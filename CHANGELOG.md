@@ -44,6 +44,14 @@ listed under a **Changed** or **Removed** heading.
   has to remember that `size()` is `(cols, rows)` while cells are
   addressed `(row, col)`.
 
+### Performance
+
+- Snapshots are cached per state generation: `Terminal::screen()` on a
+  quiescent terminal now costs an `Arc` clone (~ns) instead of a full grid
+  conversion (~16µs at 80×24), and `wait_until` skips re-evaluating its
+  predicate on wakes where nothing changed. Streaming throughput is
+  unaffected (verified with interleaved A/B benchmarks).
+
 ### Fixed
 
 - PTY lifecycle edges (open+spawn / kill+reap+close) are serialized behind
