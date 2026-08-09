@@ -99,7 +99,7 @@ so the backend can be swapped; details in [docs/DESIGN.md](docs/DESIGN.md).
 | [rexpect] / [expectrl] |   ✔     |      ✗      |     ✗     | stream matching, no rendered screen     |
 | [term-transcript]     |    ✗     |      ~      |   SVG     | transcripts for docs, not assertions    |
 | ratatui `TestBackend` |    ✗     |      ✔      |     ~     | in-process only: your real binary, PTY layer, and non-ratatui output stay untested |
-| teatest (Go)          |    ✔     |      ✔      |     ✔     | same idea, Bubble Tea / Go ecosystem    |
+| [teatest] (Go)        |    ✔     |      ✔      |     ✔     | same idea, Bubble Tea / Go ecosystem    |
 
 ## Determinism
 
@@ -163,3 +163,4 @@ as above, without any additional terms or conditions.
 [rexpect]: https://crates.io/crates/rexpect
 [expectrl]: https://crates.io/crates/expectrl
 [term-transcript]: https://crates.io/crates/term-transcript
+[teatest]: https://github.com/charmbracelet/x/tree/main/exp/teatest
