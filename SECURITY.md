@@ -6,6 +6,31 @@ intended to process untrusted input in production. That said, bugs that allow
 a spawned program's output to corrupt the harness process (e.g. memory safety
 issues in escape-sequence handling) are treated as security issues.
 
+## Posture
+
+What the project does continuously, enforced by required CI on every change:
+
+- **No `unsafe` code** in the crate (`unsafe_code` lint, clippy
+  `-D warnings`). Escape sequences from the child are parsed by pure-Rust
+  code; nothing from the terminal stream is ever executed or evaluated.
+- **Dependency policy** (`cargo-deny` job): RUSTSEC advisories, yanked
+  crates, license allowlist, and crates.io-only sources — on every PR, with
+  weekly grouped Dependabot updates and Dependabot alerts enabled.
+- **Workflow security** (`zizmor` job at `--persona=pedantic`): every
+  GitHub Action is pinned to a full commit SHA, checkouts don't persist
+  credentials, the workflow token is read-only by default with write scopes
+  granted per job, and inputs reach shell steps only via environment
+  variables. Accepted findings are documented in `.github/zizmor.yml`.
+- **Release integrity**: `v*` tags are ruleset-protected (admin-only),
+  releases re-run the full CI gates, and publishing prefers crates.io
+  Trusted Publishing (short-lived OIDC tokens) over stored secrets.
+- **Provenance**: every commit requires a DCO sign-off from a human author
+  of record; bot-authored commits are rejected by CI.
+
+Resource-exhaustion notes for the paranoid: the emulator runs with zero
+scrollback, the reader uses a fixed buffer, every wait is deadline-bounded,
+and a hostile child can at worst waste its own test's time budget.
+
 ## Supported versions
 
 | Version        | Supported          |
