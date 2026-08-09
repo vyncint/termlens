@@ -19,15 +19,22 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write # one-time failure comment on PRs
+
+concurrency:
+  group: commit-policy-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   commit-policy:
     name: commit-policy
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # one-time failure comment on PRs
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           fetch-depth: 0 # need full history to walk the commit range
 
       - name: Determine commit range
@@ -53,12 +60,16 @@ jobs:
           echo "range=$range" >> "$GITHUB_OUTPUT"
 
       - name: DCO sign-off
-        run: .github/scripts/check-dco.sh "${{ steps.range.outputs.range }}"
+        env:
+          RANGE: ${{ steps.range.outputs.range }}
+        run: .github/scripts/check-dco.sh "$RANGE"
 
       - name: No AI attribution
         # Run even when the DCO step failed, so one run reports everything.
         if: always() && steps.range.outcome == 'success'
-        run: .github/scripts/check-no-ai-attribution.sh "${{ steps.range.outputs.range }}"
+        env:
+          RANGE: ${{ steps.range.outputs.range }}
+        run: .github/scripts/check-no-ai-attribution.sh "$RANGE"
 
       - name: Comment on PR (policy failed)
         if: failure() && github.event_name == 'pull_request'

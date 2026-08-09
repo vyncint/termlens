@@ -17,6 +17,12 @@ on:
 permissions:
   contents: read
 
+# One stress run per ref at a time; a second dispatch queues rather than
+# cancelling a half-finished 100-iteration measurement.
+concurrency:
+  group: stress-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   stress:
     name: stress (${{ matrix.os }})
@@ -27,9 +33,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Build test binaries once
         run: cargo build --workspace --release --all-targets # bins too: fixture binaries must exist before iteration 1
       - name: Run the suite repeatedly
