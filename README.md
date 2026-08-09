@@ -106,6 +106,11 @@ design. termtest's position:
   visible grid is the testable surface.
 - Unix only for now (Linux + macOS in CI). The PTY layer (`portable-pty`)
   supports ConPTY, so Windows is planned, not designed out.
+- A child that writes and exits within its first milliseconds can lose
+  output to the OS pty teardown (macOS especially). Long-lived TUIs are
+  unaffected; for run-and-exit programs, end the script with a `read` and
+  release it after asserting — see the "instant-exit caveat" in
+  [docs/DESIGN.md](docs/DESIGN.md).
 - Styles (colors/bold/…) are captured per-cell and queryable, but not part
   of the text snapshot format yet (`with_styles()` planned for v0.2).
 - Exotic grapheme clusters render as the vt100 crate renders them; the

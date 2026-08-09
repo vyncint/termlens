@@ -27,3 +27,18 @@ listed under a **Changed** or **Removed** heading.
 - Deterministic PTY fixture apps (`hello-tui`, `form-echo`, `resize-echo`,
   `unicode-torture`) used by the integration suite.
 - `inspect` example: run any command and print its rendered screen.
+- `ExitStatus::signal()`: the terminating signal's name when the child died
+  from a signal instead of exiting; `Display` now says
+  `killed by signal: … (code …)` so harness-level kills are never mistaken
+  for application exit codes. (`ExitStatus` is `Clone` but no longer `Copy`.)
+- `Screen`'s `Debug` is now the compact header+text rendering: a failing
+  `Result` test prints a readable screen instead of a one-line cell dump.
+
+### Fixed
+
+- The PTY reader thread now attaches **before** the child is spawned, so a
+  program that writes and exits within its first millisecond meets a drain
+  that is already running. This narrows (but cannot fully close — see the
+  instant-exit caveat in `docs/DESIGN.md`) an output-loss race in the OS
+  pty teardown, found by the stress workflow at roughly 1 in 80
+  instant-exit spawns on macOS.

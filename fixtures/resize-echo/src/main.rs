@@ -33,6 +33,13 @@ fn main() -> io::Result<()> {
     let mut out = io::stdout();
     execute!(out, EnterAlternateScreen, Hide)?;
 
+    // Initialize crossterm's event source (which registers the SIGWINCH
+    // listener) BEFORE the first draw. The harness treats the first drawn
+    // size as "ready to be resized"; without this, a resize landing between
+    // the draw and the first event::read() is silently lost (SIGWINCH's
+    // default disposition is ignore) and the test deadlocks.
+    let _ = event::poll(std::time::Duration::from_secs(0))?;
+
     let (cols, rows) = terminal::size()?;
     draw(&mut out, cols, rows)?;
 

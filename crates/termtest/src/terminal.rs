@@ -27,10 +27,11 @@ use crate::wait::{next_backoff, Expired, Monitor, INITIAL_BACKOFF, POLL_CAP};
 const DRAIN_GRACE: Duration = Duration::from_millis(500);
 
 /// Exit status of the child process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitStatus {
     code: u32,
     success: bool,
+    signal: Option<Box<str>>,
 }
 
 impl ExitStatus {
@@ -38,6 +39,7 @@ impl ExitStatus {
         Self {
             code: status.exit_code(),
             success: status.success(),
+            signal: status.signal().map(Into::into),
         }
     }
 
@@ -47,16 +49,33 @@ impl ExitStatus {
         self.success
     }
 
-    /// The raw exit code as reported by the OS.
+    /// The raw exit code as reported by the OS. Note that a signal-killed
+    /// child has no real exit code — the OS reports a placeholder (1);
+    /// check [`signal`](Self::signal) to tell the two cases apart.
     #[must_use]
     pub fn code(&self) -> u32 {
         self.code
+    }
+
+    /// The name of the signal that terminated the child, if it died from a
+    /// signal (e.g. `"Hangup"`, `"Killed: 9"`). `None` for a normal exit.
+    ///
+    /// Distinguishing "the app exited 1" from "something killed the app" is
+    /// the difference between a failing test and a failing test *harness* —
+    /// always assert with the full status in the message, e.g.
+    /// `assert_eq!(status.code(), 7, "status: {status}")`.
+    #[must_use]
+    pub fn signal(&self) -> Option<&str> {
+        self.signal.as_deref()
     }
 }
 
 impl fmt::Display for ExitStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "exit code {}", self.code)
+        match &self.signal {
+            Some(signal) => write!(f, "killed by signal: {signal} (code {})", self.code),
+            None => write!(f, "exit code {}", self.code),
+        }
     }
 }
 
@@ -79,9 +98,10 @@ struct EmuState {
 /// let mut t = Terminal::builder()
 ///     .size(80, 24)
 ///     .timeout(Duration::from_secs(10))
-///     .args(["-c", "echo builder-doc"])
+///     .args(["-c", "echo builder-doc; read quit"])
 ///     .spawn("sh")?;
 /// t.wait_until(|s| s.contains("builder-doc"))?;
+/// # t.send(termtest::Key::Enter); // release `read quit`
 /// # t.wait_exit()?; Ok(())
 /// # }
 /// ```
@@ -207,14 +227,12 @@ impl TerminalBuilder {
             cmd.env(key, value);
         }
 
-        let child = pair.slave.spawn_command(cmd).map_err(|e| Error::Spawn {
-            command: command_desc.clone(),
-            reason: e.to_string(),
-        })?;
-        // Close the parent's slave handle so the master sees EOF once the
-        // child (and its descendants) release the terminal.
-        drop(pair.slave);
-
+        // Attach the reader thread BEFORE spawning the child: a program that
+        // writes and exits within its first millisecond must find a drain
+        // already running. (macOS's pty layer can discard output still
+        // buffered at teardown — see docs/DESIGN.md §2 — so the window
+        // between child start and first read must be as close to zero as
+        // userspace can make it.)
         let reader = pair
             .master
             .try_clone_reader()
@@ -235,6 +253,14 @@ impl TerminalBuilder {
             .name("termtest-pty-reader".into())
             .spawn(move || reader_loop(reader, &reader_shared))
             .map_err(Error::Io)?;
+
+        let child = pair.slave.spawn_command(cmd).map_err(|e| Error::Spawn {
+            command: command_desc.clone(),
+            reason: e.to_string(),
+        })?;
+        // Close the parent's slave handle so the master sees EOF once the
+        // child (and its descendants) release the terminal.
+        drop(pair.slave);
 
         Ok(Terminal {
             child,
@@ -432,7 +458,7 @@ impl Terminal {
     /// [`Error::Timeout`] (with screen) if the child is still running at the
     /// deadline; [`Error::Io`] if the OS wait itself fails.
     pub fn wait_exit(&mut self) -> Result<ExitStatus> {
-        if let Some(status) = self.exit_status {
+        if let Some(status) = self.exit_status.clone() {
             return Ok(status);
         }
         let deadline = Instant::now() + self.default_timeout;
@@ -440,7 +466,7 @@ impl Terminal {
         loop {
             if let Some(status) = self.child.try_wait().map_err(Error::Io)? {
                 let status = ExitStatus::from_pty(&status);
-                self.exit_status = Some(status);
+                self.exit_status = Some(status.clone());
                 let _ = self
                     .shared
                     .wait_until(Instant::now() + DRAIN_GRACE, |state| {
