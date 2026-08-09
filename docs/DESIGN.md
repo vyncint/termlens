@@ -6,26 +6,29 @@ change those only with a matching change here.
 
 ## 1. Four layers
 
-```
-┌────────────────────────────────────────────────────────────┐
-│ 4. Assertions      wait_until / wait_idle / wait_exit,     │
-│                    Screen queries, insta snapshots          │
-├────────────────────────────────────────────────────────────┤
-│ 3. Screen          immutable, Arc-backed grid snapshots     │
-│                    (Cell, Style, cursor) — termtest's own   │
-├────────────────────────────────────────────────────────────┤
-│ 2. Emulator        pub(crate) trait Emulator                │
-│                    { process, snapshot, mid_sequence,       │
-│                      set_size } — v0.1 backend: vt100       │
-├────────────────────────────────────────────────────────────┤
-│ 1. PTY             portable-pty: real kernel pty, spawn,    │
-│                    resize (TIOCSWINSZ→SIGWINCH), reader     │
-│                    thread draining master → emulator        │
-└────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+  test["test code"]
+  l4["4 · assertions<br/>wait_until / wait_idle / wait_exit · Screen queries · insta snapshots"]
+  l3["3 · Screen<br/>immutable Arc-backed grid snapshots · Cell · Style · cursor — termtest's own types"]
+  l2["2 · emulator<br/>internal trait: process · snapshot · mid_sequence · set_size — v0.1 backend: vt100"]
+  l1["1 · pty<br/>portable-pty · reader thread · resize TIOCSWINSZ → SIGWINCH · lifecycle lock"]
+  app["child app<br/>spawned in the pty, unmodified"]
+
+  app -->|"escape-sequence bytes"| l1
+  l1 -->|"reader thread · mutate under lock, notify waiters"| l2
+  l2 -->|"snapshot on demand"| l3
+  l3 -->|"predicates · dumps embedded in every timeout"| l4
+  l4 --> test
+  test -.->|"send(Key) → Key::encode · resize"| l1
+  l1 -.->|"stdin bytes · SIGWINCH"| app
+  classDef ours fill:#2563eb,color:#ffffff,stroke:#1d4ed8,stroke-width:1px;
+  class l1,l2,l3,l4 ours
 ```
 
-Data flows up: child writes → PTY master → reader thread → emulator →
-screen snapshots. Input flows down: `Key::encode()` → PTY master → child.
+Data flows up (solid): child writes → PTY master → reader thread →
+emulator → screen snapshots → assertions. Input flows down (dashed):
+`Key::encode()` → PTY master → child.
 
 **The reader thread** is the linchpin. It drains the PTY *continuously*, not
 just inside `wait_*` calls, so a chatty program can never fill the kernel

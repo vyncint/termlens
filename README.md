@@ -54,22 +54,41 @@ exactly what the app was displaying, not "assertion failed: false".
 
 ## How it works
 
-```
- your test ──────────── send(Key) ───────────────► ┌──────────────┐
-     │                                             │  child app   │
-     │  wait_until / wait_idle / wait_exit         │ in a real pty│
-     ▼                                             └──────┬───────┘
- ┌─────────┐      ┌────────────┐      ┌─────────┐         │
- │ Screen  │ ◄──  │ VT emulator│ ◄──  │ reader  │ ◄── pty master
- │snapshots│      │  (vt100)   │      │ thread  │     (bytes)
- └─────────┘      └────────────┘      └─────────┘
+```mermaid
+flowchart TB
+  test["your test<br/>drive · wait · assert"]
+  subgraph proc["your test process · cargo test"]
+    subgraph tt["termtest"]
+      api["Terminal<br/>send · resize · wait_until / wait_idle / wait_exit"]
+      reader["reader thread<br/>drains continuously — output is never lost between waits"]
+      emu["VT emulator<br/>vt100 behind a small internal trait, swappable"]
+      screen["Screen<br/>immutable grid snapshots · cells · cursor · styles"]
+    end
+  end
+  subgraph kernel["kernel"]
+    pty["real pty<br/>line discipline · TIOCSWINSZ → SIGWINCH"]
+  end
+  app["your app, unmodified<br/>believes it owns a terminal"]
+
+  test -->|"send(Key) · send_str"| api
+  api -->|"xterm byte sequences"| pty
+  api -.->|"resize · kernel delivers SIGWINCH"| pty
+  pty -->|stdin| app
+  app -->|"stdout · escape sequences"| pty
+  pty -->|bytes| reader
+  reader -->|"process, under one lock"| emu
+  emu -->|"snapshot"| screen
+  screen -->|"predicates · insta snapshots · screen dumps in every timeout"| test
+  classDef ours fill:#2563eb,color:#ffffff,stroke:#1d4ed8,stroke-width:1px;
+  class api,reader,emu,screen ours
 ```
 
-A background thread drains the PTY into the emulator *continuously* — the
+The reader thread drains the PTY into the emulator *continuously* — the
 kernel buffer can't fill up and stall your app, and no output is lost
-between assertions. Screens are immutable snapshots taken under a lock.
-Four layers, one small internal trait between emulator and screen so the
-backend can be swapped; details in [docs/DESIGN.md](docs/DESIGN.md).
+between assertions. Screens are immutable snapshots taken under the same
+lock the reader writes through, so every assertion sees a consistent
+instant. Four layers, one small internal trait between emulator and screen
+so the backend can be swapped; details in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Comparison
 
