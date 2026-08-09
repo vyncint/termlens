@@ -14,6 +14,7 @@ terminal.
 
 ```sh
 cargo add termlens --dev
+cargo add insta --dev    # used by the snapshot assertions below
 ```
 
 ## Example
