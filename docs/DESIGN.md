@@ -89,6 +89,15 @@ last action a `read` on stdin, assert on its output, then send Enter and
 `wait_exit`. Real TUI applications are unaffected — they live far longer
 than the window and exit on request.
 
+Related, and fixed inside the library: macOS tears ptys down with
+`revoke()` and recycles pty device numbers immediately, so with concurrent
+terminals one thread's teardown could revoke another thread's *freshly
+opened* pty and kill its child at birth (~1/800 spawns under CI load; the
+same suite ran 100/100 on Linux). termtest therefore serializes every pty
+lifecycle edge — open+spawn on one side, kill+reap+close on the other —
+behind a process-wide lock (`PTY_LIFECYCLE` in `terminal.rs`). The lock is
+held for microseconds per edge; steady-state I/O never touches it.
+
 ## 3. Snapshot text format (spec)
 
 `Display for Screen` produces:
