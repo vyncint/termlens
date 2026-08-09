@@ -68,6 +68,9 @@ jobs:
     name: publish to crates.io
     needs: [ci, semver]
     runs-on: ubuntu-latest
+    # The `release` environment only deploys from v* tags, so an OIDC
+    # publish token can never be minted from a branch.
+    environment: release
     permissions:
       contents: read
       id-token: write # crates.io Trusted Publishing (GitHub OIDC)
@@ -78,16 +81,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
-      # Preferred auth: crates.io Trusted Publishing. Needs the one-time
-      # linkage of this repo+workflow on crates.io (docs/RELEASING.md).
-      # Until that exists, the step fails soft and we fall back to a
-      # CARGO_REGISTRY_TOKEN repository secret.
+      # Auth is crates.io Trusted Publishing (linked 2026-08-09): the
+      # action exchanges this job's OIDC token for a short-lived publish
+      # token. No stored secrets remain on the repository.
       - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: auth
-        continue-on-error: true
       - run: cargo publish -p termlens --locked
         env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
   github-release:
     name: GitHub release

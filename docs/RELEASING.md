@@ -2,24 +2,16 @@
 
 One page, copy-pasteable. Maintainers only.
 
-## Prerequisites (once)
+## Prerequisites (already satisfied)
 
-- A crates.io account (log in with GitHub) with a **verified email** —
-  publishing is refused without one.
-- **The first publish must use an API token** — crates.io has no
-  "pending publisher" feature (RFC 3691), so Trusted Publishing can only
-  be configured after the crate exists:
-  1. crates.io → Account Settings → API Tokens → New token: scopes
-     `publish-new` + `publish-update`, crate pattern `termlens`, short
-     expiry (it is needed exactly once).
-  2. `gh secret set CARGO_REGISTRY_TOKEN --repo vyncint/termlens`
-  `release.yml` tries Trusted Publishing first and falls back to this
-  secret automatically.
-- **After the first publish, switch to Trusted Publishing** (tokenless):
-  crates.io → termlens → Settings → Trusted Publishing → GitHub:
-  repository `vyncint/termlens`, workflow `release.yml`, environment
-  *(none)*. Then revoke the token and
-  `gh secret delete CARGO_REGISTRY_TOKEN --repo vyncint/termlens`.
+- Publishing auth is **crates.io Trusted Publishing** (linked
+  2026-08-09): crates.io → termlens → Settings → Trusted Publishing →
+  GitHub, repository `vyncint/termlens`, workflow `release.yml`. No
+  token or secret is stored anywhere.
+- The publish job runs in the **`release` GitHub environment**, which
+  only deploys from `v*` tags — an OIDC publish token can never be
+  minted from a branch. (Optionally set the environment name `release`
+  on the crates.io side too, for the server-side binding.)
 
 ## Cutting vX.Y.Z
 
