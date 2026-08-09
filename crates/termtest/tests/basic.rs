@@ -2,6 +2,12 @@
 //! control, exit codes, and the failure modes (timeout / EOF).
 //!
 //! These run headless — CI runners have no TTY, the harness makes its own.
+//!
+//! Pattern note: every script that must *print something we assert on*
+//! ends with a `read` guard, and we send Enter only after the assertion.
+//! Output written immediately before exit can be discarded by macOS's pty
+//! teardown (docs/DESIGN.md §2); keeping the child alive until the harness
+//! has seen the bytes makes these tests deterministic on every platform.
 
 use std::time::{Duration, Instant};
 
@@ -15,20 +21,24 @@ fn sh(script: &str) -> termtest::Result<Terminal> {
 
 #[test]
 fn echo_reaches_the_screen_and_child_exits_cleanly() -> termtest::Result<()> {
-    let mut t = sh("echo hello from a real pty")?;
+    let mut t = sh("echo hello from a real pty; read guard")?;
     t.wait_until(|s| s.contains("hello from a real pty"))?;
+    t.send(Key::Enter);
     let status = t.wait_exit()?;
-    assert!(status.success());
+    assert!(status.success(), "full status: {status}");
     assert_eq!(status.code(), 0);
     Ok(())
 }
 
 #[test]
 fn exit_codes_are_reported() -> termtest::Result<()> {
-    let mut t = sh("exit 7")?;
+    // The `read` keeps the exit from racing pty setup; the line discipline
+    // buffers our Enter even if it lands before `read` starts.
+    let mut t = sh("read guard; exit 7")?;
+    t.send(Key::Enter);
     let status = t.wait_exit()?;
     assert!(!status.success());
-    assert_eq!(status.code(), 7);
+    assert_eq!(status.code(), 7, "full status: {status}");
 
     // Idempotent: a second wait returns the cached status.
     assert_eq!(t.wait_exit()?, status);
@@ -36,12 +46,28 @@ fn exit_codes_are_reported() -> termtest::Result<()> {
 }
 
 #[test]
+fn signal_deaths_are_reported_as_signals_not_exit_codes() -> termtest::Result<()> {
+    let mut t = sh("read guard; kill -TERM $$")?;
+    t.send(Key::Enter);
+    let status = t.wait_exit()?;
+    assert!(!status.success());
+    // strsignal spelling differs per libc ("Terminated" / "Terminated: 15"),
+    // but the word is stable on both CI platforms.
+    let signal = status.signal().unwrap_or_else(|| {
+        panic!("expected a signal death, got: {status}");
+    });
+    assert!(signal.contains("Terminated"), "signal was: {signal}");
+    Ok(())
+}
+
+#[test]
 fn env_vars_reach_the_child() -> termtest::Result<()> {
     let mut t = Terminal::builder()
         .env("TERMTEST_MARKER", "42")
-        .args(["-c", r#"echo "marker=$TERMTEST_MARKER""#])
+        .args(["-c", r#"echo "marker=$TERMTEST_MARKER"; read guard"#])
         .spawn(SH)?;
     t.wait_until(|s| s.contains("marker=42"))?;
+    t.send(Key::Enter);
     t.wait_exit()?;
     Ok(())
 }
@@ -59,7 +85,10 @@ fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termtest::
     let mut t = Terminal::builder()
         .env_clear()
         .env("KEPT", "yes")
-        .args(["-c", r#"echo "home=${HOME:-unset} term=$TERM kept=$KEPT""#])
+        .args([
+            "-c",
+            r#"echo "home=${HOME:-unset} term=$TERM kept=$KEPT"; read guard"#,
+        ])
         .spawn(SH)?;
     t.wait_until(|s| s.contains("kept=yes"))?;
     let screen = t.screen();
@@ -71,6 +100,7 @@ fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termtest::
         screen.contains("term=xterm-256color"),
         "default TERM missing:\n{screen}"
     );
+    t.send(Key::Enter);
     t.wait_exit()?;
     Ok(())
 }
@@ -79,19 +109,21 @@ fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termtest::
 fn explicit_term_overrides_the_default() -> termtest::Result<()> {
     let mut t = Terminal::builder()
         .env("TERM", "vt100")
-        .args(["-c", r#"echo "term=$TERM""#])
+        .args(["-c", r#"echo "term=$TERM"; read guard"#])
         .spawn(SH)?;
     t.wait_until(|s| s.contains("term=vt100"))?;
+    t.send(Key::Enter);
     t.wait_exit()?;
     Ok(())
 }
 
 #[test]
 fn send_str_and_enter_round_trip_through_the_line_discipline() -> termtest::Result<()> {
-    let mut t = sh(r#"read line; echo "got: $line""#)?;
+    let mut t = sh(r#"read line; echo "got: $line"; read guard"#)?;
     t.send_str("hello");
     t.send(Key::Enter);
     t.wait_until(|s| s.contains("got: hello"))?;
+    t.send(Key::Enter);
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -122,9 +154,14 @@ fn timeout_error_embeds_the_screen_dump() {
 fn waits_fail_fast_on_eof_instead_of_burning_the_timeout() {
     let mut t = Terminal::builder()
         .timeout(Duration::from_secs(30))
-        .args(["-c", "echo bye"])
+        .args(["-c", "echo bye; read guard"])
         .spawn(SH)
         .unwrap();
+    // Deterministic sequencing: observe the output, then let the child
+    // exit, then wait for something that can never appear.
+    t.wait_until(|s| s.contains("bye")).unwrap();
+    t.send(Key::Enter);
+
     let start = Instant::now();
     let err = t.wait_until(|s| s.contains("never printed")).unwrap_err();
     let elapsed = start.elapsed();
@@ -140,7 +177,7 @@ fn waits_fail_fast_on_eof_instead_of_burning_the_timeout() {
 
 #[test]
 fn wait_idle_resolves_in_output_gaps() -> termtest::Result<()> {
-    let mut t = sh("printf a; sleep 1.5; printf b")?;
+    let mut t = sh("printf a; sleep 1.5; printf b; read guard")?;
     t.wait_until(|s| s.contains("a"))?;
     t.wait_idle(Duration::from_millis(200))?;
 
@@ -152,6 +189,7 @@ fn wait_idle_resolves_in_output_gaps() -> termtest::Result<()> {
     );
 
     t.wait_until(|s| s.contains("b"))?;
+    t.send(Key::Enter);
     t.wait_exit()?;
     Ok(())
 }

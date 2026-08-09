@@ -63,6 +63,21 @@ expiry the error **embeds the full screen dump** — a CI log alone answers
 `Drop` kills + reaps the child unconditionally (unless already reaped):
 tests never leak zombies, including on panic.
 
+### The instant-exit caveat (macOS pty teardown)
+
+A child that **writes and exits within its first milliseconds** races the
+platform's pty teardown: on macOS, bytes still buffered in the kernel when
+the slave side closes can be discarded, and teardown can even surface as a
+signal-death instead of the real exit code. Stress-testing found this at
+roughly 1 in 80 instant-exit spawns under load. termtest narrows the window
+as far as userspace allows — the reader thread is attached *before* the
+child is spawned — but cannot close it.
+
+The deterministic pattern (used throughout our own suite): make the child's
+last action a `read` on stdin, assert on its output, then send Enter and
+`wait_exit`. Real TUI applications are unaffected — they live far longer
+than the window and exit on request.
+
 ## 3. Snapshot text format (spec)
 
 `Display for Screen` produces:

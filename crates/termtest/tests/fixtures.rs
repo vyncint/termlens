@@ -11,13 +11,16 @@ mod util {
     use std::process::Command;
     use std::sync::Mutex;
 
-    /// Serializes fallback `cargo build` invocations across test threads.
-    static BUILD_LOCK: Mutex<()> = Mutex::new(());
+    /// Fixture names already rebuilt by this test process.
+    static BUILT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
     /// Path to a fixture binary (a sibling workspace member, so
-    /// `CARGO_BIN_EXE_*` is unavailable). `cargo test --workspace` has
-    /// already built them; when running `cargo test -p termtest` alone, fall
-    /// back to building on demand.
+    /// `CARGO_BIN_EXE_*` is unavailable). Always runs `cargo build -p`
+    /// once per fixture per test process: `cargo test` links test
+    /// harnesses into `deps/` but does not refresh the plain bin artifact,
+    /// so an existing `target/<profile>/<name>` can be stale and would
+    /// silently test old fixture code. The build no-ops in milliseconds
+    /// when everything is fresh (and stress.yml prebuilds --all-targets).
     pub(crate) fn fixture_bin(name: &str) -> PathBuf {
         let profile = if cfg!(debug_assertions) {
             "debug"
@@ -33,12 +36,9 @@ mod util {
             PathBuf::from,
         );
         let bin = target_dir.join(profile).join(name);
-        if bin.exists() {
-            return bin;
-        }
 
-        let _guard = BUILD_LOCK.lock().unwrap();
-        if !bin.exists() {
+        let mut built = BUILT.lock().unwrap();
+        if !built.iter().any(|b| b == name) {
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
             let mut cmd = Command::new(cargo);
             cmd.args(["build", "-p", name]);
@@ -47,7 +47,10 @@ mod util {
             }
             let status = cmd.status().expect("failed to run cargo build");
             assert!(status.success(), "cargo build -p {name} failed");
+            built.push(name.to_owned());
         }
+        drop(built);
+
         assert!(bin.exists(), "fixture binary missing at {}", bin.display());
         bin
     }
@@ -127,7 +130,7 @@ fn form_echo_reports_nonzero_exit_codes() -> termtest::Result<()> {
     t.send(Key::Ctrl('x'));
     let status = t.wait_exit()?;
     assert!(!status.success());
-    assert_eq!(status.code(), 42);
+    assert_eq!(status.code(), 42, "full status: {status}");
     Ok(())
 }
 
@@ -160,6 +163,8 @@ fn unicode_torture_renders_with_correct_widths() -> termtest::Result<()> {
     assert_eq!(screen.find("|一二三|"), Some((5, 7)));
     insta::assert_snapshot!(screen);
 
+    // Release the fixture's stdin guard now that everything is asserted.
+    t.send(Key::Enter);
     assert!(t.wait_exit()?.success());
     Ok(())
 }

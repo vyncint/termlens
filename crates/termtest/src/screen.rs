@@ -102,7 +102,7 @@ impl Cell {
 /// whitespace stripped per line. Trailing blanks are *preserved* inside the
 /// grid itself, so coordinate queries like [`Screen::cell`] and
 /// [`Screen::find`] are unaffected by the trimming.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Screen {
     cols: u16,
     rows: u16,
@@ -241,6 +241,18 @@ impl Screen {
             }
         }
         None
+    }
+}
+
+impl fmt::Debug for Screen {
+    /// Deliberately compact: the header plus the rendered text, exactly like
+    /// [`Display`](fmt::Display). The derived alternative — thousands of
+    /// [`Cell`]s on one line — makes `Err(Error::Timeout { .. })` in a
+    /// `Result`-returning test unreadable (and long enough that CI log
+    /// pipelines drop the line entirely). Use [`Screen::cell`] to inspect
+    /// individual cells.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Screen({self})")
     }
 }
 
