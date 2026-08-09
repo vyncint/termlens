@@ -552,7 +552,7 @@ impl Drop for Terminal {
     /// The whole teardown (including closing the master/writer fds) runs
     /// under the process-wide pty lifecycle lock: on macOS, letting a
     /// master close overlap a concurrent `openpty()` can revoke the *other*
-    /// terminal's freshly recycled pty device (see [`PTY_LIFECYCLE`]).
+    /// terminal's freshly recycled pty device (see `PTY_LIFECYCLE` in this module).
     fn drop(&mut self) {
         let _lifecycle = pty_lifecycle_guard();
         if self.exit_status.is_none() {
