@@ -14,7 +14,7 @@ jobs:
     name: tag matches crate version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Compare tag against crates/termtest version
         run: |
@@ -38,7 +38,7 @@ jobs:
     needs: verify-version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Look for a published baseline on crates.io
         id: published
         run: |
@@ -61,7 +61,7 @@ jobs:
       contents: read
       id-token: write # crates.io Trusted Publishing (GitHub OIDC)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       # Preferred auth: crates.io Trusted Publishing. Needs the one-time
       # linkage of this repo+workflow on crates.io (docs/RELEASING.md).
@@ -81,7 +81,7 @@ jobs:
     permissions:
       contents: write # create the release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Extract notes from CHANGELOG.md
         run: .github/scripts/extract-changelog.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
       - name: Create the release

@@ -26,7 +26,7 @@ jobs:
     name: commit-policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0 # need full history to walk the commit range
 
