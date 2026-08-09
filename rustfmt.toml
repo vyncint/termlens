@@ -1,0 +1,8 @@
+# rustfmt defaults; stable `cargo fmt --all --check` gates CI, so this file
+# must only contain options stable rustfmt understands.
+#
+# `imports_granularity = "Module"` is the preferred import style, but it is a
+# nightly-only option. Run `cargo +nightly fmt` locally if you want it applied;
+# it stays commented out so stable rustfmt formats the tree identically.
+# imports_granularity = "Module"
+edition = "2021"

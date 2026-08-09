@@ -1,0 +1,47 @@
+# termtest workspace.
+#
+# `crates/` holds publishable members; `fixtures/` holds deterministic test
+# programs that the integration suite spawns inside real PTYs (publish = false).
+
+[workspace]
+resolver = "2"
+members = ["crates/termtest"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# Minimum supported Rust version. Checked by the `msrv` CI job, which reads
+# this field; bumping it is a minor (not patch) change per our SemVer policy.
+#
+# 1.85 is dictated by the default `insta` feature's tree (insta -> tempfile ->
+# getrandom 0.4). The core library itself only needs what portable-pty/vt100
+# need (~1.70); we declare what CI can actually verify with the lockfile.
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/vyncint/termtest"
+authors = ["Vyncint Ng <vyncint@icloud.com>"]
+
+[workspace.dependencies]
+termtest = { path = "crates/termtest", version = "0.1.0" }
+
+portable-pty = "0.9"
+vt100 = "0.16"
+thiserror = "2"
+unicode-width = "0.2"
+
+# Dev / fixture dependencies.
+insta = "1.48"
+anyhow = "1"
+crossterm = "0.29"
+
+[workspace.lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+unsafe_code = "warn"
+unreachable_pub = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

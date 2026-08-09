@@ -1,0 +1,8 @@
+# Pins local development and CI to the current stable toolchain so that
+# rustfmt/clippy output is reproducible across machines.
+#
+# This is NOT the MSRV. The minimum supported Rust version is declared as
+# `rust-version` in Cargo.toml and verified by the `msrv` CI job.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

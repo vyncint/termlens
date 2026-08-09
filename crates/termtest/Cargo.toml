@@ -1,0 +1,35 @@
+[package]
+name = "termtest"
+description = "Headless PTY test harness for CLI/TUI apps — spawn in a real PTY, assert on the rendered screen"
+keywords = ["pty", "terminal", "testing", "tui", "snapshot"]
+categories = ["development-tools::testing", "command-line-interface"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = ["insta"]
+# Snapshot-testing glue: re-exports `insta` and provides
+# `assert_screen_snapshot!`. Disable if you bring your own snapshot tool.
+insta = ["dep:insta"]
+
+[dependencies]
+portable-pty.workspace = true
+vt100.workspace = true
+thiserror.workspace = true
+unicode-width.workspace = true
+insta = { workspace = true, optional = true }
+
+[dev-dependencies]
+insta.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true
