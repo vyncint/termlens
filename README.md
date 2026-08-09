@@ -1,0 +1,137 @@
+# termtest
+
+Integration testing for terminal programs, done the way you'd test a web
+app: spawn the real thing in a **real PTY**, let a VT emulator render its
+output into an in-memory **screen grid**, and **assert or snapshot on the
+rendered screen** instead of scraping raw bytes. Playwright for the
+terminal.
+
+[![CI](https://github.com/vyncint/termtest/actions/workflows/ci.yml/badge.svg)](https://github.com/vyncint/termtest/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/termtest.svg)](https://crates.io/crates/termtest)
+[![docs.rs](https://img.shields.io/docsrs/termtest)](https://docs.rs/termtest)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue)](https://github.com/vyncint/termtest/blob/main/Cargo.toml)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+
+```sh
+cargo add termtest --dev
+```
+
+## Example
+
+```rust
+use std::time::Duration;
+use termtest::{Key, Terminal};
+
+#[test]
+fn quits_from_the_main_screen() -> termtest::Result<()> {
+    let mut t = Terminal::builder()
+        .size(80, 24)
+        .env_clear()                       // hermetic: no host env leaks in
+        .timeout(Duration::from_secs(5))   // every wait_* has this deadline
+        .spawn(env!("CARGO_BIN_EXE_myapp"))?;
+
+    t.wait_until(|screen| screen.contains("Ready"))?;
+    insta::assert_snapshot!(t.screen());   // snapshot the rendered grid
+
+    t.send(Key::Char('q'));
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+```
+
+When a wait times out, the error embeds the screen — your CI log shows
+exactly what the app was displaying, not "assertion failed: false".
+
+## What it is (and is not)
+
+- **Not** an expect-style stream matcher — [rexpect] and [expectrl] already
+  do that well. Byte streams can't answer "is the cursor on the third menu
+  item?".
+- **Not** an SVG transcript generator for pretty docs — that's
+  [term-transcript].
+- **It is**: a real PTY + an emulated screen + snapshot assertions, so you
+  test what a user would *see*.
+
+## How it works
+
+```
+ your test ──────────── send(Key) ───────────────► ┌──────────────┐
+     │                                             │  child app   │
+     │  wait_until / wait_idle / wait_exit         │ in a real pty│
+     ▼                                             └──────┬───────┘
+ ┌─────────┐      ┌────────────┐      ┌─────────┐         │
+ │ Screen  │ ◄──  │ VT emulator│ ◄──  │ reader  │ ◄── pty master
+ │snapshots│      │  (vt100)   │      │ thread  │     (bytes)
+ └─────────┘      └────────────┘      └─────────┘
+```
+
+A background thread drains the PTY into the emulator *continuously* — the
+kernel buffer can't fill up and stall your app, and no output is lost
+between assertions. Screens are immutable snapshots taken under a lock.
+Four layers, one small internal trait between emulator and screen so the
+backend can be swapped; details in [docs/DESIGN.md](docs/DESIGN.md).
+
+## Comparison
+
+| Tool                  | Real PTY | Screen grid | Snapshots | Notes                                   |
+| --------------------- | :------: | :---------: | :-------: | --------------------------------------- |
+| **termtest**          |    ✔     |      ✔      |     ✔     | this crate                              |
+| [rexpect] / [expectrl] |   ✔     |      ✗      |     ✗     | stream matching, no rendered screen     |
+| [term-transcript]     |    ✗     |      ~      |   SVG     | transcripts for docs, not assertions    |
+| ratatui `TestBackend` |    ✗     |      ✔      |     ~     | in-process only: your real binary, PTY layer, and non-ratatui output stay untested |
+| teatest (Go)          |    ✔     |      ✔      |     ✔     | same idea, Bubble Tea / Go ecosystem    |
+
+## Determinism
+
+PTYs are asynchronous; a harness that pretends otherwise is flaky by
+design. termtest's position:
+
+- **Prefer `wait_until` on visible content.** It re-checks on every chunk
+  of output and is exact: the condition either becomes true or you get a
+  screen-carrying timeout.
+- **`wait_idle(quiet)` is an honest heuristic.** It resolves when nothing
+  arrived for `quiet` *and* the stream isn't mid-escape-sequence. Silence
+  is evidence a render finished — not proof. Use it for "the app settled",
+  not for precise sequencing. DEC mode 2026 (synchronized output) gives
+  real frame boundaries; a `wait_frame` built on it is on the roadmap.
+- **Hermetic environments.** `env_clear()` blocks inheritance,
+  `TERM=xterm-256color` is pinned by default, fixtures draw no clocks and
+  no animations. The CI suite runs a 100-iteration
+  [stress workflow](.github/workflows/stress.yml) on Linux and macOS —
+  wait/timing changes don't merge without surviving it.
+
+## Known limitations (v0.1)
+
+- No scrollback assertions, and resizing does not reflow scrollback — the
+  visible grid is the testable surface.
+- Unix only for now (Linux + macOS in CI). The PTY layer (`portable-pty`)
+  supports ConPTY, so Windows is planned, not designed out.
+- Styles (colors/bold/…) are captured per-cell and queryable, but not part
+  of the text snapshot format yet (`with_styles()` planned for v0.2).
+- Exotic grapheme clusters render as the vt100 crate renders them; the
+  unicode-torture fixture pins the current behavior.
+
+## MSRV
+
+Rust **1.85** (driven by the default `insta` feature's dependency tree;
+checked in CI against the committed lockfile). MSRV bumps are minor
+releases.
+
+## Contributing
+
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) (dev setup, testing
+policy, DCO sign-off, AI tooling policy) and
+[docs/DESIGN.md](docs/DESIGN.md) before touching wait semantics. Security
+reports: [SECURITY.md](SECURITY.md).
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. Unless you explicitly state
+otherwise, any contribution intentionally submitted for inclusion in the
+work by you, as defined in the Apache-2.0 license, shall be dual licensed
+as above, without any additional terms or conditions.
+
+[rexpect]: https://crates.io/crates/rexpect
+[expectrl]: https://crates.io/crates/expectrl
+[term-transcript]: https://crates.io/crates/term-transcript
