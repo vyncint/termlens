@@ -1,0 +1,36 @@
+name: Feature request
+description: Propose an addition or change to the API or tooling
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to test, and what makes it hard or impossible today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API / behavior
+      description: Sketch the API you'd want to write in a test. Code beats prose.
+      render: rust
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you tried; other tools (rexpect/expectrl/TestBackend) and why they don't fit.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I've read the "What termtest is / is not" section of the README and this fits the project's scope.
+          required: true

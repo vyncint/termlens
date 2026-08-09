@@ -1,0 +1,83 @@
+# Enforces two commit policies on every commit in a PR (and on pushes to
+# main, for direct pushes while the project is solo-maintained):
+#
+#   1. DCO: every commit is signed off, and the sign-off email matches the
+#      commit author (.github/scripts/check-dco.sh).
+#   2. No AI attribution: no AI co-author trailers, "Generated with"
+#      watermarks, or bot identities (.github/scripts/check-no-ai-attribution.sh).
+#
+# Why CI and not git hooks: hooks don't survive `git clone`, so a local
+# commit-msg hook only ever protects the maintainer's machine. CI is the
+# enforceable boundary for external contributors. (.claude/settings.json in
+# the repo is a soft guard for agent users; this workflow is the hard one.)
+name: commit-policy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write # one-time failure comment on PRs
+
+jobs:
+  commit-policy:
+    name: commit-policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need full history to walk the commit range
+
+      - name: Determine commit range
+        id: range
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            range="${BASE}..${HEAD}"
+          elif [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+               || ! git cat-file -e "$BEFORE" 2>/dev/null; then
+            # First push to the branch (or force push whose old tip is gone):
+            # inspect the pushed head's full history.
+            range="$AFTER"
+          else
+            range="${BEFORE}..${AFTER}"
+          fi
+          echo "Checking range: $range"
+          echo "range=$range" >> "$GITHUB_OUTPUT"
+
+      - name: DCO sign-off
+        run: .github/scripts/check-dco.sh "${{ steps.range.outputs.range }}"
+
+      - name: No AI attribution
+        # Run even when the DCO step failed, so one run reports everything.
+        if: always() && steps.range.outcome == 'success'
+        run: .github/scripts/check-no-ai-attribution.sh "${{ steps.range.outputs.range }}"
+
+      - name: Comment on PR (policy failed)
+        if: failure() && github.event_name == 'pull_request'
+        # Forks get a read-only token; never let the courtesy comment itself
+        # flip the job's outcome.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          marker="<!-- termtest-commit-policy -->"
+          if gh api "repos/${REPO}/issues/${PR}/comments" --jq '.[].body' | grep -qF "$marker"; then
+            echo "Policy comment already posted; skipping."
+            exit 0
+          fi
+          body="$(printf '%s\n\n%s\n\n%s' \
+            "$marker" \
+            "**Commit policy check failed.** AI assistance is welcome; AI attribution is not. Remove the trailer and recommit — you are the author of record." \
+            "Also make sure every commit carries a DCO sign-off matching its author (\`git commit -s\`; fix a branch with \`git rebase --signoff\` and force-push). The offending commits are listed in the [job log](${RUN_URL}).")"
+          gh pr comment "$PR" --repo "$REPO" --body "$body"

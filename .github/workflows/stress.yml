@@ -1,0 +1,44 @@
+# Flake hunter: the whole test suite, 100 times, on both OSes.
+#
+# A flaky test harness is worse than none — this workflow is the credibility
+# gate. Run it before every release and whenever wait/timing code changes.
+name: stress
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: Number of full-suite iterations
+        required: false
+        default: "100"
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    name: stress (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build test binaries once
+        run: cargo build --workspace --release --tests
+      - name: Run the suite repeatedly
+        env:
+          ITERS: ${{ inputs.iterations || '100' }}
+        run: |
+          for i in $(seq "$ITERS"); do
+            echo "::group::iteration ${i}/${ITERS}"
+            cargo test --workspace --release -- --test-threads=4 \
+              || { echo "::error::suite flaked on iteration ${i}/${ITERS}"; exit 1; }
+            echo "::endgroup::"
+          done

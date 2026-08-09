@@ -1,0 +1,70 @@
+name: Bug report
+description: Something behaves wrongly, hangs, or is flaky
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: termtest version
+      placeholder: "0.1.0 (or git SHA)"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: OS and version; for CI failures, the runner image.
+      placeholder: "macOS 15.5 / ubuntu-24.04 runner"
+    validations:
+      required: true
+
+  - type: input
+    id: term
+    attributes:
+      label: TERM value
+      description: The TERM the terminal under test sees (termtest defaults to `xterm-256color`).
+      placeholder: xterm-256color
+    validations:
+      required: false
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: >
+        Smallest complete test that shows the problem — ideally spawning `sh -c '…'`
+        or one of the fixture apps rather than your private binary.
+      render: rust
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+      description: Include the screen dump from the error/snapshot if you have one.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: flaky
+    attributes:
+      label: Is it flaky?
+      description: >
+        Timing bugs matter to us. If it fails intermittently, how many times did you
+        run it, and how often does it fail? (e.g. `for i in $(seq 50); do cargo test … ; done`)
+      options:
+        - "No — fails every time"
+        - "Yes — intermittent (please give failure rate + iteration count below)"
+        - "Don't know — only ran it once or twice"
+    validations:
+      required: true
+
+  - type: textarea
+    id: flaky-details
+    attributes:
+      label: Flakiness details
+      placeholder: "Failed 3/100 runs with --test-threads=4 on macos-14 runner"
+    validations:
+      required: false

@@ -1,0 +1,94 @@
+# Release pipeline, triggered by pushing a v*.*.* tag.
+# The human-side checklist lives in docs/RELEASING.md.
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-version:
+    name: tag matches crate version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compare tag against crates/termtest version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "termtest") | .version')"
+          echo "tag=${tag} crate=${version}"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::Tag v${tag} does not match crates/termtest version ${version}. Bump the version (docs/RELEASING.md) before tagging."
+            exit 1
+          fi
+
+  # Re-run the exact CI gates (fmt, clippy, test matrix, msrv, docs, deny).
+  ci:
+    name: ci
+    needs: verify-version
+    uses: ./.github/workflows/ci.yml
+
+  semver:
+    name: cargo-semver-checks
+    needs: verify-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Look for a published baseline on crates.io
+        id: published
+        run: |
+          status="$(curl -sS -o /dev/null -w '%{http_code}' https://crates.io/api/v1/crates/termtest)"
+          echo "crates.io responded ${status}"
+          echo "found=$([ "$status" = "200" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Skip (first release, no baseline)
+        if: steps.published.outputs.found != 'true'
+        run: echo "termtest is not on crates.io yet; skipping semver checks gracefully."
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        if: steps.published.outputs.found == 'true'
+        with:
+          package: termtest
+
+  publish:
+    name: publish to crates.io
+    needs: [ci, semver]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # crates.io Trusted Publishing (GitHub OIDC)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Preferred auth: crates.io Trusted Publishing. Needs the one-time
+      # linkage of this repo+workflow on crates.io (docs/RELEASING.md).
+      # Until that exists, the step fails soft and we fall back to a
+      # CRATES_IO_TOKEN repository secret.
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+        continue-on-error: true
+      - run: cargo publish -p termtest --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CRATES_IO_TOKEN }}
+
+  github-release:
+    name: GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract notes from CHANGELOG.md
+        run: .github/scripts/extract-changelog.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --verify-tag
