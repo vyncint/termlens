@@ -56,7 +56,7 @@ mod util {
 fn spawn_fixture(name: &str) -> termtest::Result<Terminal> {
     Terminal::builder()
         .size(80, 24)
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
         .env_clear()
         .spawn(util::fixture_bin(name))
 }

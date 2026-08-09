@@ -24,6 +24,24 @@ count=0
 while IFS= read -r sha; do
   count=$((count + 1))
   author_email="$(git log -1 --format='%ae' "$sha")"
+  committer_email="$(git log -1 --format='%ce' "$sha")"
+
+  # GitHub web-flow commits (squash/merge performed by github.com itself,
+  # committer noreply@github.com) rewrite the author email to the merging
+  # account's GitHub address, so an exact sign-off==author match is
+  # impossible by construction. The underlying PR commits were already
+  # DCO-checked by this workflow's required pull_request run; for the
+  # resulting merge commit we require a sign-off to be present but skip
+  # the email match.
+  if [ "$committer_email" = "noreply@github.com" ]; then
+    if ! git log -1 --format='%B' "$sha" | grep -qi '^signed-off-by:'; then
+      echo "::error::Merge/squash commit ${sha} carries no Signed-off-by at all."
+      echo "  subject: $(git log -1 --format='%s' "$sha")"
+      fail=1
+    fi
+    continue
+  fi
+
   # The sign-off may sit anywhere in the message body: after a squash merge,
   # GitHub concatenates commit messages, which moves trailers out of the
   # strict trailer block. Match any "Signed-off-by:" line instead.
