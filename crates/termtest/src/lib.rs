@@ -9,6 +9,7 @@
 
 #![warn(missing_docs)]
 
+mod emu;
 mod error;
 mod keys;
 mod screen;
