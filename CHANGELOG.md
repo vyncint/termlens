@@ -9,6 +9,8 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-09
+
 ### Changed
 
 - Renamed the project from `termtest` to `termlens` before first publish:

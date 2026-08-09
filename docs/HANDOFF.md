@@ -110,7 +110,7 @@ Real-world findings the pipeline caught (working exactly as designed):
    - Fallback — token: create an API token at
      <https://crates.io/settings/tokens> (scope: `publish-new`,
      `publish-update`), then
-     `gh secret set CRATES_IO_TOKEN --repo vyncint/termlens`.
+     `gh secret set CARGO_REGISTRY_TOKEN --repo vyncint/termlens`.
 2. **Commit email + signing.** History is authored as
    `Vyncint Ng <vyncint@icloud.com>`. Add **and verify** that address on
    your GitHub account (*Settings → Emails*) — it does two things: links
@@ -127,11 +127,11 @@ Real-world findings the pipeline caught (working exactly as designed):
    # then: GitHub → Settings → SSH and GPG keys → New SSH key → type "Signing key"
    ```
 
-3. **Git remote / SSH identity on this machine.** Your ssh key
-   authenticates as `chivy1204`, which cannot see this private repo, so the
-   remote was switched to HTTPS using the `gh` credential helper (active
-   account `vyncint`). Keep it, or set up a per-account SSH alias if you
-   prefer SSH.
+3. **Git remote / SSH identity on this machine.** Your SSH key
+   authenticates as a different GitHub account with no access to this
+   repo, so the remote was switched to HTTPS using the `gh` credential
+   helper (active account `vyncint`). Keep it, or set up a per-account
+   SSH alias if you prefer SSH.
 4. **Ruleset — applied AND enforcing** (the brief's plan caveat turned out
    obsolete: rulesets now enforce on Free-plan private repos). Ruleset
    `protect-main` (id 20601249): PR required before merge (0 approvals

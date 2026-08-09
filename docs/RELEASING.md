@@ -12,14 +12,14 @@ One page, copy-pasteable. Maintainers only.
   1. crates.io → Account Settings → API Tokens → New token: scopes
      `publish-new` + `publish-update`, crate pattern `termlens`, short
      expiry (it is needed exactly once).
-  2. `gh secret set CRATES_IO_TOKEN --repo vyncint/termlens`
+  2. `gh secret set CARGO_REGISTRY_TOKEN --repo vyncint/termlens`
   `release.yml` tries Trusted Publishing first and falls back to this
   secret automatically.
 - **After the first publish, switch to Trusted Publishing** (tokenless):
   crates.io → termlens → Settings → Trusted Publishing → GitHub:
   repository `vyncint/termlens`, workflow `release.yml`, environment
   *(none)*. Then revoke the token and
-  `gh secret delete CRATES_IO_TOKEN --repo vyncint/termlens`.
+  `gh secret delete CARGO_REGISTRY_TOKEN --repo vyncint/termlens`.
 
 ## Cutting vX.Y.Z
 
