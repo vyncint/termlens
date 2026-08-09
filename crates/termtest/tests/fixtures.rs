@@ -67,9 +67,14 @@ fn spawn_fixture(name: &str) -> termtest::Result<Terminal> {
 #[test]
 fn hello_tui_draws_a_static_alt_screen_frame() -> termtest::Result<()> {
     let mut t = spawn_fixture("hello-tui")?;
-    t.wait_until(|s| s.contains("status: ready"))?;
+    // The bottom-right corner is the LAST byte the fixture draws — once it
+    // is on screen, the whole frame is. Waiting on an earlier line (like
+    // "status: ready") would race the rest of the frame at chunk
+    // boundaries and flake the snapshot below.
+    t.wait_until(|s| s.contains("╯"))?;
 
     let screen = t.screen();
+    assert!(screen.contains("status: ready"), "{screen}");
     let (_, _, cursor_visible) = screen.cursor();
     assert!(!cursor_visible, "hello-tui hides the cursor");
     assert_eq!(screen.find("hello-tui"), Some((1, 2)));
@@ -154,7 +159,11 @@ fn resize_reaches_the_child_as_sigwinch() -> termtest::Result<()> {
 #[test]
 fn unicode_torture_renders_with_correct_widths() -> termtest::Result<()> {
     let mut t = spawn_fixture("unicode-torture")?;
-    t.wait_until(|s| s.contains("done"))?;
+    // Wait on the cursor, not on contains("done"): the predicate would turn
+    // true before the trailing newline is processed, and the snapshot would
+    // catch the cursor mid-line. After "done\r\n" the cursor rests at the
+    // start of row 7 — that is the fixture's true "finished drawing" state.
+    t.wait_until(|s| s.cursor() == (7, 0, true))?;
 
     let screen = t.screen();
     // "width: |一二三| vs |abc|" — "width: " is 7 columns, "|一二三|" is
