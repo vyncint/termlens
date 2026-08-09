@@ -373,8 +373,9 @@ impl Terminal {
     /// (nothing more can arrive).
     ///
     /// This is a heuristic: "no output for N ms" is evidence, not proof,
-    /// that the application finished rendering. Prefer [`wait_until`]
-    /// (`Self::wait_until`) on visible content where possible; see
+    /// that the application finished rendering. Prefer
+    /// [`wait_until`](Self::wait_until) on visible content where possible;
+    /// see
     /// `docs/DESIGN.md` for the discussion and the planned frame-sync
     /// alternative.
     ///
