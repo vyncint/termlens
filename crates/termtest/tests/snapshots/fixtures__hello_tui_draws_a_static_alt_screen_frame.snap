@@ -1,0 +1,12 @@
+---
+source: crates/termtest/tests/fixtures.rs
+assertion_line: 73
+expression: t.screen()
+---
+size: 80x24  cursor: hidden
+╭──────────────────────────────╮
+│ hello-tui                    │
+│                              │
+│ status: ready                │
+│ press q to quit              │
+╰──────────────────────────────╯

@@ -1,0 +1,13 @@
+---
+source: crates/termtest/tests/fixtures.rs
+assertion_line: 161
+expression: screen
+---
+size: 80x24  cursor: 7,0
+ascii: the quick brown fox
+cjk: 你好 世界 漢字
+emoji: 🦀 crab, family 👩‍👩‍👧‍👦, flag 🇻🇳
+viet-nfc: Tiếng Việt — cà phê sữa đá
+viet-nfd: Tiếng Việt
+width: |一二三| vs |abc|
+done
