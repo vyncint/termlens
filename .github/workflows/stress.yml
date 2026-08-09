@@ -31,7 +31,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build test binaries once
-        run: cargo build --workspace --release --tests
+        run: cargo build --workspace --release --all-targets # bins too: fixture binaries must exist before iteration 1
       - name: Run the suite repeatedly
         env:
           ITERS: ${{ inputs.iterations || '100' }}
