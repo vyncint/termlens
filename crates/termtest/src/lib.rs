@@ -9,8 +9,10 @@
 
 #![warn(missing_docs)]
 
+mod error;
 mod keys;
 mod screen;
 
+pub use error::{Error, Result};
 pub use keys::Key;
 pub use screen::{Cell, Color, Screen, Style};
