@@ -118,7 +118,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         # Version pinned; bump deliberately alongside a fresh local audit.
         # pipx ships on the runner image (uv/uvx does not).
-        run: pipx run zizmor==1.29.0 --persona=pedantic .github/workflows/
+        #
+        # One retry after a pause: the online audits call the GitHub
+        # advisories API, and a transient network error there once blocked
+        # a release (run 31307319409). A genuine finding fails identically
+        # on the retry, so nothing real can slip through.
+        run: |
+          audit() { pipx run zizmor==1.29.0 --persona=pedantic .github/workflows/; }
+          audit || {
+            echo "::warning::zizmor failed; retrying once in 30s in case of a transient online-audit network error"
+            sleep 30
+            audit
+          }
 
   # Single stable job name for branch protection: require this one check and
   # matrix/job changes never break the required-checks configuration.
