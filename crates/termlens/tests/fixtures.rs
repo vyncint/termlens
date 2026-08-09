@@ -93,7 +93,7 @@ fn form_echo_round_trips_typed_input_and_special_keys() -> termlens::Result<()> 
     t.send_str("hello");
     t.wait_until(|s| s.contains("input: hello"))?;
 
-    // Each special key must round-trip: our xterm encoding -> pty ->
+    // Each special key must round-trip: our xterm encoding -> PTY ->
     // crossterm's parser inside the fixture -> stable name on screen.
     for (key, name) in [
         (Key::Up, "last: up"),

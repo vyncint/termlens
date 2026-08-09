@@ -66,16 +66,16 @@ flowchart TB
     end
   end
   subgraph kernel["kernel"]
-    pty["real pty<br/>line discipline · TIOCSWINSZ → SIGWINCH"]
+    PTY["real PTY<br/>line discipline · TIOCSWINSZ → SIGWINCH"]
   end
   app["your app, unmodified<br/>believes it owns a terminal"]
 
   test -->|"send(Key) · send_str"| api
-  api -->|"xterm byte sequences"| pty
-  api -.->|"resize · kernel delivers SIGWINCH"| pty
-  pty -->|stdin| app
-  app -->|"stdout · escape sequences"| pty
-  pty -->|bytes| reader
+  api -->|"xterm byte sequences"| PTY
+  api -.->|"resize · kernel delivers SIGWINCH"| PTY
+  PTY -->|stdin| app
+  app -->|"stdout · escape sequences"| PTY
+  PTY -->|bytes| reader
   reader -->|"process, under one lock"| emu
   emu -->|"snapshot"| screen
   screen -->|"predicates · insta snapshots · screen dumps in every timeout"| test
@@ -126,7 +126,7 @@ design. termlens's position:
 - Unix only for now (Linux + macOS in CI). The PTY layer (`portable-pty`)
   supports ConPTY, so Windows is planned, not designed out.
 - A child that writes and exits within its first milliseconds can lose
-  output to the OS pty teardown (macOS especially). Long-lived TUIs are
+  output to the OS PTY teardown (macOS especially). Long-lived TUIs are
   unaffected; for run-and-exit programs, end the script with a `read` and
   release it after asserting — see the "instant-exit caveat" in
   [docs/DESIGN.md](docs/DESIGN.md).
@@ -151,7 +151,10 @@ reports: [SECURITY.md](SECURITY.md).
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
-[MIT license](LICENSE-MIT) at your option. Unless you explicitly state
+[MIT license](LICENSE-MIT) at your option — the Rust ecosystem's standard
+dual license. Apache-2.0 carries an express patent grant; MIT is maximally
+simple and GPLv2-compatible. Offering both lets every downstream user pick
+whichever their project or policy needs. Unless you explicitly state
 otherwise, any contribution intentionally submitted for inclusion in the
 work by you, as defined in the Apache-2.0 license, shall be dual licensed
 as above, without any additional terms or conditions.

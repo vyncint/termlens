@@ -5,7 +5,7 @@
 //!
 //! Pattern note: every script that must *print something we assert on*
 //! ends with a `read` guard, and we send Enter only after the assertion.
-//! Output written immediately before exit can be discarded by macOS's pty
+//! Output written immediately before exit can be discarded by macOS's PTY
 //! teardown (docs/DESIGN.md §2); keeping the child alive until the harness
 //! has seen the bytes makes these tests deterministic on every platform.
 
@@ -21,8 +21,8 @@ fn sh(script: &str) -> termlens::Result<Terminal> {
 
 #[test]
 fn echo_reaches_the_screen_and_child_exits_cleanly() -> termlens::Result<()> {
-    let mut t = sh("echo hello from a real pty; read guard")?;
-    t.wait_until(|s| s.contains("hello from a real pty"))?;
+    let mut t = sh("echo hello from a real PTY; read guard")?;
+    t.wait_until(|s| s.contains("hello from a real PTY"))?;
     t.send(Key::Enter);
     let status = t.wait_exit()?;
     assert!(status.success(), "full status: {status}");
@@ -32,7 +32,7 @@ fn echo_reaches_the_screen_and_child_exits_cleanly() -> termlens::Result<()> {
 
 #[test]
 fn exit_codes_are_reported() -> termlens::Result<()> {
-    // The `read` keeps the exit from racing pty setup; the line discipline
+    // The `read` keeps the exit from racing PTY setup; the line discipline
     // buffers our Enter even if it lands before `read` starts.
     let mut t = sh("read guard; exit 7")?;
     t.send(Key::Enter);
