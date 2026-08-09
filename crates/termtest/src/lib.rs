@@ -1,10 +1,14 @@
 //! Headless PTY test harness for CLI/TUI applications.
 //!
-//! `termtest` spawns your program in a real pseudo-terminal, feeds its output
-//! through a VT emulator into an in-memory screen grid, and lets your tests
-//! assert on — and snapshot — the *rendered screen* instead of raw bytes.
+//! `termtest` spawns your program in a **real pseudo-terminal**, feeds its
+//! output through a **VT emulator** into an in-memory **screen grid**, and
+//! lets tests **assert and snapshot on the rendered screen** instead of raw
+//! bytes — Playwright for the terminal.
 //!
-//! The public API lands module by module; see the repository README for the
-//! full v0.1 surface.
+//! The full API lands module by module; see the repository README.
 
 #![warn(missing_docs)]
+
+mod screen;
+
+pub use screen::{Cell, Color, Screen, Style};

@@ -24,10 +24,12 @@ insta = ["dep:insta"]
 portable-pty.workspace = true
 vt100.workspace = true
 thiserror.workspace = true
-unicode-width.workspace = true
 insta = { workspace = true, optional = true }
 
 [dev-dependencies]
+# vt100 reports wide cells itself; unicode-width is only needed by our own
+# tests to construct wide-character fixtures.
+unicode-width.workspace = true
 insta.workspace = true
 anyhow.workspace = true
 
