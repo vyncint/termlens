@@ -2,12 +2,15 @@
 
 Date: 2026-08-09. Repo: <https://github.com/vyncint/termlens> (private).
 Everything below was verified against live GitHub state, not assumed.
+"The build brief" below means the commissioning document this build
+executed. It is **not** part of the repository, so wherever a requirement
+of it matters, the requirement is restated inline.
 
 ## 1. What was built
 
 A complete, release-ready v0.1 of `termlens` — a headless PTY test harness
 (real PTY → vt100 emulation → `Screen` snapshots → deadline-bounded waits),
-per the product spec. Highlights:
+as commissioned by the build brief. Highlights:
 
 - **Library** (`crates/termlens`): `Terminal`/`TerminalBuilder` (size,
   strict env control, default deadline), `Screen`/`Cell`/`Style`/`Color`
@@ -21,7 +24,7 @@ per the product spec. Highlights:
 - **Tests**: 48 green (29 unit, 10 `basic.rs` against `/bin/sh`, 5 fixture
   tests incl. three reviewed insta snapshots, 4 doctests). The form-echo
   test round-trips every special-key encoding through crossterm's parser.
-- **Docs**: README (storefront per spec §10), `docs/DESIGN.md` (4 layers,
+- **Docs**: README (the project's storefront), `docs/DESIGN.md` (4 layers,
   wait-semantics contract, snapshot format spec, emulator rationale),
   `docs/RELEASING.md`, CONTRIBUTING/SECURITY/MAINTAINERS/CoC/CHANGELOG.
 - **Automation**: `ci.yml` (fmt, clippy `-D warnings`, test matrix
@@ -129,7 +132,7 @@ Real-world findings the pipeline caught (working exactly as designed):
    remote was switched to HTTPS using the `gh` credential helper (active
    account `vyncint`). Keep it, or set up a per-account SSH alias if you
    prefer SSH.
-4. **Ruleset — applied AND enforcing** (spec's plan caveat turned out
+4. **Ruleset — applied AND enforcing** (the brief's plan caveat turned out
    obsolete: rulesets now enforce on Free-plan private repos). Ruleset
    `protect-main` (id 20601249): PR required before merge (0 approvals
    while solo), dismiss stale approvals, required checks `required-green` +
@@ -160,42 +163,47 @@ Then:
       `gh api -X PATCH repos/vyncint/termlens -f 'security_and_analysis[secret_scanning][status]=enabled' -f 'security_and_analysis[secret_scanning_push_protection][status]=enabled'`
 - [ ] Enable Private Vulnerability Reporting (Settings → Code security), and
       delete the "once public" caveat in SECURITY.md.
-- [ ] Decide on Discussions (`gh repo edit --enable-discussions`); currently off per spec.
+- [ ] Decide on Discussions (`gh repo edit --enable-discussions`); the brief asked for them off.
 - [ ] docs.rs + crates.io badges go live after the first publish
       (`docs/RELEASING.md` end-to-end).
 - [ ] Announce: r/rust, This Week in Rust (PR to `rust-lang/this-week-in-rust`),
       awesome-ratatui PR, and the ratatui forum/Discord testing channel.
 
-## 4. Deviations from the spec, and why
+## 4. Deviations from the build brief, and why
 
 1. **MSRV 1.85, not portable-pty/vt100's ~1.70** — the default `insta`
    feature's tree (insta → tempfile → getrandom 0.4) hard-requires 1.85;
    we declare only what CI actually verifies (`--locked`).
 2. **`unicode-width` is a dev-dependency** — vt100 already reports wide
-   cells; the lib never needed it, and the dep tree stays lean (spec §2.3
-   listed it as a main dependency).
-3. **Builder has `arg`/`args`** — spec's API showed only `spawn(program)`;
+   cells; the lib never needed it, and the dep tree stays lean (the brief
+   listed it among the runtime dependencies).
+3. **Builder has `arg`/`args`** — the brief's API sketch showed only
+   `spawn(program)`;
    argv-less spawning can't drive `sh -c` or any real CLI.
 4. **`cursor: hidden`** in the snapshot header when the app hides the
-   cursor — the spec sample only showed the visible-cursor form; hiding is
+   cursor — the brief's sample output only showed the visible-cursor form;
+   hiding is
    deliberate TUI behavior worth asserting on.
 5. **`with_styles()` is a documented plan (DESIGN.md §3), not a stub
    function** — shipping a callable API whose output will change in v0.2 is
    a semver trap; a documented reservation is not.
 6. **`env_clear()` order-independence** (unlike `std::process::Command`) —
-   the spec's own example calls `.env("TERM", …)` *before* `.env_clear()`
+   the brief's own example calls `.env("TERM", …)` *before* `.env_clear()`
    and expects TERM to survive; documented on the method.
 7. **Internal `Emulator` trait gained `set_size`** — resize must reach the
    grid; trait is `pub(crate)`, no API impact.
 8. **Negative-test commit uses a generic "Example Bot" identity and
-   "Generated with SomeAgent"** instead of naming a real AI vendor — hard
-   rule 3 bans AI attribution anywhere including test artifacts; the
+   "Generated with SomeAgent"** instead of naming a real AI vendor — the
+   zero-AI-attribution rule applies everywhere, test artifacts included; the
    generic forms still trip every pattern class (see the red run above).
-9. **Ruleset JSON fallback not committed** — the API accepted and enforces
-   the ruleset (plan caveat in spec §9 no longer matches GitHub behavior),
-   so per the spec's own conditional there was nothing to save.
-10. **`stress.yml` accepts an `iterations` input** (default 100) — spec
-    behavior preserved, one-off deeper/shallower runs made possible.
+9. **Ruleset JSON fallback not committed** — the brief expected rulesets
+   not to enforce on Free-plan private repos and asked for the ruleset
+   JSON to be committed only if the API refused it. GitHub now enforces
+   rulesets on such repos and the API accepted, so by the brief's own
+   condition there was nothing to save.
+10. **`stress.yml` accepts an `iterations` input** — the brief's fixed
+    100 iterations remain the default; one-off deeper or shallower runs
+    become possible.
 11. **`checkout@v7`** rather than v4 — v4 targets end-of-life Node 20 and
     annotates every job; bumped to current (via Dependabot's own proposal,
     landed human-authored per §2.5).
@@ -204,7 +212,7 @@ Then:
     rewrites squash-commit author emails, so the strict match fails by
     construction; a sign-off must still be present, and the real commits
     were already checked by the required PR run. Found live on the first
-    squash merge (spec §6.1 predates this interaction).
+    squash merge; the brief's DCO design predates this GitHub behavior.
 13. **Stress workflow prebuilds `--all-targets`** (not `--tests`) and the
     fixture tests carry 30s deadlines — the first stress run proved that
     compiling fixture bins mid-iteration on a cold 2-vCPU runner blows a
