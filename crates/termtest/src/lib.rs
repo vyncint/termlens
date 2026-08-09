@@ -9,6 +9,8 @@
 
 #![warn(missing_docs)]
 
+mod keys;
 mod screen;
 
+pub use keys::Key;
 pub use screen::{Cell, Color, Screen, Style};
