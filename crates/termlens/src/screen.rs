@@ -132,8 +132,22 @@ impl Screen {
         }
     }
 
-    /// Screen size as `(cols, rows)` — width × height, matching
-    /// [`TerminalBuilder::size`](crate::TerminalBuilder::size).
+    /// Number of columns (the screen's width).
+    #[must_use]
+    pub fn cols(&self) -> u16 {
+        self.cols
+    }
+
+    /// Number of rows (the screen's height).
+    #[must_use]
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
+
+    /// Screen size as `([cols](Self::cols), [rows](Self::rows))` — width ×
+    /// height, matching [`TerminalBuilder::size`](crate::TerminalBuilder::size).
+    /// Note the order differs from cell addressing, which is `(row, col)`;
+    /// prefer the named accessors when in doubt.
     #[must_use]
     pub fn size(&self) -> (u16, u16) {
         (self.cols, self.rows)
@@ -347,6 +361,7 @@ mod tests {
         assert!(s.cell(0, 10).is_none());
         assert_eq!(s.cursor(), (1, 2, true));
         assert_eq!(s.size(), (10, 2));
+        assert_eq!((s.cols(), s.rows()), (10, 2));
     }
 
     #[test]

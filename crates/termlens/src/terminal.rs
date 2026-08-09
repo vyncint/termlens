@@ -29,7 +29,7 @@ const DRAIN_GRACE: Duration = Duration::from_millis(500);
 /// Serializes every PTY *lifecycle edge* (open+spawn on one side, kill+reap+
 /// master-close on the other) across all `Terminal`s in this process.
 ///
-/// Why: macOS tears ptys down with `revoke()`, and pty device numbers are
+/// Why: macOS tears PTYs down with `revoke()`, and PTY device numbers are
 /// recycled immediately. With concurrent terminals, one thread's teardown
 /// can race another thread's `openpty()` **on the same recycled device**,
 /// and the late revoke hangs up the brand-new session — the fresh child
@@ -224,7 +224,7 @@ impl TerminalBuilder {
             .join(" ");
 
         // Hold the lifecycle lock across openpty → spawn → slave close, so
-        // no concurrent Terminal teardown can revoke our fresh pty device.
+        // no concurrent Terminal teardown can revoke our fresh PTY device.
         let lifecycle = pty_lifecycle_guard();
 
         let pty = native_pty_system();
@@ -251,18 +251,18 @@ impl TerminalBuilder {
 
         // Attach the reader thread BEFORE spawning the child: a program that
         // writes and exits within its first millisecond must find a drain
-        // already running. (macOS's pty layer can discard output still
+        // already running. (macOS's PTY layer can discard output still
         // buffered at teardown — see docs/DESIGN.md §2 — so the window
         // between child start and first read must be as close to zero as
         // userspace can make it.)
         let reader = pair
             .master
             .try_clone_reader()
-            .map_err(|e| Error::Pty(format!("cloning pty reader failed: {e}")))?;
+            .map_err(|e| Error::Pty(format!("cloning PTY reader failed: {e}")))?;
         let writer = pair
             .master
             .take_writer()
-            .map_err(|e| Error::Pty(format!("taking pty writer failed: {e}")))?;
+            .map_err(|e| Error::Pty(format!("taking PTY writer failed: {e}")))?;
 
         let shared = Arc::new(Monitor::new(EmuState {
             emu: Box::new(Vt100Emulator::new(self.rows, self.cols)),
@@ -322,7 +322,7 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: &Monitor<EmuState>) {
 /// and reaps the child — tests never leak zombies, even on panic.
 pub struct Terminal {
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    // Option only so Drop can close them under the pty lifecycle lock;
+    // Option only so Drop can close them under the PTY lifecycle lock;
     // both are Some for the entire life of the value outside Drop.
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     writer: Option<Box<dyn Write + Send>>,
@@ -422,9 +422,8 @@ impl Terminal {
     ///
     /// This is a heuristic: "no output for N ms" is evidence, not proof,
     /// that the application finished rendering. Prefer
-    /// [`wait_until`](Self::wait_until) on visible content where possible;
-    /// see
-    /// `docs/DESIGN.md` for the discussion and the planned frame-sync
+    /// [`wait_until`](Self::wait_until) on visible content where possible.
+    /// `docs/DESIGN.md` discusses the trade-off and the planned frame-sync
     /// alternative.
     ///
     /// # Errors
@@ -550,9 +549,9 @@ impl Drop for Terminal {
     /// joined here — a grandchild holding the PTY open must not hang Drop.
     ///
     /// The whole teardown (including closing the master/writer fds) runs
-    /// under the process-wide pty lifecycle lock: on macOS, letting a
+    /// under the process-wide PTY lifecycle lock: on macOS, letting a
     /// master close overlap a concurrent `openpty()` can revoke the *other*
-    /// terminal's freshly recycled pty device (see `PTY_LIFECYCLE` in this module).
+    /// terminal's freshly recycled PTY device (see `PTY_LIFECYCLE` in this module).
     fn drop(&mut self) {
         let _lifecycle = pty_lifecycle_guard();
         if self.exit_status.is_none() {
@@ -562,7 +561,7 @@ impl Drop for Terminal {
                 let _ = self.child.wait();
             }
         }
-        // Close the pty fds while still holding the lock.
+        // Close the PTY fds while still holding the lock.
         drop(self.writer.take());
         drop(self.master.take());
     }

@@ -54,7 +54,7 @@ pub enum Error {
     },
 
     /// A PTY control operation (open, resize, reader/writer setup) failed.
-    #[error("pty error: {0}")]
+    #[error("PTY error: {0}")]
     Pty(String),
 
     /// An OS-level I/O error (e.g. while waiting on the child process).

@@ -12,8 +12,8 @@ flowchart TB
   l4["4 · assertions<br/>wait_until / wait_idle / wait_exit · Screen queries · insta snapshots"]
   l3["3 · Screen<br/>immutable Arc-backed grid snapshots · Cell · Style · cursor — termlens's own types"]
   l2["2 · emulator<br/>internal trait: process · snapshot · mid_sequence · set_size — v0.1 backend: vt100"]
-  l1["1 · pty<br/>portable-pty · reader thread · resize TIOCSWINSZ → SIGWINCH · lifecycle lock"]
-  app["child app<br/>spawned in the pty, unmodified"]
+  l1["1 · PTY<br/>portable-pty · reader thread · resize TIOCSWINSZ → SIGWINCH · lifecycle lock"]
+  app["child app<br/>spawned in the PTY, unmodified"]
 
   app -->|"escape-sequence bytes"| l1
   l1 -->|"reader thread · mutate under lock, notify waiters"| l2
@@ -77,10 +77,10 @@ corner of a frame, or the cursor's resting position
 an early marker and snapshotting is a race at chunk boundaries; the stress
 workflow found exactly that in our own suite.
 
-### The instant-exit caveat (macOS pty teardown)
+### The instant-exit caveat (macOS PTY teardown)
 
 A child that **writes and exits within its first milliseconds** races the
-platform's pty teardown: on macOS, bytes still buffered in the kernel when
+platform's PTY teardown: on macOS, bytes still buffered in the kernel when
 the slave side closes can be discarded, and teardown can even surface as a
 signal-death instead of the real exit code. Stress-testing found this at
 roughly 1 in 80 instant-exit spawns under load. termlens narrows the window
@@ -92,11 +92,11 @@ last action a `read` on stdin, assert on its output, then send Enter and
 `wait_exit`. Real TUI applications are unaffected — they live far longer
 than the window and exit on request.
 
-Related, and fixed inside the library: macOS tears ptys down with
-`revoke()` and recycles pty device numbers immediately, so with concurrent
+Related, and fixed inside the library: macOS tears PTYs down with
+`revoke()` and recycles PTY device numbers immediately, so with concurrent
 terminals one thread's teardown could revoke another thread's *freshly
-opened* pty and kill its child at birth (~1/800 spawns under CI load; the
-same suite ran 100/100 on Linux). termlens therefore serializes every pty
+opened* PTY and kill its child at birth (~1/800 spawns under CI load; the
+same suite ran 100/100 on Linux). termlens therefore serializes every PTY
 lifecycle edge — open+spawn on one side, kill+reap+close on the other —
 behind a process-wide lock (`PTY_LIFECYCLE` in `terminal.rs`). The lock is
 held for microseconds per edge; steady-state I/O never touches it.

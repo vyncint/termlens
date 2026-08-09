@@ -40,6 +40,9 @@ listed under a **Changed** or **Removed** heading.
   for application exit codes. (`ExitStatus` is `Clone` but no longer `Copy`.)
 - `Screen`'s `Debug` is now the compact header+text rendering: a failing
   `Result` test prints a readable screen instead of a one-line cell dump.
+- `Screen::cols()` and `Screen::rows()`: named size accessors, so nobody
+  has to remember that `size()` is `(cols, rows)` while cells are
+  addressed `(row, col)`.
 
 ### Fixed
 
