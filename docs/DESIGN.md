@@ -63,6 +63,17 @@ expiry the error **embeds the full screen dump** — a CI log alone answers
 `Drop` kills + reaps the child unconditionally (unless already reaped):
 tests never leak zombies, including on panic.
 
+### Snapshot after waiting on the *last* drawn byte
+
+`wait_until(pred)` guarantees exactly this: every byte up to and including
+the ones that made `pred` true has been processed. Bytes the application
+wrote *after* your marker may still be in flight. So before snapshotting a
+whole screen, wait on the **final** thing the app draws — the bottom-right
+corner of a frame, or the cursor's resting position
+(`s.cursor() == (row, 0, true)`) — not on a line drawn midway. Waiting on
+an early marker and snapshotting is a race at chunk boundaries; the stress
+workflow found exactly that in our own suite.
+
 ### The instant-exit caveat (macOS pty teardown)
 
 A child that **writes and exits within its first milliseconds** races the
