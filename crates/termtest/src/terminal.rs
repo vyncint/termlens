@@ -9,7 +9,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,24 @@ use crate::wait::{next_backoff, Expired, Monitor, INITIAL_BACKOFF, POLL_CAP};
 /// reaped, so the final screen is complete. Best effort: a grandchild
 /// holding the PTY open must not stall the wait.
 const DRAIN_GRACE: Duration = Duration::from_millis(500);
+
+/// Serializes every PTY *lifecycle edge* (open+spawn on one side, kill+reap+
+/// master-close on the other) across all `Terminal`s in this process.
+///
+/// Why: macOS tears ptys down with `revoke()`, and pty device numbers are
+/// recycled immediately. With concurrent terminals, one thread's teardown
+/// can race another thread's `openpty()` **on the same recycled device**,
+/// and the late revoke hangs up the brand-new session — the fresh child
+/// dies at birth (observed under stress as SIGHUP-style deaths, instant
+/// EOF, and EIO on the first write, at roughly 1 in 800 spawns on loaded
+/// macOS runners; Linux, whose teardown is not revoke-based, ran the same
+/// suite 100/100). Holding this lock during both edges means the kernel
+/// never sees the two windows overlap. Steady-state I/O is unaffected.
+static PTY_LIFECYCLE: Mutex<()> = Mutex::new(());
+
+fn pty_lifecycle_guard() -> std::sync::MutexGuard<'static, ()> {
+    PTY_LIFECYCLE.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Exit status of the child process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +223,10 @@ impl TerminalBuilder {
             .collect::<Vec<_>>()
             .join(" ");
 
+        // Hold the lifecycle lock across openpty → spawn → slave close, so
+        // no concurrent Terminal teardown can revoke our fresh pty device.
+        let lifecycle = pty_lifecycle_guard();
+
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
@@ -261,11 +283,12 @@ impl TerminalBuilder {
         // Close the parent's slave handle so the master sees EOF once the
         // child (and its descendants) release the terminal.
         drop(pair.slave);
+        drop(lifecycle);
 
         Ok(Terminal {
             child,
-            master: pair.master,
-            writer,
+            master: Some(pair.master),
+            writer: Some(writer),
             shared,
             default_timeout: self.timeout,
             exit_status: None,
@@ -299,8 +322,10 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: &Monitor<EmuState>) {
 /// and reaps the child — tests never leak zombies, even on panic.
 pub struct Terminal {
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    master: Box<dyn portable_pty::MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    // Option only so Drop can close them under the pty lifecycle lock;
+    // both are Some for the entire life of the value outside Drop.
+    master: Option<Box<dyn portable_pty::MasterPty + Send>>,
+    writer: Option<Box<dyn Write + Send>>,
     shared: Arc<Monitor<EmuState>>,
     default_timeout: Duration,
     exit_status: Option<ExitStatus>,
@@ -345,11 +370,8 @@ impl Terminal {
     }
 
     fn write_or_panic(&mut self, bytes: &[u8], what: &str) {
-        if let Err(e) = self
-            .writer
-            .write_all(bytes)
-            .and_then(|()| self.writer.flush())
-        {
+        let writer = self.writer.as_mut().expect("writer lives until drop");
+        if let Err(e) = writer.write_all(bytes).and_then(|()| writer.flush()) {
             panic!(
                 "termtest: failed to send {what} to `{}` ({e})\n--- screen ---\n{}",
                 self.command_desc,
@@ -495,6 +517,8 @@ impl Terminal {
     /// [`Error::Pty`] if the ioctl fails.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         self.master
+            .as_ref()
+            .expect("master lives until drop")
             .resize(PtySize {
                 rows,
                 cols,
@@ -524,7 +548,13 @@ impl Drop for Terminal {
     /// Kill and reap the child. No zombies, even when a test panics before
     /// `wait_exit`. The reader thread ends on its own at EOF and is never
     /// joined here — a grandchild holding the PTY open must not hang Drop.
+    ///
+    /// The whole teardown (including closing the master/writer fds) runs
+    /// under the process-wide pty lifecycle lock: on macOS, letting a
+    /// master close overlap a concurrent `openpty()` can revoke the *other*
+    /// terminal's freshly recycled pty device (see [`PTY_LIFECYCLE`]).
     fn drop(&mut self) {
+        let _lifecycle = pty_lifecycle_guard();
         if self.exit_status.is_none() {
             let already_exited = matches!(self.child.try_wait(), Ok(Some(_)));
             if !already_exited {
@@ -532,5 +562,8 @@ impl Drop for Terminal {
                 let _ = self.child.wait();
             }
         }
+        // Close the pty fds while still holding the lock.
+        drop(self.writer.take());
+        drop(self.master.take());
     }
 }

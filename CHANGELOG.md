@@ -36,6 +36,10 @@ listed under a **Changed** or **Removed** heading.
 
 ### Fixed
 
+- PTY lifecycle edges (open+spawn / kill+reap+close) are serialized behind
+  a process-wide lock: on macOS, a concurrent teardown's `revoke()` could
+  hit another thread's freshly recycled pty device and kill its child at
+  birth. Found by the stress workflow; see `docs/DESIGN.md` §2.
 - The PTY reader thread now attaches **before** the child is spawned, so a
   program that writes and exits within its first millisecond meets a drain
   that is already running. This narrows (but cannot fully close — see the
