@@ -5,7 +5,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: termtest version
+      label: termlens version
       placeholder: "0.1.0 (or git SHA)"
     validations:
       required: true
@@ -23,7 +23,7 @@ body:
     id: term
     attributes:
       label: TERM value
-      description: The TERM the terminal under test sees (termtest defaults to `xterm-256color`).
+      description: The TERM the terminal under test sees (termlens defaults to `xterm-256color`).
       placeholder: xterm-256color
     validations:
       required: false

@@ -1,5 +1,5 @@
 ---
-source: crates/termtest/tests/fixtures.rs
+source: crates/termlens/tests/fixtures.rs
 assertion_line: 161
 expression: screen
 ---

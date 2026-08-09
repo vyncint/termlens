@@ -1,4 +1,4 @@
-# termtest — Design
+# termlens — Design
 
 Condensed architecture notes. This document is the contract for anything
 touching wait semantics, the snapshot format, or the emulator boundary —
@@ -10,7 +10,7 @@ change those only with a matching change here.
 flowchart TB
   test["test code"]
   l4["4 · assertions<br/>wait_until / wait_idle / wait_exit · Screen queries · insta snapshots"]
-  l3["3 · Screen<br/>immutable Arc-backed grid snapshots · Cell · Style · cursor — termtest's own types"]
+  l3["3 · Screen<br/>immutable Arc-backed grid snapshots · Cell · Style · cursor — termlens's own types"]
   l2["2 · emulator<br/>internal trait: process · snapshot · mid_sequence · set_size — v0.1 backend: vt100"]
   l1["1 · pty<br/>portable-pty · reader thread · resize TIOCSWINSZ → SIGWINCH · lifecycle lock"]
   app["child app<br/>spawned in the pty, unmodified"]
@@ -83,7 +83,7 @@ A child that **writes and exits within its first milliseconds** races the
 platform's pty teardown: on macOS, bytes still buffered in the kernel when
 the slave side closes can be discarded, and teardown can even surface as a
 signal-death instead of the real exit code. Stress-testing found this at
-roughly 1 in 80 instant-exit spawns under load. termtest narrows the window
+roughly 1 in 80 instant-exit spawns under load. termlens narrows the window
 as far as userspace allows — the reader thread is attached *before* the
 child is spawned — but cannot close it.
 
@@ -96,7 +96,7 @@ Related, and fixed inside the library: macOS tears ptys down with
 `revoke()` and recycles pty device numbers immediately, so with concurrent
 terminals one thread's teardown could revoke another thread's *freshly
 opened* pty and kill its child at birth (~1/800 spawns under CI load; the
-same suite ran 100/100 on Linux). termtest therefore serializes every pty
+same suite ran 100/100 on Linux). termlens therefore serializes every pty
 lifecycle edge — open+spawn on one side, kill+reap+close on the other —
 behind a process-wide lock (`PTY_LIFECYCLE` in `terminal.rs`). The lock is
 held for microseconds per edge; steady-state I/O never touches it.
@@ -139,7 +139,7 @@ from the one the macro targets.
 `vt100` is the v0.1 backend: small, pure, battle-tested by its own suite.
 But it is an implementation detail:
 
-- Public types (`Screen`, `Cell`, `Style`, `Color`) are termtest's own.
+- Public types (`Screen`, `Cell`, `Style`, `Color`) are termlens's own.
   vt100 types never appear in the API, so swapping the backend is a
   non-breaking change.
 - The `Emulator` trait is four methods (`process`, `snapshot`,

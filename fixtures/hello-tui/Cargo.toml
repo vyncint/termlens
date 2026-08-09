@@ -1,6 +1,6 @@
 [package]
 name = "hello-tui"
-description = "termtest fixture: static alternate-screen frame, exits on 'q'"
+description = "termlens fixture: static alternate-screen frame, exits on 'q'"
 publish = false
 version.workspace = true
 edition.workspace = true

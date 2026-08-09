@@ -1,5 +1,5 @@
 [package]
-name = "termtest"
+name = "termlens"
 description = "Headless PTY test harness for CLI/TUI apps — spawn in a real PTY, assert on the rendered screen"
 keywords = ["pty", "terminal", "testing", "tui", "snapshot"]
 categories = ["development-tools::testing", "command-line-interface"]

@@ -25,14 +25,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
-      - name: Compare tag against crates/termtest version
+      - name: Compare tag against crates/termlens version
         run: |
           tag="${GITHUB_REF_NAME#v}"
           version="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "termtest") | .version')"
+            | jq -r '.packages[] | select(.name == "termlens") | .version')"
           echo "tag=${tag} crate=${version}"
           if [ "$tag" != "$version" ]; then
-            echo "::error::Tag v${tag} does not match crates/termtest version ${version}. Bump the version (docs/RELEASING.md) before tagging."
+            echo "::error::Tag v${tag} does not match crates/termlens version ${version}. Bump the version (docs/RELEASING.md) before tagging."
             exit 1
           fi
 
@@ -53,16 +53,16 @@ jobs:
       - name: Look for a published baseline on crates.io
         id: published
         run: |
-          status="$(curl -sS -o /dev/null -w '%{http_code}' https://crates.io/api/v1/crates/termtest)"
+          status="$(curl -sS -o /dev/null -w '%{http_code}' https://crates.io/api/v1/crates/termlens)"
           echo "crates.io responded ${status}"
           echo "found=$([ "$status" = "200" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - name: Skip (first release, no baseline)
         if: steps.published.outputs.found != 'true'
-        run: echo "termtest is not on crates.io yet; skipping semver checks gracefully."
+        run: echo "termlens is not on crates.io yet; skipping semver checks gracefully."
       - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         if: steps.published.outputs.found == 'true'
         with:
-          package: termtest
+          package: termlens
 
   publish:
     name: publish to crates.io
@@ -85,7 +85,7 @@ jobs:
       - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: auth
         continue-on-error: true
-      - run: cargo publish -p termtest --locked
+      - run: cargo publish -p termlens --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CRATES_IO_TOKEN }}
 

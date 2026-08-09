@@ -1,4 +1,4 @@
-//! termtest fixture: prints `size: <cols>x<rows>` on startup and reprints it
+//! termlens fixture: prints `size: <cols>x<rows>` on startup and reprints it
 //! every time the terminal is resized (kernel delivers SIGWINCH after
 //! TIOCSWINSZ; crossterm surfaces it as `Event::Resize`). Exits on `q`.
 //!

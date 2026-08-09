@@ -1,4 +1,4 @@
-# termtest
+# termlens
 
 Integration testing for terminal programs, done the way you'd test a web
 app: spawn the real thing in a **real PTY**, let a VT emulator render its
@@ -6,24 +6,24 @@ output into an in-memory **screen grid**, and **assert or snapshot on the
 rendered screen** instead of scraping raw bytes. Playwright for the
 terminal.
 
-[![CI](https://github.com/vyncint/termtest/actions/workflows/ci.yml/badge.svg)](https://github.com/vyncint/termtest/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/termtest.svg)](https://crates.io/crates/termtest)
-[![docs.rs](https://img.shields.io/docsrs/termtest)](https://docs.rs/termtest)
-[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue)](https://github.com/vyncint/termtest/blob/main/Cargo.toml)
+[![CI](https://github.com/vyncint/termlens/actions/workflows/ci.yml/badge.svg)](https://github.com/vyncint/termlens/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/termlens.svg)](https://crates.io/crates/termlens)
+[![docs.rs](https://img.shields.io/docsrs/termlens)](https://docs.rs/termlens)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue)](https://github.com/vyncint/termlens/blob/main/Cargo.toml)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
 ```sh
-cargo add termtest --dev
+cargo add termlens --dev
 ```
 
 ## Example
 
 ```rust
 use std::time::Duration;
-use termtest::{Key, Terminal};
+use termlens::{Key, Terminal};
 
 #[test]
-fn quits_from_the_main_screen() -> termtest::Result<()> {
+fn quits_from_the_main_screen() -> termlens::Result<()> {
     let mut t = Terminal::builder()
         .size(80, 24)
         .env_clear()                       // hermetic: no host env leaks in
@@ -58,7 +58,7 @@ exactly what the app was displaying, not "assertion failed: false".
 flowchart TB
   test["your test<br/>drive · wait · assert"]
   subgraph proc["your test process · cargo test"]
-    subgraph tt["termtest"]
+    subgraph tt["termlens"]
       api["Terminal<br/>send · resize · wait_until / wait_idle / wait_exit"]
       reader["reader thread<br/>drains continuously — output is never lost between waits"]
       emu["VT emulator<br/>vt100 behind a small internal trait, swappable"]
@@ -94,7 +94,7 @@ so the backend can be swapped; details in [docs/DESIGN.md](docs/DESIGN.md).
 
 | Tool                  | Real PTY | Screen grid | Snapshots | Notes                                   |
 | --------------------- | :------: | :---------: | :-------: | --------------------------------------- |
-| **termtest**          |    ✔     |      ✔      |     ✔     | this crate                              |
+| **termlens**          |    ✔     |      ✔      |     ✔     | this crate                              |
 | [rexpect] / [expectrl] |   ✔     |      ✗      |     ✗     | stream matching, no rendered screen     |
 | [term-transcript]     |    ✗     |      ~      |   SVG     | transcripts for docs, not assertions    |
 | ratatui `TestBackend` |    ✗     |      ✔      |     ~     | in-process only: your real binary, PTY layer, and non-ratatui output stay untested |
@@ -103,7 +103,7 @@ so the backend can be swapped; details in [docs/DESIGN.md](docs/DESIGN.md).
 ## Determinism
 
 PTYs are asynchronous; a harness that pretends otherwise is flaky by
-design. termtest's position:
+design. termlens's position:
 
 - **Prefer `wait_until` on visible content.** It re-checks on every chunk
   of output and is exact: the condition either becomes true or you get a

@@ -1,4 +1,4 @@
-//! termtest fixture: prints a fixed set of width-hostile lines and exits.
+//! termlens fixture: prints a fixed set of width-hostile lines and exits.
 //!
 //! Covers: plain ASCII, double-width CJK, emoji (including a ZWJ family and
 //! a regional-indicator flag), Vietnamese in both NFC and NFD normalization

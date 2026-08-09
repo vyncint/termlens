@@ -9,9 +9,16 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed the project from `termtest` to `termlens` before first publish:
+  an active Go library of the same name occupies the identical niche
+  (github.com/ActiveState/termtest), and the new name says what the crate
+  actually does — assert on what is *seen* through the terminal.
+
 ### Added
 
-- Initial implementation of the `termtest` crate: spawn any terminal program
+- Initial implementation of the `termlens` crate: spawn any terminal program
   in a real PTY, drive it with typed key input, and assert or snapshot on the
   emulated screen grid.
 - `Terminal` / `TerminalBuilder` with strict environment control, size

@@ -1,6 +1,6 @@
 //! Emulator abstraction.
 //!
-//! The public types ([`Screen`](crate::Screen) et al.) are termtest's own;
+//! The public types ([`Screen`](crate::Screen) et al.) are termlens's own;
 //! the VT emulator sits behind this small internal trait so the backend can
 //! be swapped (e.g. for `wezterm-term` or `alacritty_terminal`) without any
 //! public API change. v0.1 ships one backend: the `vt100` crate.

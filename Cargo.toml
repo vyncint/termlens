@@ -1,11 +1,11 @@
-# termtest workspace.
+# termlens workspace.
 #
 # `crates/` holds publishable members; `fixtures/` holds deterministic test
 # programs that the integration suite spawns inside real PTYs (publish = false).
 
 [workspace]
 resolver = "2"
-members = ["crates/termtest", "fixtures/*"]
+members = ["crates/termlens", "fixtures/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,11 +18,11 @@ edition = "2021"
 # need (~1.70); we declare what CI can actually verify with the lockfile.
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/vyncint/termtest"
+repository = "https://github.com/vyncint/termlens"
 authors = ["Vyncint Ng <vyncint@icloud.com>"]
 
 [workspace.dependencies]
-termtest = { path = "crates/termtest", version = "0.1.0" }
+termlens = { path = "crates/termlens", version = "0.1.0" }
 
 portable-pty = "0.9"
 vt100 = "0.16"

@@ -8,7 +8,7 @@
 
 ## Governance model
 
-`termtest` currently uses a **single-maintainer (BDFL) model**: the lead
+`termlens` currently uses a **single-maintainer (BDFL) model**: the lead
 maintainer has final say on design, scope, and releases. This is documented so
 expectations are clear, not because it is a goal — the intent is to grow a
 small maintainer team as the project attracts sustained contributors.

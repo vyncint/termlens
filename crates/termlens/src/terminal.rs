@@ -110,16 +110,16 @@ struct EmuState {
 ///
 /// ```
 /// use std::time::Duration;
-/// use termtest::Terminal;
+/// use termlens::Terminal;
 ///
-/// # fn main() -> termtest::Result<()> {
+/// # fn main() -> termlens::Result<()> {
 /// let mut t = Terminal::builder()
 ///     .size(80, 24)
 ///     .timeout(Duration::from_secs(10))
 ///     .args(["-c", "echo builder-doc; read quit"])
 ///     .spawn("sh")?;
 /// t.wait_until(|s| s.contains("builder-doc"))?;
-/// # t.send(termtest::Key::Enter); // release `read quit`
+/// # t.send(termlens::Key::Enter); // release `read quit`
 /// # t.wait_exit()?; Ok(())
 /// # }
 /// ```
@@ -272,7 +272,7 @@ impl TerminalBuilder {
 
         let reader_shared = Arc::clone(&shared);
         thread::Builder::new()
-            .name("termtest-pty-reader".into())
+            .name("termlens-pty-reader".into())
             .spawn(move || reader_loop(reader, &reader_shared))
             .map_err(Error::Io)?;
 
@@ -373,7 +373,7 @@ impl Terminal {
         let writer = self.writer.as_mut().expect("writer lives until drop");
         if let Err(e) = writer.write_all(bytes).and_then(|()| writer.flush()) {
             panic!(
-                "termtest: failed to send {what} to `{}` ({e})\n--- screen ---\n{}",
+                "termlens: failed to send {what} to `{}` ({e})\n--- screen ---\n{}",
                 self.command_desc,
                 self.screen()
             );

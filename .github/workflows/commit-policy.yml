@@ -82,7 +82,7 @@ jobs:
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          marker="<!-- termtest-commit-policy -->"
+          marker="<!-- termlens-commit-policy -->"
           if gh api "repos/${REPO}/issues/${PR}/comments" --jq '.[].body' | grep -qF "$marker"; then
             echo "Policy comment already posted; skipping."
             exit 0

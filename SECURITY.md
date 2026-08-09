@@ -1,6 +1,6 @@
 # Security Policy
 
-`termtest` is a development-time test harness. It spawns the programs *you*
+`termlens` is a development-time test harness. It spawns the programs *you*
 tell it to spawn, in a PTY, with the environment you configure — it is not
 intended to process untrusted input in production. That said, bugs that allow
 a spawned program's output to corrupt the harness process (e.g. memory safety
@@ -49,7 +49,7 @@ release rather than backports.
   [Private Vulnerability Reporting](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
   — the "Report a vulnerability" button under the Security tab.
 - Interim / fallback: email the maintainer at <vyncint@icloud.com> with the
-  subject line `[SECURITY] termtest`.
+  subject line `[SECURITY] termlens`.
 
 You should receive an acknowledgement within 72 hours.
 

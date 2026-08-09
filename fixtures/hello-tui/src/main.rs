@@ -1,4 +1,4 @@
-//! termtest fixture: draws one static frame on the alternate screen, hides
+//! termlens fixture: draws one static frame on the alternate screen, hides
 //! the cursor, then blocks until it reads `q`.
 //!
 //! Fixture rules: deterministic by construction — no clocks, no animation,

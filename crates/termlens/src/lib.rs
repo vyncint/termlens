@@ -1,6 +1,6 @@
 //! Headless PTY test harness for CLI/TUI applications.
 //!
-//! `termtest` spawns your program in a **real pseudo-terminal**, feeds its
+//! `termlens` spawns your program in a **real pseudo-terminal**, feeds its
 //! output through a **VT emulator** into an in-memory **screen grid**, and
 //! lets tests **assert and snapshot on the rendered screen** instead of raw
 //! bytes — Playwright for the terminal.
@@ -13,9 +13,9 @@
 //!
 //! ```
 //! use std::time::Duration;
-//! use termtest::{Key, Terminal};
+//! use termlens::{Key, Terminal};
 //!
-//! # fn main() -> termtest::Result<()> {
+//! # fn main() -> termlens::Result<()> {
 //! let mut t = Terminal::builder()
 //!     .size(80, 24)
 //!     .env("TERM", "xterm-256color") // the default; shown for completeness
@@ -43,10 +43,10 @@
 //! With the default `insta` feature, snapshot-test whole screens:
 //!
 //! ```no_run
-//! # fn main() -> termtest::Result<()> {
-//! # let mut t = termtest::Terminal::builder().spawn("true")?;
+//! # fn main() -> termlens::Result<()> {
+//! # let mut t = termlens::Terminal::builder().spawn("true")?;
 //! insta::assert_snapshot!(t.screen());        // plain insta…
-//! termtest::assert_screen_snapshot!(t.screen()); // …or the bundled macro
+//! termlens::assert_screen_snapshot!(t.screen()); // …or the bundled macro
 //! # Ok(())
 //! # }
 //! ```
@@ -77,9 +77,9 @@ pub use insta;
 /// accepts the same optional inline-snapshot form:
 ///
 /// ```no_run
-/// # fn main() -> termtest::Result<()> {
-/// # let t = termtest::Terminal::builder().spawn("true")?;
-/// termtest::assert_screen_snapshot!(t.screen());
+/// # fn main() -> termlens::Result<()> {
+/// # let t = termlens::Terminal::builder().spawn("true")?;
+/// termlens::assert_screen_snapshot!(t.screen());
 /// # Ok(())
 /// # }
 /// ```
