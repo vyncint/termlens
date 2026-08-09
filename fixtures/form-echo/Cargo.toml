@@ -1,6 +1,6 @@
 [package]
 name = "form-echo"
-description = "termtest fixture: echoes typed input and describes the last key pressed"
+description = "termlens fixture: echoes typed input and describes the last key pressed"
 publish = false
 version.workspace = true
 edition.workspace = true

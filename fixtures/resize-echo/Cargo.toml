@@ -1,6 +1,6 @@
 [package]
 name = "resize-echo"
-description = "termtest fixture: reports the terminal size on start and on every resize"
+description = "termlens fixture: reports the terminal size on start and on every resize"
 publish = false
 version.workspace = true
 edition.workspace = true

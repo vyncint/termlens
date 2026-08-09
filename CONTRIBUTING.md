@@ -1,4 +1,4 @@
-# Contributing to termtest
+# Contributing to termlens
 
 Thanks for your interest! This document covers everything you need to get a
 change from your editor into `main`.
@@ -6,8 +6,8 @@ change from your editor into `main`.
 ## 1. Dev setup
 
 ```sh
-git clone https://github.com/vyncint/termtest
-cd termtest
+git clone https://github.com/vyncint/termlens
+cd termlens
 cargo test --workspace        # full suite: unit + integration + doctests
 ```
 
@@ -23,7 +23,7 @@ cargo insta review            # inspect and accept/reject each diff
 
 ## 2. Project layout
 
-- `crates/termtest/` — the published library (PTY spawn → VT emulation →
+- `crates/termlens/` — the published library (PTY spawn → VT emulation →
   `Screen` snapshots → wait engine).
 - `fixtures/` — deterministic terminal apps the integration suite drives;
   workspace members, never published.

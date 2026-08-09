@@ -32,5 +32,5 @@ body:
     attributes:
       label: Scope check
       options:
-        - label: I've read the "What termtest is / is not" section of the README and this fits the project's scope.
+        - label: I've read the "What termlens is / is not" section of the README and this fits the project's scope.
           required: true

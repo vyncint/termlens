@@ -1,4 +1,4 @@
-//! Run any command inside termtest and print its rendered screen — a
+//! Run any command inside termlens and print its rendered screen — a
 //! debugging tool for "what does my app actually look like in the grid?".
 //!
 //! ```sh
@@ -12,7 +12,7 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use termtest::Terminal;
+use termlens::Terminal;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1).peekable();

@@ -1,4 +1,4 @@
-//! termtest fixture: a minimal "form" that proves `send()` + `wait_until`
+//! termlens fixture: a minimal "form" that proves `send()` + `wait_until`
 //! round-trips. It echoes printable characters into an input line, names the
 //! last key it decoded (stable custom format, independent of crossterm's
 //! `Debug`), and reports submitted lines.

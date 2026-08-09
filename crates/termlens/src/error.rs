@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::Screen;
 
-/// Convenience alias for `std::result::Result<T, termtest::Error>`.
+/// Convenience alias for `std::result::Result<T, termlens::Error>`.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Errors returned by [`Terminal`](crate::Terminal) operations.

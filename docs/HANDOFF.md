@@ -1,15 +1,15 @@
-# termtest — Build Handoff Report
+# termlens (née termtest) — Build Handoff Report
 
-Date: 2026-08-09. Repo: <https://github.com/vyncint/termtest> (private).
+Date: 2026-08-09. Repo: <https://github.com/vyncint/termlens> (private).
 Everything below was verified against live GitHub state, not assumed.
 
 ## 1. What was built
 
-A complete, release-ready v0.1 of `termtest` — a headless PTY test harness
+A complete, release-ready v0.1 of `termlens` — a headless PTY test harness
 (real PTY → vt100 emulation → `Screen` snapshots → deadline-bounded waits),
 per the product spec. Highlights:
 
-- **Library** (`crates/termtest`): `Terminal`/`TerminalBuilder` (size,
+- **Library** (`crates/termlens`): `Terminal`/`TerminalBuilder` (size,
   strict env control, default deadline), `Screen`/`Cell`/`Style`/`Color`
   value types with the documented snapshot `Display` format, `Key` with
   xterm encodings, `wait_until` / `wait_idle` / `wait_exit` (every error
@@ -42,14 +42,14 @@ by the `commit-policy` runs on every push.
 
 | What | Run |
 | --- | --- |
-| First full-green CI on `main` (all 8 jobs, first push) | <https://github.com/vyncint/termtest/actions/runs/31297033139> |
-| `commit-policy` green over all pushed commits | <https://github.com/vyncint/termtest/actions/runs/31297033128> |
-| **Negative test: `commit-policy` red** on a crafted bad commit (PR #2, since closed, branch deleted). Log shows all five violation classes caught: missing DCO, bot co-author trailer, "Generated with" watermark, bot author + committer identity. The one-time PR comment fired with the policy line. | <https://github.com/vyncint/termtest/actions/runs/31297145908> |
-| Stress ×100 — run 1: macos green, ubuntu red (cold-start: prebuild missed fixture bins → compiled mid-iteration; fixed in PR #4) | <https://github.com/vyncint/termtest/actions/runs/31297100536> |
-| Stress ×100 — run 2: **both OSes red**, and the failures were gold: they exposed a real instant-exit pty race (see below; fixed in PR #5) | <https://github.com/vyncint/termtest/actions/runs/31297578368> |
-| Stress ×100 — run 3: red again, one level deeper — a snapshot test waited on a midway marker and raced the trailing newline at a chunk boundary (fixed in PR #6; run cancelled once diagnosed) | <https://github.com/vyncint/termtest/actions/runs/31298405233> |
-| Stress ×100 — run 4: **ubuntu 100/100 green for the first time**; macOS died at iteration 41 with the new forensics pointing at a kernel-level pty race (fixed in PR #7) | <https://github.com/vyncint/termtest/actions/runs/31298690497> |
-| Stress ×100 — final run after PRs #5–#7, both OSes green | <https://github.com/vyncint/termtest/actions/runs/31299282165> |
+| First full-green CI on `main` (all 8 jobs, first push) | <https://github.com/vyncint/termlens/actions/runs/31297033139> |
+| `commit-policy` green over all pushed commits | <https://github.com/vyncint/termlens/actions/runs/31297033128> |
+| **Negative test: `commit-policy` red** on a crafted bad commit (PR #2, since closed, branch deleted). Log shows all five violation classes caught: missing DCO, bot co-author trailer, "Generated with" watermark, bot author + committer identity. The one-time PR comment fired with the policy line. | <https://github.com/vyncint/termlens/actions/runs/31297145908> |
+| Stress ×100 — run 1: macos green, ubuntu red (cold-start: prebuild missed fixture bins → compiled mid-iteration; fixed in PR #4) | <https://github.com/vyncint/termlens/actions/runs/31297100536> |
+| Stress ×100 — run 2: **both OSes red**, and the failures were gold: they exposed a real instant-exit pty race (see below; fixed in PR #5) | <https://github.com/vyncint/termlens/actions/runs/31297578368> |
+| Stress ×100 — run 3: red again, one level deeper — a snapshot test waited on a midway marker and raced the trailing newline at a chunk boundary (fixed in PR #6; run cancelled once diagnosed) | <https://github.com/vyncint/termlens/actions/runs/31298405233> |
+| Stress ×100 — run 4: **ubuntu 100/100 green for the first time**; macOS died at iteration 41 with the new forensics pointing at a kernel-level pty race (fixed in PR #7) | <https://github.com/vyncint/termlens/actions/runs/31298690497> |
+| Stress ×100 — final run after PRs #5–#7, both OSes green | <https://github.com/vyncint/termlens/actions/runs/31299282165> |
 
 Real-world findings the pipeline caught (working exactly as designed):
 
@@ -100,14 +100,14 @@ Real-world findings the pipeline caught (working exactly as designed):
 1. **crates.io publishing auth** (needed before the first `v*` tag):
    - Preferred — Trusted Publishing (no long-lived token): after the crate
      name exists on crates.io (first publish may need a token — see
-     fallback), go to *crates.io → termtest → Settings → Trusted
-     Publishing → Add* and enter repository `vyncint/termtest`, workflow
+     fallback), go to *crates.io → termlens → Settings → Trusted
+     Publishing → Add* and enter repository `vyncint/termlens`, workflow
      `release.yml`, environment blank. `release.yml` already requests the
      OIDC token and prefers it.
    - Fallback — token: create an API token at
      <https://crates.io/settings/tokens> (scope: `publish-new`,
      `publish-update`), then
-     `gh secret set CRATES_IO_TOKEN --repo vyncint/termtest`.
+     `gh secret set CRATES_IO_TOKEN --repo vyncint/termlens`.
 2. **Commit email + signing.** History is authored as
    `Vyncint Ng <vyncint@icloud.com>`. Add **and verify** that address on
    your GitHub account (*Settings → Emails*) — it does two things: links
@@ -136,7 +136,7 @@ Real-world findings the pipeline caught (working exactly as designed):
    `commit-policy`, linear history, no force pushes, no deletions.
    **Consequence: direct pushes to `main` are already blocked** — a test
    push was rejected, and the final commits landed through PRs. Manage it
-   at <https://github.com/vyncint/termtest/settings/rules>.
+   at <https://github.com/vyncint/termlens/settings/rules>.
 5. **Dependabot PRs under the bot-author policy.** Squash-merging a
    Dependabot PR would put a bot-authored commit on `main`, which our own
    `commit-policy` (push trigger) flags. Pattern used for PR #1 and
@@ -147,7 +147,7 @@ Real-world findings the pipeline caught (working exactly as designed):
 ## 3. Go-public checklist (when you flip the switch)
 
 ```sh
-gh repo edit vyncint/termtest --visibility public --accept-visibility-change-consequences
+gh repo edit vyncint/termlens --visibility public --accept-visibility-change-consequences
 ```
 
 Then:
@@ -157,7 +157,7 @@ Then:
 - [ ] Bump required approvals to 1:
       edit ruleset 20601249 → `pull_request.required_approving_review_count: 1`.
 - [ ] Enable secret scanning + push protection:
-      `gh api -X PATCH repos/vyncint/termtest -f 'security_and_analysis[secret_scanning][status]=enabled' -f 'security_and_analysis[secret_scanning_push_protection][status]=enabled'`
+      `gh api -X PATCH repos/vyncint/termlens -f 'security_and_analysis[secret_scanning][status]=enabled' -f 'security_and_analysis[secret_scanning_push_protection][status]=enabled'`
 - [ ] Enable Private Vulnerability Reporting (Settings → Code security), and
       delete the "once public" caveat in SECURITY.md.
 - [ ] Decide on Discussions (`gh repo edit --enable-discussions`); currently off per spec.
@@ -212,7 +212,7 @@ Then:
 
 ## 5. Where to start reading
 
-`README.md` → `docs/DESIGN.md` → `crates/termtest/src/terminal.rs` (the
+`README.md` → `docs/DESIGN.md` → `crates/termlens/src/terminal.rs` (the
 whole runtime is ~450 lines) → `tests/fixtures.rs` for what using it feels
 like. `cargo run --example inspect -- <your-app>` shows you any program
-through termtest's eyes.
+through termlens's eyes.

@@ -11,16 +11,16 @@
 
 use std::time::{Duration, Instant};
 
-use termtest::{Error, Key, Terminal};
+use termlens::{Error, Key, Terminal};
 
 const SH: &str = "/bin/sh";
 
-fn sh(script: &str) -> termtest::Result<Terminal> {
+fn sh(script: &str) -> termlens::Result<Terminal> {
     Terminal::builder().args(["-c", script]).spawn(SH)
 }
 
 #[test]
-fn echo_reaches_the_screen_and_child_exits_cleanly() -> termtest::Result<()> {
+fn echo_reaches_the_screen_and_child_exits_cleanly() -> termlens::Result<()> {
     let mut t = sh("echo hello from a real pty; read guard")?;
     t.wait_until(|s| s.contains("hello from a real pty"))?;
     t.send(Key::Enter);
@@ -31,7 +31,7 @@ fn echo_reaches_the_screen_and_child_exits_cleanly() -> termtest::Result<()> {
 }
 
 #[test]
-fn exit_codes_are_reported() -> termtest::Result<()> {
+fn exit_codes_are_reported() -> termlens::Result<()> {
     // The `read` keeps the exit from racing pty setup; the line discipline
     // buffers our Enter even if it lands before `read` starts.
     let mut t = sh("read guard; exit 7")?;
@@ -46,7 +46,7 @@ fn exit_codes_are_reported() -> termtest::Result<()> {
 }
 
 #[test]
-fn signal_deaths_are_reported_as_signals_not_exit_codes() -> termtest::Result<()> {
+fn signal_deaths_are_reported_as_signals_not_exit_codes() -> termlens::Result<()> {
     let mut t = sh("read guard; kill -TERM $$")?;
     t.send(Key::Enter);
     let status = t.wait_exit()?;
@@ -61,7 +61,7 @@ fn signal_deaths_are_reported_as_signals_not_exit_codes() -> termtest::Result<()
 }
 
 #[test]
-fn env_vars_reach_the_child() -> termtest::Result<()> {
+fn env_vars_reach_the_child() -> termlens::Result<()> {
     let mut t = Terminal::builder()
         .env("TERMTEST_MARKER", "42")
         .args(["-c", r#"echo "marker=$TERMTEST_MARKER"; read guard"#])
@@ -73,7 +73,7 @@ fn env_vars_reach_the_child() -> termtest::Result<()> {
 }
 
 #[test]
-fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termtest::Result<()> {
+fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termlens::Result<()> {
     // Probe HOME, not PATH: shells synthesize a compiled-in default PATH
     // when none is inherited, so PATH can't distinguish "inherited" from
     // "defaulted". HOME is always set for the test process and never
@@ -106,7 +106,7 @@ fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termtest::
 }
 
 #[test]
-fn explicit_term_overrides_the_default() -> termtest::Result<()> {
+fn explicit_term_overrides_the_default() -> termlens::Result<()> {
     let mut t = Terminal::builder()
         .env("TERM", "vt100")
         .args(["-c", r#"echo "term=$TERM"; read guard"#])
@@ -118,7 +118,7 @@ fn explicit_term_overrides_the_default() -> termtest::Result<()> {
 }
 
 #[test]
-fn send_str_and_enter_round_trip_through_the_line_discipline() -> termtest::Result<()> {
+fn send_str_and_enter_round_trip_through_the_line_discipline() -> termlens::Result<()> {
     let mut t = sh(r#"read line; echo "got: $line"; read guard"#)?;
     t.send_str("hello");
     t.send(Key::Enter);
@@ -176,7 +176,7 @@ fn waits_fail_fast_on_eof_instead_of_burning_the_timeout() {
 }
 
 #[test]
-fn wait_idle_resolves_in_output_gaps() -> termtest::Result<()> {
+fn wait_idle_resolves_in_output_gaps() -> termlens::Result<()> {
     let mut t = sh("printf a; sleep 1.5; printf b; read guard")?;
     t.wait_until(|s| s.contains("a"))?;
     t.wait_idle(Duration::from_millis(200))?;

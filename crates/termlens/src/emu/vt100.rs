@@ -1,5 +1,5 @@
 //! The `vt100`-crate backend. Public types never leak from here: every
-//! snapshot converts vt100's grid into termtest's own [`Screen`].
+//! snapshot converts vt100's grid into termlens's own [`Screen`].
 
 use super::seq::SeqTracker;
 use super::Emulator;

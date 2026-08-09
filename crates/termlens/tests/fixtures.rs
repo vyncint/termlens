@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use termtest::{Key, Terminal};
+use termlens::{Key, Terminal};
 
 mod util {
     use std::path::PathBuf;
@@ -56,7 +56,7 @@ mod util {
     }
 }
 
-fn spawn_fixture(name: &str) -> termtest::Result<Terminal> {
+fn spawn_fixture(name: &str) -> termlens::Result<Terminal> {
     Terminal::builder()
         .size(80, 24)
         .timeout(Duration::from_secs(30))
@@ -65,7 +65,7 @@ fn spawn_fixture(name: &str) -> termtest::Result<Terminal> {
 }
 
 #[test]
-fn hello_tui_draws_a_static_alt_screen_frame() -> termtest::Result<()> {
+fn hello_tui_draws_a_static_alt_screen_frame() -> termlens::Result<()> {
     let mut t = spawn_fixture("hello-tui")?;
     // The bottom-right corner is the LAST byte the fixture draws — once it
     // is on screen, the whole frame is. Waiting on an earlier line (like
@@ -86,7 +86,7 @@ fn hello_tui_draws_a_static_alt_screen_frame() -> termtest::Result<()> {
 }
 
 #[test]
-fn form_echo_round_trips_typed_input_and_special_keys() -> termtest::Result<()> {
+fn form_echo_round_trips_typed_input_and_special_keys() -> termlens::Result<()> {
     let mut t = spawn_fixture("form-echo")?;
     t.wait_until(|s| s.contains("form-echo ready"))?;
 
@@ -129,7 +129,7 @@ fn form_echo_round_trips_typed_input_and_special_keys() -> termtest::Result<()> 
 }
 
 #[test]
-fn form_echo_reports_nonzero_exit_codes() -> termtest::Result<()> {
+fn form_echo_reports_nonzero_exit_codes() -> termlens::Result<()> {
     let mut t = spawn_fixture("form-echo")?;
     t.wait_until(|s| s.contains("form-echo ready"))?;
     t.send(Key::Ctrl('x'));
@@ -140,7 +140,7 @@ fn form_echo_reports_nonzero_exit_codes() -> termtest::Result<()> {
 }
 
 #[test]
-fn resize_reaches_the_child_as_sigwinch() -> termtest::Result<()> {
+fn resize_reaches_the_child_as_sigwinch() -> termlens::Result<()> {
     let mut t = spawn_fixture("resize-echo")?;
     t.wait_until(|s| s.contains("size: 80x24"))?;
 
@@ -157,7 +157,7 @@ fn resize_reaches_the_child_as_sigwinch() -> termtest::Result<()> {
 }
 
 #[test]
-fn unicode_torture_renders_with_correct_widths() -> termtest::Result<()> {
+fn unicode_torture_renders_with_correct_widths() -> termlens::Result<()> {
     let mut t = spawn_fixture("unicode-torture")?;
     // Wait on the cursor, not on contains("done"): the predicate would turn
     // true before the trailing newline is processed, and the snapshot would

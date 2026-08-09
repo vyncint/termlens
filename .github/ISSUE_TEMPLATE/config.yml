@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Question / usage help
-    url: https://github.com/vyncint/termtest/issues/new?labels=question&template=bug_report.yml&title=%5Bquestion%5D%3A+
+    url: https://github.com/vyncint/termlens/issues/new?labels=question&template=bug_report.yml&title=%5Bquestion%5D%3A+
     about: For usage questions, open a bug report and delete the sections that don't apply.

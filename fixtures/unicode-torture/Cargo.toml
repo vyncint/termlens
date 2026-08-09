@@ -1,6 +1,6 @@
 [package]
 name = "unicode-torture"
-description = "termtest fixture: prints width-hostile unicode lines and exits"
+description = "termlens fixture: prints width-hostile unicode lines and exits"
 publish = false
 version.workspace = true
 edition.workspace = true

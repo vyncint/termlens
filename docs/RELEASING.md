@@ -1,12 +1,12 @@
-# Releasing termtest
+# Releasing termlens
 
 One page, copy-pasteable. Maintainers only.
 
 ## Prerequisites (once)
 
 - crates.io **Trusted Publishing** linkage for this repo:
-  crates.io → termtest → Settings → Trusted Publishing → GitHub:
-  repository `vyncint/termtest`, workflow `release.yml`, environment
+  crates.io → termlens → Settings → Trusted Publishing → GitHub:
+  repository `vyncint/termlens`, workflow `release.yml`, environment
   *(none)*. Until that exists, `release.yml` falls back to a
   `CRATES_IO_TOKEN` repository secret (Settings → Secrets → Actions).
 
@@ -38,11 +38,11 @@ git push origin vX.Y.Z
 
 Pushing the tag runs `release.yml`, which:
 
-1. fails unless tag == `crates/termtest` version,
+1. fails unless tag == `crates/termlens` version,
 2. re-runs the full CI gates (`workflow_call` into ci.yml),
 3. runs `cargo-semver-checks` against the last published release
    (skipped gracefully on the first release),
-4. `cargo publish -p termtest` via Trusted Publishing (OIDC) or the
+4. `cargo publish -p termlens` via Trusted Publishing (OIDC) or the
    token fallback,
 5. creates the GitHub Release with notes extracted from the CHANGELOG
    section for that version (`.github/scripts/extract-changelog.sh`).
