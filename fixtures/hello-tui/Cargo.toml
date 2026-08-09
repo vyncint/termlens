@@ -1,0 +1,16 @@
+[package]
+name = "hello-tui"
+description = "termtest fixture: static alternate-screen frame, exits on 'q'"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+crossterm.workspace = true
+
+[lints]
+workspace = true

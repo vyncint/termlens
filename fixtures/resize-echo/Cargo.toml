@@ -1,0 +1,16 @@
+[package]
+name = "resize-echo"
+description = "termtest fixture: reports the terminal size on start and on every resize"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+crossterm.workspace = true
+
+[lints]
+workspace = true
