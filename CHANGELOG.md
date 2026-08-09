@@ -9,6 +9,25 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-09
+
+### Changed
+
+- Publishing runs exclusively through crates.io Trusted Publishing
+  (short-lived OIDC tokens), bound to a tag-restricted GitHub
+  environment; the repository stores no secrets at all.
+
+### Fixed
+
+- README install instructions now include `insta`, which the snapshot
+  examples use — copying the example verbatim previously failed on an
+  unresolved import.
+- README comparison table links `teatest` like every other row (first
+  external contribution).
+- CONTRIBUTING documents the fork-PR experience: the first-run approval
+  gate and where commit-policy failures are explained when the courtesy
+  comment cannot post.
+
 ## [0.1.0] - 2026-08-09
 
 ### Changed
