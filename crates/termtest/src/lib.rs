@@ -13,6 +13,7 @@ mod emu;
 mod error;
 mod keys;
 mod screen;
+mod wait;
 
 pub use error::{Error, Result};
 pub use keys::Key;
