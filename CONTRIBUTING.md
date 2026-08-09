@@ -89,8 +89,15 @@ not accepted.
   since it becomes the commit subject on `main`. Branches are deleted on
   merge.
 - Required checks: `required-green` (fmt, clippy, tests on Ubuntu + macOS,
-  MSRV, docs, cargo-deny) and `commit-policy` (DCO + attribution policy).
-  All must pass before merge.
+  MSRV, docs, cargo-deny, zizmor) and `commit-policy` (DCO + attribution
+  policy). All must pass before merge.
+- **Contributing from a fork?** Two things are normal. First, on your
+  first PR the workflows wait for a maintainer to approve them (GitHub's
+  standard first-time-contributor safeguard — nothing you did wrong).
+  Second, when `commit-policy` fails on a fork PR it **cannot post its
+  explanatory comment** (fork PRs run with a read-only token); the job
+  log carries the full explanation instead, including the exact
+  offending commit and the command that fixes it.
 - Review: expect actionable review within a few days. Small, focused PRs get
   reviewed faster than large ones. Update `CHANGELOG.md` under
   `[Unreleased]` for any user-facing change.
