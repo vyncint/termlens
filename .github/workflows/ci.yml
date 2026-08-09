@@ -117,7 +117,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         # Version pinned; bump deliberately alongside a fresh local audit.
-        run: uvx zizmor==1.29.0 --persona=pedantic .github/workflows/
+        # pipx ships on the runner image (uv/uvx does not).
+        run: pipx run zizmor==1.29.0 --persona=pedantic .github/workflows/
 
   # Single stable job name for branch protection: require this one check and
   # matrix/job changes never break the required-checks configuration.
