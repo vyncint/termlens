@@ -4,11 +4,22 @@ One page, copy-pasteable. Maintainers only.
 
 ## Prerequisites (once)
 
-- crates.io **Trusted Publishing** linkage for this repo:
+- A crates.io account (log in with GitHub) with a **verified email** —
+  publishing is refused without one.
+- **The first publish must use an API token** — crates.io has no
+  "pending publisher" feature (RFC 3691), so Trusted Publishing can only
+  be configured after the crate exists:
+  1. crates.io → Account Settings → API Tokens → New token: scopes
+     `publish-new` + `publish-update`, crate pattern `termlens`, short
+     expiry (it is needed exactly once).
+  2. `gh secret set CRATES_IO_TOKEN --repo vyncint/termlens`
+  `release.yml` tries Trusted Publishing first and falls back to this
+  secret automatically.
+- **After the first publish, switch to Trusted Publishing** (tokenless):
   crates.io → termlens → Settings → Trusted Publishing → GitHub:
   repository `vyncint/termlens`, workflow `release.yml`, environment
-  *(none)*. Until that exists, `release.yml` falls back to a
-  `CRATES_IO_TOKEN` repository secret (Settings → Secrets → Actions).
+  *(none)*. Then revoke the token and
+  `gh secret delete CRATES_IO_TOKEN --repo vyncint/termlens`.
 
 ## Cutting vX.Y.Z
 
