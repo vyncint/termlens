@@ -38,7 +38,16 @@
 //! [`timeout`](TerminalBuilder::timeout), default 5s), and a timeout error
 //! [embeds the screen](Error::Timeout) so a CI log alone shows what the
 //! application was displaying. A background reader thread drains the PTY
-//! continuously — no output is lost between waits.
+//! continuously — no output is lost between waits — and answers the
+//! queries a real terminal answers, so capability-probing apps run
+//! instead of hanging.
+//!
+//! Input is mode-aware: [mouse clicks](Terminal::click),
+//! [pastes](Terminal::paste), modifier [chords](Chord), and cursor keys
+//! are encoded exactly as the application configured its terminal. And
+//! the terminal's out-of-band state — the window title, the
+//! alternate-screen flag, the input modes — is readable from every
+//! [`Screen`] as plain accessors.
 //!
 //! With the default `insta` feature, snapshot-test whole screens:
 //!

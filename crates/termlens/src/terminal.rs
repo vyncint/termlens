@@ -964,9 +964,10 @@ impl Terminal {
     ///
     /// This is a heuristic: "no output for N ms" is evidence, not proof,
     /// that the application finished rendering. Prefer
-    /// [`wait_until`](Self::wait_until) on visible content where possible.
-    /// `docs/DESIGN.md` discusses the trade-off and the planned frame-sync
-    /// alternative.
+    /// [`wait_until`](Self::wait_until) on visible content where possible,
+    /// or [`wait_frame`](Self::wait_frame) where the application emits
+    /// DEC 2026 synchronized updates. `docs/DESIGN.md` §2 discusses the
+    /// trade-off.
     ///
     /// # Errors
     ///

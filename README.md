@@ -61,7 +61,7 @@ flowchart TB
   test["your test<br/>drive · wait · assert"]
   subgraph proc["your test process · cargo test"]
     subgraph tt["termlens"]
-      api["Terminal<br/>send · resize · wait_until / wait_idle / wait_exit"]
+      api["Terminal<br/>send · click · paste · signal · resize · wait_until / wait_frame / wait_idle / wait_exit"]
       reader["reader thread<br/>drains continuously — output is never lost between waits"]
       emu["VT emulator<br/>vt100 behind a small internal trait, swappable"]
       screen["Screen<br/>immutable grid snapshots · cells · cursor · styles"]
@@ -72,7 +72,7 @@ flowchart TB
   end
   app["your app, unmodified<br/>believes it owns a terminal"]
 
-  test -->|"send(Key) · send_str"| api
+  test -->|"send(Key) · click · paste"| api
   api -->|"xterm byte sequences"| PTY
   api -.->|"resize · kernel delivers SIGWINCH"| PTY
   PTY -->|stdin| app
@@ -90,7 +90,17 @@ kernel buffer can't fill up and stall your app, and no output is lost
 between assertions. It also **answers the queries real terminals
 answer** (cursor position, device attributes, window size, background
 color), so capability-probing apps run instead of hanging — and anything
-left unanswered is named inside the next timeout error. Screens are immutable snapshots taken under the same
+left unanswered is named inside the next timeout error.
+
+Input is **mode-aware**: mouse clicks and scrolls, pastes, modifier
+chords, and cursor keys are encoded exactly as the application
+configured its terminal (SGR mouse, bracketed paste, DECCKM) — because
+the emulator knows which modes the app enabled. The same knowledge is
+readable from every `Screen`: the window title, the alternate-screen
+flag, and the input modes are plain accessors, so "did the app enter the
+alt screen?" is an assertion, not an inference.
+
+Screens are immutable snapshots taken under the same
 lock the reader writes through, so every assertion sees a consistent
 instant. Four layers, one small internal trait between emulator and screen
 so the backend can be swapped; details in [docs/DESIGN.md](docs/DESIGN.md).
@@ -112,7 +122,8 @@ design. termlens's position:
 
 - **Prefer `wait_until` on visible content.** It re-checks on every chunk
   of output and is exact: the condition either becomes true or you get a
-  screen-carrying timeout.
+  screen-carrying timeout. The three rules for race-free waits (and the
+  resize stale-frame trap) are in [docs/DESIGN.md](docs/DESIGN.md) §2.
 - **`wait_frame` gives exact frame boundaries** for apps that bracket
   repaints in DEC 2026 synchronized updates (crossterm's
   `BeginSynchronizedUpdate`/`EndSynchronizedUpdate`): the predicate only
@@ -128,7 +139,7 @@ design. termlens's position:
   [stress workflow](.github/workflows/stress.yml) on Linux and macOS —
   wait/timing changes don't merge without surviving it.
 
-## Known limitations (v0.1)
+## Known limitations (v0.2)
 
 - No scrollback assertions, and resizing does not reflow scrollback — the
   visible grid is the testable surface.

@@ -9,9 +9,9 @@ change those only with a matching change here.
 ```mermaid
 flowchart TB
   test["test code"]
-  l4["4 · assertions<br/>wait_until / wait_idle / wait_exit · Screen queries · insta snapshots"]
-  l3["3 · Screen<br/>immutable Arc-backed grid snapshots · Cell · Style · cursor — termlens's own types"]
-  l2["2 · emulator<br/>internal trait: process · snapshot · mid_sequence · set_size — v0.1 backend: vt100"]
+  l4["4 · assertions<br/>wait_until / wait_frame / wait_idle / wait_exit · Screen queries · insta snapshots"]
+  l3["3 · Screen<br/>immutable Arc-backed grid snapshots · Cell · Style · cursor · title & modes — termlens's own types"]
+  l2["2 · emulator<br/>internal trait: process · snapshot · mid_sequence · in_sync_update · input_modes · set_size<br/>backend: vt100"]
   l1["1 · PTY<br/>portable-pty · reader thread · resize TIOCSWINSZ → SIGWINCH · lifecycle lock"]
   app["child app<br/>spawned in the PTY, unmodified"]
 
@@ -20,15 +20,16 @@ flowchart TB
   l2 -->|"snapshot on demand"| l3
   l3 -->|"predicates · dumps embedded in every timeout"| l4
   l4 --> test
-  test -.->|"send(Key) → Key::encode · resize"| l1
+  test -.->|"send · click · paste · resize · signal"| l1
   l1 -.->|"stdin bytes · SIGWINCH"| app
   classDef ours fill:#2563eb,color:#ffffff,stroke:#1d4ed8,stroke-width:1px;
   class l1,l2,l3,l4 ours
 ```
 
 Data flows up (solid): child writes → PTY master → reader thread →
-emulator → screen snapshots → assertions. Input flows down (dashed):
-`Key::encode()` → PTY master → child.
+emulator → screen snapshots → assertions. Input flows down (dashed),
+encoded to match the modes the application enabled (§6) → PTY master →
+child.
 
 **The reader thread** is the linchpin. It drains the PTY *continuously*, not
 just inside `wait_*` calls, so a chatty program can never fill the kernel
@@ -255,18 +256,21 @@ from the one the macro targets.
 
 ## 4. Emulator abstraction — why
 
-`vt100` is the v0.1 backend: small, pure, battle-tested by its own suite.
+`vt100` is the first backend: small, pure, battle-tested by its own suite.
 But it is an implementation detail:
 
-- Public types (`Screen`, `Cell`, `Style`, `Color`) are termlens's own.
-  vt100 types never appear in the API, so swapping the backend is a
-  non-breaking change.
-- The `Emulator` trait is four methods (`process`, `snapshot`,
-  `mid_sequence`, `set_size`) — deliberately the *narrowest* surface that
+- Public types (`Screen`, `Cell`, `Style`, `Color`, `MouseMode`) are
+  termlens's own. vt100 types never appear in the API, so swapping the
+  backend is a non-breaking change. The one piece of state vt100 does
+  not track — the window title — termlens tracks itself in the sequence
+  tracker, so it survives a backend swap too.
+- The `Emulator` trait is six methods (`process`, `snapshot`,
+  `mid_sequence`, `in_sync_update`, `input_modes`, `set_size`) —
+  deliberately the *narrowest* surface that
   the terminal loop needs, so candidate backends (wezterm-term for wider
   escape coverage, alacritty_terminal for fidelity to a real terminal's
   quirks) can be evaluated behind a feature flag without touching layer 3+.
-- Known vt100 limits we accept in v0.1: no scrollback assertions (parser
+- Known vt100 limits we accept in v0.2: no scrollback assertions (parser
   runs with scrollback 0), no reflow of scrollback on resize, cluster
   handling for exotic emoji is whatever vt100 does (pinned by the
   unicode-torture snapshot rather than promised).

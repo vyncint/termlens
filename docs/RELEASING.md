@@ -45,8 +45,8 @@ Pushing the tag runs `release.yml`, which:
 2. re-runs the full CI gates (`workflow_call` into ci.yml),
 3. runs `cargo-semver-checks` against the last published release
    (skipped gracefully on the first release),
-4. `cargo publish -p termlens` via Trusted Publishing (OIDC) or the
-   token fallback,
+4. `cargo publish -p termlens` via Trusted Publishing (OIDC) — the
+   repository stores no tokens,
 5. creates the GitHub Release with notes extracted from the CHANGELOG
    section for that version (`.github/scripts/extract-changelog.sh`).
 

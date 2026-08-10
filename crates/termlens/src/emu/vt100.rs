@@ -13,7 +13,7 @@ pub(crate) struct Vt100Emulator {
 impl Vt100Emulator {
     pub(crate) fn new(rows: u16, cols: u16) -> Self {
         Self {
-            // No scrollback: v0.1 asserts on the visible screen only.
+            // No scrollback: termlens asserts on the visible screen only.
             parser: ::vt100::Parser::new(rows, cols, 0),
             tracker: SeqTracker::new(),
         }
