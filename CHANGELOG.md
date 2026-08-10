@@ -11,6 +11,15 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- termlens now **answers terminal queries** (on by default): DSR cursor
+  position — exact as of the query byte — operating status, DA1/DA2
+  device attributes, `CSI 18 t` text-area size, and `OSC 10/11` color
+  queries (`TerminalBuilder::background_rgb` configures the reported
+  background). Capability-probing applications run instead of hanging.
+  Recognized-but-unanswerable questions (XTGETTCAP, kitty `CSI ? u`,
+  pixel-size reports, …) are named inside the next wait timeout error,
+  turning a silent hang into a diagnosis; `answer_queries(false)` mutes
+  the responder while keeping the diagnosis.
 - `Terminal::wait_frame(pred)`: evaluates the predicate only on **complete
   frames** for applications that bracket repaints in DEC 2026 synchronized
   updates — a torn, half-painted repaint is never observable. Apps that

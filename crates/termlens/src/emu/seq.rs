@@ -33,15 +33,61 @@ enum State {
     DcsEsc,
 }
 
-/// What one byte did to the synchronized-update state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SyncEvent {
-    /// No change.
+/// What one byte completed, if anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SeqEvent {
+    /// Nothing actionable.
     None,
-    /// The byte completed a `CSI ? 2026 … h`: a synchronized update began.
-    Begin,
-    /// The byte completed a `CSI ? 2026 … l`: a frame is now complete.
-    End,
+    /// A `CSI ? 2026 … h` completed: a synchronized update began.
+    SyncBegin,
+    /// A `CSI ? 2026 … l` completed: a frame is now complete.
+    SyncEnd,
+    /// The application asked the terminal a question.
+    Query(Query),
+}
+
+/// A terminal query the application issued. The tracker classifies;
+/// policy (answer vs record) lives with the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Query {
+    /// DSR cursor position: `CSI 6 n` (or the DEC `CSI ? 6 n` form).
+    CursorPosition {
+        /// True for the `?`-prefixed DECXCPR form.
+        private: bool,
+    },
+    /// DSR operating status: `CSI 5 n`.
+    OperatingStatus,
+    /// Primary device attributes: `CSI c` / `CSI 0 c`.
+    PrimaryDa,
+    /// Secondary device attributes: `CSI > c` / `CSI > 0 c`.
+    SecondaryDa,
+    /// Text-area size in characters: `CSI 18 t`.
+    TextAreaSize,
+    /// OSC color query (`OSC 10;?` foreground / `OSC 11;?` background).
+    OscColor {
+        /// 10 = foreground, 11 = background.
+        code: u8,
+        /// True when the query used ST; the reply must mirror it.
+        st_terminated: bool,
+    },
+    /// Recognized as a question, but one termlens has no answer for
+    /// (XTGETTCAP, kitty `CSI ? u`, other DSR/DA/XTWINOPS reports, …).
+    /// Carries a printable rendering for diagnostics.
+    Unanswerable(String),
+}
+
+/// Render a captured escape sequence printably (`ESC` becomes `^[`).
+fn printable(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for &b in bytes {
+        match b {
+            0x1b => out.push_str("^["),
+            0x07 => out.push_str("^G"),
+            0x20..=0x7e => out.push(b as char),
+            _ => out.push_str(&format!("\\x{b:02x}")),
+        }
+    }
+    out
 }
 
 #[derive(Debug)]
@@ -51,12 +97,20 @@ pub(crate) struct SeqTracker {
     utf8_remaining: u8,
     /// True between a 2026 `h` and the matching `l`.
     sync_update: bool,
-    // Incremental CSI parameter scanner (only what mode 2026 needs).
-    csi_private: bool,
+    // Incremental CSI scanner: enough to recognize mode 2026 and the
+    // handful of query shapes, in O(1) space.
+    csi_prefix: u8,
     csi_invalid: bool,
     csi_first: bool,
     csi_param: u32,
+    csi_has_digits: bool,
+    csi_first_param: u32,
+    csi_param_count: u8,
     csi_saw_2026: bool,
+    /// Raw capture of the current sequence (from ESC), for diagnostics
+    /// and OSC/DCS query recognition. Bounded; long sequences truncate.
+    seq_buf: [u8; 24],
+    seq_len: u8,
 }
 
 impl SeqTracker {
@@ -65,11 +119,16 @@ impl SeqTracker {
             state: State::Ground,
             utf8_remaining: 0,
             sync_update: false,
-            csi_private: false,
+            csi_prefix: 0,
             csi_invalid: false,
             csi_first: true,
             csi_param: 0,
+            csi_has_digits: false,
+            csi_first_param: 0,
+            csi_param_count: 0,
             csi_saw_2026: false,
+            seq_buf: [0; 24],
+            seq_len: 0,
         }
     }
 
@@ -90,64 +149,169 @@ impl SeqTracker {
     }
 
     fn reset_csi_scanner(&mut self) {
-        self.csi_private = false;
+        self.csi_prefix = 0;
         self.csi_invalid = false;
         self.csi_first = true;
         self.csi_param = 0;
+        self.csi_has_digits = false;
+        self.csi_first_param = 0;
+        self.csi_param_count = 0;
         self.csi_saw_2026 = false;
+    }
+
+    fn push_seq(&mut self, b: u8) {
+        if usize::from(self.seq_len) < self.seq_buf.len() {
+            self.seq_buf[usize::from(self.seq_len)] = b;
+            self.seq_len += 1;
+        }
+    }
+
+    fn seq_printable(&self) -> String {
+        printable(&self.seq_buf[..usize::from(self.seq_len)])
+    }
+
+    /// Close the parameter currently being accumulated.
+    fn end_csi_param(&mut self) {
+        if self.csi_param == 2026 {
+            self.csi_saw_2026 = true;
+        }
+        if self.csi_param_count == 0 {
+            self.csi_first_param = self.csi_param;
+        }
+        self.csi_param_count = self.csi_param_count.saturating_add(1);
+        self.csi_param = 0;
+        self.csi_has_digits = false;
     }
 
     /// Track one CSI parameter/intermediate byte.
     fn scan_csi_byte(&mut self, b: u8) {
         match b {
-            b'?' if self.csi_first => self.csi_private = true,
+            b'?' | b'>' | b'=' if self.csi_first => self.csi_prefix = b,
             b'0'..=b'9' => {
                 self.csi_param = self
                     .csi_param
                     .saturating_mul(10)
                     .saturating_add(u32::from(b - b'0'));
+                self.csi_has_digits = true;
             }
-            b';' => {
-                if self.csi_param == 2026 {
-                    self.csi_saw_2026 = true;
-                }
-                self.csi_param = 0;
-            }
-            // Sub-parameters, intermediates, or other private markers:
-            // whatever this sequence is, it is not a plain mode 2026 set.
+            b';' => self.end_csi_param(),
+            // Sub-parameters or intermediates: none of the sequences we
+            // recognize use them.
             _ => self.csi_invalid = true,
         }
         self.csi_first = false;
     }
 
-    /// The sync-state change (if any) implied by a CSI final byte.
-    fn csi_final(&mut self, b: u8) -> SyncEvent {
-        if !self.csi_private || self.csi_invalid {
-            return SyncEvent::None;
+    /// The event (if any) implied by a CSI final byte.
+    fn csi_final(&mut self, b: u8) -> SeqEvent {
+        if self.csi_invalid {
+            return SeqEvent::None;
         }
-        if !(self.csi_saw_2026 || self.csi_param == 2026) {
-            return SyncEvent::None;
+        if self.csi_has_digits {
+            self.end_csi_param();
         }
-        match b {
-            b'h' => {
-                self.sync_update = true;
-                SyncEvent::Begin
+        let params_empty = self.csi_param_count == 0;
+        let single = |v: u32| self.csi_param_count == 1 && self.csi_first_param == v;
+
+        // DEC private mode 2026 (synchronized output).
+        if self.csi_prefix == b'?' && self.csi_saw_2026 {
+            match b {
+                b'h' => {
+                    self.sync_update = true;
+                    return SeqEvent::SyncBegin;
+                }
+                b'l' => {
+                    self.sync_update = false;
+                    return SeqEvent::SyncEnd;
+                }
+                _ => {}
             }
-            b'l' => {
-                self.sync_update = false;
-                SyncEvent::End
-            }
-            _ => SyncEvent::None,
         }
+
+        // Queries. Classification only — answering policy lives upstream.
+        let query = match (self.csi_prefix, b) {
+            (0, b'n') if single(6) => Some(Query::CursorPosition { private: false }),
+            (b'?', b'n') if single(6) => Some(Query::CursorPosition { private: true }),
+            (0, b'n') if single(5) => Some(Query::OperatingStatus),
+            (0, b'c') if params_empty || single(0) => Some(Query::PrimaryDa),
+            (b'>', b'c') if params_empty || single(0) => Some(Query::SecondaryDa),
+            (0, b't') if single(18) => Some(Query::TextAreaSize),
+            // Questions we can recognize but not answer.
+            (_, b'n') | (b'=', b'c') => Some(Query::Unanswerable(self.seq_printable())),
+            (b'?', b'u') if params_empty => {
+                // kitty keyboard probe. Its protocol pairs this with DA1;
+                // our DA1 answer unblocks the probe like any non-kitty
+                // terminal, but the probe itself is still unanswered.
+                Some(Query::Unanswerable(self.seq_printable()))
+            }
+            (0, b't')
+                if matches!(self.csi_first_param, 11 | 13 | 14 | 16 | 19 | 20 | 21)
+                    && self.csi_param_count == 1 =>
+            {
+                Some(Query::Unanswerable(self.seq_printable()))
+            }
+            _ => None,
+        };
+        query.map_or(SeqEvent::None, SeqEvent::Query)
     }
 
-    pub(crate) fn step(&mut self, b: u8) -> SyncEvent {
+    /// The event (if any) implied by a completed OSC or DCS string.
+    fn string_final(&mut self, was_osc: bool, st_terminated: bool) -> SeqEvent {
+        let body = &self.seq_buf[..usize::from(self.seq_len)];
+        if was_osc {
+            // body is `ESC ] <content> [terminator…]`; a color query is
+            // exactly `10;?` or `11;?` (12 = cursor color: unanswerable).
+            let content_end = if st_terminated {
+                body.len().saturating_sub(2) // strip ESC \
+            } else {
+                body.len().saturating_sub(1) // strip BEL
+            };
+            let content = body.get(2..content_end).unwrap_or(b"");
+            match content {
+                b"10;?" => {
+                    return SeqEvent::Query(Query::OscColor {
+                        code: 10,
+                        st_terminated,
+                    })
+                }
+                b"11;?" => {
+                    return SeqEvent::Query(Query::OscColor {
+                        code: 11,
+                        st_terminated,
+                    })
+                }
+                b"12;?" => return SeqEvent::Query(Query::Unanswerable(self.seq_printable())),
+                _ => return SeqEvent::None,
+            }
+        }
+        // DCS: XTGETTCAP is `ESC P + q … ST` — a capability question.
+        if body.get(2..4) == Some(b"+q") {
+            return SeqEvent::Query(Query::Unanswerable(self.seq_printable()));
+        }
+        SeqEvent::None
+    }
+
+    /// Feed one byte: capture it if it belongs to a sequence, then run
+    /// the state machine.
+    pub(crate) fn step(&mut self, b: u8) -> SeqEvent {
+        if self.state == State::Ground {
+            if b == 0x1b {
+                self.seq_len = 0;
+                self.push_seq(b);
+            }
+        } else {
+            self.push_seq(b);
+        }
+        self.transition(b)
+    }
+
+    fn transition(&mut self, b: u8) -> SeqEvent {
         const ESC: u8 = 0x1b;
         const CAN: u8 = 0x18;
         const SUB: u8 = 0x1a;
         const BEL: u8 = 0x07;
 
-        let mut event = SyncEvent::None;
+        let mut event = SeqEvent::None;
         self.state = match self.state {
             State::Ground => {
                 if b == ESC {
@@ -192,7 +356,10 @@ impl SeqTracker {
                 }
             },
             State::Osc => match b {
-                BEL => State::Ground,
+                BEL => {
+                    event = self.string_final(true, false);
+                    State::Ground
+                }
                 ESC => State::OscEsc,
                 CAN | SUB => State::Ground,
                 _ => State::Osc,
@@ -202,14 +369,28 @@ impl SeqTracker {
                 CAN | SUB => State::Ground,
                 _ => State::Dcs, // BEL is data inside DCS-class strings
             },
-            State::OscEsc | State::DcsEsc => match b {
-                b'\\' => State::Ground, // ESC \ = ST
-                ESC => self.state,
-                // Anything else: the ESC aborted the string and starts a new
-                // escape sequence; reprocess this byte in Esc state.
+            State::OscEsc => match b {
+                b'\\' => {
+                    event = self.string_final(true, true); // ESC \ = ST
+                    State::Ground
+                }
+                ESC => State::OscEsc,
+                // The ESC aborted the string and starts a new sequence;
+                // reprocess this byte in Esc state (capture already done).
                 _ => {
                     self.state = State::Esc;
-                    return self.step(b);
+                    return self.transition(b);
+                }
+            },
+            State::DcsEsc => match b {
+                b'\\' => {
+                    event = self.string_final(false, true);
+                    State::Ground
+                }
+                ESC => State::DcsEsc,
+                _ => {
+                    self.state = State::Esc;
+                    return self.transition(b);
                 }
             },
         };
@@ -299,11 +480,11 @@ mod tests {
     #[test]
     fn sync_update_events_fire_on_2026_set_and_reset() {
         let mut t = SeqTracker::new();
-        let events: Vec<SyncEvent> = b"\x1b[?2026h".iter().map(|&b| t.step(b)).collect();
-        assert_eq!(*events.last().unwrap(), SyncEvent::Begin);
+        let events: Vec<SeqEvent> = b"\x1b[?2026h".iter().map(|&b| t.step(b)).collect();
+        assert_eq!(*events.last().unwrap(), SeqEvent::SyncBegin);
         assert!(t.in_sync_update());
-        let events: Vec<SyncEvent> = b"\x1b[?2026l".iter().map(|&b| t.step(b)).collect();
-        assert_eq!(*events.last().unwrap(), SyncEvent::End);
+        let events: Vec<SeqEvent> = b"\x1b[?2026l".iter().map(|&b| t.step(b)).collect();
+        assert_eq!(*events.last().unwrap(), SeqEvent::SyncEnd);
         assert!(!t.in_sync_update());
     }
 
@@ -337,6 +518,75 @@ mod tests {
         assert!(t.in_sync_update());
         t.feed(b"\x1b[?2026l");
         assert!(!t.in_sync_update());
+    }
+
+    fn queries_of(bytes: &[u8]) -> Vec<Query> {
+        let mut t = SeqTracker::new();
+        bytes
+            .iter()
+            .filter_map(|&b| match t.step(b) {
+                SeqEvent::Query(q) => Some(q),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn recognizes_the_answerable_queries() {
+        assert_eq!(
+            queries_of(b"\x1b[6n"),
+            vec![Query::CursorPosition { private: false }]
+        );
+        assert_eq!(
+            queries_of(b"\x1b[?6n"),
+            vec![Query::CursorPosition { private: true }]
+        );
+        assert_eq!(queries_of(b"\x1b[5n"), vec![Query::OperatingStatus]);
+        assert_eq!(queries_of(b"\x1b[c"), vec![Query::PrimaryDa]);
+        assert_eq!(queries_of(b"\x1b[0c"), vec![Query::PrimaryDa]);
+        assert_eq!(queries_of(b"\x1b[>c"), vec![Query::SecondaryDa]);
+        assert_eq!(queries_of(b"\x1b[18t"), vec![Query::TextAreaSize]);
+        assert_eq!(
+            queries_of(b"\x1b]11;?\x07"),
+            vec![Query::OscColor {
+                code: 11,
+                st_terminated: false
+            }]
+        );
+        assert_eq!(
+            queries_of(b"\x1b]10;?\x1b\\"),
+            vec![Query::OscColor {
+                code: 10,
+                st_terminated: true
+            }]
+        );
+    }
+
+    #[test]
+    fn recognizes_unanswerable_questions_with_their_shape() {
+        let q = queries_of(b"\x1b[?u");
+        assert_eq!(q, vec![Query::Unanswerable("^[[?u".into())]);
+        let q = queries_of(b"\x1b[14t");
+        assert_eq!(q, vec![Query::Unanswerable("^[[14t".into())]);
+        let q = queries_of(b"\x1bP+q544e\x1b\\"); // XTGETTCAP
+        assert_eq!(q, vec![Query::Unanswerable("^[P+q544e^[\\".into())]);
+        let q = queries_of(b"\x1b[=c"); // DA3
+        assert_eq!(q, vec![Query::Unanswerable("^[[=c".into())]);
+        let q = queries_of(b"\x1b]12;?\x07"); // cursor color
+        assert_eq!(q, vec![Query::Unanswerable("^[]12;?^G".into())]);
+        // Any CSI …n is a DSR-family status request by definition.
+        let q = queries_of(b"\x1b[6;1n");
+        assert_eq!(q, vec![Query::Unanswerable("^[[6;1n".into())]);
+    }
+
+    #[test]
+    fn ordinary_output_is_not_a_query() {
+        assert!(queries_of(b"\x1b[31m").is_empty()); // SGR
+        assert!(queries_of(b"\x1b[2J\x1b[H").is_empty()); // clear+home
+        assert!(queries_of(b"\x1b[8;30;100t").is_empty()); // resize command
+        assert!(queries_of(b"\x1b]0;title\x07").is_empty()); // set title
+        assert!(queries_of(b"\x1b[1;6H").is_empty()); // cursor move
+        assert!(queries_of(b"plain text").is_empty());
     }
 
     #[test]

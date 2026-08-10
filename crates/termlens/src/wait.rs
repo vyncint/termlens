@@ -48,13 +48,17 @@ impl<S> Monitor<S> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Mutate under the lock, then wake all waiters.
-    pub(crate) fn mutate(&self, f: impl FnOnce(&mut S)) {
-        {
+    /// Mutate under the lock, then wake all waiters. Returns the closure's
+    /// value so callers can carry work out of the critical section (the
+    /// reader thread uses this to build query replies under the lock but
+    /// write them to the PTY after releasing it).
+    pub(crate) fn mutate<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
+        let value = {
             let mut guard = self.lock();
-            f(&mut guard);
-        }
+            f(&mut guard)
+        };
         self.cond.notify_all();
+        value
     }
 
     /// One bounded condvar sleep; returns the reacquired guard.

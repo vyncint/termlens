@@ -8,25 +8,37 @@
 mod seq;
 mod vt100;
 
+pub(crate) use self::seq::Query;
 pub(crate) use self::vt100::Vt100Emulator;
 
 use crate::Screen;
 
+/// Why the emulator stopped consuming mid-segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Stop {
+    /// A synchronized update ended (DEC 2026 ESU): the screen at this
+    /// instant is a complete frame.
+    FrameComplete,
+    /// The application asked the terminal a question; the screen state
+    /// (cursor, size) is exactly as of the query.
+    Query(Query),
+}
+
 /// Outcome of feeding one segment of PTY bytes into the emulator.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct Processed {
     /// How many input bytes were consumed (> 0 for non-empty input).
     pub(crate) consumed: usize,
-    /// True when consumption stopped because a synchronized update ended
-    /// (DEC 2026 ESU): the screen at this instant is a complete frame.
-    pub(crate) frame_complete: bool,
+    /// Set when consumption stopped before the end of the input.
+    pub(crate) stop: Option<Stop>,
 }
 
 /// A VT emulator: consumes raw PTY bytes, maintains a screen grid.
 pub(crate) trait Emulator: Send {
     /// Feed raw bytes from the PTY into the emulator. Stops early — with
-    /// `consumed < bytes.len()` — when a synchronized update ends, so the
-    /// caller can observe the completed frame before feeding the rest.
+    /// `consumed < bytes.len()` — when a synchronized update ends or the
+    /// application issues a query, so the caller can act on the exact
+    /// screen state at that instant before feeding the rest.
     fn process(&mut self, bytes: &[u8]) -> Processed;
 
     /// Snapshot the current screen as an owned value.

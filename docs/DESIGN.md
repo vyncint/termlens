@@ -39,6 +39,30 @@ are notified. On EOF (child exited and released the terminal — reported as
 0-read on macOS, EIO on Linux) it sets the `eof` flag and exits. It is
 never joined: a grandchild holding the PTY open must not hang `Drop`.
 
+### The reader answers queries
+
+Applications ask their terminal questions — DSR `CSI 6 n` (cursor
+position), DA1/DA2 (device attributes), `CSI 18 t` (text-area size),
+`OSC 10/11 ; ?` (colors) — and block on the reply. A mute harness turns
+every capability probe into a hang. termlens therefore answers, by
+default, exactly what a real terminal answers and nothing more: the DA1
+identity is VT220-with-color (`?62;22c`), claiming no feature the
+emulator cannot render, and kitty's `CSI ? u` probe is deliberately left
+unanswered because its protocol resolves via the DA1 reply, exactly as
+on a real non-kitty terminal.
+
+Precision: the emulator stops consuming at each query byte (the same
+mechanism as frame boundaries), so a cursor-position report reflects the
+cursor *at the query*, not after later output in the same chunk moved
+it. Replies are built under the state lock but written after it is
+released — the state lock and the writer lock are never held together.
+
+Whatever remains unanswered (XTGETTCAP, pixel-size reports, …) is
+recorded, and the next wait timeout names it: "the application queried
+the terminal (`^[[14t`) and received no answer" — a hang becomes a
+diagnosis. `answer_queries(false)` mutes the responder for tests that
+need a silent terminal; the diagnosis still works.
+
 ## 2. Wait semantics
 
 Every wait runs under the terminal's **default deadline** (builder

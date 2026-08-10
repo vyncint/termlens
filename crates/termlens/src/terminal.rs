@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-use crate::emu::{Emulator, Vt100Emulator};
+use crate::emu::{Emulator, Query, Stop, Vt100Emulator};
 use crate::error::{Error, Result};
 use crate::keys::Key;
 use crate::screen::Screen;
@@ -43,6 +43,11 @@ static PTY_LIFECYCLE: Mutex<()> = Mutex::new(());
 fn pty_lifecycle_guard() -> std::sync::MutexGuard<'static, ()> {
     PTY_LIFECYCLE.lock().unwrap_or_else(PoisonError::into_inner)
 }
+
+/// The PTY writer, shared between `Terminal` (typed input) and the reader
+/// thread (query replies). `None` after teardown. Locked briefly per write;
+/// never while the emulator state lock is held.
+type SharedWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
 
 /// Exit status of the child process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,10 +119,17 @@ struct EmuState {
     frames_seen: u64,
     /// The screen exactly as of the most recent completed frame.
     last_frame: Option<Screen>,
+    /// Whether to answer recognized terminal queries (builder-configured).
+    respond: bool,
+    /// Background color reported to OSC 11 queries.
+    background: (u8, u8, u8),
+    /// The most recent query that got no answer, printable, plus a count —
+    /// timeout errors surface this so a blocked probe is diagnosable.
+    unanswered: Option<String>,
 }
 
 impl EmuState {
-    fn new(emu: Box<dyn Emulator>) -> Self {
+    fn new(emu: Box<dyn Emulator>, respond: bool, background: (u8, u8, u8)) -> Self {
         Self {
             emu,
             last_activity: Instant::now(),
@@ -126,7 +138,63 @@ impl EmuState {
             snapshot_cache: None,
             frames_seen: 0,
             last_frame: None,
+            respond,
+            background,
+            unanswered: None,
         }
+    }
+
+    /// Build the reply for a query, or record it as unanswered. Pure
+    /// computation under the state lock; the caller does the writing.
+    fn answer(&mut self, query: &Query) -> Option<Vec<u8>> {
+        fn osc_color(code: u8, (r, g, b): (u8, u8, u8), st: bool) -> Vec<u8> {
+            let widen = |v: u8| u16::from(v) << 8 | u16::from(v);
+            let terminator = if st { "\x1b\\" } else { "\x07" };
+            format!(
+                "\x1b]{code};rgb:{:04x}/{:04x}/{:04x}{terminator}",
+                widen(r),
+                widen(g),
+                widen(b)
+            )
+            .into_bytes()
+        }
+
+        if !self.respond {
+            self.unanswered = Some(query_shape(query));
+            return None;
+        }
+        let reply = match query {
+            Query::CursorPosition { private } => {
+                // Report exactly the cursor as of the query byte: the
+                // emulator stopped there, so this snapshot cannot include
+                // later output. 1-based on the wire.
+                let (row, col, _) = self.emu.snapshot().cursor();
+                let prefix = if *private { "?" } else { "" };
+                format!("\x1b[{prefix}{};{}R", row + 1, col + 1).into_bytes()
+            }
+            Query::OperatingStatus => b"\x1b[0n".to_vec(),
+            // VT220 with ANSI color: honest — nothing claimed (sixel,
+            // kitty, …) that the emulator cannot render.
+            Query::PrimaryDa => b"\x1b[?62;22c".to_vec(),
+            Query::SecondaryDa => b"\x1b[>1;10;0c".to_vec(),
+            Query::TextAreaSize => {
+                let screen = self.emu.snapshot();
+                format!("\x1b[8;{};{}t", screen.rows(), screen.cols()).into_bytes()
+            }
+            Query::OscColor {
+                code: 11,
+                st_terminated,
+            } => osc_color(11, self.background, *st_terminated),
+            Query::OscColor {
+                code,
+                st_terminated,
+            } => osc_color(*code, (0xff, 0xff, 0xff), *st_terminated),
+            Query::Unanswerable(shape) => {
+                self.unanswered = Some(shape.clone());
+                return None;
+            }
+        };
+        Some(reply)
     }
 
     /// Record a state change: waiters must re-evaluate, snapshots rebuild.
@@ -147,6 +215,19 @@ impl EmuState {
         let screen = self.emu.snapshot();
         self.snapshot_cache = Some((self.generation, screen.clone()));
         screen
+    }
+
+    /// One-line diagnosis when a query went unanswered, appended to
+    /// timeout messages — a probing app blocked on a reply is otherwise
+    /// indistinguishable from a hung one.
+    fn query_note(&self) -> String {
+        self.unanswered.as_ref().map_or_else(String::new, |shape| {
+            format!(
+                " — note: the application queried the terminal ({shape}) \
+                 and received no answer; if it is blocked waiting for that \
+                 reply, this is the cause"
+            )
+        })
     }
 
     /// Cache-aware read that never writes: serve the stored snapshot when
@@ -190,6 +271,8 @@ pub struct TerminalBuilder {
     args: Vec<OsString>,
     env_clear: bool,
     envs: Vec<(OsString, OsString)>,
+    answer_queries: bool,
+    background: (u8, u8, u8),
 }
 
 impl Default for TerminalBuilder {
@@ -201,6 +284,8 @@ impl Default for TerminalBuilder {
             args: Vec::new(),
             env_clear: false,
             envs: Vec::new(),
+            answer_queries: true,
+            background: (0, 0, 0),
         }
     }
 }
@@ -264,6 +349,28 @@ impl TerminalBuilder {
         self
     }
 
+    /// Answer terminal queries from the application (on by default).
+    ///
+    /// Real terminals answer questions like `CSI 6 n` (cursor position),
+    /// `CSI c` (device attributes) and `OSC 11 ; ?` (background color) —
+    /// so does termlens, because an application blocked on a probe reply
+    /// would otherwise hang until the test times out. Disable only to
+    /// test how your app behaves against a mute terminal; unanswered
+    /// queries are then named inside wait-timeout errors.
+    #[must_use]
+    pub fn answer_queries(mut self, answer: bool) -> Self {
+        self.answer_queries = answer;
+        self
+    }
+
+    /// The background color reported to `OSC 11` queries (light/dark
+    /// detection). Defaults to black.
+    #[must_use]
+    pub fn background_rgb(mut self, r: u8, g: u8, b: u8) -> Self {
+        self.background = (r, g, b);
+        self
+    }
+
     /// Spawn `program` inside a fresh PTY and start draining its output.
     ///
     /// Unless a `TERM` variable was set explicitly, the child gets
@@ -323,14 +430,18 @@ impl TerminalBuilder {
             .take_writer()
             .map_err(|e| Error::Pty(format!("taking PTY writer failed: {e}")))?;
 
-        let shared = Arc::new(Monitor::new(EmuState::new(Box::new(Vt100Emulator::new(
-            self.rows, self.cols,
-        )))));
+        let shared = Arc::new(Monitor::new(EmuState::new(
+            Box::new(Vt100Emulator::new(self.rows, self.cols)),
+            self.answer_queries,
+            self.background,
+        )));
+        let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
 
         let reader_shared = Arc::clone(&shared);
+        let reader_writer = Arc::clone(&writer);
         thread::Builder::new()
             .name("termlens-pty-reader".into())
-            .spawn(move || reader_loop(reader, &reader_shared))
+            .spawn(move || reader_loop(reader, &reader_shared, &reader_writer))
             .map_err(Error::Io)?;
 
         let child = pair.slave.spawn_command(cmd).map_err(|e| Error::Spawn {
@@ -345,7 +456,7 @@ impl TerminalBuilder {
         Ok(Terminal {
             child,
             master: Some(pair.master),
-            writer: Some(writer),
+            writer,
             shared,
             default_timeout: self.timeout,
             exit_status: None,
@@ -354,28 +465,67 @@ impl TerminalBuilder {
     }
 }
 
+/// Canonical printable shape of a known query (for diagnostics when the
+/// responder is disabled).
+fn query_shape(query: &Query) -> String {
+    match query {
+        Query::CursorPosition { private: false } => "^[[6n".into(),
+        Query::CursorPosition { private: true } => "^[[?6n".into(),
+        Query::OperatingStatus => "^[[5n".into(),
+        Query::PrimaryDa => "^[[c".into(),
+        Query::SecondaryDa => "^[[>c".into(),
+        Query::TextAreaSize => "^[[18t".into(),
+        Query::OscColor { code, .. } => format!("^[]{code};?"),
+        Query::Unanswerable(shape) => shape.clone(),
+    }
+}
+
 /// Drain the PTY into the emulator until EOF. Runs on a dedicated thread.
-fn reader_loop(mut reader: Box<dyn Read + Send>, shared: &Monitor<EmuState>) {
+fn reader_loop(
+    mut reader: Box<dyn Read + Send>,
+    shared: &Monitor<EmuState>,
+    writer: &SharedWriter,
+) {
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => shared.mutate(|state| {
-                // The emulator stops at each DEC 2026 frame end, so the
-                // snapshot taken there is exactly the completed frame —
-                // even when the same chunk already carries the next
-                // frame's opening bytes.
-                let mut offset = 0;
-                while offset < n {
-                    let processed = state.emu.process(&buf[offset..n]);
-                    offset += processed.consumed;
-                    if processed.frame_complete {
-                        state.frames_seen += 1;
-                        state.last_frame = Some(state.emu.snapshot());
+            Ok(n) => {
+                // The emulator stops at each DEC 2026 frame end and at
+                // each query, so state read there (screen, cursor) is
+                // exact — even when the same chunk already carries the
+                // following bytes. Replies are BUILT under the state
+                // lock but WRITTEN after it is released; the state lock
+                // and the writer lock are never held together.
+                let replies = shared.mutate(|state| {
+                    let mut replies: Vec<Vec<u8>> = Vec::new();
+                    let mut offset = 0;
+                    while offset < n {
+                        let processed = state.emu.process(&buf[offset..n]);
+                        offset += processed.consumed;
+                        match processed.stop {
+                            Some(Stop::FrameComplete) => {
+                                state.frames_seen += 1;
+                                state.last_frame = Some(state.emu.snapshot());
+                            }
+                            Some(Stop::Query(query)) => {
+                                if let Some(reply) = state.answer(&query) {
+                                    replies.push(reply);
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    state.touch();
+                    replies
+                });
+                for reply in replies {
+                    let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
+                    if let Some(writer) = writer.as_mut() {
+                        let _ = writer.write_all(&reply).and_then(|()| writer.flush());
                     }
                 }
-                state.touch();
-            }),
+            }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             // Linux reports EIO on the master once the child side is gone;
             // treat any hard error as end-of-stream.
@@ -394,10 +544,11 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: &Monitor<EmuState>) {
 /// and reaps the child — tests never leak zombies, even on panic.
 pub struct Terminal {
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    // Option only so Drop can close them under the PTY lifecycle lock;
-    // both are Some for the entire life of the value outside Drop.
+    // Option only so Drop can close it under the PTY lifecycle lock;
+    // Some for the entire life of the value outside Drop.
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
-    writer: Option<Box<dyn Write + Send>>,
+    /// Shared with the reader thread, which writes query replies.
+    writer: SharedWriter,
     shared: Arc<Monitor<EmuState>>,
     default_timeout: Duration,
     exit_status: Option<ExitStatus>,
@@ -442,8 +593,17 @@ impl Terminal {
     }
 
     fn write_or_panic(&mut self, bytes: &[u8], what: &str) {
-        let writer = self.writer.as_mut().expect("writer lives until drop");
-        if let Err(e) = writer.write_all(bytes).and_then(|()| writer.flush()) {
+        // Write under the writer lock only; build the panic message (which
+        // takes the state lock for the screen) strictly after releasing it,
+        // so the two locks are never held together.
+        let result = {
+            let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+            match writer.as_mut() {
+                Some(writer) => writer.write_all(bytes).and_then(|()| writer.flush()),
+                None => Err(io::Error::new(io::ErrorKind::BrokenPipe, "pty closed")),
+            }
+        };
+        if let Err(e) = result {
             panic!(
                 "termlens: failed to send {what} to `{}` ({e})\n--- screen ---\n{}",
                 self.command_desc,
@@ -489,7 +649,7 @@ impl Terminal {
         match outcome {
             Ok(inner) => inner,
             Err(Expired) => Err(Error::Timeout {
-                waiting_for: WHAT.into(),
+                waiting_for: format!("{WHAT}{}", self.shared.lock().query_note()),
                 timeout: self.default_timeout,
                 screen: self.screen(),
             }),
@@ -608,9 +768,10 @@ impl Terminal {
             let now = Instant::now();
             if now >= deadline {
                 let screen = guard.peek_snapshot();
+                let note = guard.query_note();
                 drop(guard);
                 return Err(Error::Timeout {
-                    waiting_for: format!("{quiet:?} of output silence"),
+                    waiting_for: format!("{quiet:?} of output silence{note}"),
                     timeout: self.default_timeout,
                     screen,
                 });
@@ -660,7 +821,11 @@ impl Terminal {
             let now = Instant::now();
             if now >= deadline {
                 return Err(Error::Timeout {
-                    waiting_for: format!("`{}` to exit", self.command_desc),
+                    waiting_for: format!(
+                        "`{}` to exit{}",
+                        self.command_desc,
+                        self.shared.lock().query_note()
+                    ),
                     timeout: self.default_timeout,
                     screen: self.screen(),
                 });
@@ -723,8 +888,15 @@ impl Drop for Terminal {
                 let _ = self.child.wait();
             }
         }
-        // Close the PTY fds while still holding the lock.
-        drop(self.writer.take());
+        // Close the PTY fds while still holding the lock. Taking the boxed
+        // writer out of the shared cell closes its fd even though the
+        // reader thread keeps the (now empty) cell alive.
+        drop(
+            self.writer
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
         drop(self.master.take());
     }
 }

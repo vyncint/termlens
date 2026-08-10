@@ -1,8 +1,8 @@
 //! The `vt100`-crate backend. Public types never leak from here: every
 //! snapshot converts vt100's grid into termlens's own [`Screen`].
 
-use super::seq::{SeqTracker, SyncEvent};
-use super::{Emulator, Processed};
+use super::seq::{SeqEvent, SeqTracker};
+use super::{Emulator, Processed, Stop};
 use crate::screen::{Cell, Color, Screen, Style};
 
 pub(crate) struct Vt100Emulator {
@@ -23,18 +23,23 @@ impl Vt100Emulator {
 impl Emulator for Vt100Emulator {
     fn process(&mut self, bytes: &[u8]) -> Processed {
         for (i, &byte) in bytes.iter().enumerate() {
-            if self.tracker.step(byte) == SyncEvent::End {
+            let stop = match self.tracker.step(byte) {
+                SeqEvent::SyncEnd => Some(Stop::FrameComplete),
+                SeqEvent::Query(query) => Some(Stop::Query(query)),
+                SeqEvent::None | SeqEvent::SyncBegin => None,
+            };
+            if let Some(stop) = stop {
                 self.parser.process(&bytes[..=i]);
                 return Processed {
                     consumed: i + 1,
-                    frame_complete: true,
+                    stop: Some(stop),
                 };
             }
         }
         self.parser.process(bytes);
         Processed {
             consumed: bytes.len(),
-            frame_complete: false,
+            stop: None,
         }
     }
 
@@ -171,7 +176,7 @@ mod tests {
         let stream = b"\x1b[?2026hframe1\x1b[?2026lnext";
 
         let first = emu.process(stream);
-        assert!(first.frame_complete);
+        assert_eq!(first.stop, Some(Stop::FrameComplete));
         // Everything through the ESU is consumed; "next" is not.
         assert_eq!(
             &stream[..first.consumed],
@@ -182,7 +187,7 @@ mod tests {
         assert!(!emu.in_sync_update());
 
         let rest = emu.process(&stream[first.consumed..]);
-        assert!(!rest.frame_complete);
+        assert!(rest.stop.is_none());
         assert!(emu.snapshot().contains("frame1next"));
     }
 

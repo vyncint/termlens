@@ -86,7 +86,10 @@ flowchart TB
 
 The reader thread drains the PTY into the emulator *continuously* — the
 kernel buffer can't fill up and stall your app, and no output is lost
-between assertions. Screens are immutable snapshots taken under the same
+between assertions. It also **answers the queries real terminals
+answer** (cursor position, device attributes, window size, background
+color), so capability-probing apps run instead of hanging — and anything
+left unanswered is named inside the next timeout error. Screens are immutable snapshots taken under the same
 lock the reader writes through, so every assertion sees a consistent
 instant. Four layers, one small internal trait between emulator and screen
 so the backend can be swapped; details in [docs/DESIGN.md](docs/DESIGN.md).
