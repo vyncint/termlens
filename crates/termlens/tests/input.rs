@@ -59,6 +59,41 @@ fn modifier_chords_round_trip_through_crossterms_parser() -> termlens::Result<()
 }
 
 #[test]
+fn paste_is_one_event_under_bracketed_paste() -> termlens::Result<()> {
+    let mut t = spawn_form_echo()?;
+    t.wait_frame(|s| s.contains("form-echo ready"))?;
+
+    // One paste event — not eleven key presses — proves the wrapper.
+    t.paste("hello world");
+    t.wait_frame(|s| s.contains("input: hello world") && s.contains("last: paste:11"))?;
+
+    t.send(Key::Esc);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+#[test]
+fn paste_falls_back_to_plain_bytes_without_the_mode() -> termlens::Result<()> {
+    // A plain shell never enables mode 2004; the paste must arrive as
+    // raw bytes with no ESC[200~ wrapper.
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"stty -icanon -echo; ",
+                r#"reply=$(head -c 5); printf 'got:%s' "$reply"; read guard"#
+            ),
+        ])
+        .spawn("/bin/sh")?;
+    t.paste("plain");
+    t.wait_until(|s| s.contains("got:plain"))?;
+    t.send(Key::Enter);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+#[test]
 fn clicking_without_mouse_tracking_is_a_typed_error() {
     // hello-tui never enables mouse tracking.
     let mut t = Terminal::builder()

@@ -18,8 +18,8 @@ use std::io::{self, Write};
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEvent, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::style::Print;
 use crossterm::terminal::{
@@ -130,14 +130,26 @@ fn draw_torn(out: &mut impl Write) -> io::Result<()> {
 }
 
 fn cleanup(out: &mut impl Write) -> io::Result<()> {
-    execute!(out, DisableMouseCapture, Show, LeaveAlternateScreen)?;
+    execute!(
+        out,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        Show,
+        LeaveAlternateScreen
+    )?;
     disable_raw_mode()
 }
 
 fn main() -> io::Result<()> {
     enable_raw_mode()?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen, Hide, EnableMouseCapture)?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        Hide,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
 
     let mut app = App::default();
     draw(&mut out, &app)?;
@@ -145,6 +157,12 @@ fn main() -> io::Result<()> {
     loop {
         let key = match event::read()? {
             Event::Key(key) => key,
+            Event::Paste(text) => {
+                app.last = format!("paste:{}", text.chars().count());
+                app.input.push_str(&text);
+                draw(&mut out, &app)?;
+                continue;
+            }
             Event::Mouse(mouse) => {
                 if let Some(description) = describe_mouse(&mouse) {
                     app.last = description;

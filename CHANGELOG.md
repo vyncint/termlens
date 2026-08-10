@@ -11,6 +11,10 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- `Terminal::paste(text)`: pastes the way a terminal pastes — wrapped in
+  bracketed-paste markers when the application enabled mode 2004 (one
+  `Paste` event, not a burst of key presses), plain bytes when it
+  didn't.
 - Modifier chords over special keys: `Key::Right.ctrl()`,
   `Key::Up.shift()`, `Key::F(5).ctrl().shift()` — the xterm
   CSI-modifier encodings, chainable, accepted by the same

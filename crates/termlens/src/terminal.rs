@@ -604,6 +604,28 @@ impl Terminal {
         self.write_or_panic(s.as_bytes(), "literal text");
     }
 
+    /// Paste text, the way a terminal pastes.
+    ///
+    /// When the application has enabled bracketed paste (mode 2004 —
+    /// crossterm's `EnableBracketedPaste`), the text arrives wrapped in
+    /// `ESC[200~ … ESC[201~` and the application sees **one paste
+    /// event**, not a burst of key presses. When it hasn't, the bytes
+    /// arrive plain — exactly like a real terminal.
+    ///
+    /// # Panics
+    ///
+    /// Same contract as [`send`](Self::send).
+    pub fn paste(&mut self, text: &str) {
+        if self.input_modes().bracketed_paste {
+            let mut bytes = b"\x1b[200~".to_vec();
+            bytes.extend_from_slice(text.as_bytes());
+            bytes.extend_from_slice(b"\x1b[201~");
+            self.write_or_panic(&bytes, "a bracketed paste");
+        } else {
+            self.write_or_panic(text.as_bytes(), "a paste");
+        }
+    }
+
     /// Click the primary button at `(col, row)` (0-based, like
     /// [`Screen::cell`]). Sends a press — and, when the application's
     /// tracking mode reports them, a release — encoded exactly as the

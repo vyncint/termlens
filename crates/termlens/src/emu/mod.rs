@@ -52,11 +52,7 @@ pub(crate) struct InputModes {
     pub(crate) mouse: MouseMode,
     /// SGR (1006) mouse encoding active.
     pub(crate) sgr_mouse: bool,
-    // Read by paste() and cursor-key encoding, which land right after
-    // the mouse work in this tier; the mode snapshot ships whole.
-    #[allow(dead_code)]
     pub(crate) bracketed_paste: bool,
-    #[allow(dead_code)]
     pub(crate) application_cursor: bool,
 }
 
