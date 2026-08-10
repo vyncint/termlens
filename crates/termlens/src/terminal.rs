@@ -793,6 +793,29 @@ impl Terminal {
     /// [`Error::Eof`] as soon as the PTY closes with the predicate still
     /// false — both embed the screen for debugging.
     ///
+    /// # Race-free waiting
+    ///
+    /// The guarantee is precise: every byte up to and including the ones
+    /// that made the predicate true has been processed — and nothing more.
+    /// No byte marks where a repaint ends, so a predicate can fire on a
+    /// half-painted screen, including half a row. Three rules (with the
+    /// field stories behind them: `docs/DESIGN.md` §2):
+    ///
+    /// 1. **Put everything you assert into this one predicate.** A
+    ///    [`Screen`] is one consistent instant; `wait_until(a)` followed by
+    ///    `assert!(screen().b)` is a race between two instants.
+    /// 2. **Wait on the last thing your app paints** (the rightmost text
+    ///    of the bottom row, the cursor's resting position) before
+    ///    snapshotting a whole screen — not on a line drawn midway.
+    /// 3. **Settle before whole-screen snapshots**: a snapshot asserts on
+    ///    cells no predicate named, so [`wait_idle`](Self::wait_idle)
+    ///    first.
+    ///
+    /// Applications that emit DEC 2026 synchronized updates need none of
+    /// this — [`wait_frame`](Self::wait_frame) sees only complete frames.
+    /// After a [`resize`](Self::resize), also see the stale-frame trap
+    /// documented there.
+    ///
     /// # Errors
     ///
     /// [`Error::Timeout`] / [`Error::Eof`], each carrying the screen.
@@ -1098,6 +1121,28 @@ impl Terminal {
 
     /// Resize the PTY (TIOCSWINSZ — the kernel delivers SIGWINCH to the
     /// child) and the emulated grid, atomically from the observer's side.
+    ///
+    /// # The stale-frame trap
+    ///
+    /// The grid resizes immediately — `s.cols()` reports the new width on
+    /// the very next snapshot — but its **content** is still the old
+    /// frame, clipped to the new geometry, until the child handles
+    /// SIGWINCH and repaints. This wait can therefore resolve on entirely
+    /// stale content:
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// t.resize(50, 20)?;
+    /// t.wait_until(|s| s.cols() == 50 && s.contains("tasks (10)"))?; // ← both true BEFORE the repaint
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Wait for something only the post-SIGWINCH frame can show — content
+    /// that needs the new width, a complete status bar on the new bottom
+    /// row — or use [`wait_frame`](Self::wait_frame) where the app emits
+    /// synchronized updates. `docs/DESIGN.md` §2 shows the trap in full.
     ///
     /// # Errors
     ///

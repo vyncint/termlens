@@ -11,6 +11,11 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- The three rules for race-free waits — one predicate, wait on the last
+  thing painted, settle before whole-screen snapshots — and the resize
+  **stale-frame trap** are now documented where you'll meet them: on
+  `wait_until` and `resize` in the rustdoc, and in `docs/DESIGN.md` §2
+  with the first real user's before/after failures.
 - Process ergonomics: `TerminalBuilder::current_dir(dir)` runs the child
   in a chosen working directory (no more `cd … && …` through a shell);
   `Terminal::pid()` exposes the child's process id;

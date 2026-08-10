@@ -103,16 +103,69 @@ expiry the error **embeds the full screen dump** — a CI log alone answers
 `Drop` kills + reaps the child unconditionally (unless already reaped):
 tests never leak zombies, including on panic.
 
-### Snapshot after waiting on the *last* drawn byte
+### The three rules for race-free waits
 
-`wait_until(pred)` guarantees exactly this: every byte up to and including
-the ones that made `pred` true has been processed. Bytes the application
-wrote *after* your marker may still be in flight. So before snapshotting a
-whole screen, wait on the **final** thing the app draws — the bottom-right
-corner of a frame, or the cursor's resting position
-(`s.cursor() == (row, 0, true)`) — not on a line drawn midway. Waiting on
-an early marker and snapshotting is a race at chunk boundaries; the stress
-workflow found exactly that in our own suite.
+`wait_until(pred)` guarantees exactly one thing: every byte up to and
+including the ones that made `pred` true has been processed. Nothing in
+the byte stream marks where a repaint ends, so the predicate can fire on
+a half-painted screen — **including half a row**. The first real user hit
+exactly that (the [termlens-demo coverage
+study](https://github.com/vyncint/termlens-demo/blob/main/docs/TERMLENS-COVERAGE.md),
+§2):
+
+```rust
+t.wait_until(|s| s.contains("NORMAL"))?;      // status bar, last row
+assert!(t.screen().contains("Tasks 1/10"));   // the SAME row — still in flight
+```
+
+This failed roughly 2 runs in 15 under parallel load: `NORMAL` had
+landed; ` Tasks 1/10 …`, the rest of the same row, was still crossing
+the PTY. Three rules make such waits deterministic:
+
+1. **Put everything you assert into one predicate.** A `Screen` is one
+   consistent instant; two waits are two instants with a race between
+   them. The fix for the failure above is race-free by construction:
+
+   ```rust
+   t.wait_until(|s| s.contains("NORMAL") && s.contains("Tasks 1/10"))?;
+   ```
+
+2. **Wait on the last thing painted.** Before snapshotting a whole
+   screen, wait on the **final** thing the app draws — the rightmost
+   text of the bottom row, or the cursor's resting position
+   (`s.cursor() == (row, 0, true)`) — never a line drawn midway. Which
+   text is "last" is a property of *your app's* render order; termlens
+   cannot tell you. Waiting on an early marker and snapshotting is a
+   race at chunk boundaries; the stress workflow found exactly that in
+   our own suite.
+3. **Settle before whole-screen snapshots.** A snapshot asserts on cells
+   the test never named, so no targeted predicate can cover it; call
+   `wait_idle` first. That is a heuristic (silence ≠ proof of a finished
+   render — see above), and it is the honest tool for the job.
+
+Applications that bracket repaints in DEC 2026 synchronized updates need
+none of this discipline: `wait_frame` evaluates predicates only on
+complete frames.
+
+### The resize stale-frame trap
+
+Rule 1 has one non-obvious failure mode after `resize`. The emulated
+grid resizes immediately — but its *content* is still the old frame,
+merely clipped (or reflowed) to the new geometry, until the application
+handles SIGWINCH and repaints. Both halves of this predicate are true of
+the **stale** frame:
+
+```rust
+t.resize(50, 20)?;
+t.wait_until(|s| s.cols() == 50 && s.contains("tasks (10)"))?;   // ← matches old content
+```
+
+`s.cols() == 50` holds from the moment `resize` returns, and the
+clipped old frame still says `tasks (10)` — the wait resolves before
+the app has repainted at all. Wait for something only the
+post-SIGWINCH frame can show — content that needs the new width, a
+complete status bar on the new bottom row — or use `wait_frame` where
+the app emits synchronized updates.
 
 ### The instant-exit caveat (macOS PTY teardown)
 
