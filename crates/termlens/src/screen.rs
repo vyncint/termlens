@@ -5,6 +5,7 @@
 //! so errors and assertions can carry whole screens around freely.
 
 use std::fmt;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 /// A terminal color, as reported by the emulator.
@@ -320,36 +321,163 @@ impl Screen {
     /// Locate the first occurrence of `needle` scanning rows top to bottom;
     /// returns the `(row, col)` of its first character.
     ///
-    /// The needle must fit within a single row (use [`Screen::contains`] for
-    /// multi-line matches). Columns account for double-width characters: a
-    /// match after a CJK character reports the real terminal column.
+    /// Needles containing `\n` match across consecutive rows with exactly
+    /// the semantics of [`Screen::contains`] (trailing whitespace stripped
+    /// per row): a multi-row needle is found wherever `contains` would be
+    /// true. A needle that *begins* with `\n` reports the position of its
+    /// first character after those newlines.
+    ///
+    /// Columns account for double-width characters: a match after a CJK
+    /// character reports the real terminal column.
     #[must_use]
     pub fn find(&self, needle: &str) -> Option<(u16, u16)> {
         if needle.is_empty() {
             return Some((0, 0));
         }
-        for row in 0..self.rows {
-            let text = self.row_text(row);
-            let Some(byte_off) = text.find(needle) else {
+        if !needle.contains('\n') {
+            for row in 0..self.rows {
+                let text = self.row_text(row);
+                if let Some(byte_off) = text.find(needle) {
+                    return Some((row, self.col_of_byte(row, byte_off)?));
+                }
+            }
+            return None;
+        }
+
+        // Multi-row: the needle is a substring of `text()` — its first
+        // segment ends a row (after the trailing-whitespace trim), the
+        // middle segments equal whole rows, the last starts one.
+        let segments: Vec<&str> = needle.split('\n').collect();
+        let extra = u16::try_from(segments.len() - 1).ok()?;
+        for row in 0..self.rows.checked_sub(extra)? {
+            let first_line = self.row_text(row);
+            let first = first_line.trim_end();
+            if !first.ends_with(segments[0]) {
                 continue;
-            };
-            // Map the byte offset back to the column of the cell that
-            // contributed that byte.
-            let mut acc = 0usize;
-            for col in 0..self.cols {
-                let cell = self.cell(row, col)?;
-                let len = if cell.is_wide_continuation() {
-                    0
-                } else if cell.contents().is_empty() {
-                    1 // rendered as a space
+            }
+            let tail_matches = segments[1..].iter().enumerate().all(|(i, seg)| {
+                let line = self.row_text(row + 1 + i as u16);
+                let line = line.trim_end();
+                if i as u16 == extra - 1 {
+                    line.starts_with(seg) // last segment: prefix
                 } else {
-                    cell.contents().len()
+                    line == *seg // middle segments: whole rows
+                }
+            });
+            if !tail_matches {
+                continue;
+            }
+            // The needle's first character: on this row for a non-empty
+            // first segment, else the first character after the leading
+            // newlines (start of a following row).
+            return match segments.iter().position(|s| !s.is_empty()) {
+                Some(0) => {
+                    let byte_off = first.len() - segments[0].len();
+                    Some((row, self.col_of_byte(row, byte_off)?))
+                }
+                Some(k) => Some((row + u16::try_from(k).ok()?, 0)),
+                None => Some((row + extra, 0)),
+            };
+        }
+        None
+    }
+
+    /// The text within a rectangle: the given columns of the given rows,
+    /// one line per row, trailing whitespace stripped per line (the same
+    /// rule as [`Screen::text`]). Ranges take any range expression and are
+    /// clamped to the screen:
+    ///
+    /// ```
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder()
+    /// #     .args(["-c", "printf 'left | right'; read q"]).spawn("sh")?;
+    /// # t.wait_until(|s| s.contains("right"))?;
+    /// let s = t.screen();
+    /// let right_pane = s.rect_text(7.., ..);   // columns 7 → end, all rows
+    /// assert!(right_pane.contains("right"));
+    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Cells contribute as in [`Screen::row_text`]: blanks render as
+    /// spaces, and a wide character contributes where its leading cell
+    /// sits — even when the rectangle cuts it in half.
+    #[must_use]
+    pub fn rect_text(&self, cols: impl RangeBounds<u16>, rows: impl RangeBounds<u16>) -> String {
+        let (col_start, col_end) = clamp_range(&cols, self.cols);
+        let (row_start, row_end) = clamp_range(&rows, self.rows);
+        let mut out = String::new();
+        for row in row_start..row_end {
+            if row > row_start {
+                out.push('\n');
+            }
+            let mut line = String::new();
+            for col in col_start..col_end {
+                let Some(cell) = self.cell(row, col) else {
+                    break;
                 };
-                if len > 0 && byte_off < acc + len {
+                if cell.is_wide_continuation() {
+                    continue;
+                }
+                if cell.contents().is_empty() {
+                    line.push(' ');
+                } else {
+                    line.push_str(cell.contents());
+                }
+            }
+            out.push_str(line.trim_end());
+        }
+        out
+    }
+
+    /// The first cell satisfying `predicate` (scanning rows top to bottom,
+    /// columns left to right), as `(row, col)`.
+    ///
+    /// This is the tool for "where did the highlight go":
+    ///
+    /// ```
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder()
+    /// #     .args(["-c", r"printf 'a \033[7mchoice\033[0m'; read q"]).spawn("sh")?;
+    /// # t.wait_until(|s| s.contains("choice"))?;
+    /// let s = t.screen();
+    /// assert_eq!(s.find_by(|c| c.style().reverse), Some((0, 2)));
+    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Every cell is scanned, including blanks and wide-character
+    /// continuation cells (they carry their character's style).
+    #[must_use]
+    pub fn find_by(&self, mut predicate: impl FnMut(&Cell) -> bool) -> Option<(u16, u16)> {
+        for row in 0..self.rows {
+            for col in 0..self.cols {
+                if predicate(self.cell(row, col)?) {
                     return Some((row, col));
                 }
-                acc += len;
             }
+        }
+        None
+    }
+
+    /// Map a byte offset within `row_text(row)` back to the column of the
+    /// cell that contributed that byte (wide characters span two columns
+    /// but contribute their bytes once).
+    fn col_of_byte(&self, row: u16, byte_off: usize) -> Option<u16> {
+        let mut acc = 0usize;
+        for col in 0..self.cols {
+            let cell = self.cell(row, col)?;
+            let len = if cell.is_wide_continuation() {
+                0
+            } else if cell.contents().is_empty() {
+                1 // rendered as a space
+            } else {
+                cell.contents().len()
+            };
+            if len > 0 && byte_off < acc + len {
+                return Some(col);
+            }
+            acc += len;
         }
         None
     }
@@ -373,6 +501,21 @@ impl Screen {
     pub fn with_styles(&self) -> ScreenWithStyles<'_> {
         ScreenWithStyles { screen: self }
     }
+}
+
+/// Clamp any range expression to `0..len`, as `(start, end)` exclusive.
+fn clamp_range(range: &impl RangeBounds<u16>, len: u16) -> (u16, u16) {
+    let start = match range.start_bound() {
+        Bound::Included(&s) => s,
+        Bound::Excluded(&s) => s.saturating_add(1),
+        Bound::Unbounded => 0,
+    };
+    let end = match range.end_bound() {
+        Bound::Included(&e) => e.saturating_add(1),
+        Bound::Excluded(&e) => e,
+        Bound::Unbounded => len,
+    };
+    (start.min(len), end.min(len))
 }
 
 impl Style {
@@ -558,6 +701,66 @@ mod tests {
         assert_eq!(s.find("x"), Some((1, 4)));
         assert_eq!(s.find("字"), Some((1, 2)));
         assert_eq!(s.find("missing"), None);
+    }
+
+    #[test]
+    fn find_locates_multi_row_needles_like_contains() {
+        let s = screen(10, 3, &["hello", "world", "again"]);
+        assert_eq!(s.find("hello\nworld"), Some((0, 0)));
+        assert_eq!(s.find("llo\nwor"), Some((0, 2)));
+        assert_eq!(s.find("world\nagain"), Some((1, 0)));
+        assert_eq!(s.find("o\nworld\nag"), Some((0, 4)));
+        assert_eq!(s.find("hello\nagain"), None); // rows aren't consecutive
+        assert_eq!(s.find("hell\nworld"), None); // "hell" doesn't end row 0
+        assert_eq!(s.find("hello\nworl\nagain"), None); // middle must be whole
+        assert_eq!(s.find("again\nmore"), None); // would run off the screen
+                                                 // Trailing whitespace is trimmed per row, exactly like `contains`.
+        assert_eq!(s.find("hello \nworld"), None);
+        // A needle starting with '\n' reports its first real character.
+        assert_eq!(s.find("\nworld"), Some((1, 0)));
+        assert_eq!(s.find("\n"), Some((1, 0)));
+        // Property: multi-row find agrees with contains.
+        for needle in ["hello\nworld", "llo\nwor", "x\nworld", "\nagain"] {
+            assert_eq!(s.find(needle).is_some(), s.contains(needle), "{needle:?}");
+        }
+    }
+
+    #[test]
+    fn multi_row_find_reports_wide_aware_columns() {
+        let s = screen(10, 2, &["汉字x", "next"]);
+        // 汉 = cols 0-1, 字 = cols 2-3, x = col 4.
+        assert_eq!(s.find("字x\nnext"), Some((0, 2)));
+        assert_eq!(s.find("x\nnext"), Some((0, 4)));
+    }
+
+    #[test]
+    fn rect_text_slices_columns_and_rows() {
+        let s = screen(10, 3, &["0123456789", "abcdefghij", "xyz"]);
+        assert_eq!(s.rect_text(2..5, 0..2), "234\ncde");
+        assert_eq!(s.rect_text(2..=4, 0..=1), "234\ncde"); // inclusive forms
+        assert_eq!(s.rect_text(.., 2..), "xyz"); // trailing blanks trimmed
+        assert_eq!(s.rect_text(8.., ..2), "89\nij");
+        assert_eq!(s.rect_text(0..3, 5..9), ""); // rows clamp to nothing
+        assert_eq!(s.rect_text(20..30, ..1), ""); // cols clamp to nothing
+        assert_eq!(s.rect_text(.., ..), s.text()); // the whole screen
+    }
+
+    #[test]
+    fn rect_text_wide_characters_count_where_they_start() {
+        let s = screen(10, 1, &["汉字x"]);
+        assert_eq!(s.rect_text(0..2, ..), "汉");
+        // Slicing in from the continuation side drops the cut character
+        // (its leading cell is outside) and keeps the next one whole.
+        assert_eq!(s.rect_text(1..3, ..), "字");
+        assert_eq!(s.rect_text(4.., ..), "x");
+    }
+
+    #[test]
+    fn find_by_scans_row_major_and_sees_styles() {
+        let s = screen(10, 2, &["ab*", "c"]);
+        assert_eq!(s.find_by(|c| c.style().bold), Some((0, 2)));
+        assert_eq!(s.find_by(|c| c.contents() == "c"), Some((1, 0)));
+        assert_eq!(s.find_by(|c| c.style().reverse), None);
     }
 
     #[test]

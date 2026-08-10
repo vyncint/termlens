@@ -11,6 +11,13 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- Three `Screen` query helpers, each earned by a documented pain in the
+  first real user's test suite: `rect_text(cols, rows)` — the text
+  inside a rectangle (any range expression, clamped to the screen), for
+  asserting on one pane of a split layout; `find_by(|cell| …)` — the
+  first cell matching a predicate, for "where did the highlight go";
+  and `find` now locates **multi-row needles** (`find("one\ntwo")`)
+  with exactly the matching semantics `contains` always had for them.
 - Out-of-band terminal state is readable from every `Screen` snapshot:
   `title()` (tracked from `OSC 0`/`OSC 2` by termlens itself — the
   emulator backend doesn't need to support it), `alternate_screen()`,
