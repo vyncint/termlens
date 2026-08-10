@@ -17,7 +17,10 @@
 use std::io::{self, Write};
 
 use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
+};
 use crossterm::style::Print;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, Clear, ClearType,
@@ -33,6 +36,18 @@ struct App {
 }
 
 /// Stable, greppable one-token description of a key event.
+/// Stable one-token description of a mouse event.
+fn describe_mouse(mouse: &MouseEvent) -> Option<String> {
+    let kind = match mouse.kind {
+        MouseEventKind::Down(_) => "down",
+        MouseEventKind::Up(_) => "up",
+        MouseEventKind::ScrollUp => "scrollup",
+        MouseEventKind::ScrollDown => "scrolldown",
+        _ => return None,
+    };
+    Some(format!("mouse:{kind}:{},{}", mouse.column, mouse.row))
+}
+
 fn describe(key: &KeyEvent) -> String {
     if let KeyCode::Char(c) = key.code {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -100,21 +115,29 @@ fn draw_torn(out: &mut impl Write) -> io::Result<()> {
 }
 
 fn cleanup(out: &mut impl Write) -> io::Result<()> {
-    execute!(out, Show, LeaveAlternateScreen)?;
+    execute!(out, DisableMouseCapture, Show, LeaveAlternateScreen)?;
     disable_raw_mode()
 }
 
 fn main() -> io::Result<()> {
     enable_raw_mode()?;
     let mut out = io::stdout();
-    execute!(out, EnterAlternateScreen, Hide)?;
+    execute!(out, EnterAlternateScreen, Hide, EnableMouseCapture)?;
 
     let mut app = App::default();
     draw(&mut out, &app)?;
 
     loop {
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let key = match event::read()? {
+            Event::Key(key) => key,
+            Event::Mouse(mouse) => {
+                if let Some(description) = describe_mouse(&mouse) {
+                    app.last = description;
+                    draw(&mut out, &app)?;
+                }
+                continue;
+            }
+            _ => continue,
         };
         if key.kind != KeyEventKind::Press {
             continue;

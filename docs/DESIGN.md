@@ -218,6 +218,11 @@ call order is a trap.
 
 ## 6. Input encoding
 
+Mouse input is **mode-aware**: the emulator knows which tracking mode and
+encoding the application enabled (`?9/?1000/?1002/?1003`, SGR `?1006`),
+`click`/`scroll` encode to match, and no tracking enabled is a typed
+error — never bytes the application would misparse as keys.
+
 `Key::encode` maps to xterm *default-mode* sequences (CSI arrows, SS3
 F1–F4, CSI-tilde function keys, DEL for Backspace). Applications that
 enable application-cursor mode (DECCKM) still parse the CSI forms in every

@@ -63,7 +63,7 @@ mod wait;
 pub use error::{Error, Result};
 pub use keys::Key;
 pub use screen::{Cell, Color, Screen, Style};
-pub use terminal::{ExitStatus, Terminal, TerminalBuilder};
+pub use terminal::{ExitStatus, Scroll, Terminal, TerminalBuilder};
 
 /// Re-export of [`insta`](https://insta.rs) (feature `insta`, on by
 /// default), so [`assert_screen_snapshot!`] always agrees with the `insta`

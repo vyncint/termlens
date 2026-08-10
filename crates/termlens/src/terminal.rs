@@ -15,9 +15,10 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-use crate::emu::{Emulator, Query, Stop, Vt100Emulator};
+use crate::emu::{Emulator, InputModes, MouseMode, Query, Stop, Vt100Emulator};
 use crate::error::{Error, Result};
 use crate::keys::Key;
+use crate::keys::{mouse_legacy, mouse_sgr};
 use crate::screen::Screen;
 use crate::wait::{next_backoff, Expired, Monitor, INITIAL_BACKOFF, POLL_CAP};
 
@@ -48,6 +49,15 @@ fn pty_lifecycle_guard() -> std::sync::MutexGuard<'static, ()> {
 /// thread (query replies). `None` after teardown. Locked briefly per write;
 /// never while the emulator state lock is held.
 type SharedWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+
+/// Scroll-wheel direction for [`Terminal::scroll`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scroll {
+    /// Wheel up (away from the user).
+    Up,
+    /// Wheel down (toward the user).
+    Down,
+}
 
 /// Exit status of the child process.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -590,6 +600,89 @@ impl Terminal {
     /// Same contract as [`send`](Self::send).
     pub fn send_str(&mut self, s: &str) {
         self.write_or_panic(s.as_bytes(), "literal text");
+    }
+
+    /// Click the primary button at `(col, row)` (0-based, like
+    /// [`Screen::cell`]). Sends a press — and, when the application's
+    /// tracking mode reports them, a release — encoded exactly as the
+    /// tracking mode and encoding **the application enabled** (SGR 1006
+    /// or the legacy byte form).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Input`] when the application has not enabled mouse
+    /// tracking (feeding it mouse bytes anyway would be misparsed as
+    /// garbage keys), or when the position is unrepresentable in the
+    /// legacy encoding (columns/rows beyond 222).
+    pub fn click(&mut self, col: u16, row: u16) -> Result<()> {
+        let modes = self.input_modes();
+        let press_only = match modes.mouse {
+            MouseMode::None => {
+                return Err(Error::Input(
+                    "the application has not enabled mouse tracking \
+                     (no CSI ?9/?1000/?1002/?1003 h was seen)"
+                        .into(),
+                ))
+            }
+            MouseMode::Press => true,
+            MouseMode::PressRelease => false,
+        };
+        let mut bytes = self.mouse_report(&modes, 0, col, row, true)?;
+        if !press_only {
+            bytes.extend(self.mouse_report(&modes, 0, col, row, false)?);
+        }
+        self.write_or_panic(&bytes, "a mouse click");
+        Ok(())
+    }
+
+    /// Scroll the wheel one notch at `(col, row)` (0-based).
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`click`](Self::click).
+    pub fn scroll(&mut self, col: u16, row: u16, direction: Scroll) -> Result<()> {
+        let modes = self.input_modes();
+        if modes.mouse == MouseMode::None {
+            return Err(Error::Input(
+                "the application has not enabled mouse tracking \
+                 (no CSI ?9/?1000/?1002/?1003 h was seen)"
+                    .into(),
+            ));
+        }
+        let button = match direction {
+            Scroll::Up => 64,
+            Scroll::Down => 65,
+        };
+        // Wheel events are presses only; there is no release.
+        let bytes = self.mouse_report(&modes, button, col, row, true)?;
+        self.write_or_panic(&bytes, "a mouse scroll");
+        Ok(())
+    }
+
+    fn input_modes(&self) -> InputModes {
+        self.shared.lock().emu.input_modes()
+    }
+
+    fn mouse_report(
+        &self,
+        modes: &InputModes,
+        button: u8,
+        col: u16,
+        row: u16,
+        press: bool,
+    ) -> Result<Vec<u8>> {
+        if modes.sgr_mouse {
+            return Ok(mouse_sgr(button, col, row, press));
+        }
+        if col > 222 || row > 222 {
+            return Err(Error::Input(format!(
+                "({col}, {row}) is unrepresentable in the legacy mouse \
+                 encoding the application selected (max 222)"
+            )));
+        }
+        // Legacy encoding: a release is button 3.
+        let button = if press { button } else { 3 };
+        Ok(mouse_legacy(button, col, row))
     }
 
     fn write_or_panic(&mut self, bytes: &[u8], what: &str) {

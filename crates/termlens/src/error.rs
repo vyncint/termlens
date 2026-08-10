@@ -60,6 +60,13 @@ pub enum Error {
     /// An OS-level I/O error (e.g. while waiting on the child process).
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Typed input that the application's terminal configuration cannot
+    /// receive — e.g. a mouse click while the application never enabled
+    /// mouse tracking. Sending it anyway would feed the app bytes it
+    /// would misparse as garbage keys.
+    #[error("input not receivable: {0}")]
+    Input(String),
 }
 
 impl Error {

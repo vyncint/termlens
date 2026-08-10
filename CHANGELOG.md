@@ -11,6 +11,12 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- `Terminal::click(col, row)` and `Terminal::scroll(col, row, Scroll)`:
+  typed mouse input, encoded exactly as the tracking mode and encoding
+  **the application enabled** (SGR 1006 or the legacy byte form), with a
+  press-only form for X10 mode. Clicking while the app never enabled
+  mouse tracking is a typed `Error::Input` instead of bytes the app
+  would misparse.
 - `Screen::with_styles()`: the plain snapshot rendering followed by a
   compact `styles:` block (run-length spans per row, format specified in
   `docs/DESIGN.md` §3) — a highlight moving to another row or a color

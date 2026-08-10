@@ -33,6 +33,33 @@ pub(crate) struct Processed {
     pub(crate) stop: Option<Stop>,
 }
 
+/// Which mouse events the application asked the terminal to report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MouseMode {
+    /// No mouse tracking enabled.
+    None,
+    /// X10: presses only (mode 9).
+    Press,
+    /// Presses and releases (mode 1000), possibly with motion (1002/1003).
+    PressRelease,
+}
+
+/// Input-affecting terminal modes the application has set — the emulator
+/// knows them, and the input path uses them so sent bytes match what the
+/// application configured the "terminal" to send.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InputModes {
+    pub(crate) mouse: MouseMode,
+    /// SGR (1006) mouse encoding active.
+    pub(crate) sgr_mouse: bool,
+    // Read by paste() and cursor-key encoding, which land right after
+    // the mouse work in this tier; the mode snapshot ships whole.
+    #[allow(dead_code)]
+    pub(crate) bracketed_paste: bool,
+    #[allow(dead_code)]
+    pub(crate) application_cursor: bool,
+}
+
 /// A VT emulator: consumes raw PTY bytes, maintains a screen grid.
 pub(crate) trait Emulator: Send {
     /// Feed raw bytes from the PTY into the emulator. Stops early — with
@@ -52,6 +79,9 @@ pub(crate) trait Emulator: Send {
     /// True while the stream is inside a DEC 2026 synchronized update —
     /// the app has begun a repaint and not finished it.
     fn in_sync_update(&self) -> bool;
+
+    /// The input-affecting modes the application has currently set.
+    fn input_modes(&self) -> InputModes;
 
     /// Resize the emulated grid to `rows` × `cols`.
     fn set_size(&mut self, rows: u16, cols: u16);

@@ -121,6 +121,22 @@ fn ctrl_byte(c: char) -> u8 {
     }
 }
 
+/// SGR (1006) mouse report. `press = false` is the release form.
+pub(crate) fn mouse_sgr(button: u8, col: u16, row: u16, press: bool) -> Vec<u8> {
+    let suffix = if press { 'M' } else { 'm' };
+    format!("\x1b[<{button};{};{}{suffix}", col + 1, row + 1).into_bytes()
+}
+
+/// Legacy (X10/normal) mouse report: `ESC [ M Cb Cx Cy`, byte-valued.
+/// Coordinates beyond 222 are unrepresentable; the caller validates.
+pub(crate) fn mouse_legacy(button: u8, col: u16, row: u16) -> Vec<u8> {
+    let mut out = b"\x1b[M".to_vec();
+    out.push(32 + button);
+    out.push(32 + 1 + u8::try_from(col).expect("caller validated"));
+    out.push(32 + 1 + u8::try_from(row).expect("caller validated"));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +175,15 @@ mod tests {
         for (key, bytes) in table {
             assert_eq!(key.encode(), *bytes, "wrong encoding for {key:?}");
         }
+    }
+
+    #[test]
+    fn mouse_encodings() {
+        assert_eq!(mouse_sgr(0, 9, 6, true), b"\x1b[<0;10;7M");
+        assert_eq!(mouse_sgr(0, 9, 6, false), b"\x1b[<0;10;7m");
+        assert_eq!(mouse_sgr(64, 0, 0, true), b"\x1b[<64;1;1M");
+        assert_eq!(mouse_legacy(0, 0, 0), b"\x1b[M\x20\x21\x21");
+        assert_eq!(mouse_legacy(3, 9, 6,), b"\x1b[M\x23\x2a\x27");
     }
 
     #[test]
