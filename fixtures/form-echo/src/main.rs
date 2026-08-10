@@ -58,7 +58,21 @@ fn describe(key: &KeyEvent) -> String {
         }
         return format!("char:{c}");
     }
-    match key.code {
+    // Special keys: stable "ctrl+alt+shift+name" prefix order. BackTab
+    // inherently carries SHIFT; keep its historical bare name.
+    let mut prefix = String::new();
+    if key.code != KeyCode::BackTab {
+        for (on, name) in [
+            (key.modifiers.contains(KeyModifiers::CONTROL), "ctrl+"),
+            (key.modifiers.contains(KeyModifiers::ALT), "alt+"),
+            (key.modifiers.contains(KeyModifiers::SHIFT), "shift+"),
+        ] {
+            if on {
+                prefix.push_str(name);
+            }
+        }
+    }
+    let name: String = match key.code {
         KeyCode::Enter => "enter".into(),
         KeyCode::Esc => "esc".into(),
         KeyCode::Tab => "tab".into(),
@@ -75,7 +89,8 @@ fn describe(key: &KeyEvent) -> String {
         KeyCode::PageDown => "pagedown".into(),
         KeyCode::F(n) => format!("f:{n}"),
         other => format!("unknown:{other:?}"),
-    }
+    };
+    format!("{prefix}{name}")
 }
 
 fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {

@@ -61,7 +61,7 @@ mod terminal;
 mod wait;
 
 pub use error::{Error, Result};
-pub use keys::Key;
+pub use keys::{Chord, Input, Key};
 pub use screen::{Cell, Color, Screen, Style};
 pub use terminal::{ExitStatus, Scroll, Terminal, TerminalBuilder};
 

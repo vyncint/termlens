@@ -11,6 +11,11 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- Modifier chords over special keys: `Key::Right.ctrl()`,
+  `Key::Up.shift()`, `Key::F(5).ctrl().shift()` — the xterm
+  CSI-modifier encodings, chainable, accepted by the same
+  `Terminal::send`. Character chords stay `Key::Ctrl(c)` / `Key::Alt(c)`
+  (the builder methods say so loudly if you mix them up).
 - `Terminal::click(col, row)` and `Terminal::scroll(col, row, Scroll)`:
   typed mouse input, encoded exactly as the tracking mode and encoding
   **the application enabled** (SGR 1006 or the legacy byte form), with a

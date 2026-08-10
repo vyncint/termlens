@@ -121,6 +121,167 @@ fn ctrl_byte(c: char) -> u8 {
     }
 }
 
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::Key {}
+    impl Sealed for super::Chord {}
+}
+
+/// Anything [`Terminal::send`](crate::Terminal::send) can send: a [`Key`]
+/// or a modifier [`Chord`]. Sealed — the set is fixed by the crate.
+pub trait Input: sealed::Sealed {
+    /// Encode for the wire. `application_cursor` selects the DECCKM form
+    /// where the key has one.
+    #[doc(hidden)]
+    fn encode_modal(&self, application_cursor: bool) -> Vec<u8>;
+}
+
+impl Input for Key {
+    fn encode_modal(&self, _application_cursor: bool) -> Vec<u8> {
+        self.encode()
+    }
+}
+
+impl Input for Chord {
+    fn encode_modal(&self, _application_cursor: bool) -> Vec<u8> {
+        self.encode()
+    }
+}
+
+/// A modifier chord over a special key — `Ctrl-Right`, `Shift-Up`,
+/// `Alt-PageDown`, `Ctrl-Shift-F5`. Build it from a [`Key`]:
+///
+/// ```
+/// use termlens::Key;
+/// assert_eq!(Key::Right.ctrl().encode(), b"\x1b[1;5C");
+/// assert_eq!(Key::Up.shift().encode(), b"\x1b[1;2A");
+/// assert_eq!(Key::F(5).ctrl().shift().encode(), b"\x1b[15;6~");
+/// ```
+///
+/// For plain character chords keep using [`Key::Ctrl`] / [`Key::Alt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Chord {
+    key: Key,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+}
+
+impl Key {
+    /// A `Ctrl` chord over this special key (arrows, Home/End,
+    /// PageUp/Down, Delete, F1–F12).
+    ///
+    /// # Panics
+    ///
+    /// Panics for keys without a CSI-modifier form — for `Key::Char` use
+    /// [`Key::Ctrl`] / [`Key::Alt`] instead.
+    #[must_use]
+    #[track_caller]
+    pub fn ctrl(self) -> Chord {
+        Chord::over(self).ctrl()
+    }
+
+    /// An `Alt` chord over this special key. See [`Key::ctrl`].
+    ///
+    /// # Panics
+    ///
+    /// Panics for keys without a CSI-modifier form.
+    #[must_use]
+    #[track_caller]
+    pub fn alt(self) -> Chord {
+        Chord::over(self).alt()
+    }
+
+    /// A `Shift` chord over this special key. See [`Key::ctrl`].
+    ///
+    /// # Panics
+    ///
+    /// Panics for keys without a CSI-modifier form.
+    #[must_use]
+    #[track_caller]
+    pub fn shift(self) -> Chord {
+        Chord::over(self).shift()
+    }
+}
+
+impl Chord {
+    #[track_caller]
+    fn over(key: Key) -> Self {
+        assert!(
+            chord_base(key).is_some(),
+            "{key:?} has no CSI-modifier chord form; for characters use \
+             Key::Ctrl(c) / Key::Alt(c)"
+        );
+        Self {
+            key,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        }
+    }
+
+    /// Add `Ctrl` to the chord.
+    #[must_use]
+    pub fn ctrl(mut self) -> Self {
+        self.ctrl = true;
+        self
+    }
+
+    /// Add `Alt` to the chord.
+    #[must_use]
+    pub fn alt(mut self) -> Self {
+        self.alt = true;
+        self
+    }
+
+    /// Add `Shift` to the chord.
+    #[must_use]
+    pub fn shift(mut self) -> Self {
+        self.shift = true;
+        self
+    }
+
+    /// The exact bytes this chord sends: the xterm CSI-modifier form,
+    /// `ESC [ 1 ; m <letter>` or `ESC [ <n> ; m ~`, where `m` is
+    /// `1 + shift + 2·alt + 4·ctrl`.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let base = chord_base(self.key).expect("validated at construction");
+        let modifier = 1 + u8::from(self.shift) + 2 * u8::from(self.alt) + 4 * u8::from(self.ctrl);
+        match base {
+            ChordBase::Letter(letter) => format!("\x1b[1;{modifier}{letter}").into_bytes(),
+            ChordBase::Tilde(number) => format!("\x1b[{number};{modifier}~").into_bytes(),
+        }
+    }
+}
+
+enum ChordBase {
+    /// `ESC [ 1 ; m <letter>` keys.
+    Letter(char),
+    /// `ESC [ n ; m ~` keys.
+    Tilde(u8),
+}
+
+fn chord_base(key: Key) -> Option<ChordBase> {
+    Some(match key {
+        Key::Up => ChordBase::Letter('A'),
+        Key::Down => ChordBase::Letter('B'),
+        Key::Right => ChordBase::Letter('C'),
+        Key::Left => ChordBase::Letter('D'),
+        Key::Home => ChordBase::Letter('H'),
+        Key::End => ChordBase::Letter('F'),
+        Key::F(n @ 1..=4) => ChordBase::Letter(['P', 'Q', 'R', 'S'][usize::from(n) - 1]),
+        Key::Delete => ChordBase::Tilde(3),
+        Key::PageUp => ChordBase::Tilde(5),
+        Key::PageDown => ChordBase::Tilde(6),
+        Key::F(5) => ChordBase::Tilde(15),
+        Key::F(n @ 6..=10) => ChordBase::Tilde(11 + n), // 17,18,19,20,21
+        Key::F(11) => ChordBase::Tilde(23),
+        Key::F(12) => ChordBase::Tilde(24),
+        _ => return None,
+    })
+}
+
 /// SGR (1006) mouse report. `press = false` is the release form.
 pub(crate) fn mouse_sgr(button: u8, col: u16, row: u16, press: bool) -> Vec<u8> {
     let suffix = if press { 'M' } else { 'm' };
@@ -175,6 +336,32 @@ mod tests {
         for (key, bytes) in table {
             assert_eq!(key.encode(), *bytes, "wrong encoding for {key:?}");
         }
+    }
+
+    #[test]
+    fn chord_encodings() {
+        let table: &[(Chord, &[u8])] = &[
+            (Key::Right.ctrl(), b"\x1b[1;5C"),
+            (Key::Up.shift(), b"\x1b[1;2A"),
+            (Key::Left.alt(), b"\x1b[1;3D"),
+            (Key::Home.ctrl(), b"\x1b[1;5H"),
+            (Key::End.ctrl().shift(), b"\x1b[1;6F"),
+            (Key::PageDown.alt(), b"\x1b[6;3~"),
+            (Key::Delete.ctrl(), b"\x1b[3;5~"),
+            (Key::F(1).ctrl(), b"\x1b[1;5P"),
+            (Key::F(5).ctrl().shift(), b"\x1b[15;6~"),
+            (Key::F(10).alt(), b"\x1b[21;3~"),
+            (Key::F(12).ctrl().alt().shift(), b"\x1b[24;8~"),
+        ];
+        for (chord, bytes) in table {
+            assert_eq!(chord.encode(), *bytes, "wrong encoding for {chord:?}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "no CSI-modifier chord form")]
+    fn char_chords_panic_toward_key_ctrl() {
+        let _ = Key::Char('a').ctrl();
     }
 
     #[test]

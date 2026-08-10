@@ -17,7 +17,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use crate::emu::{Emulator, InputModes, MouseMode, Query, Stop, Vt100Emulator};
 use crate::error::{Error, Result};
-use crate::keys::Key;
+use crate::keys::Input;
 use crate::keys::{mouse_legacy, mouse_sgr};
 use crate::screen::Screen;
 use crate::wait::{next_backoff, Expired, Monitor, INITIAL_BACKOFF, POLL_CAP};
@@ -581,7 +581,8 @@ impl Terminal {
         self.shared.lock().snapshot()
     }
 
-    /// Send one key press. See [`Key`] for the encodings.
+    /// Send one key press or modifier [`Chord`](crate::Chord). See
+    /// [`Key`](crate::Key) for the encodings.
     ///
     /// # Panics
     ///
@@ -589,8 +590,9 @@ impl Terminal {
     /// exited and the OS tore the terminal down); the panic message includes
     /// the current screen. A test that types into a dead program is broken —
     /// failing loudly beats a silent no-op.
-    pub fn send(&mut self, key: Key) {
-        self.write_or_panic(&key.encode(), &format!("{key:?}"));
+    pub fn send(&mut self, key: impl Input + fmt::Debug) {
+        let application_cursor = self.input_modes().application_cursor;
+        self.write_or_panic(&key.encode_modal(application_cursor), &format!("{key:?}"));
     }
 
     /// Send a string literally (UTF-8 bytes, no key mapping, no newline).
