@@ -12,6 +12,18 @@
 //!    repaint; the byte that ends one marks a complete frame. Parameters
 //!    are parsed incrementally in O(1) space, and `?2026` is recognized
 //!    anywhere in a multi-mode list such as `CSI ? 2026 ; 25 h`.
+//!
+//! It also tracks the one piece of screen state the vt100 backend does not
+//! expose: the **window title** (`OSC 0`/`OSC 2`), kept whole in its own
+//! buffer — the diagnostic capture below truncates at 24 bytes, real titles
+//! don't fit.
+
+use std::sync::Arc;
+
+/// OSC strings are captured whole (titles must not truncate), but bounded:
+/// a buggy or hostile stream must not grow memory without limit. No real
+/// title comes anywhere near this.
+const OSC_CAPTURE_MAX: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -108,9 +120,15 @@ pub(crate) struct SeqTracker {
     csi_param_count: u8,
     csi_saw_2026: bool,
     /// Raw capture of the current sequence (from ESC), for diagnostics
-    /// and OSC/DCS query recognition. Bounded; long sequences truncate.
+    /// and DCS query recognition. Bounded; long sequences truncate.
     seq_buf: [u8; 24],
     seq_len: u8,
+    /// Content bytes of the current OSC string (no `ESC ]`, no
+    /// terminator), kept whole so titles never truncate.
+    osc_buf: Vec<u8>,
+    /// The window title as most recently set via `OSC 0`/`OSC 2`; empty
+    /// until the application sets one. Shared so snapshots clone for free.
+    title: Arc<str>,
 }
 
 impl SeqTracker {
@@ -129,6 +147,8 @@ impl SeqTracker {
             csi_saw_2026: false,
             seq_buf: [0; 24],
             seq_len: 0,
+            osc_buf: Vec::new(),
+            title: Arc::from(""),
         }
     }
 
@@ -148,6 +168,12 @@ impl SeqTracker {
         self.sync_update
     }
 
+    /// The window title as most recently set via `OSC 0`/`OSC 2` (empty
+    /// until the application sets one).
+    pub(crate) fn title(&self) -> Arc<str> {
+        Arc::clone(&self.title)
+    }
+
     fn reset_csi_scanner(&mut self) {
         self.csi_prefix = 0;
         self.csi_invalid = false;
@@ -163,6 +189,12 @@ impl SeqTracker {
         if usize::from(self.seq_len) < self.seq_buf.len() {
             self.seq_buf[usize::from(self.seq_len)] = b;
             self.seq_len += 1;
+        }
+    }
+
+    fn push_osc(&mut self, b: u8) {
+        if self.osc_buf.len() < OSC_CAPTURE_MAX {
+            self.osc_buf.push(b);
         }
     }
 
@@ -257,17 +289,11 @@ impl SeqTracker {
 
     /// The event (if any) implied by a completed OSC or DCS string.
     fn string_final(&mut self, was_osc: bool, st_terminated: bool) -> SeqEvent {
-        let body = &self.seq_buf[..usize::from(self.seq_len)];
         if was_osc {
-            // body is `ESC ] <content> [terminator…]`; a color query is
-            // exactly `10;?` or `11;?` (12 = cursor color: unanswerable).
-            let content_end = if st_terminated {
-                body.len().saturating_sub(2) // strip ESC \
-            } else {
-                body.len().saturating_sub(1) // strip BEL
-            };
-            let content = body.get(2..content_end).unwrap_or(b"");
-            match content {
+            // `osc_buf` holds exactly the content (`ESC ]` and terminator
+            // stripped). A color query is exactly `10;?` or `11;?`
+            // (12 = cursor color: unanswerable).
+            match self.osc_buf.as_slice() {
                 b"10;?" => {
                     return SeqEvent::Query(Query::OscColor {
                         code: 10,
@@ -281,10 +307,22 @@ impl SeqTracker {
                     })
                 }
                 b"12;?" => return SeqEvent::Query(Query::Unanswerable(self.seq_printable())),
-                _ => return SeqEvent::None,
+                content => {
+                    // OSC 0 (icon + title) / OSC 2 (title) set the window
+                    // title — state the vt100 backend does not track.
+                    // OSC 1 (icon only) is deliberately ignored.
+                    if let Some(title) = content
+                        .strip_prefix(b"0;")
+                        .or_else(|| content.strip_prefix(b"2;"))
+                    {
+                        self.title = Arc::from(String::from_utf8_lossy(title));
+                    }
+                    return SeqEvent::None;
+                }
             }
         }
         // DCS: XTGETTCAP is `ESC P + q … ST` — a capability question.
+        let body = &self.seq_buf[..usize::from(self.seq_len)];
         if body.get(2..4) == Some(b"+q") {
             return SeqEvent::Query(Query::Unanswerable(self.seq_printable()));
         }
@@ -327,7 +365,10 @@ impl SeqTracker {
                     self.reset_csi_scanner();
                     State::Csi
                 }
-                b']' => State::Osc,
+                b']' => {
+                    self.osc_buf.clear();
+                    State::Osc
+                }
                 // DCS, SOS, PM, APC — string sequences terminated by ST.
                 b'P' | b'X' | b'^' | b'_' => State::Dcs,
                 0x20..=0x2f => State::EscIntermediate,
@@ -362,7 +403,10 @@ impl SeqTracker {
                 }
                 ESC => State::OscEsc,
                 CAN | SUB => State::Ground,
-                _ => State::Osc,
+                _ => {
+                    self.push_osc(b);
+                    State::Osc
+                }
             },
             State::Dcs => match b {
                 ESC => State::DcsEsc,
@@ -587,6 +631,53 @@ mod tests {
         assert!(queries_of(b"\x1b]0;title\x07").is_empty()); // set title
         assert!(queries_of(b"\x1b[1;6H").is_empty()); // cursor move
         assert!(queries_of(b"plain text").is_empty());
+    }
+
+    #[test]
+    fn osc_0_and_2_set_the_title_via_bel_or_st() {
+        let mut t = SeqTracker::new();
+        assert_eq!(&*t.title(), "");
+        t.feed(b"\x1b]2;hello world\x07");
+        assert_eq!(&*t.title(), "hello world");
+        t.feed("\x1b]0;second ✓\x1b\\".as_bytes());
+        assert_eq!(&*t.title(), "second ✓");
+    }
+
+    #[test]
+    fn titles_longer_than_the_diagnostic_capture_are_kept_whole() {
+        let mut t = SeqTracker::new();
+        let title = "t".repeat(80); // seq_buf truncates at 24; titles must not
+        t.feed(format!("\x1b]2;{title}\x07").as_bytes());
+        assert_eq!(&*t.title(), title.as_str());
+    }
+
+    #[test]
+    fn title_survives_chunked_delivery() {
+        let mut t = SeqTracker::new();
+        t.feed(b"\x1b]2;split");
+        t.feed(b" title\x07");
+        assert_eq!(&*t.title(), "split title");
+    }
+
+    #[test]
+    fn title_keeps_embedded_semicolons() {
+        let mut t = SeqTracker::new();
+        t.feed(b"\x1b]0;a;b;c\x07");
+        assert_eq!(&*t.title(), "a;b;c");
+    }
+
+    #[test]
+    fn icon_only_and_aborted_titles_do_not_change_the_title() {
+        let mut t = SeqTracker::new();
+        t.feed(b"\x1b]2;kept\x07");
+        t.feed(b"\x1b]1;icon only\x07"); // OSC 1: icon name, not the title
+        assert_eq!(&*t.title(), "kept");
+        t.feed(b"\x1b]2;aborted\x18"); // CAN aborts the string
+        assert_eq!(&*t.title(), "kept");
+        t.feed(b"\x1b]2;also aborted\x1b[31m"); // ESC starts a new sequence
+        assert_eq!(&*t.title(), "kept");
+        t.feed(b"\x1b]2;\x07"); // explicitly set empty: cleared
+        assert_eq!(&*t.title(), "");
     }
 
     #[test]

@@ -11,6 +11,15 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- Out-of-band terminal state is readable from every `Screen` snapshot:
+  `title()` (tracked from `OSC 0`/`OSC 2` by termlens itself — the
+  emulator backend doesn't need to support it), `alternate_screen()`,
+  `bracketed_paste()`, `application_cursor()`, and `mouse_mode()` (the
+  new public `MouseMode` enum, reporting the exact tracking mode the
+  application enabled). State that previously could only be inferred
+  from grid contents is now a plain assertion:
+  `wait_until(|s| s.alternate_screen())`. None of it appears in the
+  snapshot text format — existing snapshot files stay valid.
 - Cursor keys are **mode-aware**: while the application has DECCKM
   (application cursor mode) set, `send(Key::Up)` emits the `ESC O A`
   form a real terminal would — the emulator knows the mode. `Key::encode`

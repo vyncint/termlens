@@ -185,6 +185,17 @@ Rules:
    Wide-character continuation cells participate in spans like any other
    cell.
 
+6. **Out-of-band terminal state is not part of the text format.** The
+   window title (tracked by termlens itself from `OSC 0`/`OSC 2` — the
+   vt100 backend does not expose it), the alternate-screen flag, and the
+   input modes (bracketed paste, application cursor, mouse tracking) are
+   captured with every snapshot and read through plain accessors —
+   `Screen::title`, `Screen::alternate_screen`, `Screen::bracketed_paste`,
+   `Screen::application_cursor`, `Screen::mouse_mode`. Keeping them out of
+   the rendering means existing snapshot files stay valid, and state
+   assertions read as ordinary predicates:
+   `wait_until(|s| s.alternate_screen())`.
+
 The `insta` feature (default) re-exports `insta` and ships
 `assert_screen_snapshot!` so the snapshotting insta version can't drift
 from the one the macro targets.

@@ -41,6 +41,54 @@ pub struct Style {
     pub reverse: bool,
 }
 
+/// Which mouse events the application asked its terminal to report.
+///
+/// Read it from a snapshot via [`Screen::mouse_mode`];
+/// [`Terminal::click`](crate::Terminal::click) and
+/// [`Terminal::scroll`](crate::Terminal::scroll) consult the same state to
+/// encode exactly what the application expects.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MouseMode {
+    /// No mouse tracking enabled.
+    #[default]
+    None,
+    /// X10 mode (`CSI ?9 h`): presses only.
+    Press,
+    /// VT200 mode (`CSI ?1000 h`): presses and releases.
+    PressRelease,
+    /// Button-event tracking (`CSI ?1002 h`): presses, releases, and motion
+    /// while a button is held down.
+    ButtonMotion,
+    /// Any-event tracking (`CSI ?1003 h`): presses, releases, and all
+    /// motion.
+    AnyMotion,
+}
+
+/// Out-of-band terminal state captured with each snapshot. Deliberately
+/// invisible in the text rendering (existing snapshot files stay valid);
+/// exposed through the accessors on [`Screen`].
+#[derive(Debug, Clone)]
+pub(crate) struct TermState {
+    pub(crate) title: Arc<str>,
+    pub(crate) alternate_screen: bool,
+    pub(crate) bracketed_paste: bool,
+    pub(crate) application_cursor: bool,
+    pub(crate) mouse: MouseMode,
+}
+
+impl Default for TermState {
+    fn default() -> Self {
+        Self {
+            title: Arc::from(""),
+            alternate_screen: false,
+            bracketed_paste: false,
+            application_cursor: false,
+            mouse: MouseMode::None,
+        }
+    }
+}
+
 /// One cell of the screen grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
@@ -109,6 +157,7 @@ pub struct Screen {
     cursor_col: u16,
     cursor_visible: bool,
     cells: Arc<[Cell]>,
+    state: TermState,
 }
 
 impl Screen {
@@ -119,6 +168,7 @@ impl Screen {
         cursor_col: u16,
         cursor_visible: bool,
         cells: Vec<Cell>,
+        state: TermState,
     ) -> Self {
         debug_assert_eq!(cells.len(), usize::from(cols) * usize::from(rows));
         Self {
@@ -128,6 +178,7 @@ impl Screen {
             cursor_col,
             cursor_visible,
             cells: cells.into(),
+            state,
         }
     }
 
@@ -156,6 +207,53 @@ impl Screen {
     #[must_use]
     pub fn cursor(&self) -> (u16, u16, bool) {
         (self.cursor_row, self.cursor_col, self.cursor_visible)
+    }
+
+    /// The window title, as the application most recently set it (`OSC 0`
+    /// or `OSC 2` — crossterm's `SetTitle`). Empty until the application
+    /// sets one; `OSC 1` (icon name only) is ignored. termlens tracks the
+    /// title itself, so it works regardless of the emulator backend.
+    ///
+    /// Like all out-of-band state, the title is not part of the
+    /// [`Display`](fmt::Display) rendering — assert on it directly:
+    /// `wait_until(|s| s.title() == "editor — draft.txt")`.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.state.title
+    }
+
+    /// True while the application has the alternate screen active (modes
+    /// 47/1049) — the buffer full-screen TUIs switch to on startup and
+    /// leave on exit, restoring the shell's scrollback.
+    #[must_use]
+    pub fn alternate_screen(&self) -> bool {
+        self.state.alternate_screen
+    }
+
+    /// True while bracketed paste (mode 2004) is enabled.
+    /// [`Terminal::paste`](crate::Terminal::paste) consults this: the text
+    /// then arrives as one paste event instead of a burst of key presses.
+    #[must_use]
+    pub fn bracketed_paste(&self) -> bool {
+        self.state.bracketed_paste
+    }
+
+    /// True while application cursor mode (DECCKM) is set.
+    /// [`Terminal::send`](crate::Terminal::send) consults this: arrow keys
+    /// then use their `ESC O` application forms.
+    #[must_use]
+    pub fn application_cursor(&self) -> bool {
+        self.state.application_cursor
+    }
+
+    /// Which mouse events the application asked to be reported —
+    /// [`MouseMode::None`] until it enables a tracking mode.
+    /// [`Terminal::click`](crate::Terminal::click) and
+    /// [`Terminal::scroll`](crate::Terminal::scroll) consult the same
+    /// state, so their reports always match what the application expects.
+    #[must_use]
+    pub fn mouse_mode(&self) -> MouseMode {
+        self.state.mouse
     }
 
     /// The cell at `(row, col)`, or `None` when out of bounds.
@@ -426,7 +524,7 @@ mod tests {
             }
             cells.extend(row_cells);
         }
-        Screen::from_parts(cols, rows, 1, 2, true, cells)
+        Screen::from_parts(cols, rows, 1, 2, true, cells, TermState::default())
     }
 
     #[test]
@@ -506,7 +604,7 @@ mod tests {
             };
             cells.push(Cell::new(String::new(), style, false, false));
         }
-        let screen = Screen::from_parts(6, 3, 0, 0, true, cells);
+        let screen = Screen::from_parts(6, 3, 0, 0, true, cells, TermState::default());
 
         let rendered = screen.with_styles().to_string();
         let styles_block = rendered.split("\n\nstyles:\n").nth(1).unwrap();
@@ -533,7 +631,7 @@ mod tests {
             cells.push(Cell::new(ch.to_string(), style, false, false));
         }
         cells.push(Cell::new(String::new(), Style::default(), false, false));
-        let screen = Screen::from_parts(4, 1, 0, 0, true, cells);
+        let screen = Screen::from_parts(4, 1, 0, 0, true, cells, TermState::default());
         let rendered = screen.with_styles().to_string();
         assert!(
             rendered.ends_with("styles:\n0: 0-2 bg=#1e1e2e"),
@@ -545,5 +643,30 @@ mod tests {
     fn display_format_matches_spec() {
         let s = screen(10, 2, &["hi"]);
         assert_eq!(format!("{s}"), "size: 10x2  cursor: 1,2\nhi\n");
+    }
+
+    #[test]
+    fn state_accessors_report_the_captured_state_and_stay_out_of_display() {
+        let default = screen(4, 1, &["x"]);
+        assert_eq!(default.title(), "");
+        assert!(!default.alternate_screen());
+        assert!(!default.bracketed_paste());
+        assert!(!default.application_cursor());
+        assert_eq!(default.mouse_mode(), MouseMode::None);
+
+        let state = TermState {
+            title: Arc::from("my app"),
+            alternate_screen: true,
+            bracketed_paste: true,
+            application_cursor: true,
+            mouse: MouseMode::AnyMotion,
+        };
+        let cells = vec![Cell::new("x".into(), Style::default(), false, false)];
+        let s = Screen::from_parts(1, 1, 0, 0, true, cells, state);
+        assert_eq!(s.title(), "my app");
+        assert!(s.alternate_screen() && s.bracketed_paste() && s.application_cursor());
+        assert_eq!(s.mouse_mode(), MouseMode::AnyMotion);
+        // Out-of-band state never leaks into the text format.
+        assert_eq!(format!("{s}"), "size: 1x1  cursor: 0,0\nx");
     }
 }

@@ -2,8 +2,8 @@
 //! snapshot converts vt100's grid into termlens's own [`Screen`].
 
 use super::seq::{SeqEvent, SeqTracker};
-use super::{Emulator, InputModes, MouseMode, Processed, Stop};
-use crate::screen::{Cell, Color, Screen, Style};
+use super::{Emulator, InputModes, Processed, Stop};
+use crate::screen::{Cell, Color, MouseMode, Screen, Style, TermState};
 
 pub(crate) struct Vt100Emulator {
     parser: ::vt100::Parser,
@@ -58,6 +58,13 @@ impl Emulator for Vt100Emulator {
             }
         }
         let (cursor_row, cursor_col) = screen.cursor_position();
+        let state = TermState {
+            title: self.tracker.title(),
+            alternate_screen: screen.alternate_screen(),
+            bracketed_paste: screen.bracketed_paste(),
+            application_cursor: screen.application_cursor(),
+            mouse: convert_mouse(screen.mouse_protocol_mode()),
+        };
         Screen::from_parts(
             cols,
             rows,
@@ -65,6 +72,7 @@ impl Emulator for Vt100Emulator {
             cursor_col,
             !screen.hide_cursor(),
             cells,
+            state,
         )
     }
 
@@ -78,13 +86,8 @@ impl Emulator for Vt100Emulator {
 
     fn input_modes(&self) -> InputModes {
         let screen = self.parser.screen();
-        let mouse = match screen.mouse_protocol_mode() {
-            ::vt100::MouseProtocolMode::None => MouseMode::None,
-            ::vt100::MouseProtocolMode::Press => MouseMode::Press,
-            _ => MouseMode::PressRelease,
-        };
         InputModes {
-            mouse,
+            mouse: convert_mouse(screen.mouse_protocol_mode()),
             sgr_mouse: matches!(
                 screen.mouse_protocol_encoding(),
                 ::vt100::MouseProtocolEncoding::Sgr
@@ -96,6 +99,16 @@ impl Emulator for Vt100Emulator {
 
     fn set_size(&mut self, rows: u16, cols: u16) {
         self.parser.screen_mut().set_size(rows, cols);
+    }
+}
+
+fn convert_mouse(mode: ::vt100::MouseProtocolMode) -> MouseMode {
+    match mode {
+        ::vt100::MouseProtocolMode::None => MouseMode::None,
+        ::vt100::MouseProtocolMode::Press => MouseMode::Press,
+        ::vt100::MouseProtocolMode::PressRelease => MouseMode::PressRelease,
+        ::vt100::MouseProtocolMode::ButtonMotion => MouseMode::ButtonMotion,
+        ::vt100::MouseProtocolMode::AnyMotion => MouseMode::AnyMotion,
     }
 }
 
@@ -217,6 +230,28 @@ mod tests {
         assert!(!emu.mid_sequence()); // the escape itself is finished
         feed_all(&mut emu, b"\x1b[?2026l");
         assert!(!emu.in_sync_update());
+    }
+
+    #[test]
+    fn snapshot_carries_out_of_band_terminal_state() {
+        let emu = emu_with(b"\x1b]0;my app\x07\x1b[?1049h\x1b[?2004h\x1b[?1h\x1b[?1002h");
+        let s = emu.snapshot();
+        assert_eq!(s.title(), "my app");
+        assert!(s.alternate_screen());
+        assert!(s.bracketed_paste());
+        assert!(s.application_cursor());
+        assert_eq!(s.mouse_mode(), MouseMode::ButtonMotion);
+    }
+
+    #[test]
+    fn snapshot_state_defaults_until_the_app_sets_it() {
+        let emu = emu_with(b"plain");
+        let s = emu.snapshot();
+        assert_eq!(s.title(), "");
+        assert!(!s.alternate_screen());
+        assert!(!s.bracketed_paste());
+        assert!(!s.application_cursor());
+        assert_eq!(s.mouse_mode(), MouseMode::None);
     }
 
     #[test]

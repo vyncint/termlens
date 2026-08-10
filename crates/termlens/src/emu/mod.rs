@@ -11,6 +11,7 @@ mod vt100;
 pub(crate) use self::seq::Query;
 pub(crate) use self::vt100::Vt100Emulator;
 
+use crate::screen::MouseMode;
 use crate::Screen;
 
 /// Why the emulator stopped consuming mid-segment.
@@ -31,17 +32,6 @@ pub(crate) struct Processed {
     pub(crate) consumed: usize,
     /// Set when consumption stopped before the end of the input.
     pub(crate) stop: Option<Stop>,
-}
-
-/// Which mouse events the application asked the terminal to report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MouseMode {
-    /// No mouse tracking enabled.
-    None,
-    /// X10: presses only (mode 9).
-    Press,
-    /// Presses and releases (mode 1000), possibly with motion (1002/1003).
-    PressRelease,
 }
 
 /// Input-affecting terminal modes the application has set — the emulator

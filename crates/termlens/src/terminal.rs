@@ -15,11 +15,11 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-use crate::emu::{Emulator, InputModes, MouseMode, Query, Stop, Vt100Emulator};
+use crate::emu::{Emulator, InputModes, Query, Stop, Vt100Emulator};
 use crate::error::{Error, Result};
 use crate::keys::Input;
 use crate::keys::{mouse_legacy, mouse_sgr};
-use crate::screen::Screen;
+use crate::screen::{MouseMode, Screen};
 use crate::wait::{next_backoff, Expired, Monitor, INITIAL_BACKOFF, POLL_CAP};
 
 /// How long `wait_exit` keeps draining PTY output after the child has been
@@ -649,7 +649,7 @@ impl Terminal {
                 ))
             }
             MouseMode::Press => true,
-            MouseMode::PressRelease => false,
+            MouseMode::PressRelease | MouseMode::ButtonMotion | MouseMode::AnyMotion => false,
         };
         let mut bytes = self.mouse_report(&modes, 0, col, row, true)?;
         if !press_only {

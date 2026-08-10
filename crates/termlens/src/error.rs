@@ -83,7 +83,7 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::screen::{Cell, Style};
+    use crate::screen::{Cell, Style, TermState};
 
     fn tiny_screen() -> Screen {
         let mut cells = Vec::new();
@@ -91,7 +91,7 @@ mod tests {
             cells.push(Cell::new(ch.to_string(), Style::default(), false, false));
         }
         cells.push(Cell::new(String::new(), Style::default(), false, false));
-        Screen::from_parts(3, 1, 0, 2, true, cells)
+        Screen::from_parts(3, 1, 0, 2, true, cells, TermState::default())
     }
 
     #[test]
