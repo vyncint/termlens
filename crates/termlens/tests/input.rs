@@ -94,6 +94,36 @@ fn paste_falls_back_to_plain_bytes_without_the_mode() -> termlens::Result<()> {
 }
 
 #[test]
+fn arrows_follow_the_apps_cursor_key_mode() -> termlens::Result<()> {
+    // The script enables DECCKM (CSI ?1 h), reads 3 bytes, reports them,
+    // then disables it and reads again — one terminal, both modes.
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"stty -icanon -echo; printf '[?1hAPP '; ",
+                r#"a=$(head -c 3 | tr '' 'E'); printf 'got:%s ' "$a"; "#,
+                r"printf '[?1lNORM '; ",
+                r#"b=$(head -c 3 | tr '' 'E'); printf 'got:%s' "$b"; read guard"#
+            ),
+        ])
+        .spawn("/bin/sh")?;
+
+    t.wait_until(|s| s.contains("APP"))?;
+    t.send(Key::Up);
+    t.wait_until(|s| s.contains("got:EOA"))?;
+
+    t.wait_until(|s| s.contains("NORM"))?;
+    t.send(Key::Up);
+    t.wait_until(|s| s.contains("got:E[A"))?;
+
+    t.send(Key::Enter);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+#[test]
 fn clicking_without_mouse_tracking_is_a_typed_error() {
     // hello-tui never enables mouse tracking.
     let mut t = Terminal::builder()

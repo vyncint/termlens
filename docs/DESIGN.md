@@ -223,10 +223,13 @@ encoding the application enabled (`?9/?1000/?1002/?1003`, SGR `?1006`),
 `click`/`scroll` encode to match, and no tracking enabled is a typed
 error — never bytes the application would misparse as keys.
 
-`Key::encode` maps to xterm *default-mode* sequences (CSI arrows, SS3
-F1–F4, CSI-tilde function keys, DEL for Backspace). Applications that
-enable application-cursor mode (DECCKM) still parse the CSI forms in every
-mainstream input stack, so v0.1 does not track terminal modes for output.
-If a real-world app under test needs mode-aware encoding, the emulator
-already knows the mode — the hook exists, the complexity is deferred until
-someone actually needs it.
+`Key::encode` documents the xterm *default-mode* sequences (CSI arrows,
+SS3 F1–F4, CSI-tilde function keys, DEL for Backspace). `send` is
+mode-aware: cursor keys switch to their `ESC O _` application forms while
+DECCKM is set, bracketed paste wraps only when mode 2004 is on, and mouse
+reports match the tracking mode/encoding the application enabled — the
+emulator knows every one of these modes, and the input path consults it,
+so the bytes always match what the application configured its "terminal"
+to send. The one thing no encoding can fix is the wire itself: `Esc`
+immediately followed by another key is byte-identical to an Alt chord;
+the documented idiom is to wait for the Esc's visible effect first.

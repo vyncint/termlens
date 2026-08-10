@@ -1,11 +1,12 @@
 //! Typed key input and its byte encodings.
 //!
 //! Every [`Key`] maps to the byte sequence an `xterm`-compatible terminal
-//! sends in its default modes (normal keypad, no application cursor keys).
-//! Applications that enable DECCKM application-cursor mode still accept the
-//! CSI forms in every mainstream input parser (crossterm, termion, ncurses),
-//! so v0.1 keeps the mapping static; see `docs/DESIGN.md` for the roadmap
-//! entry on mode-aware encoding.
+//! sends. [`Key::encode`] gives the default-mode form; when sent through
+//! [`Terminal::send`](crate::Terminal::send), cursor keys (arrows,
+//! Home/End) automatically switch to their `ESC O _` application forms
+//! while the application has DECCKM set — the emulator knows the mode, so
+//! the bytes always match what the application configured its terminal to
+//! send.
 
 /// A key press to send to the terminal.
 ///
@@ -18,6 +19,19 @@ pub enum Key {
     /// delivers as end-of-line in both raw and canonical modes.
     Enter,
     /// The Escape key alone (byte `0x1B`).
+    ///
+    /// **Wire ambiguity**: `Esc` immediately followed by another key is
+    /// byte-identical to an [`Alt`](Key::Alt) chord, and every input
+    /// parser resolves it as one — real keyboards are saved only by human
+    /// inter-key delay, which [`send`](crate::Terminal::send) does not
+    /// add. Make the `Esc`'s effect observable and wait for it before
+    /// sending the next key:
+    ///
+    /// ```text
+    /// t.send(Key::Esc);
+    /// t.wait_until(|s| s.contains("NORMAL"))?; // Esc took effect
+    /// t.send(Key::Char('?'));                  // now unambiguous
+    /// ```
     Esc,
     /// Tab (`0x09`).
     Tab,
@@ -54,7 +68,10 @@ pub enum Key {
 }
 
 impl Key {
-    /// The exact bytes this key sends, per xterm defaults.
+    /// The exact bytes this key sends, per xterm defaults (normal cursor
+    /// mode). [`Terminal::send`](crate::Terminal::send) prefers the
+    /// mode-aware encoding, switching cursor keys to `ESC O _` while the
+    /// application has DECCKM set.
     ///
     /// # Panics
     ///
@@ -137,7 +154,22 @@ pub trait Input: sealed::Sealed {
 }
 
 impl Input for Key {
-    fn encode_modal(&self, _application_cursor: bool) -> Vec<u8> {
+    fn encode_modal(&self, application_cursor: bool) -> Vec<u8> {
+        if application_cursor {
+            // DECCKM: cursor keys send SS3 forms.
+            let ss3 = match self {
+                Key::Up => Some(b'A'),
+                Key::Down => Some(b'B'),
+                Key::Right => Some(b'C'),
+                Key::Left => Some(b'D'),
+                Key::Home => Some(b'H'),
+                Key::End => Some(b'F'),
+                _ => None,
+            };
+            if let Some(final_byte) = ss3 {
+                return vec![0x1b, b'O', final_byte];
+            }
+        }
         self.encode()
     }
 }
@@ -336,6 +368,18 @@ mod tests {
         for (key, bytes) in table {
             assert_eq!(key.encode(), *bytes, "wrong encoding for {key:?}");
         }
+    }
+
+    #[test]
+    fn cursor_keys_switch_to_ss3_under_application_cursor_mode() {
+        assert_eq!(Key::Up.encode_modal(true), b"\x1bOA");
+        assert_eq!(Key::End.encode_modal(true), b"\x1bOF");
+        assert_eq!(Key::Up.encode_modal(false), b"\x1b[A");
+        // Only cursor keys switch; everything else is mode-independent.
+        assert_eq!(Key::F(5).encode_modal(true), Key::F(5).encode());
+        assert_eq!(Key::Delete.encode_modal(true), Key::Delete.encode());
+        // Chords stay CSI-modified regardless of mode.
+        assert_eq!(Key::Up.ctrl().encode_modal(true), b"\x1b[1;5A");
     }
 
     #[test]

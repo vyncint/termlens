@@ -11,6 +11,12 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- Cursor keys are **mode-aware**: while the application has DECCKM
+  (application cursor mode) set, `send(Key::Up)` emits the `ESC O A`
+  form a real terminal would — the emulator knows the mode. `Key::encode`
+  still documents the default-mode bytes, and the `Esc`-then-key wire
+  ambiguity (identical to an Alt chord) is now documented on `Key::Esc`
+  with the working idiom.
 - `Terminal::paste(text)`: pastes the way a terminal pastes — wrapped in
   bracketed-paste markers when the application enabled mode 2004 (one
   `Paste` event, not a burst of key presses), plain bytes when it
