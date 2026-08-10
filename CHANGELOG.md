@@ -11,6 +11,14 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- Process ergonomics: `TerminalBuilder::current_dir(dir)` runs the child
+  in a chosen working directory (no more `cd … && …` through a shell);
+  `Terminal::pid()` exposes the child's process id;
+  `Terminal::signal(Signal::Term)` (Unix) delivers real signals so
+  graceful-shutdown paths are testable — with a guard that refuses to
+  signal an already-reaped pid, which the OS may have reused; and
+  `wait_until_for(pred, timeout)` gives the one known-slow wait its own
+  deadline instead of dragging the builder default up for every wait.
 - Three `Screen` query helpers, each earned by a documented pain in the
   first real user's test suite: `rect_text(cols, rows)` — the text
   inside a rectangle (any range expression, clamped to the screen), for

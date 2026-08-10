@@ -9,6 +9,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -57,6 +58,48 @@ pub enum Scroll {
     Up,
     /// Wheel down (toward the user).
     Down,
+}
+
+/// A POSIX signal for [`Terminal::signal`]: the graceful-shutdown set.
+///
+/// Note the difference from typing: `send(Key::Ctrl('c'))` writes the
+/// `0x03` byte *through the PTY* (an app in raw mode reads it; in cooked
+/// mode the line discipline turns it into `SIGINT`), while
+/// `signal(Signal::Int)` delivers the signal directly via `kill(2)`,
+/// bypassing the terminal entirely.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Signal {
+    /// `SIGINT` — interactive interrupt (what Ctrl-C means).
+    Int,
+    /// `SIGTERM` — the polite termination request.
+    Term,
+    /// `SIGHUP` — the controlling terminal hung up.
+    Hup,
+    /// `SIGQUIT` — quit (often with a core dump).
+    Quit,
+    /// `SIGUSR1` — user-defined; commonly "reload" or "toggle".
+    Usr1,
+    /// `SIGUSR2` — user-defined.
+    Usr2,
+    /// `SIGKILL` — uncatchable. Prefer letting `Drop` clean up; send this
+    /// only to test how your supervisor reacts to a hard kill.
+    Kill,
+}
+
+#[cfg(unix)]
+impl Signal {
+    fn raw(self) -> libc::c_int {
+        match self {
+            Signal::Int => libc::SIGINT,
+            Signal::Term => libc::SIGTERM,
+            Signal::Hup => libc::SIGHUP,
+            Signal::Quit => libc::SIGQUIT,
+            Signal::Usr1 => libc::SIGUSR1,
+            Signal::Usr2 => libc::SIGUSR2,
+            Signal::Kill => libc::SIGKILL,
+        }
+    }
 }
 
 /// Exit status of the child process.
@@ -281,6 +324,7 @@ pub struct TerminalBuilder {
     args: Vec<OsString>,
     env_clear: bool,
     envs: Vec<(OsString, OsString)>,
+    cwd: Option<PathBuf>,
     answer_queries: bool,
     background: (u8, u8, u8),
 }
@@ -294,6 +338,7 @@ impl Default for TerminalBuilder {
             args: Vec::new(),
             env_clear: false,
             envs: Vec::new(),
+            cwd: None,
             answer_queries: true,
             background: (0, 0, 0),
         }
@@ -359,6 +404,15 @@ impl TerminalBuilder {
         self
     }
 
+    /// Run the program with `dir` as its working directory instead of
+    /// inheriting the test runner's. Directory-sensitive programs no
+    /// longer need a `cd … && …` through a shell.
+    #[must_use]
+    pub fn current_dir(mut self, dir: impl AsRef<Path>) -> Self {
+        self.cwd = Some(dir.as_ref().to_path_buf());
+        self
+    }
+
     /// Answer terminal queries from the application (on by default).
     ///
     /// Real terminals answer questions like `CSI 6 n` (cursor position),
@@ -415,6 +469,9 @@ impl TerminalBuilder {
 
         let mut cmd = CommandBuilder::new(program);
         cmd.args(&self.args);
+        if let Some(dir) = &self.cwd {
+            cmd.cwd(dir);
+        }
         if self.env_clear {
             cmd.env_clear();
         }
@@ -739,9 +796,32 @@ impl Terminal {
     /// # Errors
     ///
     /// [`Error::Timeout`] / [`Error::Eof`], each carrying the screen.
-    pub fn wait_until(&mut self, mut predicate: impl FnMut(&Screen) -> bool) -> Result<()> {
+    pub fn wait_until(&mut self, predicate: impl FnMut(&Screen) -> bool) -> Result<()> {
+        self.wait_until_deadline(predicate, self.default_timeout)
+    }
+
+    /// [`wait_until`](Self::wait_until) with a per-call timeout — for the
+    /// one known-slow moment (a first compile, a large fixture load) that
+    /// shouldn't force every other wait in the suite to the slow value.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Timeout`] / [`Error::Eof`], each carrying the screen.
+    pub fn wait_until_for(
+        &mut self,
+        predicate: impl FnMut(&Screen) -> bool,
+        timeout: Duration,
+    ) -> Result<()> {
+        self.wait_until_deadline(predicate, timeout)
+    }
+
+    fn wait_until_deadline(
+        &mut self,
+        mut predicate: impl FnMut(&Screen) -> bool,
+        timeout: Duration,
+    ) -> Result<()> {
         const WHAT: &str = "the screen predicate to hold";
-        let deadline = Instant::now() + self.default_timeout;
+        let deadline = Instant::now() + timeout;
         let mut seen_generation = None;
         let outcome = self.shared.wait_until(deadline, |state| {
             // Spurious wake (poll-cap tick, unrelated notify): the state is
@@ -767,7 +847,7 @@ impl Terminal {
             Ok(inner) => inner,
             Err(Expired) => Err(Error::Timeout {
                 waiting_for: format!("{WHAT}{}", self.shared.lock().query_note()),
-                timeout: self.default_timeout,
+                timeout,
                 screen: self.screen(),
             }),
         }
@@ -904,6 +984,70 @@ impl Terminal {
             .min(deadline - now)
             .max(Duration::from_millis(1));
             guard = self.shared.wait_timeout(guard, sleep);
+        }
+    }
+
+    /// The child's OS process id, when the platform reports one.
+    ///
+    /// Useful for out-of-band inspection (`/proc`, `ps`, `lsof`). The pid
+    /// belongs to the child until it has been reaped
+    /// ([`wait_exit`](Self::wait_exit) or `Drop`) — after that the OS may
+    /// reuse it, so don't deliver signals to a stored pid yourself;
+    /// [`signal`](Self::signal) has that guard built in.
+    #[must_use]
+    pub fn pid(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
+    /// Deliver `signal` to the child process (`kill(2)`) — the tool for
+    /// graceful-shutdown paths: send `SIGTERM`, then assert the app saves
+    /// its state and exits cleanly. Unix only.
+    ///
+    /// ```
+    /// # use termlens::Signal;
+    /// # fn main() -> termlens::Result<()> {
+    /// let mut t = termlens::Terminal::builder()
+    ///     .timeout(std::time::Duration::from_secs(10))
+    ///     .args(["-c", "trap 'echo bye; exit 0' TERM; echo up; while :; do sleep 0.05; done"])
+    ///     .spawn("sh")?;
+    /// t.wait_until(|s| s.contains("up"))?;
+    /// t.signal(Signal::Term)?;
+    /// t.wait_until(|s| s.contains("bye"))?;
+    /// assert!(t.wait_exit()?.success());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Input`] when the child has already been reaped (its pid may
+    /// have been reused — signaling it would be misdirected) or reports no
+    /// pid; [`Error::Io`] when `kill(2)` itself fails.
+    #[cfg(unix)]
+    pub fn signal(&mut self, signal: Signal) -> Result<()> {
+        if let Some(status) = &self.exit_status {
+            return Err(Error::Input(format!(
+                "cannot deliver {signal:?} to `{}`: it already exited ({status})",
+                self.command_desc
+            )));
+        }
+        let Some(pid) = self.pid() else {
+            return Err(Error::Input(format!(
+                "cannot deliver {signal:?} to `{}`: the platform reports no pid",
+                self.command_desc
+            )));
+        };
+        let pid = libc::pid_t::try_from(pid)
+            .map_err(|_| Error::Input(format!("pid {pid} exceeds the platform's pid range")))?;
+        // SAFETY: kill(2) touches no memory. The pid is our own un-reaped
+        // child (guarded above): worst case it is a zombie, for which kill
+        // is defined and harmless — never an unrelated, recycled pid.
+        #[allow(unsafe_code)]
+        let rc = unsafe { libc::kill(pid, signal.raw()) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(Error::Io(io::Error::last_os_error()))
         }
     }
 

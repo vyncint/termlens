@@ -28,6 +28,9 @@ portable-pty = "0.9"
 vt100 = "0.16"
 thiserror = "2"
 unicode-width = "0.2"
+# Already in the tree transitively (portable-pty); used directly for one
+# kill(2) call behind Terminal::signal.
+libc = "0.2"
 
 # Dev / fixture dependencies.
 insta = "1.48"
