@@ -21,9 +21,8 @@ pub enum Color {
 
 /// Visual attributes of a [`Cell`].
 ///
-/// Captured for every cell in v0.1; the textual snapshot format does not
-/// render them yet (a `with_styles()` styles block is planned for v0.2 — see
-/// `docs/DESIGN.md`), but assertions can inspect them via [`Cell::style`].
+/// Inspect them per cell via [`Cell::style`], or snapshot them wholesale
+/// with [`Screen::with_styles`] (plain snapshots stay text-only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Style {
     /// Foreground color.
@@ -256,6 +255,117 @@ impl Screen {
         }
         None
     }
+
+    /// This screen rendered **with its styles**: the normal
+    /// [`Display`](fmt::Display) output followed by a `styles:` block
+    /// listing every non-default span (format specified in
+    /// `docs/DESIGN.md` §3). Style-only regressions — a highlight moving
+    /// to another row, a color changing — become visible snapshot diffs:
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// # let t = termlens::Terminal::builder().spawn("true")?;
+    /// insta::assert_snapshot!(t.screen().with_styles());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Plain snapshots stay text-only; this is the opt-in.
+    #[must_use]
+    pub fn with_styles(&self) -> ScreenWithStyles<'_> {
+        ScreenWithStyles { screen: self }
+    }
+}
+
+impl Style {
+    /// True when every attribute is at its default.
+    fn is_default(&self) -> bool {
+        *self == Style::default()
+    }
+
+    /// Fixed-order tokens for the `styles:` block (see `docs/DESIGN.md` §3).
+    fn tokens(&self) -> String {
+        fn color(prefix: &str, color: Color, out: &mut Vec<String>) {
+            match color {
+                Color::Default => {}
+                Color::Indexed(i) => out.push(format!("{prefix}={i}")),
+                Color::Rgb(r, g, b) => out.push(format!("{prefix}=#{r:02x}{g:02x}{b:02x}")),
+            }
+        }
+        let mut tokens = Vec::new();
+        color("fg", self.fg, &mut tokens);
+        color("bg", self.bg, &mut tokens);
+        for (on, name) in [
+            (self.bold, "bold"),
+            (self.dim, "dim"),
+            (self.italic, "italic"),
+            (self.underline, "underline"),
+            (self.reverse, "reverse"),
+        ] {
+            if on {
+                tokens.push(name.to_owned());
+            }
+        }
+        tokens.join(" ")
+    }
+}
+
+/// [`Screen`] rendered with its styles — see [`Screen::with_styles`].
+#[derive(Debug, Clone, Copy)]
+pub struct ScreenWithStyles<'a> {
+    screen: &'a Screen,
+}
+
+impl fmt::Display for ScreenWithStyles<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let screen = self.screen;
+        write!(f, "{screen}\n\nstyles:")?;
+        let mut any = false;
+        for row in 0..screen.rows() {
+            let mut spans: Vec<String> = Vec::new();
+            let mut run: Option<(u16, u16, Style)> = None;
+            for col in 0..screen.cols() {
+                let style = screen
+                    .cell(row, col)
+                    .map_or_else(Style::default, |cell| *cell.style());
+                match &mut run {
+                    Some((_, end, current)) if *current == style => *end = col,
+                    _ => {
+                        if let Some(span) = flush(run.take()) {
+                            spans.push(span);
+                        }
+                        run = Some((col, col, style));
+                    }
+                }
+            }
+            if let Some(span) = flush(run) {
+                spans.push(span);
+            }
+            if !spans.is_empty() {
+                any = true;
+                write!(f, "\n{row}: {}", spans.join("; "))?;
+            }
+        }
+        if !any {
+            write!(f, "\n(none)")?;
+        }
+        return Ok(());
+
+        /// Render one run, or `None` for default-styled runs (absence
+        /// means default).
+        fn flush(run: Option<(u16, u16, Style)>) -> Option<String> {
+            let (start, end, style) = run?;
+            if style.is_default() {
+                return None;
+            }
+            let range = if start == end {
+                format!("{start}")
+            } else {
+                format!("{start}-{end}")
+            };
+            Some(format!("{range} {}", style.tokens()))
+        }
+    }
 }
 
 impl fmt::Debug for Screen {
@@ -362,6 +472,73 @@ mod tests {
         assert_eq!(s.cursor(), (1, 2, true));
         assert_eq!(s.size(), (10, 2));
         assert_eq!((s.cols(), s.rows()), (10, 2));
+    }
+
+    #[test]
+    fn with_styles_renders_runs_in_fixed_token_order() {
+        use unicode_width::UnicodeWidthChar as _;
+        let mut cells: Vec<Cell> = Vec::new();
+        let styled = Style {
+            fg: Color::Indexed(4),
+            bold: true,
+            ..Style::default()
+        };
+        // Row 0: "hi" styled, rest default. Row 1: all default text.
+        // Row 2: one reverse blank cell at col 3 (highlight past text).
+        for ch in ['h', 'i'] {
+            assert_eq!(ch.width(), Some(1));
+            cells.push(Cell::new(ch.to_string(), styled, false, false));
+        }
+        for _ in 2..6 {
+            cells.push(Cell::new(String::new(), Style::default(), false, false));
+        }
+        for ch in "plain ".chars() {
+            cells.push(Cell::new(ch.to_string(), Style::default(), false, false));
+        }
+        for col in 0..6 {
+            let style = if col == 3 {
+                Style {
+                    reverse: true,
+                    ..Style::default()
+                }
+            } else {
+                Style::default()
+            };
+            cells.push(Cell::new(String::new(), style, false, false));
+        }
+        let screen = Screen::from_parts(6, 3, 0, 0, true, cells);
+
+        let rendered = screen.with_styles().to_string();
+        let styles_block = rendered.split("\n\nstyles:\n").nth(1).unwrap();
+        assert_eq!(styles_block, "0: 0-1 fg=4 bold\n2: 3 reverse");
+        // The plain rendering is a strict prefix.
+        assert!(rendered.starts_with(&screen.to_string()));
+    }
+
+    #[test]
+    fn with_styles_on_a_default_screen_says_none() {
+        let s = screen(10, 2, &["hello"]);
+        let rendered = s.with_styles().to_string();
+        assert!(rendered.ends_with("\n\nstyles:\n(none)"), "{rendered}");
+    }
+
+    #[test]
+    fn with_styles_renders_rgb_and_merges_adjacent_runs() {
+        let style = Style {
+            bg: Color::Rgb(0x1e, 0x1e, 0x2e),
+            ..Style::default()
+        };
+        let mut cells: Vec<Cell> = Vec::new();
+        for ch in ['a', 'b', 'c'] {
+            cells.push(Cell::new(ch.to_string(), style, false, false));
+        }
+        cells.push(Cell::new(String::new(), Style::default(), false, false));
+        let screen = Screen::from_parts(4, 1, 0, 0, true, cells);
+        let rendered = screen.with_styles().to_string();
+        assert!(
+            rendered.ends_with("styles:\n0: 0-2 bg=#1e1e2e"),
+            "{rendered}"
+        );
     }
 
     #[test]

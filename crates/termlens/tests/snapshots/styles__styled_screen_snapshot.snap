@@ -1,0 +1,33 @@
+---
+source: crates/termlens/tests/styles.rs
+expression: t.screen().with_styles()
+---
+size: 80x24  cursor: 2,0
+ERROR plain underlined
+second row selected
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+styles:
+0: 0-4 fg=1 bold; 12-21 fg=4 underline
+1: 11-18 reverse

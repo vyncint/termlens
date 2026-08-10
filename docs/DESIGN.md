@@ -163,9 +163,27 @@ Rules:
 4. Wide characters occupy their real columns: the character appears once;
    its continuation cell contributes nothing to the text but does count
    for column arithmetic (`find` returns true terminal columns).
-5. Styles are captured per-cell (`Cell::style`) but not rendered in v0.1.
-   v0.2 adds `Screen::with_styles()`, appending a styles block after the
-   grid; the format will be specified here before it ships.
+5. Styles are text-invisible by default; `Screen::with_styles()` opts in.
+   Its rendering is the plain `Display` output followed by a blank line
+   and a `styles:` block:
+
+   ```
+   styles:
+   1: 0-8 fg=4 bold; 12 reverse
+   3: 0-79 bg=#1e1e2e
+   ```
+
+   One line per row containing any non-default cell, ascending; each line
+   is `<row>: <spans>` with spans joined by `; `. A span is an inclusive,
+   0-based column range (`start-end`, or just `start` for one column)
+   followed by style tokens in fixed order: `fg=`, `bg=` (indexed colors
+   as decimal, RGB as `#rrggbb`), then `bold`, `dim`, `italic`,
+   `underline`, `reverse`. Default-styled spans are omitted entirely —
+   absence means default — so a highlight moving rows diffs as exactly
+   two lines. A fully default-styled screen renders `styles:` followed by
+   `(none)`, so the snapshot itself records that styles were asserted.
+   Wide-character continuation cells participate in spans like any other
+   cell.
 
 The `insta` feature (default) re-exports `insta` and ships
 `assert_screen_snapshot!` so the snapshotting insta version can't drift

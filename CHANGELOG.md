@@ -11,6 +11,11 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- `Screen::with_styles()`: the plain snapshot rendering followed by a
+  compact `styles:` block (run-length spans per row, format specified in
+  `docs/DESIGN.md` §3) — a highlight moving to another row or a color
+  changing is now a visible snapshot diff. Plain snapshots stay
+  text-only; this is the opt-in.
 - termlens now **answers terminal queries** (on by default): DSR cursor
   position — exact as of the query byte — operating status, DA1/DA2
   device attributes, `CSI 18 t` text-area size, and `OSC 10/11` color

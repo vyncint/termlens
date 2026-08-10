@@ -33,6 +33,7 @@ fn quits_from_the_main_screen() -> termlens::Result<()> {
 
     t.wait_until(|screen| screen.contains("Ready"))?;
     insta::assert_snapshot!(t.screen());   // snapshot the rendered grid
+    // …or t.screen().with_styles() to catch style-only regressions too
 
     t.send(Key::Char('q'));
     assert!(t.wait_exit()?.success());
@@ -138,8 +139,6 @@ design. termlens's position:
   unaffected; for run-and-exit programs, end the script with a `read` and
   release it after asserting — see the "instant-exit caveat" in
   [docs/DESIGN.md](docs/DESIGN.md).
-- Styles (colors/bold/…) are captured per-cell and queryable, but not part
-  of the text snapshot format yet (`with_styles()` planned for v0.2).
 - Exotic grapheme clusters render as the vt100 crate renders them; the
   unicode-torture fixture pins the current behavior.
 
