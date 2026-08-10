@@ -109,11 +109,15 @@ design. termlens's position:
 - **Prefer `wait_until` on visible content.** It re-checks on every chunk
   of output and is exact: the condition either becomes true or you get a
   screen-carrying timeout.
-- **`wait_idle(quiet)` is an honest heuristic.** It resolves when nothing
-  arrived for `quiet` *and* the stream isn't mid-escape-sequence. Silence
-  is evidence a render finished — not proof. Use it for "the app settled",
-  not for precise sequencing. DEC mode 2026 (synchronized output) gives
-  real frame boundaries; a `wait_frame` built on it is on the roadmap.
+- **`wait_frame` gives exact frame boundaries** for apps that bracket
+  repaints in DEC 2026 synchronized updates (crossterm's
+  `BeginSynchronizedUpdate`/`EndSynchronizedUpdate`): the predicate only
+  ever sees complete frames, never a torn repaint.
+- **`wait_idle(quiet)` is an honest heuristic** for everything else. It
+  resolves when nothing arrived for `quiet`, the stream isn't
+  mid-escape-sequence, and no synchronized update is open. Silence is
+  evidence a render finished — not proof. Use it for "the app settled",
+  not for precise sequencing.
 - **Hermetic environments.** `env_clear()` blocks inheritance,
   `TERM=xterm-256color` is pinned by default, fixtures draw no clocks and
   no animations. The CI suite runs a 100-iteration

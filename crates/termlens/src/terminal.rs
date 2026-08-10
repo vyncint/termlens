@@ -110,6 +110,10 @@ struct EmuState {
     /// The last snapshot built, valid while `generation` is unchanged.
     /// `Screen` is Arc-backed, so serving the cache is a cheap clone.
     snapshot_cache: Option<(u64, Screen)>,
+    /// Completed synchronized updates (DEC 2026) observed so far.
+    frames_seen: u64,
+    /// The screen exactly as of the most recent completed frame.
+    last_frame: Option<Screen>,
 }
 
 impl EmuState {
@@ -120,6 +124,8 @@ impl EmuState {
             eof: false,
             generation: 0,
             snapshot_cache: None,
+            frames_seen: 0,
+            last_frame: None,
         }
     }
 
@@ -355,7 +361,19 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: &Monitor<EmuState>) {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => shared.mutate(|state| {
-                state.emu.process(&buf[..n]);
+                // The emulator stops at each DEC 2026 frame end, so the
+                // snapshot taken there is exactly the completed frame —
+                // even when the same chunk already carries the next
+                // frame's opening bytes.
+                let mut offset = 0;
+                while offset < n {
+                    let processed = state.emu.process(&buf[offset..n]);
+                    offset += processed.consumed;
+                    if processed.frame_complete {
+                        state.frames_seen += 1;
+                        state.last_frame = Some(state.emu.snapshot());
+                    }
+                }
                 state.touch();
             }),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -478,6 +496,88 @@ impl Terminal {
         }
     }
 
+    /// Block until a **complete frame** satisfies `predicate`.
+    ///
+    /// For applications that bracket repaints in DEC 2026 synchronized
+    /// updates (`BeginSynchronizedUpdate` / `EndSynchronizedUpdate` in
+    /// crossterm), the predicate is evaluated only on screens exactly as
+    /// they stood when an update ended — never on a torn, half-painted
+    /// frame. This removes the discipline [`wait_until`](Self::wait_until)
+    /// demands (single predicate, wait on the last-painted region; see
+    /// `docs/DESIGN.md` §2).
+    ///
+    /// The frame completed most recently *before* the call is evaluated
+    /// first, so a fast application cannot slip a frame past you. Each
+    /// frame is evaluated at most once; if several frames complete within
+    /// one read burst, only the newest is seen — `wait_frame` guarantees
+    /// frame-consistent screens, not observation of every transient frame.
+    ///
+    /// ```
+    /// # fn main() -> termlens::Result<()> {
+    /// let mut t = termlens::Terminal::builder()
+    ///     .timeout(std::time::Duration::from_secs(10))
+    ///     .args(["-c", r"printf '\033[?2026hFrame ready\033[?2026l'; read quit"])
+    ///     .spawn("sh")?;
+    /// t.wait_frame(|screen| screen.contains("Frame ready"))?;
+    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Timeout`] at the deadline — with a pointed message when the
+    /// application never emitted a single synchronized update, since
+    /// `wait_frame` can then never succeed; use `wait_until` for such apps.
+    /// [`Error::Eof`] as soon as the PTY closes with no matching frame.
+    pub fn wait_frame(&mut self, mut predicate: impl FnMut(&Screen) -> bool) -> Result<()> {
+        const WHAT: &str = "a complete frame matching the predicate";
+        let deadline = Instant::now() + self.default_timeout;
+        let mut seen_frame = None;
+        let outcome = self.shared.wait_until(deadline, |state| {
+            if state.frames_seen > 0 && seen_frame != Some(state.frames_seen) {
+                seen_frame = Some(state.frames_seen);
+                let frame = state
+                    .last_frame
+                    .clone()
+                    .expect("frames_seen > 0 implies a stored frame");
+                if predicate(&frame) {
+                    return Some(Ok(()));
+                }
+            }
+            if state.eof {
+                return Some(Err(Error::Eof {
+                    waiting_for: WHAT.into(),
+                    screen: state.peek_snapshot(),
+                }));
+            }
+            None
+        });
+        match outcome {
+            Ok(inner) => inner,
+            Err(Expired) => {
+                let (frames, screen) = {
+                    let mut guard = self.shared.lock();
+                    let screen = guard.last_frame.clone().unwrap_or_else(|| guard.snapshot());
+                    (guard.frames_seen, screen)
+                };
+                let waiting_for = if frames == 0 {
+                    "a complete frame — but the application never emitted a \
+                     DEC 2026 synchronized update. wait_frame needs repaints \
+                     bracketed in BeginSynchronizedUpdate/EndSynchronizedUpdate; \
+                     for other apps use wait_until (docs/DESIGN.md §2)"
+                        .to_owned()
+                } else {
+                    format!("{WHAT} ({frames} complete frames observed)")
+                };
+                Err(Error::Timeout {
+                    waiting_for,
+                    timeout: self.default_timeout,
+                    screen,
+                })
+            }
+        }
+    }
+
     /// Block until the terminal has been quiet — no bytes for `quiet` and
     /// the stream not ending mid-escape-sequence. EOF counts as idle
     /// (nothing more can arrive).
@@ -501,7 +601,7 @@ impl Terminal {
                 return Ok(());
             }
             let elapsed = guard.last_activity.elapsed();
-            if elapsed >= quiet && !guard.emu.mid_sequence() {
+            if elapsed >= quiet && !guard.emu.mid_sequence() && !guard.emu.in_sync_update() {
                 return Ok(());
             }
 

@@ -12,10 +12,22 @@ pub(crate) use self::vt100::Vt100Emulator;
 
 use crate::Screen;
 
+/// Outcome of feeding one segment of PTY bytes into the emulator.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Processed {
+    /// How many input bytes were consumed (> 0 for non-empty input).
+    pub(crate) consumed: usize,
+    /// True when consumption stopped because a synchronized update ended
+    /// (DEC 2026 ESU): the screen at this instant is a complete frame.
+    pub(crate) frame_complete: bool,
+}
+
 /// A VT emulator: consumes raw PTY bytes, maintains a screen grid.
 pub(crate) trait Emulator: Send {
-    /// Feed raw bytes from the PTY into the emulator.
-    fn process(&mut self, bytes: &[u8]);
+    /// Feed raw bytes from the PTY into the emulator. Stops early — with
+    /// `consumed < bytes.len()` — when a synchronized update ends, so the
+    /// caller can observe the completed frame before feeding the rest.
+    fn process(&mut self, bytes: &[u8]) -> Processed;
 
     /// Snapshot the current screen as an owned value.
     fn snapshot(&self) -> Screen;
@@ -24,6 +36,10 @@ pub(crate) trait Emulator: Send {
     /// or an incomplete UTF-8 character — used by `wait_idle` to avoid
     /// declaring idleness mid-update.
     fn mid_sequence(&self) -> bool;
+
+    /// True while the stream is inside a DEC 2026 synchronized update —
+    /// the app has begun a repaint and not finished it.
+    fn in_sync_update(&self) -> bool;
 
     /// Resize the emulated grid to `rows` × `cols`.
     fn set_size(&mut self, rows: u16, cols: u16);

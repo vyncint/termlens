@@ -5,6 +5,13 @@
 //!
 //! Exit codes: 0 on Esc, 42 on Ctrl-X (exercises exit-status plumbing).
 //!
+//! Every redraw is bracketed in a DEC 2026 synchronized update, so this
+//! fixture also exercises `wait_frame`. F2 triggers a deliberately *torn*
+//! draw — half a row, a real 150ms pause, then the rest, all inside one
+//! synchronized update — to prove `wait_frame` never observes the tear.
+//! That sleep is the only nondeterminism in any fixture, and it affects
+//! timing only, never content.
+//!
 //! Fixture rules: deterministic — redraws only in response to input.
 
 use std::io::{self, Write};
@@ -13,7 +20,8 @@ use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::style::Print;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, Clear, ClearType,
+    EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::{execute, queue};
 
@@ -56,6 +64,7 @@ fn describe(key: &KeyEvent) -> String {
 }
 
 fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
+    queue!(out, BeginSynchronizedUpdate)?;
     let lines = [
         "form-echo ready".to_string(),
         format!("input: {}", app.input),
@@ -70,6 +79,23 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
             Print(line)
         )?;
     }
+    queue!(out, EndSynchronizedUpdate)?;
+    out.flush()
+}
+
+/// Half a frame, a real pause, then the rest — inside ONE synchronized
+/// update. An unsynchronized observer sees the tear; `wait_frame` must not.
+fn draw_torn(out: &mut impl Write) -> io::Result<()> {
+    queue!(
+        out,
+        BeginSynchronizedUpdate,
+        MoveTo(0, 5),
+        Clear(ClearType::CurrentLine),
+        Print("torn: left")
+    )?;
+    out.flush()?;
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    queue!(out, MoveTo(10, 5), Print(" right"), EndSynchronizedUpdate)?;
     out.flush()
 }
 
@@ -97,6 +123,11 @@ fn main() -> io::Result<()> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('x') {
             cleanup(&mut out)?;
             std::process::exit(42);
+        }
+
+        if key.code == KeyCode::F(2) {
+            draw_torn(&mut out)?;
+            continue;
         }
 
         match key.code {

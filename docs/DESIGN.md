@@ -51,14 +51,27 @@ expiry the error **embeds the full screen dump** — a CI log alone answers
   reader delivers bytes (condvar notification), with a 50ms poll cap as a
   missed-wakeup backstop. Fails fast with `Error::Eof` the moment the PTY
   closes while `pred` is false: more waiting can never succeed.
+- `wait_frame(pred)` — evaluates `pred` **only on complete frames**. The
+  sequence tracker recognizes DEC private mode 2026 (`CSI ?2026 h/l`,
+  including multi-mode lists); the reader splits each chunk at every
+  frame end and snapshots the screen *at that instant*, so the predicate
+  sees exactly the frame as the app finished it — even when the same read
+  already carries the next frame's opening bytes. The frame completed
+  most recently before the call is evaluated first (fast apps can't slip
+  a frame past the wait). Honest caveat: frames that complete within one
+  read burst supersede each other — `wait_frame` guarantees
+  frame-consistent screens, not observation of every transient frame. An
+  app that never emits a synchronized update makes the timeout error say
+  so and point at `wait_until`.
 - `wait_idle(quiet)` — resolves when **no bytes for `quiet`** AND the
-  stream does not end mid-escape-sequence (or mid-UTF-8-character). The
-  second condition comes from a minimal sequence tracker (`emu/seq.rs`) —
-  not a VT parser, just enough state to answer "did the stream stop inside
-  an update?". EOF counts as idle. **This is a heuristic**: silence is
-  evidence of a finished render, not proof. Prefer `wait_until` on visible
-  content. Roadmap: DEC private mode 2026 (synchronized output) gives true
-  frame boundaries — a future `wait_frame` will use it where apps opt in.
+  stream does not end mid-escape-sequence (or mid-UTF-8-character) AND no
+  synchronized update is open (a begun-but-unfinished DEC 2026 repaint is
+  by definition mid-update). The sequence conditions come from a minimal
+  tracker (`emu/seq.rs`) — not a VT parser, just enough state to answer
+  "did the stream stop inside an update?". EOF counts as idle. **This is
+  a heuristic**: silence is evidence of a finished render, not proof.
+  Prefer `wait_until` on visible content, or `wait_frame` where the app
+  uses synchronized output.
 - `wait_exit()` — polls `try_wait` on a capped backoff ladder (1→20ms),
   then grace-drains the PTY (≤500ms) so the final screen is complete
   before returning. Idempotent via a cached status.

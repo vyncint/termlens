@@ -9,6 +9,19 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Added
+
+- `Terminal::wait_frame(pred)`: evaluates the predicate only on **complete
+  frames** for applications that bracket repaints in DEC 2026 synchronized
+  updates — a torn, half-painted repaint is never observable. Apps that
+  don't emit synchronized output get a timeout error that says so and
+  points at `wait_until`.
+
+### Changed
+
+- `wait_idle` no longer resolves while a synchronized update is open: a
+  begun-but-unfinished repaint is mid-update by definition.
+
 ## [0.1.1] - 2026-08-09
 
 ### Changed
