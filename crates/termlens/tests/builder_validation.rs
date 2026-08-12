@@ -66,6 +66,51 @@ fn a_file_is_not_a_working_directory() {
     let _ = std::fs::remove_file(&file);
 }
 
+/// A zero dimension used to reach vt100, which panicked on an
+/// overflowing subtraction in debug builds and — worse — panicked on the
+/// *reader thread* in release builds, killing the drain silently.
+#[test]
+fn a_zero_dimension_is_rejected_before_it_reaches_the_emulator() {
+    for (cols, rows) in [(0u16, 24u16), (80, 0), (0, 0)] {
+        let err = Terminal::builder()
+            .size(cols, rows)
+            .timeout(Duration::from_secs(2))
+            .args(["-c", "read x"])
+            .spawn("/bin/sh")
+            .expect_err("a terminal cannot have a zero dimension");
+        assert!(matches!(err, Error::Input(_)), "{cols}x{rows}: got {err}");
+        assert!(
+            err.to_string().contains(&format!("{cols}x{rows}")),
+            "the offending size belongs in the message: {err}"
+        );
+    }
+}
+
+#[test]
+fn resize_to_zero_is_refused_without_touching_the_pty_or_the_grid() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .size(80, 24)
+        .timeout(Duration::from_secs(5))
+        .args(["-c", "printf ready; read x"])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("ready"))?;
+
+    for (cols, rows) in [(0u16, 24u16), (80, 0), (0, 0)] {
+        let err = t
+            .resize(cols, rows)
+            .expect_err("a terminal cannot have a zero dimension");
+        assert!(matches!(err, Error::Input(_)), "{cols}x{rows}: got {err}");
+    }
+
+    // The grid is untouched and the terminal still works.
+    assert_eq!(t.screen().size(), (80, 24));
+    t.resize(70, 20)?;
+    assert_eq!(t.screen().size(), (70, 20));
+    t.send(termlens::Key::Enter);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 #[test]
 fn a_missing_program_still_reports_the_underlying_search_failure() {
     let err = Terminal::builder()

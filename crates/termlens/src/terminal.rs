@@ -347,6 +347,10 @@ impl Default for TerminalBuilder {
 
 impl TerminalBuilder {
     /// Terminal size as columns × rows. Defaults to 80×24.
+    ///
+    /// Both dimensions must be non-zero; [`spawn`](Self::spawn) rejects a
+    /// zero with [`Error::Input`] rather than letting the emulator meet a
+    /// size no terminal can have.
     #[must_use]
     pub fn size(mut self, cols: u16, rows: u16) -> Self {
         self.cols = cols;
@@ -456,6 +460,7 @@ impl TerminalBuilder {
         if program.is_empty() {
             return spawn_err("no program name given (the program argument was empty)".into());
         }
+        check_size(self.cols, self.rows)?;
         // portable-pty filters the cwd through is_dir() and silently falls
         // back to the home directory. Sensible for a terminal emulator,
         // which must always open somewhere; wrong for a test harness,
@@ -480,8 +485,11 @@ impl TerminalBuilder {
     /// # Errors
     ///
     /// [`Error::Spawn`] when the configuration cannot produce a runnable
-    /// command (empty program name) or the program cannot be executed;
-    /// [`Error::Pty`] when the PTY cannot be opened.
+    /// command (empty program name, missing
+    /// [`current_dir`](Self::current_dir)) or the program cannot be
+    /// executed; [`Error::Input`] when the configured
+    /// [`size`](Self::size) has a zero dimension; [`Error::Pty`] when the
+    /// PTY cannot be opened.
     pub fn spawn(self, program: impl AsRef<OsStr>) -> Result<Terminal> {
         let program = program.as_ref();
         let command_desc = std::iter::once(program)
@@ -572,6 +580,28 @@ impl TerminalBuilder {
             command_desc,
         })
     }
+}
+
+/// Reject a zero terminal dimension.
+///
+/// A terminal has at least one row and one column. Letting a zero reach
+/// the emulator is not a graceful degradation: in debug builds vt100
+/// panics on an overflowing subtraction, and in release builds (the
+/// stress workflow runs `--release`) the arithmetic wraps, `spawn` and
+/// `resize` return `Ok`, and vt100 panics on the first printable byte —
+/// on the reader thread, where nothing propagates it. The drain dies
+/// silently, every later snapshot is blank, and a careless test goes
+/// green. Zeroes arrive from ordinary arithmetic (`resize(cols - 1, …)`
+/// in a loop), so this must be a typed error, not a panic in a
+/// dependency.
+fn check_size(cols: u16, rows: u16) -> Result<()> {
+    if cols == 0 || rows == 0 {
+        return Err(Error::Input(format!(
+            "a terminal needs at least one column and one row, got {cols}x{rows} \
+             (columns x rows)"
+        )));
+    }
+    Ok(())
 }
 
 /// Canonical printable shape of a known query (for diagnostics when the
@@ -1189,8 +1219,11 @@ impl Terminal {
     ///
     /// # Errors
     ///
-    /// [`Error::Pty`] if the ioctl fails.
+    /// [`Error::Input`] if either dimension is zero (a terminal has at
+    /// least one row and one column), before the PTY or the grid is
+    /// touched; [`Error::Pty`] if the ioctl fails.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        check_size(cols, rows)?;
         self.master
             .as_ref()
             .expect("master lives until drop")

@@ -11,6 +11,12 @@ listed under a **Changed** or **Removed** heading.
 
 ### Fixed
 
+- A zero terminal dimension is now a typed `Error::Input` from `spawn`
+  and `resize` instead of a panic inside the emulator. In release builds
+  — the profile the stress workflow uses — it was worse than a panic:
+  the arithmetic wrapped, both calls returned `Ok`, and the emulator
+  panicked on the reader thread, silently killing the drain so every
+  later snapshot was blank and a careless test went green.
 - `current_dir` pointing at a path that is not an existing directory now
   fails the spawn instead of being **silently ignored**: the PTY layer
   falls back to the home directory, so a directory-sensitive test could
