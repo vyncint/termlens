@@ -121,8 +121,15 @@ fn a_query_the_app_moved_past_is_context_not_a_cause() {
     let mut t = Terminal::builder()
         .timeout(Duration::from_millis(400))
         // Probes kitty (deliberately unanswered), does NOT block on a
-        // reply, prints, then sits in a normal read.
-        .args(["-c", r"printf '\033[?u'; printf 'ready\n'; read guard"])
+        // reply, prints, then sits in a normal read. The pause forces the
+        // output into a *later read* than the probe — output batched into
+        // the same write is deliberately not treated as progress, since
+        // the emulator stops at the query byte and consumes the rest of
+        // that same chunk regardless of what the application is doing.
+        .args([
+            "-c",
+            r"printf '\033[?u'; sleep 0.2; printf 'ready\n'; read guard",
+        ])
         .spawn("/bin/sh")
         .unwrap();
     t.wait_until(|s| s.contains("ready")).unwrap();
