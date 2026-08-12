@@ -10,7 +10,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -34,6 +34,17 @@ const DRAIN_GRACE: Duration = Duration::from_millis(500);
 /// beyond this is counted rather than kept.
 const MAX_UNANSWERED: usize = 8;
 
+/// Query replies that may be queued for the responder thread before the
+/// drain starts discarding them. Reached only when the application has
+/// stopped reading its input entirely, in which case it cannot be
+/// waiting on these bytes.
+const REPLY_QUEUE_DEPTH: usize = 64;
+
+/// How long `Drop` will wait for a killed child to be reaped before
+/// giving up. Teardown must terminate: a stuck child is a bad outcome, a
+/// test binary that never exits is a worse one.
+const DROP_REAP_GRACE: Duration = Duration::from_secs(2);
+
 /// Serializes every PTY *lifecycle edge* (open+spawn on one side, kill+reap+
 /// master-close on the other) across all `Terminal`s in this process.
 ///
@@ -56,6 +67,32 @@ fn pty_lifecycle_guard() -> std::sync::MutexGuard<'static, ()> {
 /// thread (query replies). `None` after teardown. Locked briefly per write;
 /// never while the emulator state lock is held.
 type SharedWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+
+/// Open a second writer onto the same PTY master, for the responder
+/// thread. `take_writer` may only be called once, so duplicate the
+/// descriptor instead: both refer to the same open file description,
+/// which is what we want — same terminal, independent blocking.
+#[cfg(unix)]
+fn dup_writer(master: &dyn portable_pty::MasterPty) -> Option<std::fs::File> {
+    use std::os::unix::io::FromRawFd;
+
+    let fd = master.as_raw_fd()?;
+    // SAFETY: `fd` is the live master descriptor (the caller still owns
+    // the master). dup(2) returns a fresh descriptor we take sole
+    // ownership of; `File` closes it exactly once on drop.
+    #[allow(unsafe_code)]
+    let duped = unsafe { libc::dup(fd) };
+    if duped < 0 {
+        return None;
+    }
+    #[allow(unsafe_code)]
+    Some(unsafe { std::fs::File::from_raw_fd(duped) })
+}
+
+#[cfg(not(unix))]
+fn dup_writer(_master: &dyn portable_pty::MasterPty) -> Option<std::fs::File> {
+    None
+}
 
 /// Scroll-wheel direction for [`Terminal::scroll`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +225,9 @@ struct EmuState {
     unanswered: Vec<(String, u64)>,
     /// Distinct unanswered shapes beyond `MAX_UNANSWERED`, counted only.
     unanswered_overflow: usize,
+    /// Query replies the reader could not deliver because the child was
+    /// not reading its input — evidence for the diagnosis, not an error.
+    replies_dropped: usize,
     /// Reads delivered by the PTY so far. A query last seen in an earlier
     /// read than this cannot be what the application is blocked on: it
     /// produced output after asking.
@@ -208,6 +248,7 @@ impl EmuState {
             background,
             unanswered: Vec::new(),
             unanswered_overflow: 0,
+            replies_dropped: 0,
             reads: 0,
         }
     }
@@ -315,8 +356,17 @@ impl EmuState {
     /// rest of the same chunk, so output the application batched into the
     /// same `write` as its probe is not evidence of progress.
     fn query_note(&self) -> String {
+        let backlog = if self.replies_dropped > 0 {
+            format!(
+                " — note: the application is not reading its input \
+                 ({} terminal replies could not be delivered)",
+                self.replies_dropped
+            )
+        } else {
+            String::new()
+        };
         if self.unanswered.is_empty() {
-            return String::new();
+            return backlog;
         }
         let mut blocking: Vec<&str> = Vec::new();
         let mut moved_past: Vec<&str> = Vec::new();
@@ -334,16 +384,16 @@ impl EmuState {
         };
         if blocking.is_empty() {
             format!(
-                " — note: the application queried the terminal ({}{more}) and \
-                 received no answer, but produced output afterwards, so that is \
-                 probably not why this wait failed",
+                "{backlog} — note: the application queried the terminal \
+                 ({}{more}) and received no answer, but produced output \
+                 afterwards, so that is probably not why this wait failed",
                 moved_past.join(", ")
             )
         } else {
             format!(
-                " — note: the application queried the terminal ({}{more}) and \
-                 received no answer; if it is blocked waiting for that reply, \
-                 this is the cause",
+                "{backlog} — note: the application queried the terminal \
+                 ({}{more}) and received no answer; if it is blocked waiting \
+                 for that reply, this is the cause",
                 blocking.join(", ")
             )
         }
@@ -620,11 +670,41 @@ impl TerminalBuilder {
         )));
         let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
 
+        // Query replies are written by a thread of their own, never by
+        // the drain. A reply write blocks whenever the application has
+        // stopped reading its input; doing that on the reader thread
+        // stops the drain, the child then blocks writing into a full
+        // output buffer, and the harness deadlocks itself with no test
+        // input involved.
+        let reply_tx = match dup_writer(pair.master.as_ref()) {
+            Some(mut reply_writer) => {
+                let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(REPLY_QUEUE_DEPTH);
+                thread::Builder::new()
+                    .name("termlens-pty-responder".into())
+                    .spawn(move || {
+                        while let Ok(reply) = rx.recv() {
+                            if reply_writer
+                                .write_all(&reply)
+                                .and_then(|()| reply_writer.flush())
+                                .is_err()
+                            {
+                                break; // terminal gone; nothing left to answer
+                            }
+                        }
+                    })
+                    .map_err(Error::Io)?;
+                Some(tx)
+            }
+            // No descriptor to duplicate: fall back to answering from
+            // the reader thread, as before.
+            None => None,
+        };
+
         let reader_shared = Arc::clone(&shared);
         let reader_writer = Arc::clone(&writer);
         thread::Builder::new()
             .name("termlens-pty-reader".into())
-            .spawn(move || reader_loop(reader, &reader_shared, &reader_writer))
+            .spawn(move || reader_loop(reader, &reader_shared, &reader_writer, reply_tx.as_ref()))
             .map_err(Error::Io)?;
 
         let child = pair.slave.spawn_command(cmd).map_err(|e| Error::Spawn {
@@ -706,6 +786,7 @@ fn reader_loop(
     mut reader: Box<dyn Read + Send>,
     shared: &Monitor<EmuState>,
     writer: &SharedWriter,
+    replies_to: Option<&mpsc::SyncSender<Vec<u8>>>,
 ) {
     let mut buf = [0u8; 8192];
     loop {
@@ -746,9 +827,24 @@ fn reader_loop(
                     replies
                 });
                 for reply in replies {
-                    let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
-                    if let Some(writer) = writer.as_mut() {
-                        let _ = writer.write_all(&reply).and_then(|()| writer.flush());
+                    match replies_to {
+                        // Hand off without waiting. A full queue means the
+                        // application has stopped reading its input
+                        // entirely, so it cannot be waiting on these bytes
+                        // — and the drain must keep running regardless.
+                        Some(tx) => {
+                            if let Err(mpsc::TrySendError::Full(_)) = tx.try_send(reply) {
+                                shared.mutate(|state| state.replies_dropped += 1);
+                            }
+                        }
+                        // No responder thread (no descriptor to duplicate):
+                        // write inline, as before.
+                        None => {
+                            let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
+                            if let Some(writer) = writer.as_mut() {
+                                let _ = writer.write_all(&reply).and_then(|()| writer.flush());
+                            }
+                        }
                     }
                 }
             }
@@ -1380,18 +1476,34 @@ impl Drop for Terminal {
     /// under the process-wide PTY lifecycle lock: on macOS, letting a
     /// master close overlap a concurrent `openpty()` can revoke the *other*
     /// terminal's freshly recycled PTY device (see `PTY_LIFECYCLE` in this module).
+    ///
+    /// The reap is bounded (`DROP_REAP_GRACE`). A child that cannot be
+    /// reaped is a bad outcome; a test binary that never exits — which an
+    /// unbounded `wait` here produced whenever the child was wedged — is a
+    /// worse one, and unlike the first it cannot even be diagnosed.
     fn drop(&mut self) {
         let _lifecycle = pty_lifecycle_guard();
         if self.exit_status.is_none() {
             let already_exited = matches!(self.child.try_wait(), Ok(Some(_)));
             if !already_exited {
                 let _ = self.child.kill();
-                let _ = self.child.wait();
+                let deadline = Instant::now() + DROP_REAP_GRACE;
+                let mut backoff = INITIAL_BACKOFF;
+                while !matches!(self.child.try_wait(), Ok(Some(_))) {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    thread::sleep(backoff.min(deadline - now));
+                    backoff = next_backoff(backoff);
+                }
             }
         }
-        // Close the PTY fds while still holding the lock. Taking the boxed
-        // writer out of the shared cell closes its fd even though the
-        // reader thread keeps the (now empty) cell alive.
+        // Close the PTY fds while still holding the lock. Taking the writer
+        // out of the shared cell closes its fd even though the reader
+        // thread keeps the (now empty) cell alive — and it must happen
+        // before the master is dropped, since the reader polls the
+        // master's descriptor while holding this lock.
         drop(
             self.writer
                 .lock()

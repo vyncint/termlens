@@ -22,6 +22,17 @@ listed under a **Changed** or **Removed** heading.
 
 ### Fixed
 
+- **The harness can no longer deadlock itself.** Query replies were
+  written by the reader thread, so an application that emitted queries
+  faster than it read the answers filled the PTY's input queue, blocked
+  that write, and stopped the drain — after which the child blocked
+  writing and neither side could proceed. Reproduced in the default
+  configuration with no test input at all: the wait timed out with a
+  stale screen and then `Drop` never returned. Replies now go to a
+  dedicated responder thread, so the drain never writes; undeliverable
+  replies are counted and reported ("the application is not reading its
+  input") instead of stalling anything. `Drop`'s reap is bounded too —
+  teardown must always terminate.
 - The unanswered-query diagnosis no longer misattributes unrelated
   failures. It was recorded once and never cleared, so a single
   deliberately-unanswered probe at startup (kitty's `CSI ? u` is the

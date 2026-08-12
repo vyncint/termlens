@@ -58,6 +58,15 @@ cursor *at the query*, not after later output in the same chunk moved
 it. Replies are built under the state lock but written after it is
 released — the state lock and the writer lock are never held together.
 
+**The drain never writes.** Replies are handed to a dedicated responder
+thread over a bounded queue. Writing them from the reader thread would
+block whenever the application stopped reading its input; the drain
+would stop, the child would then block writing into a full output
+buffer, and the harness would deadlock itself with no test input
+involved. A full queue means the application is not reading at all — so
+it cannot be waiting on those bytes — and the replies are counted and
+named in the next wait's error instead.
+
 Whatever remains unanswered (XTGETTCAP, pixel-size reports, …) is
 recorded, and the next wait timeout names it: "the application queried
 the terminal (`^[[14t`) and received no answer" — a hang becomes a
