@@ -582,6 +582,22 @@ impl TerminalBuilder {
     }
 }
 
+/// Remove bracketed-paste markers from pasted text.
+///
+/// Repeated to a fixed point, because a single pass is trivially
+/// defeated by a marker that reassembles from the remains of another
+/// (`ESC[2ESC[201~01~`) — the same rule kitty applies.
+fn strip_paste_markers(text: &str) -> String {
+    let mut out = text.to_owned();
+    loop {
+        let stripped = out.replace("\x1b[200~", "").replace("\x1b[201~", "");
+        if stripped == out {
+            return out;
+        }
+        out = stripped;
+    }
+}
+
 /// Reject a zero terminal dimension.
 ///
 /// A terminal has at least one row and one column. Letting a zero reach
@@ -739,15 +755,35 @@ impl Terminal {
     /// crossterm's `EnableBracketedPaste`), the text arrives wrapped in
     /// `ESC[200~ … ESC[201~` and the application sees **one paste
     /// event**, not a burst of key presses. When it hasn't, the bytes
-    /// arrive plain — exactly like a real terminal.
+    /// arrive unwrapped — exactly like a real terminal.
+    ///
+    /// Two transformations make the paste behave like a real one, both
+    /// applied to the text itself:
+    ///
+    /// - **Line breaks become `\r`**, the byte the Enter key produces.
+    ///   Applications in raw mode (which clears `ICRNL`) never see `\n`
+    ///   from a terminal, so a pasted `"a\nb"` would otherwise be a line
+    ///   break the application does not recognize.
+    /// - **Paste markers inside the text are removed** while bracketed
+    ///   paste is active, repeatedly until none remain. Otherwise an
+    ///   embedded `ESC[201~` would end the paste early and the remainder
+    ///   would arrive as ordinary key presses — the classic paste
+    ///   injection, and a silent way for a test to exercise something
+    ///   other than what it wrote.
+    ///
+    /// To send bytes with no transformation at all, use
+    /// [`send_str`](Self::send_str) and write the brackets yourself.
     ///
     /// # Panics
     ///
     /// Same contract as [`send`](Self::send).
     pub fn paste(&mut self, text: &str) {
+        // Real terminals send CR for a pasted line break; \r\n collapses
+        // to a single CR rather than two line breaks.
+        let text = text.replace("\r\n", "\r").replace('\n', "\r");
         if self.input_modes().bracketed_paste {
             let mut bytes = b"\x1b[200~".to_vec();
-            bytes.extend_from_slice(text.as_bytes());
+            bytes.extend_from_slice(strip_paste_markers(&text).as_bytes());
             bytes.extend_from_slice(b"\x1b[201~");
             self.write_or_panic(&bytes, "a bracketed paste");
         } else {

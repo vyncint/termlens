@@ -93,6 +93,61 @@ fn paste_falls_back_to_plain_bytes_without_the_mode() -> termlens::Result<()> {
     Ok(())
 }
 
+/// A paste marker inside the text must not end the paste early: the app
+/// would see the remainder as ordinary key presses (paste injection).
+#[test]
+fn an_embedded_paste_marker_cannot_end_the_paste() -> termlens::Result<()> {
+    let mut t = spawn_form_echo()?;
+    t.wait_frame(|s| s.contains("form-echo ready"))?;
+
+    t.paste("AB\x1b[201~CD");
+    // One paste event carrying all four characters — the markers are
+    // gone, so nothing arrives as key presses.
+    t.wait_frame(|s| s.contains("input: ABCD") && s.contains("last: paste:4"))?;
+
+    t.send(Key::Esc);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// Pasted line breaks reach the application as CR, the byte the Enter
+/// key produces — every real terminal converts, and raw mode (which
+/// clears ICRNL) means nothing downstream will.
+#[test]
+fn a_pasted_line_break_arrives_as_carriage_return() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                // -icrnl is what raw mode does (crossterm's
+                // enable_raw_mode clears it): without it the line
+                // discipline rewrites our CR back to LF before the app
+                // ever sees it. READY marks the settings as applied —
+                // pasting earlier would race them.
+                r"stty -icanon -echo -icrnl; printf READY; ",
+                // Render the three bytes as hex so the wire is visible.
+                r"head -c 3 | od -An -tx1 | tr -d ' \n'; printf ' WIRE-EOF'; read guard"
+            ),
+        ])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("READY"))?;
+
+    t.paste("a\nb");
+    t.wait_until(|s| s.contains("WIRE-EOF"))?;
+    let row = t.screen().row_text(0);
+    assert!(
+        row.contains("610d62"),
+        "expected 61 0d 62 (a CR b), got: {row}"
+    );
+
+    // ICRNL is off, so the guard `read` needs a literal newline — the
+    // CR that Key::Enter sends is no longer translated for it.
+    t.send_str("\n");
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 #[test]
 fn arrows_follow_the_apps_cursor_key_mode() -> termlens::Result<()> {
     // The script enables DECCKM (CSI ?1 h), reads 3 bytes, reports them,

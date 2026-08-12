@@ -9,6 +9,17 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Changed
+
+- `paste` now transforms the text the way a real terminal does, so what
+  the application receives matches what a user pasting would produce.
+  Line breaks become `\r` (the byte Enter sends; applications in raw
+  mode never see `\n` from a terminal), and while bracketed paste is
+  active, paste markers embedded in the text are removed — previously an
+  `ESC[201~` inside the text ended the paste early and the remainder
+  arrived as ordinary key presses. `send_str` remains the untransformed
+  path.
+
 ### Fixed
 
 - A zero terminal dimension is now a typed `Error::Input` from `spawn`
