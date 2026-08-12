@@ -9,6 +9,12 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- `spawn("")` now fails with a one-line `Error::Spawn` naming the problem
+  instead of surfacing the PTY layer's entire `PATH` search. Genuine
+  "program not found" failures keep their underlying diagnosis.
+
 ## [0.2.0] - 2026-08-11
 
 ### Added

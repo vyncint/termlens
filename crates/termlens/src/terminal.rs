@@ -435,6 +435,25 @@ impl TerminalBuilder {
         self
     }
 
+    /// Reject configurations that cannot produce a working terminal.
+    ///
+    /// These are all programming errors in the test, and each has a
+    /// failure mode elsewhere that is far harder to read than a typed
+    /// error here: an empty program name becomes a page of PATH search
+    /// output from the PTY layer.
+    fn validate(&self, command_desc: &str, program: &OsStr) -> Result<()> {
+        let spawn_err = |reason: String| {
+            Err(Error::Spawn {
+                command: command_desc.to_owned(),
+                reason,
+            })
+        };
+        if program.is_empty() {
+            return spawn_err("no program name given (the program argument was empty)".into());
+        }
+        Ok(())
+    }
+
     /// Spawn `program` inside a fresh PTY and start draining its output.
     ///
     /// Unless a `TERM` variable was set explicitly, the child gets
@@ -443,8 +462,9 @@ impl TerminalBuilder {
     ///
     /// # Errors
     ///
-    /// [`Error::Pty`] when the PTY cannot be opened and [`Error::Spawn`]
-    /// when the program cannot be executed.
+    /// [`Error::Spawn`] when the configuration cannot produce a runnable
+    /// command (empty program name) or the program cannot be executed;
+    /// [`Error::Pty`] when the PTY cannot be opened.
     pub fn spawn(self, program: impl AsRef<OsStr>) -> Result<Terminal> {
         let program = program.as_ref();
         let command_desc = std::iter::once(program)
@@ -452,6 +472,11 @@ impl TerminalBuilder {
             .map(|s| s.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join(" ");
+
+        // Validate the configuration before opening anything: a bad
+        // builder should fail on its own terms, not as a PTY-layer
+        // diagnostic about something else.
+        self.validate(&command_desc, program)?;
 
         // Hold the lifecycle lock across openpty → spawn → slave close, so
         // no concurrent Terminal teardown can revoke our fresh PTY device.
