@@ -407,6 +407,10 @@ impl TerminalBuilder {
     /// Run the program with `dir` as its working directory instead of
     /// inheriting the test runner's. Directory-sensitive programs no
     /// longer need a `cd … && …` through a shell.
+    ///
+    /// [`spawn`](Self::spawn) fails with [`Error::Spawn`] if `dir` is not
+    /// an existing directory — running somewhere else instead would make
+    /// a directory-sensitive test pass against the wrong tree.
     #[must_use]
     pub fn current_dir(mut self, dir: impl AsRef<Path>) -> Self {
         self.cwd = Some(dir.as_ref().to_path_buf());
@@ -440,7 +444,8 @@ impl TerminalBuilder {
     /// These are all programming errors in the test, and each has a
     /// failure mode elsewhere that is far harder to read than a typed
     /// error here: an empty program name becomes a page of PATH search
-    /// output from the PTY layer.
+    /// output from the PTY layer, and a missing working directory becomes
+    /// no error at all — the child just runs somewhere else.
     fn validate(&self, command_desc: &str, program: &OsStr) -> Result<()> {
         let spawn_err = |reason: String| {
             Err(Error::Spawn {
@@ -450,6 +455,18 @@ impl TerminalBuilder {
         };
         if program.is_empty() {
             return spawn_err("no program name given (the program argument was empty)".into());
+        }
+        // portable-pty filters the cwd through is_dir() and silently falls
+        // back to the home directory. Sensible for a terminal emulator,
+        // which must always open somewhere; wrong for a test harness,
+        // where "run it there" is part of the assertion.
+        if let Some(dir) = &self.cwd {
+            if !dir.is_dir() {
+                return spawn_err(format!(
+                    "current_dir({}) is not an existing directory",
+                    dir.display()
+                ));
+            }
         }
         Ok(())
     }

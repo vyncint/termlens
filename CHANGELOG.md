@@ -11,6 +11,10 @@ listed under a **Changed** or **Removed** heading.
 
 ### Fixed
 
+- `current_dir` pointing at a path that is not an existing directory now
+  fails the spawn instead of being **silently ignored**: the PTY layer
+  falls back to the home directory, so a directory-sensitive test could
+  pass against the wrong tree with no error anywhere.
 - `spawn("")` now fails with a one-line `Error::Spawn` naming the problem
   instead of surfacing the PTY layer's entire `PATH` search. Genuine
   "program not found" failures keep their underlying diagnosis.
