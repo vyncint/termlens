@@ -112,6 +112,73 @@ fn the_responder_can_be_disabled_and_says_what_went_unanswered() {
     assert!(msg.contains("^[[6n"), "query not named in: {msg}");
 }
 
+/// The diagnosis must not outlive the situation it describes. An app
+/// that probes, is answered nothing, and carries on producing output was
+/// plainly not blocked on that probe — a later, unrelated timeout must
+/// not blame it.
+#[test]
+fn a_query_the_app_moved_past_is_context_not_a_cause() {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_millis(400))
+        // Probes kitty (deliberately unanswered), does NOT block on a
+        // reply, prints, then sits in a normal read.
+        .args(["-c", r"printf '\033[?u'; printf 'ready\n'; read guard"])
+        .spawn("/bin/sh")
+        .unwrap();
+    t.wait_until(|s| s.contains("ready")).unwrap();
+
+    let err = t.wait_until(|s| s.contains("never-appears")).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("^[[?u"),
+        "the query is still worth naming: {msg}"
+    );
+    assert!(
+        !msg.contains("this is the cause"),
+        "the app moved past the probe — no causal claim belongs here: {msg}"
+    );
+    assert!(
+        msg.contains("produced output afterwards"),
+        "the note should say why it is only context: {msg}"
+    );
+}
+
+/// Every unanswered query is named, not just the most recent one.
+#[test]
+fn all_unanswered_queries_are_named() {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_millis(400))
+        .args([
+            "-c",
+            r"printf '\033[?u\033[14t'; head -c 4 >/dev/null; echo never",
+        ])
+        .spawn("/bin/sh")
+        .unwrap();
+    let err = t.wait_until(|s| s.contains("never")).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("^[[?u"), "first query missing from: {msg}");
+    assert!(msg.contains("^[[14t"), "second query missing from: {msg}");
+}
+
+/// `wait_frame` used to build its message from its own strings and never
+/// surface the note — the worst place to withhold it, since an app
+/// blocked on a probe never reaches its first repaint and the message
+/// then blames the app for not emitting frames.
+#[test]
+fn wait_frame_timeouts_carry_the_query_note() {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_millis(400))
+        .args(["-c", r"printf '\033[14t'; head -c 4 >/dev/null; echo never"])
+        .spawn("/bin/sh")
+        .unwrap();
+    let err = t.wait_frame(|s| s.contains("never")).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("^[[14t") && msg.contains("received no answer"),
+        "wait_frame withheld the diagnosis: {msg}"
+    );
+}
+
 #[test]
 fn replies_are_not_echoed_into_the_screen() -> termlens::Result<()> {
     // The reply travels the input path; unless the app prints it, it must

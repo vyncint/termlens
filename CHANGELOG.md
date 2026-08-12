@@ -22,6 +22,17 @@ listed under a **Changed** or **Removed** heading.
 
 ### Fixed
 
+- The unanswered-query diagnosis no longer misattributes unrelated
+  failures. It was recorded once and never cleared, so a single
+  deliberately-unanswered probe at startup (kitty's `CSI ? u` is the
+  common one) claimed to be the cause of every later timeout. A query is
+  now only blamed while the application has produced no output since
+  asking; otherwise it is reported as context. Every unanswered query is
+  named rather than just the most recent, the set is bounded, and
+  `wait_frame` and the `Eof` errors carry the note too — previously
+  `wait_frame` withheld it, which is the worst place for it to be
+  missing, since an application blocked on a probe never reaches its
+  first repaint.
 - `wait_frame` timeouts embed the **live** screen, like every other
   wait. They previously embedded the last completed frame — which can be
   arbitrarily old — under a header saying "screen at timeout", so the

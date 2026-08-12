@@ -28,6 +28,12 @@ use crate::wait::{next_backoff, Expired, Monitor, INITIAL_BACKOFF, POLL_CAP};
 /// holding the PTY open must not stall the wait.
 const DRAIN_GRACE: Duration = Duration::from_millis(500);
 
+/// How many distinct unanswered query shapes a terminal remembers for its
+/// diagnostics. The set is filled by the application under test — every
+/// distinct `CSI … n` is its own shape — so it is bounded; anything
+/// beyond this is counted rather than kept.
+const MAX_UNANSWERED: usize = 8;
+
 /// Serializes every PTY *lifecycle edge* (open+spawn on one side, kill+reap+
 /// master-close on the other) across all `Terminal`s in this process.
 ///
@@ -176,9 +182,16 @@ struct EmuState {
     respond: bool,
     /// Background color reported to OSC 11 queries.
     background: (u8, u8, u8),
-    /// The most recent query that got no answer, printable, plus a count —
-    /// timeout errors surface this so a blocked probe is diagnosable.
-    unanswered: Option<String>,
+    /// Distinct queries that went unanswered, in first-seen order, each
+    /// with the read it most recently arrived in — timeout errors surface
+    /// these so a blocked probe is diagnosable.
+    unanswered: Vec<(String, u64)>,
+    /// Distinct unanswered shapes beyond `MAX_UNANSWERED`, counted only.
+    unanswered_overflow: usize,
+    /// Reads delivered by the PTY so far. A query last seen in an earlier
+    /// read than this cannot be what the application is blocked on: it
+    /// produced output after asking.
+    reads: u64,
 }
 
 impl EmuState {
@@ -193,7 +206,27 @@ impl EmuState {
             last_frame: None,
             respond,
             background,
-            unanswered: None,
+            unanswered: Vec::new(),
+            unanswered_overflow: 0,
+            reads: 0,
+        }
+    }
+
+    /// Record a query we did not answer, keyed on its printable shape.
+    ///
+    /// Bounded: the set is application-controlled (every distinct
+    /// `CSI … n` is its own shape), so a probing application must not be
+    /// able to grow it without limit — the same reasoning as
+    /// `OSC_CAPTURE_MAX` in `emu/seq.rs`.
+    fn note_unanswered(&mut self, shape: String) {
+        let reads = self.reads;
+        if let Some(entry) = self.unanswered.iter_mut().find(|(seen, _)| *seen == shape) {
+            // Asked again: judge it by the most recent occurrence.
+            entry.1 = reads;
+        } else if self.unanswered.len() < MAX_UNANSWERED {
+            self.unanswered.push((shape, reads));
+        } else {
+            self.unanswered_overflow += 1;
         }
     }
 
@@ -213,7 +246,7 @@ impl EmuState {
         }
 
         if !self.respond {
-            self.unanswered = Some(query_shape(query));
+            self.note_unanswered(query_shape(query));
             return None;
         }
         let reply = match query {
@@ -243,7 +276,7 @@ impl EmuState {
                 st_terminated,
             } => osc_color(*code, (0xff, 0xff, 0xff), *st_terminated),
             Query::Unanswerable(shape) => {
-                self.unanswered = Some(shape.clone());
+                self.note_unanswered(shape.clone());
                 return None;
             }
         };
@@ -270,17 +303,50 @@ impl EmuState {
         screen
     }
 
-    /// One-line diagnosis when a query went unanswered, appended to
-    /// timeout messages — a probing app blocked on a reply is otherwise
+    /// One-line diagnosis when a query went unanswered, appended to every
+    /// wait's error — a probing app blocked on a reply is otherwise
     /// indistinguishable from a hung one.
+    ///
+    /// Causation is claimed only for queries the application has *not*
+    /// visibly moved past. If output arrived in a later read than the
+    /// query, the application asked and carried on, so the query is
+    /// reported as context instead. Counting reads rather than bytes is
+    /// deliberate: the emulator stops at the query byte and processes the
+    /// rest of the same chunk, so output the application batched into the
+    /// same `write` as its probe is not evidence of progress.
     fn query_note(&self) -> String {
-        self.unanswered.as_ref().map_or_else(String::new, |shape| {
+        if self.unanswered.is_empty() {
+            return String::new();
+        }
+        let mut blocking: Vec<&str> = Vec::new();
+        let mut moved_past: Vec<&str> = Vec::new();
+        for (shape, seen_at) in &self.unanswered {
+            if *seen_at == self.reads {
+                blocking.push(shape);
+            } else {
+                moved_past.push(shape);
+            }
+        }
+        let more = if self.unanswered_overflow > 0 {
+            format!(", and {} more", self.unanswered_overflow)
+        } else {
+            String::new()
+        };
+        if blocking.is_empty() {
             format!(
-                " — note: the application queried the terminal ({shape}) \
-                 and received no answer; if it is blocked waiting for that \
-                 reply, this is the cause"
+                " — note: the application queried the terminal ({}{more}) and \
+                 received no answer, but produced output afterwards, so that is \
+                 probably not why this wait failed",
+                moved_past.join(", ")
             )
-        })
+        } else {
+            format!(
+                " — note: the application queried the terminal ({}{more}) and \
+                 received no answer; if it is blocked waiting for that reply, \
+                 this is the cause",
+                blocking.join(", ")
+            )
+        }
     }
 
     /// Cache-aware read that never writes: serve the stored snapshot when
@@ -653,6 +719,11 @@ fn reader_loop(
                 // lock but WRITTEN after it is released; the state lock
                 // and the writer lock are never held together.
                 let replies = shared.mutate(|state| {
+                    // Counted before the chunk is processed, so a query
+                    // inside it is recorded against *this* read: output
+                    // batched into the same write as the probe must not
+                    // read as the application having moved past it.
+                    state.reads += 1;
                     let mut replies: Vec<Vec<u8>> = Vec::new();
                     let mut offset = 0;
                     while offset < n {
@@ -968,7 +1039,7 @@ impl Terminal {
             }
             if state.eof {
                 return Some(Err(Error::Eof {
-                    waiting_for: WHAT.into(),
+                    waiting_for: format!("{WHAT}{}", state.query_note()),
                     screen,
                 }));
             }
@@ -1034,7 +1105,7 @@ impl Terminal {
             }
             if state.eof {
                 return Some(Err(Error::Eof {
-                    waiting_for: WHAT.into(),
+                    waiting_for: format!("{WHAT}{}", state.query_note()),
                     screen: state.peek_snapshot(),
                 }));
             }
@@ -1049,19 +1120,25 @@ impl Terminal {
                 // can be arbitrarily old — it is named in `waiting_for`
                 // instead, where it reads as a count rather than a
                 // picture that claims to be current.
-                let (frames, screen) = {
+                let (frames, screen, note) = {
                     let mut guard = self.shared.lock();
                     let screen = guard.snapshot();
-                    (guard.frames_seen, screen)
+                    let note = guard.query_note();
+                    (guard.frames_seen, screen, note)
                 };
                 let waiting_for = if frames == 0 {
-                    "a complete frame — but the application never emitted a \
-                     DEC 2026 synchronized update. wait_frame needs repaints \
-                     bracketed in BeginSynchronizedUpdate/EndSynchronizedUpdate; \
-                     for other apps use wait_until (docs/DESIGN.md §2)"
-                        .to_owned()
+                    // An application blocked on an unanswered probe never
+                    // reaches its first repaint, so this is exactly where
+                    // the query note earns its place: without it the
+                    // message blames the app for not emitting frames.
+                    format!(
+                        "a complete frame — but the application never emitted a \
+                         DEC 2026 synchronized update. wait_frame needs repaints \
+                         bracketed in BeginSynchronizedUpdate/EndSynchronizedUpdate; \
+                         for other apps use wait_until (docs/DESIGN.md §2){note}"
+                    )
                 } else {
-                    format!("{WHAT} ({frames} complete frames observed)")
+                    format!("{WHAT} ({frames} complete frames observed){note}")
                 };
                 Err(Error::Timeout {
                     waiting_for,
