@@ -9,6 +9,13 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-12
+
+Correctness patch. Every entry below was found by probing the published
+0.2.0 rather than reading the source, and each one is a case where the
+harness quietly did the wrong thing, panicked inside a dependency, or —
+in the worst of them — hung itself.
+
 ### Changed
 
 - `paste` now transforms the text the way a real terminal does, so what
