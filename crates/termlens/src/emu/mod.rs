@@ -40,10 +40,25 @@ pub(crate) struct Processed {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct InputModes {
     pub(crate) mouse: MouseMode,
-    /// SGR (1006) mouse encoding active.
-    pub(crate) sgr_mouse: bool,
+    pub(crate) mouse_encoding: MouseEncoding,
     pub(crate) bracketed_paste: bool,
     pub(crate) application_cursor: bool,
+}
+
+/// How the application asked for mouse coordinates to be encoded. The
+/// three schemes agree below column/row 95 and diverge past it, so
+/// sending the wrong one fails only at a position boundary — which is a
+/// miserable thing to debug from a test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MouseEncoding {
+    /// The original byte-valued form: `ESC [ M Cb Cx Cy`, unusable past
+    /// coordinate 222.
+    Legacy,
+    /// SGR (mode 1006): `ESC [ < b ; col ; row M`, unbounded.
+    Sgr,
+    /// UTF-8 (mode 1005): like the legacy form, but coordinates above 95
+    /// are encoded as two-byte UTF-8 rather than a bare byte.
+    Utf8,
 }
 
 /// A VT emulator: consumes raw PTY bytes, maintains a screen grid.

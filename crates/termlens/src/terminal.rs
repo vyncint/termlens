@@ -16,10 +16,10 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-use crate::emu::{Emulator, InputModes, Query, Stop, Vt100Emulator};
+use crate::emu::{Emulator, InputModes, MouseEncoding, Query, Stop, Vt100Emulator};
 use crate::error::{Error, Result};
 use crate::keys::Input;
-use crate::keys::{mouse_legacy, mouse_sgr};
+use crate::keys::{mouse_legacy, mouse_sgr, mouse_utf8};
 use crate::screen::{MouseMode, Screen};
 use crate::wait::{next_backoff, Expired, Monitor, INITIAL_BACKOFF, POLL_CAP};
 
@@ -1027,7 +1027,7 @@ impl Terminal {
         row: u16,
         press: bool,
     ) -> Result<Vec<u8>> {
-        if modes.sgr_mouse {
+        if modes.mouse_encoding == MouseEncoding::Sgr {
             return Ok(mouse_sgr(button, col, row, press));
         }
         if col > 222 || row > 222 {
@@ -1036,9 +1036,13 @@ impl Terminal {
                  encoding the application selected (max 222)"
             )));
         }
-        // Legacy encoding: a release is button 3.
-        let button = if press { button } else { 3 };
-        Ok(mouse_legacy(button, col, row))
+        // Both remaining forms are `ESC [ M Cb Cx Cy`; they differ only in
+        // how a coordinate byte above 127 is written.
+        let button = if press { button } else { 3 }; // legacy: release is 3
+        Ok(match modes.mouse_encoding {
+            MouseEncoding::Utf8 => mouse_utf8(button, col, row),
+            MouseEncoding::Legacy | MouseEncoding::Sgr => mouse_legacy(button, col, row),
+        })
     }
 
     fn write_or_panic(&mut self, bytes: &[u8], what: &str) {

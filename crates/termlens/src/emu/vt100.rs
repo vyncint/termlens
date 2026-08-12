@@ -2,7 +2,7 @@
 //! snapshot converts vt100's grid into termlens's own [`Screen`].
 
 use super::seq::{SeqEvent, SeqTracker};
-use super::{Emulator, InputModes, Processed, Stop};
+use super::{Emulator, InputModes, MouseEncoding, Processed, Stop};
 use crate::screen::{Cell, Color, MouseMode, Screen, Style, TermState};
 
 pub(crate) struct Vt100Emulator {
@@ -88,10 +88,11 @@ impl Emulator for Vt100Emulator {
         let screen = self.parser.screen();
         InputModes {
             mouse: convert_mouse(screen.mouse_protocol_mode()),
-            sgr_mouse: matches!(
-                screen.mouse_protocol_encoding(),
-                ::vt100::MouseProtocolEncoding::Sgr
-            ),
+            mouse_encoding: match screen.mouse_protocol_encoding() {
+                ::vt100::MouseProtocolEncoding::Sgr => MouseEncoding::Sgr,
+                ::vt100::MouseProtocolEncoding::Utf8 => MouseEncoding::Utf8,
+                ::vt100::MouseProtocolEncoding::Default => MouseEncoding::Legacy,
+            },
             bracketed_paste: screen.bracketed_paste(),
             application_cursor: screen.application_cursor(),
         }

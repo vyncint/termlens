@@ -330,6 +330,23 @@ pub(crate) fn mouse_legacy(button: u8, col: u16, row: u16) -> Vec<u8> {
     out
 }
 
+/// UTF-8 (mode 1005) mouse report: the legacy layout, but each
+/// coordinate is written as a UTF-8 *character* rather than a raw byte.
+/// Identical to [`mouse_legacy`] up to coordinate 127 (columns and rows
+/// 0..=94); past that the legacy form emits a bare byte no UTF-8 reader
+/// can accept, which is exactly the bug this encoding exists to avoid.
+pub(crate) fn mouse_utf8(button: u8, col: u16, row: u16) -> Vec<u8> {
+    let mut out = b"\x1b[M".to_vec();
+    out.push(32 + button); // the button byte stays a byte
+    let mut buf = [0u8; 4];
+    for coordinate in [col, row] {
+        let value = 32 + 1 + u32::from(coordinate);
+        let ch = char::from_u32(value).expect("32 + 1 + u16 is always a valid scalar value");
+        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +432,25 @@ mod tests {
         assert_eq!(mouse_sgr(64, 0, 0, true), b"\x1b[<64;1;1M");
         assert_eq!(mouse_legacy(0, 0, 0), b"\x1b[M\x20\x21\x21");
         assert_eq!(mouse_legacy(3, 9, 6,), b"\x1b[M\x23\x2a\x27");
+    }
+
+    #[test]
+    fn utf8_mouse_matches_legacy_until_the_encodings_diverge() {
+        // Coordinate byte is 32 + 1 + n, so n = 94 is the last value that
+        // fits in one UTF-8 byte (127) and n = 95 is the first that does
+        // not (128 -> c2 80).
+        for n in [0u16, 10, 94] {
+            assert_eq!(
+                mouse_utf8(0, n, n),
+                mouse_legacy(0, n, n),
+                "encodings must agree at coordinate {n}"
+            );
+        }
+        assert_eq!(mouse_utf8(0, 95, 0), b"\x1b[M\x20\xc2\x80\x21");
+        // The case that motivated this: column 100 is a bare 0x85 in the
+        // legacy form, which a UTF-8 reader cannot accept.
+        assert_eq!(mouse_legacy(0, 100, 3), b"\x1b[M\x20\x85\x24");
+        assert_eq!(mouse_utf8(0, 100, 3), b"\x1b[M\x20\xc2\x85\x24");
     }
 
     #[test]

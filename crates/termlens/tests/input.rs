@@ -148,6 +148,41 @@ fn a_pasted_line_break_arrives_as_carriage_return() -> termlens::Result<()> {
     Ok(())
 }
 
+/// An application that selected the UTF-8 mouse encoding (mode 1005)
+/// must receive coordinates it can decode. The legacy form writes a bare
+/// byte above 127, which is not valid UTF-8 on its own — and because the
+/// two encodings agree below column 95, sending the wrong one fails only
+/// past a position boundary.
+#[test]
+fn mouse_reports_follow_the_utf8_encoding() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .size(120, 24)
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"stty -icanon -echo; printf '\033[?1000h\033[?1005h'; printf READY; ",
+                r"head -c 7 | od -An -tx1 | tr -d ' \n'; printf ' WIRE-EOF'; read guard"
+            ),
+        ])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("READY"))?;
+
+    // Column 100 is 0x85 as a bare byte; UTF-8 must send c2 85.
+    t.click(100, 3)?;
+    t.send_str("\n\n\n\n\n\n\n");
+    t.wait_until(|s| s.contains("WIRE-EOF"))?;
+
+    let wire = t.screen().row_text(0);
+    assert!(
+        wire.contains("1b5b4d20c28524"),
+        "expected ESC [ M 0x20 c2 85 0x24 (UTF-8 column 100), got: {wire}"
+    );
+    t.send_str("\n");
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 #[test]
 fn arrows_follow_the_apps_cursor_key_mode() -> termlens::Result<()> {
     // The script enables DECCKM (CSI ?1 h), reads 3 bytes, reports them,

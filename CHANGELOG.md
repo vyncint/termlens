@@ -33,6 +33,11 @@ listed under a **Changed** or **Removed** heading.
   replies are counted and reported ("the application is not reading its
   input") instead of stalling anything. `Drop`'s reap is bounded too —
   teardown must always terminate.
+- Mouse reports now follow the **UTF-8 encoding** (mode 1005) when the
+  application selects it. The encoding was collapsed to "SGR or not", so
+  a 1005 application received the legacy form — identical below column
+  95, and a bare non-UTF-8 byte past it, which such an application
+  cannot decode.
 - The unanswered-query diagnosis no longer misattributes unrelated
   failures. It was recorded once and never cleared, so a single
   deliberately-unanswered probe at startup (kitty's `CSI ? u` is the
