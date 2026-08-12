@@ -1043,9 +1043,15 @@ impl Terminal {
         match outcome {
             Ok(inner) => inner,
             Err(Expired) => {
+                // The live screen, like every other wait: the error's
+                // header says "screen at timeout" and a CI log is often
+                // the only evidence there is. The last completed frame
+                // can be arbitrarily old — it is named in `waiting_for`
+                // instead, where it reads as a count rather than a
+                // picture that claims to be current.
                 let (frames, screen) = {
                     let mut guard = self.shared.lock();
-                    let screen = guard.last_frame.clone().unwrap_or_else(|| guard.snapshot());
+                    let screen = guard.snapshot();
                     (guard.frames_seen, screen)
                 };
                 let waiting_for = if frames == 0 {

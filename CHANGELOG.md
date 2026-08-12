@@ -22,6 +22,11 @@ listed under a **Changed** or **Removed** heading.
 
 ### Fixed
 
+- `wait_frame` timeouts embed the **live** screen, like every other
+  wait. They previously embedded the last completed frame — which can be
+  arbitrarily old — under a header saying "screen at timeout", so the
+  one place a CI log is the only evidence showed the wrong screen. The
+  count of observed frames is still in the message.
 - A zero terminal dimension is now a typed `Error::Input` from `spawn`
   and `resize` instead of a panic inside the emulator. In release builds
   — the profile the stress workflow uses — it was worse than a panic:

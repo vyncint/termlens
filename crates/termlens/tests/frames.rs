@@ -109,6 +109,38 @@ fn apps_without_synchronized_output_time_out_with_guidance() {
     assert!(t.wait_exit().unwrap().success());
 }
 
+/// The timeout error must show the screen as it is *now*, like every
+/// other wait: its header says so, and in CI the embedded dump is often
+/// the only evidence available. The last completed frame can be
+/// arbitrarily old.
+#[test]
+fn wait_frame_timeouts_embed_the_live_screen_not_the_last_frame() {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_millis(400))
+        .args([
+            "-c",
+            // One synchronized frame, then unbracketed output that will
+            // never complete a frame.
+            r"printf '\033[?2026h\033[HOLD FRAME\033[?2026l'; printf '\r\nLIVE SCREEN'; read quit",
+        ])
+        .spawn("sh")
+        .unwrap();
+    t.wait_frame(|s| s.contains("OLD FRAME")).unwrap();
+    t.wait_until(|s| s.contains("LIVE SCREEN")).unwrap();
+
+    let err = t.wait_frame(|s| s.contains("never painted")).unwrap_err();
+    let screen = err.screen().expect("timeouts embed a screen");
+    assert!(
+        screen.contains("LIVE SCREEN"),
+        "the embedded screen is stale — it must match the header:\n{screen}"
+    );
+    // The frame count still tells you what wait_frame actually saw.
+    assert!(
+        err.to_string().contains("1 complete frames observed"),
+        "the frame count belongs in the message: {err}"
+    );
+}
+
 #[test]
 fn wait_frame_fails_fast_on_eof() {
     let mut t = Terminal::builder()
