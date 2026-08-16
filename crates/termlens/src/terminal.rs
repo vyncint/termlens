@@ -6,6 +6,7 @@
 //! the test thread. Screens are immutable snapshots taken under that lock,
 //! so no output is ever lost between two waits.
 
+use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -33,6 +34,17 @@ const DRAIN_GRACE: Duration = Duration::from_millis(500);
 /// distinct `CSI … n` is its own shape — so it is bounded; anything
 /// beyond this is counted rather than kept.
 const MAX_UNANSWERED: usize = 8;
+
+/// How many completed frames a terminal retains for [`wait_frame`].
+///
+/// Several frames can complete inside a single read, and only retained
+/// frames are observable — so the bound is the bound on how much of a
+/// burst a test can assert on. Eight covers realistic bursts (a repaint
+/// is rarely under a hundred bytes, and a read is 8 KiB) while keeping
+/// the worst case small: a retained frame is a full grid snapshot, about
+/// 75 KB at 80×24 and 470 KB at 200×60, so eight of them cost roughly
+/// 0.6 MB and 3.8 MB respectively.
+const FRAME_HISTORY: usize = 8;
 
 /// Query replies that may be queued for the responder thread before the
 /// drain starts discarding them. Reached only when the application has
@@ -213,8 +225,11 @@ struct EmuState {
     snapshot_cache: Option<(u64, Screen)>,
     /// Completed synchronized updates (DEC 2026) observed so far.
     frames_seen: u64,
-    /// The screen exactly as of the most recent completed frame.
-    last_frame: Option<Screen>,
+    /// The most recent completed frames, oldest first, capped at
+    /// [`FRAME_HISTORY`]. Several frames can complete inside one read, so
+    /// keeping only the newest made rapid intermediate states — a
+    /// progress counter ticking 1, 2, 3 in one write — unobservable.
+    frames: VecDeque<Screen>,
     /// Whether to answer recognized terminal queries (builder-configured).
     respond: bool,
     /// Background color reported to OSC 11 queries.
@@ -243,7 +258,7 @@ impl EmuState {
             generation: 0,
             snapshot_cache: None,
             frames_seen: 0,
-            last_frame: None,
+            frames: VecDeque::with_capacity(FRAME_HISTORY),
             respond,
             background,
             unanswered: Vec::new(),
@@ -813,7 +828,11 @@ fn reader_loop(
                         match processed.stop {
                             Some(Stop::FrameComplete) => {
                                 state.frames_seen += 1;
-                                state.last_frame = Some(state.emu.snapshot());
+                                let frame = state.emu.snapshot();
+                                if state.frames.len() == FRAME_HISTORY {
+                                    state.frames.pop_front();
+                                }
+                                state.frames.push_back(frame);
                             }
                             Some(Stop::Query(query)) => {
                                 if let Some(reply) = state.answer(&query) {
@@ -1165,11 +1184,18 @@ impl Terminal {
     /// demands (single predicate, wait on the last-painted region; see
     /// `docs/DESIGN.md` §2).
     ///
-    /// The frame completed most recently *before* the call is evaluated
-    /// first, so a fast application cannot slip a frame past you. Each
-    /// frame is evaluated at most once; if several frames complete within
-    /// one read burst, only the newest is seen — `wait_frame` guarantees
-    /// frame-consistent screens, not observation of every transient frame.
+    /// Frames completed *before* the call are evaluated too, so a fast
+    /// application cannot slip one past you — including when several
+    /// complete inside a single read. The terminal retains the last
+    /// **8** completed frames and each call scans them oldest first, so
+    /// a burst like a progress counter ticking `1`, `2`, `3` in one
+    /// write is observable step by step by three successive calls.
+    ///
+    /// Two honest limits follow from the retention bound: a burst longer
+    /// than 8 frames drops its oldest, and because retained frames stay
+    /// matchable, a predicate that was true of an earlier frame resolves
+    /// immediately rather than waiting for a new one. Where that matters,
+    /// assert on something only the newer frame can show.
     ///
     /// ```
     /// # fn main() -> termlens::Result<()> {
@@ -1195,11 +1221,11 @@ impl Terminal {
         let outcome = self.shared.wait_until(deadline, |state| {
             if state.frames_seen > 0 && seen_frame != Some(state.frames_seen) {
                 seen_frame = Some(state.frames_seen);
-                let frame = state
-                    .last_frame
-                    .clone()
-                    .expect("frames_seen > 0 implies a stored frame");
-                if predicate(&frame) {
+                // Oldest retained frame first: several frames can
+                // complete inside one read, and a test asserting on a
+                // sequence must be able to see them in the order the
+                // application drew them.
+                if state.frames.iter().any(&mut predicate) {
                     return Some(Ok(()));
                 }
             }

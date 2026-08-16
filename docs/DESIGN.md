@@ -90,13 +90,16 @@ expiry the error **embeds the full screen dump** — a CI log alone answers
   including multi-mode lists); the reader splits each chunk at every
   frame end and snapshots the screen *at that instant*, so the predicate
   sees exactly the frame as the app finished it — even when the same read
-  already carries the next frame's opening bytes. The frame completed
-  most recently before the call is evaluated first (fast apps can't slip
-  a frame past the wait). Honest caveat: frames that complete within one
-  read burst supersede each other — `wait_frame` guarantees
-  frame-consistent screens, not observation of every transient frame. An
-  app that never emits a synchronized update makes the timeout error say
-  so and point at `wait_until`.
+  already carries the next frame's opening bytes. The last **8**
+  completed frames are retained and each call scans them oldest first, so
+  frames completed before the call are still observable (fast apps can't
+  slip one past the wait) and a burst of frames arriving in one read can
+  be asserted on step by step. Honest caveats: a burst longer than the
+  retention bound drops its oldest frames, and a retained frame stays
+  matchable, so a predicate satisfied by an earlier frame resolves at
+  once rather than waiting for a new one. An app that never emits a
+  synchronized update makes the timeout error say so and point at
+  `wait_until`.
 - `wait_idle(quiet)` — resolves when **no bytes for `quiet`** AND the
   stream does not end mid-escape-sequence (or mid-UTF-8-character) AND no
   synchronized update is open (a begun-but-unfinished DEC 2026 repaint is

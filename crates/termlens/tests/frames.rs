@@ -141,6 +141,63 @@ fn wait_frame_timeouts_embed_the_live_screen_not_the_last_frame() {
     );
 }
 
+/// Several frames can complete inside one read. Each must stay
+/// observable, in the order the application drew them — a progress
+/// counter ticking 1, 2, 3 in a single write used to be visible only
+/// at 3.
+#[test]
+fn every_frame_of_a_burst_is_observable_in_order() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            // Three complete frames in ONE write, then park.
+            concat!(
+                r"printf '\033[?2026h\033[HSTEP 1\033[?2026l",
+                r"\033[?2026h\033[HSTEP 2\033[?2026l",
+                r"\033[?2026h\033[HSTEP 3\033[?2026l'; read guard"
+            ),
+        ])
+        .spawn("sh")?;
+
+    // Wait for the last one first, so all three have certainly arrived
+    // (and been coalesced into as few reads as the OS chose).
+    t.wait_frame(|s| s.contains("STEP 3"))?;
+    // Every intermediate frame is still there.
+    t.wait_frame(|s| s.contains("STEP 1"))?;
+    t.wait_frame(|s| s.contains("STEP 2"))?;
+
+    t.send(Key::Enter);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// The retention bound is real and documented: beyond it, the oldest
+/// frames are dropped.
+#[test]
+fn a_burst_longer_than_the_retention_bound_drops_its_oldest_frames() -> termlens::Result<()> {
+    // 12 frames in one write, against a retention bound of 8.
+    let mut script = String::new();
+    for n in 1..=12 {
+        script.push_str(&format!(r"\033[?2026h\033[HFRAME {n:02}\033[?2026l"));
+    }
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_millis(600))
+        .args(["-c", &format!("printf '{script}'; read guard")])
+        .spawn("sh")?;
+
+    t.wait_frame(|s| s.contains("FRAME 12"))?;
+    // The most recent 8 are retained: 05..=12.
+    t.wait_frame(|s| s.contains("FRAME 05"))?;
+    // The first four are gone, and the error says how many were seen.
+    let err = t.wait_frame(|s| s.contains("FRAME 01")).unwrap_err();
+    assert!(
+        err.to_string().contains("12 complete frames observed"),
+        "the frame count belongs in the message: {err}"
+    );
+    Ok(())
+}
+
 #[test]
 fn wait_frame_fails_fast_on_eof() {
     let mut t = Terminal::builder()

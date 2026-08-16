@@ -9,6 +9,16 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Added
+
+- `wait_frame` retains the **last 8 completed frames** and evaluates
+  them oldest first, so a burst of frames arriving in a single read is
+  observable step by step — a progress counter ticking `1`, `2`, `3` in
+  one write used to be visible only at `3`. The retention bound and its
+  two consequences (a longer burst drops its oldest frames; a retained
+  frame stays matchable, so a predicate satisfied earlier resolves at
+  once) are documented on `wait_frame` and in `docs/DESIGN.md` §2.
+
 ## [0.2.1] - 2026-08-12
 
 Correctness patch. Every entry below was found by probing the published
