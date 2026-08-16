@@ -1214,9 +1214,32 @@ impl Terminal {
     /// application never emitted a single synchronized update, since
     /// `wait_frame` can then never succeed; use `wait_until` for such apps.
     /// [`Error::Eof`] as soon as the PTY closes with no matching frame.
-    pub fn wait_frame(&mut self, mut predicate: impl FnMut(&Screen) -> bool) -> Result<()> {
+    pub fn wait_frame(&mut self, predicate: impl FnMut(&Screen) -> bool) -> Result<()> {
+        self.wait_frame_deadline(predicate, self.default_timeout)
+    }
+
+    /// [`wait_frame`](Self::wait_frame) with a per-call timeout, for the
+    /// one known-slow repaint that shouldn't drag every other wait in the
+    /// suite up to its deadline.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`wait_frame`](Self::wait_frame).
+    pub fn wait_frame_for(
+        &mut self,
+        predicate: impl FnMut(&Screen) -> bool,
+        timeout: Duration,
+    ) -> Result<()> {
+        self.wait_frame_deadline(predicate, timeout)
+    }
+
+    fn wait_frame_deadline(
+        &mut self,
+        mut predicate: impl FnMut(&Screen) -> bool,
+        timeout: Duration,
+    ) -> Result<()> {
         const WHAT: &str = "a complete frame matching the predicate";
-        let deadline = Instant::now() + self.default_timeout;
+        let deadline = Instant::now() + timeout;
         let mut seen_frame = None;
         let outcome = self.shared.wait_until(deadline, |state| {
             if state.frames_seen > 0 && seen_frame != Some(state.frames_seen) {
@@ -1268,7 +1291,7 @@ impl Terminal {
                 };
                 Err(Error::Timeout {
                     waiting_for,
-                    timeout: self.default_timeout,
+                    timeout,
                     screen,
                 })
             }
@@ -1292,7 +1315,35 @@ impl Terminal {
     /// expires first — e.g. when `quiet` exceeds the timeout, or the child
     /// keeps chattering.
     pub fn wait_idle(&mut self, quiet: Duration) -> Result<()> {
-        let deadline = Instant::now() + self.default_timeout;
+        self.wait_idle_deadline(quiet, self.default_timeout)
+    }
+
+    /// [`wait_idle`](Self::wait_idle) with a per-call timeout.
+    ///
+    /// Both arguments are durations and the order matters: `quiet` is the
+    /// silence being waited *for*, `timeout` is how long to wait for it.
+    /// `quiet` must be the smaller of the two, or the wait can only ever
+    /// time out.
+    ///
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// // 100ms of silence, waited for up to 30s.
+    /// t.wait_idle_for(Duration::from_millis(100), Duration::from_secs(30))?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Same as [`wait_idle`](Self::wait_idle), against `timeout`.
+    pub fn wait_idle_for(&mut self, quiet: Duration, timeout: Duration) -> Result<()> {
+        self.wait_idle_deadline(quiet, timeout)
+    }
+
+    fn wait_idle_deadline(&mut self, quiet: Duration, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
         let mut guard = self.shared.lock();
         loop {
             if guard.eof {
@@ -1310,7 +1361,7 @@ impl Terminal {
                 drop(guard);
                 return Err(Error::Timeout {
                     waiting_for: format!("{quiet:?} of output silence{note}"),
-                    timeout: self.default_timeout,
+                    timeout,
                     screen,
                 });
             }
@@ -1404,10 +1455,25 @@ impl Terminal {
     /// [`Error::Timeout`] (with screen) if the child is still running at the
     /// deadline; [`Error::Io`] if the OS wait itself fails.
     pub fn wait_exit(&mut self) -> Result<ExitStatus> {
+        self.wait_exit_deadline(self.default_timeout)
+    }
+
+    /// [`wait_exit`](Self::wait_exit) with a per-call timeout — for the
+    /// application whose shutdown is slower than everything else the
+    /// suite waits on.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`wait_exit`](Self::wait_exit), against `timeout`.
+    pub fn wait_exit_for(&mut self, timeout: Duration) -> Result<ExitStatus> {
+        self.wait_exit_deadline(timeout)
+    }
+
+    fn wait_exit_deadline(&mut self, timeout: Duration) -> Result<ExitStatus> {
         if let Some(status) = self.exit_status.clone() {
             return Ok(status);
         }
-        let deadline = Instant::now() + self.default_timeout;
+        let deadline = Instant::now() + timeout;
         let mut backoff = INITIAL_BACKOFF;
         loop {
             if let Some(status) = self.child.try_wait().map_err(Error::Io)? {
@@ -1428,7 +1494,7 @@ impl Terminal {
                         self.command_desc,
                         self.shared.lock().query_note()
                     ),
-                    timeout: self.default_timeout,
+                    timeout,
                     screen: self.screen(),
                 });
             }

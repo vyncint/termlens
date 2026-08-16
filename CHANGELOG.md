@@ -11,6 +11,12 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- Every wait now takes a per-call deadline: `wait_frame_for`,
+  `wait_idle_for` and `wait_exit_for` join `wait_until_for`. One
+  known-slow step no longer forces the builder timeout up for every
+  other wait in the suite — which is what made a genuinely stuck
+  application burn the long timeout on its first failure. Timeout errors
+  report the deadline that actually applied.
 - `wait_frame` retains the **last 8 completed frames** and evaluates
   them oldest first, so a burst of frames arriving in a single read is
   observable step by step — a progress counter ticking `1`, `2`, `3` in
