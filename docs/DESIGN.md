@@ -11,7 +11,7 @@ flowchart TB
   test["test code"]
   l4["4 · assertions<br/>wait_until / wait_frame / wait_idle / wait_exit · Screen queries · insta snapshots"]
   l3["3 · Screen<br/>immutable Arc-backed grid snapshots · Cell · Style · cursor · title & modes — termlens's own types"]
-  l2["2 · emulator<br/>internal trait: process · snapshot · mid_sequence · in_sync_update · input_modes · set_size<br/>backend: vt100"]
+  l2["2 · emulator<br/>internal trait: process · snapshot · mid_sequence · in_sync_update · input_modes · mode_state · set_size<br/>backend: vt100"]
   l1["1 · PTY<br/>portable-pty · reader thread · resize TIOCSWINSZ → SIGWINCH · lifecycle lock"]
   app["child app<br/>spawned in the PTY, unmodified"]
 
@@ -20,7 +20,7 @@ flowchart TB
   l2 -->|"snapshot on demand"| l3
   l3 -->|"predicates · dumps embedded in every timeout"| l4
   l4 --> test
-  test -.->|"send · click · paste · resize · signal"| l1
+  test -.->|"send · click · drag · paste · resize · signal"| l1
   l1 -.->|"stdin bytes · SIGWINCH"| app
   classDef ours fill:#2563eb,color:#ffffff,stroke:#1d4ed8,stroke-width:1px;
   class l1,l2,l3,l4 ours
@@ -51,6 +51,15 @@ identity is VT220-with-color (`?62;22c`), claiming no feature the
 emulator cannot render, and kitty's `CSI ? u` probe is deliberately left
 unanswered because its protocol resolves via the DA1 reply, exactly as
 on a real non-kitty terminal.
+
+`DECRQM` ("is private mode *n* set?") is answered too, and answering it
+is what lets an application that *probes* before using synchronized
+output turn it on against termlens — so `wait_frame` can work against a
+program nobody modified for us. Every reply is truthful or absent:
+modes whose state the emulator holds exactly report set/reset, and
+anything else — including the mouse tracking modes, which the backend
+collapses into one mutually exclusive value — reports "not recognized"
+rather than a guess.
 
 Precision: the emulator stops consuming at each query byte (the same
 mechanism as frame boundaries), so a cursor-position report reflects the
@@ -284,9 +293,9 @@ But it is an implementation detail:
   backend is a non-breaking change. The one piece of state vt100 does
   not track — the window title — termlens tracks itself in the sequence
   tracker, so it survives a backend swap too.
-- The `Emulator` trait is six methods (`process`, `snapshot`,
-  `mid_sequence`, `in_sync_update`, `input_modes`, `set_size`) —
-  deliberately the *narrowest* surface that
+- The `Emulator` trait is seven methods (`process`, `snapshot`,
+  `mid_sequence`, `in_sync_update`, `input_modes`, `mode_state`,
+  `set_size`) — deliberately the *narrowest* surface that
   the terminal loop needs, so candidate backends (wezterm-term for wider
   escape coverage, alacritty_terminal for fidelity to a real terminal's
   quirks) can be evaluated behind a feature flag without touching layer 3+.

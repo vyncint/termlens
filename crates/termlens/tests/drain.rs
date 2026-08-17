@@ -89,8 +89,13 @@ fn writing_to_a_child_that_is_not_reading_fails_at_the_deadline() {
                 .spawn("/bin/sh")
                 .expect("spawn");
             std::thread::sleep(Duration::from_millis(200));
-            for _ in 0..20_000 {
-                t.send_str("xxxxxxxx");
+            // Chunky repeated writes: enough total volume to fill any
+            // PTY buffer (Linux's is far larger than macOS's), and few
+            // enough calls that the blocking point arrives in seconds —
+            // every call costs an acknowledgement round-trip.
+            let chunk = "x".repeat(4096);
+            for _ in 0..500 {
+                t.send_str(&chunk);
             }
         });
         let _ = tx.send(outcome.err().map(|payload| {
@@ -100,7 +105,10 @@ fn writing_to_a_child_that_is_not_reading_fails_at_the_deadline() {
         }));
     });
 
-    let message = match rx.recv_timeout(Duration::from_secs(20)) {
+    // Comfortably longer than the provocation needs, so a timeout here
+    // means the write really never returned rather than that the
+    // provocation was still working.
+    let message = match rx.recv_timeout(Duration::from_secs(60)) {
         Ok(Some(message)) => message,
         Ok(None) => panic!(
             "every write was absorbed, so the deadline path was never reached — \
