@@ -18,6 +18,12 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- Writes now respect the terminal's deadline. `send`, `send_str`,
+  `paste`, `click` and `scroll` used to block indefinitely if the
+  application stopped reading its input and the PTY buffer filled — the
+  one place the crate's own "no unbounded waits" rule wasn't applied.
+  They now fail at the deadline with the screen attached and a message
+  naming the real cause, instead of hanging a CI job.
 - A fuller mouse API: `click_with(button, col, row)` for middle and
   right buttons, `drag(button, from, to)`, modifier chords
   (`MouseButton::Left.ctrl()`, mirroring `Key::Right.ctrl()`), and

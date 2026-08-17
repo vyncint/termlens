@@ -62,6 +62,53 @@ fn undelivered_replies_are_named_in_the_diagnosis() {
     );
 }
 
+/// Writing to a child that has stopped reading must fail at the
+/// deadline with a diagnosis, not block forever. Before this, a large
+/// `send_str` into a non-reading child blocked indefinitely — no
+/// deadline applied to writes at all, and the eventual failure (when
+/// the child died) described the teardown rather than the real cause.
+#[test]
+fn writing_to_a_child_that_is_not_reading_fails_at_the_deadline() {
+    let start = Instant::now();
+    let panicked = std::panic::catch_unwind(|| {
+        let mut t = Terminal::builder()
+            .size(80, 24)
+            .env_clear()
+            .timeout(Duration::from_millis(700))
+            // The child stops itself: a stopped process cannot drain its
+            // input, which fills the PTY buffer for certain. (A single
+            // huge write is not a reliable way to provoke this — macOS
+            // absorbs one of those and blocks on the *small repeated*
+            // writes instead, which is exactly the shape typed input
+            // has.)
+            .args(["-c", "stty -icanon -echo; kill -STOP $$; sleep 30"])
+            .spawn("/bin/sh")
+            .expect("spawn");
+        std::thread::sleep(Duration::from_millis(200));
+        for _ in 0..5000 {
+            t.send_str("xxxxxxxx");
+        }
+    })
+    .expect_err("the write must fail loudly");
+
+    let message = panicked
+        .downcast_ref::<String>()
+        .map_or_else(|| "<non-string panic>".to_owned(), Clone::clone);
+    assert!(
+        message.contains("not reading its input"),
+        "the panic must name the real cause: {message}"
+    );
+    assert!(
+        message.contains("--- screen ---"),
+        "the panic must carry the screen: {message}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "the write blocked past its deadline: {:?}",
+        start.elapsed()
+    );
+}
+
 /// The ordinary case must be untouched: an application that reads its
 /// replies still gets every one of them.
 #[test]

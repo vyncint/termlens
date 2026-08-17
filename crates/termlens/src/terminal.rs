@@ -46,11 +46,21 @@ const MAX_UNANSWERED: usize = 8;
 /// 0.6 MB and 3.8 MB respectively.
 const FRAME_HISTORY: usize = 8;
 
-/// Query replies that may be queued for the responder thread before the
-/// drain starts discarding them. Reached only when the application has
-/// stopped reading its input entirely, in which case it cannot be
-/// waiting on these bytes.
+/// Writes that may be queued for the writer thread before the drain
+/// starts discarding query replies. Reached only when the application
+/// has stopped reading its input entirely, in which case it cannot be
+/// waiting on those bytes.
 const REPLY_QUEUE_DEPTH: usize = 64;
+
+/// One write handed to the writer thread.
+///
+/// Query replies are fire-and-forget; typed input carries an
+/// acknowledgement channel so the calling thread can apply a deadline
+/// and fail loudly instead of blocking forever inside `write(2)`.
+struct WriteRequest {
+    bytes: Vec<u8>,
+    ack: Option<mpsc::SyncSender<io::Result<()>>>,
+}
 
 /// How long `Drop` will wait for a killed child to be reaped before
 /// giving up. Teardown must terminate: a stuck child is a bad outcome, a
@@ -829,41 +839,47 @@ impl TerminalBuilder {
         )));
         let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
 
-        // Query replies are written by a thread of their own, never by
-        // the drain. A reply write blocks whenever the application has
-        // stopped reading its input; doing that on the reader thread
-        // stops the drain, the child then blocks writing into a full
-        // output buffer, and the harness deadlocks itself with no test
-        // input involved.
-        let reply_tx = match dup_writer(pair.master.as_ref()) {
-            Some(mut reply_writer) => {
-                let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(REPLY_QUEUE_DEPTH);
+        // Everything written *to* the child goes through a thread of its
+        // own: query replies from the drain, and typed input from the
+        // test. A write into the PTY blocks whenever the application has
+        // stopped reading, and neither caller can afford that — the drain
+        // would deadlock the harness (the child then blocks writing into
+        // a full output buffer), and the test thread would hang with no
+        // deadline and no diagnosis.
+        let write_tx = match dup_writer(pair.master.as_ref()) {
+            Some(mut pty_writer) => {
+                let (tx, rx) = mpsc::sync_channel::<WriteRequest>(REPLY_QUEUE_DEPTH);
                 thread::Builder::new()
-                    .name("termlens-pty-responder".into())
+                    .name("termlens-pty-writer".into())
                     .spawn(move || {
-                        while let Ok(reply) = rx.recv() {
-                            if reply_writer
-                                .write_all(&reply)
-                                .and_then(|()| reply_writer.flush())
-                                .is_err()
-                            {
-                                break; // terminal gone; nothing left to answer
+                        while let Ok(request) = rx.recv() {
+                            let result = pty_writer
+                                .write_all(&request.bytes)
+                                .and_then(|()| pty_writer.flush());
+                            let failed = result.is_err();
+                            if let Some(ack) = request.ack {
+                                // The caller may have given up already.
+                                let _ = ack.send(result);
+                            }
+                            if failed {
+                                break; // terminal gone; nothing left to write
                             }
                         }
                     })
                     .map_err(Error::Io)?;
                 Some(tx)
             }
-            // No descriptor to duplicate: fall back to answering from
-            // the reader thread, as before.
+            // No descriptor to duplicate: fall back to writing inline,
+            // as before.
             None => None,
         };
 
         let reader_shared = Arc::clone(&shared);
         let reader_writer = Arc::clone(&writer);
+        let reader_tx = write_tx.clone();
         thread::Builder::new()
             .name("termlens-pty-reader".into())
-            .spawn(move || reader_loop(reader, &reader_shared, &reader_writer, reply_tx.as_ref()))
+            .spawn(move || reader_loop(reader, &reader_shared, &reader_writer, reader_tx.as_ref()))
             .map_err(Error::Io)?;
 
         let child = pair.slave.spawn_command(cmd).map_err(|e| Error::Spawn {
@@ -879,6 +895,7 @@ impl TerminalBuilder {
             child,
             master: Some(pair.master),
             writer,
+            write_tx,
             shared,
             default_timeout: self.timeout,
             exit_status: None,
@@ -946,7 +963,7 @@ fn reader_loop(
     mut reader: Box<dyn Read + Send>,
     shared: &Monitor<EmuState>,
     writer: &SharedWriter,
-    replies_to: Option<&mpsc::SyncSender<Vec<u8>>>,
+    replies_to: Option<&mpsc::SyncSender<WriteRequest>>,
 ) {
     let mut buf = [0u8; 8192];
     loop {
@@ -997,7 +1014,11 @@ fn reader_loop(
                         // entirely, so it cannot be waiting on these bytes
                         // — and the drain must keep running regardless.
                         Some(tx) => {
-                            if let Err(mpsc::TrySendError::Full(_)) = tx.try_send(reply) {
+                            let request = WriteRequest {
+                                bytes: reply,
+                                ack: None, // fire and forget: never wait here
+                            };
+                            if let Err(mpsc::TrySendError::Full(_)) = tx.try_send(request) {
                                 shared.mutate(|state| state.replies_dropped += 1);
                             }
                         }
@@ -1035,6 +1056,9 @@ pub struct Terminal {
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     /// Shared with the reader thread, which writes query replies.
     writer: SharedWriter,
+    /// Queue to the writer thread. `None` only when no descriptor could
+    /// be duplicated, in which case writes go through `writer` directly.
+    write_tx: Option<mpsc::SyncSender<WriteRequest>>,
     shared: Arc<Monitor<EmuState>>,
     default_timeout: Duration,
     exit_status: Option<ExitStatus>,
@@ -1062,10 +1086,18 @@ impl Terminal {
     ///
     /// # Panics
     ///
-    /// Panics if the bytes cannot be written to the PTY (e.g. the child
-    /// exited and the OS tore the terminal down); the panic message includes
-    /// the current screen. A test that types into a dead program is broken —
-    /// failing loudly beats a silent no-op.
+    /// Panics if the bytes cannot be written to the PTY — the child
+    /// exited and the OS tore the terminal down, or the application
+    /// stopped reading its input and the PTY buffer filled, in which
+    /// case the write gives up at the terminal's deadline rather than
+    /// blocking forever. Either way the panic message includes the
+    /// current screen. A test that types into a program which cannot
+    /// receive it is broken; failing loudly beats a silent no-op, and
+    /// beats a hang by more.
+    ///
+    /// [`click`](Self::click), [`scroll`](Self::scroll),
+    /// [`paste`](Self::paste) and [`send_str`](Self::send_str) share this
+    /// contract.
     pub fn send(&mut self, key: impl Input + fmt::Debug) {
         let application_cursor = self.input_modes().application_cursor;
         self.write_or_panic(&key.encode_modal(application_cursor), &format!("{key:?}"));
@@ -1276,22 +1308,79 @@ impl Terminal {
     }
 
     fn write_or_panic(&mut self, bytes: &[u8], what: &str) {
-        // Write under the writer lock only; build the panic message (which
-        // takes the state lock for the screen) strictly after releasing it,
-        // so the two locks are never held together.
-        let result = {
-            let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-            match writer.as_mut() {
-                Some(writer) => writer.write_all(bytes).and_then(|()| writer.flush()),
-                None => Err(io::Error::new(io::ErrorKind::BrokenPipe, "pty closed")),
-            }
-        };
-        if let Err(e) = result {
+        // Build the panic message (which takes the state lock for the
+        // screen) strictly after the write attempt finishes, so no two
+        // locks are ever held together.
+        if let Err(reason) = self.write_within_deadline(bytes) {
             panic!(
-                "termlens: failed to send {what} to `{}` ({e})\n--- screen ---\n{}",
+                "termlens: failed to send {what} to `{}` ({reason})\n--- screen ---\n{}",
                 self.command_desc,
                 self.screen()
             );
+        }
+    }
+
+    /// Write to the child, bounded by the default deadline.
+    ///
+    /// Writes into a PTY block once the application stops reading its
+    /// input, and there is no portable way to ask whether the next write
+    /// would block — `POLLOUT` on a macOS master reports writable and
+    /// then blocks anyway. So the write happens on the writer thread and
+    /// this one waits for an acknowledgement with a deadline: the test
+    /// gets a screen-carrying failure naming the real cause instead of
+    /// the six-hour CI job `docs/DESIGN.md` §2 exists to prevent.
+    fn write_within_deadline(&mut self, bytes: &[u8]) -> std::result::Result<(), String> {
+        let Some(tx) = &self.write_tx else {
+            // No writer thread (no descriptor to duplicate): the original
+            // synchronous path, which can block — better than not being
+            // able to type at all.
+            let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+            return match writer.as_mut() {
+                Some(writer) => writer
+                    .write_all(bytes)
+                    .and_then(|()| writer.flush())
+                    .map_err(|e| e.to_string()),
+                None => Err("the terminal is closed".to_owned()),
+            };
+        };
+
+        let not_reading = || {
+            format!(
+                "the application is not reading its input, and the PTY buffer is \
+                 full — no progress in {:?}",
+                self.default_timeout
+            )
+        };
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        let request = WriteRequest {
+            bytes: bytes.to_vec(),
+            ack: Some(ack_tx),
+        };
+        // A full queue means the writer thread is already stuck on an
+        // earlier write, which is the same diagnosis. (`send_timeout` is
+        // still unstable, so this is a bounded retry on `try_send`.)
+        let deadline = Instant::now() + self.default_timeout;
+        let mut pending = request;
+        loop {
+            match tx.try_send(pending) {
+                Ok(()) => break,
+                Err(mpsc::TrySendError::Full(returned)) => {
+                    if Instant::now() >= deadline {
+                        return Err(not_reading());
+                    }
+                    pending = returned;
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    return Err("the terminal is closed".to_owned())
+                }
+            }
+        }
+        match ack_rx.recv_timeout(self.default_timeout) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(not_reading()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err("the terminal is closed".to_owned()),
         }
     }
 
