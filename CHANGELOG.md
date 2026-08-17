@@ -9,6 +9,12 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-17
+
+The features the first real user's coverage study asked for, in the
+order it ranked them, plus the terminal-query work that lets
+capability-probing applications run against termlens unmodified.
+
 ### Changed
 
 - `Scroll` gained `Left` and `Right` variants and is now
@@ -32,7 +38,19 @@ listed under a **Changed** or **Removed** heading.
   application enabled, and refused with a typed error when the mode
   cannot express the gesture — a drag under X10, which reports no
   release, is an error rather than a misleading half-gesture.
-
+- termlens answers **`DECRQM`** ("is private mode *n* set?"), so an
+  application that probes before using synchronized output enables it
+  against termlens — `wait_frame` works against programs nobody
+  modified for the harness. Replies are truthful or absent: modes whose
+  state the emulator holds exactly report set/reset, everything else
+  reports "not recognized" rather than a guess. `DECRQSS`, `OSC 4`
+  palette reads and `OSC 52` clipboard reads are now recognized too, so
+  an application blocked on one is named in the timeout instead of
+  hanging silently.
+- `TerminalBuilder::foreground_rgb` configures the `OSC 10` answer,
+  which was hardcoded white. Applications that pick a theme by
+  comparing foreground and background luminance can now be tested
+  against both.
 - Every wait now takes a per-call deadline: `wait_frame_for`,
   `wait_idle_for` and `wait_exit_for` join `wait_until_for`. One
   known-slow step no longer forces the builder timeout up for every
