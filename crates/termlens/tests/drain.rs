@@ -89,14 +89,21 @@ fn writing_to_a_child_that_is_not_reading_fails_at_the_deadline() {
                 .spawn("/bin/sh")
                 .expect("spawn");
             std::thread::sleep(Duration::from_millis(200));
-            // Chunky repeated writes: enough total volume to fill any
-            // PTY buffer (Linux's is far larger than macOS's), and few
-            // enough calls that the blocking point arrives in seconds —
-            // every call costs an acknowledgement round-trip.
+            // Write until the deadline fires. Bounded by time rather
+            // than a byte count: how much a PTY absorbs before it blocks
+            // differs sharply between platforms, and the count that is
+            // "obviously enough" on one is not on the other.
             let chunk = "x".repeat(4096);
-            for _ in 0..500 {
+            let writing_since = Instant::now();
+            let mut written = 0usize;
+            while writing_since.elapsed() < Duration::from_secs(15) {
                 t.send_str(&chunk);
+                written += chunk.len();
             }
+            println!(
+                "provocation ended without blocking: {written} bytes in {:?}",
+                writing_since.elapsed()
+            );
         });
         let _ = tx.send(outcome.err().map(|payload| {
             payload
@@ -108,12 +115,13 @@ fn writing_to_a_child_that_is_not_reading_fails_at_the_deadline() {
     // Comfortably longer than the provocation needs, so a timeout here
     // means the write really never returned rather than that the
     // provocation was still working.
-    let message = match rx.recv_timeout(Duration::from_secs(60)) {
+    let message = match rx.recv_timeout(Duration::from_secs(45)) {
         Ok(Some(message)) => message,
         Ok(None) => panic!(
-            "every write was absorbed, so the deadline path was never reached — \
-             this platform does not block on a full PTY buffer at this volume, \
-             and the test needs a stronger provocation"
+            "every write was absorbed for 15s straight, so the deadline path was \
+             never reached — this platform does not block on a full PTY buffer, \
+             and the test needs a different provocation (see the printed byte \
+             count above)"
         ),
         Err(_) => panic!(
             "the write never returned: it blocked past its own 700ms deadline, \
