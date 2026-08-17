@@ -61,7 +61,7 @@ flowchart TB
   test["your test<br/>drive · wait · assert"]
   subgraph proc["your test process · cargo test"]
     subgraph tt["termlens"]
-      api["Terminal<br/>send · click · paste · signal · resize · wait_until / wait_frame / wait_idle / wait_exit"]
+      api["Terminal<br/>send · click · drag · paste · signal · resize · wait_until / wait_frame / wait_idle / wait_exit"]
       reader["reader thread<br/>drains continuously — output is never lost between waits"]
       emu["VT emulator<br/>vt100 behind a small internal trait, swappable"]
       screen["Screen<br/>immutable grid snapshots · cells · cursor · styles"]
@@ -127,7 +127,16 @@ design. termlens's position:
 - **`wait_frame` gives exact frame boundaries** for apps that bracket
   repaints in DEC 2026 synchronized updates (crossterm's
   `BeginSynchronizedUpdate`/`EndSynchronizedUpdate`): the predicate only
-  ever sees complete frames, never a torn repaint.
+  ever sees complete frames, never a torn repaint. The last 8 frames are
+  retained, so a burst arriving in one read is assertable step by step —
+  and applications that *probe* for synchronized output before using it
+  get a truthful `DECRQM` answer, so they enable it against termlens
+  unmodified.
+- **Every wait takes a per-call deadline** (`wait_until_for`,
+  `wait_frame_for`, `wait_idle_for`, `wait_exit_for`), so one slow step
+  doesn't force a generous timeout on the whole suite. Writes are bounded
+  too: typing into an application that has stopped reading fails with the
+  screen attached instead of hanging.
 - **`wait_idle(quiet)` is an honest heuristic** for everything else. It
   resolves when nothing arrived for `quiet`, the stream isn't
   mid-escape-sequence, and no synchronized update is open. Silence is
@@ -139,7 +148,7 @@ design. termlens's position:
   [stress workflow](.github/workflows/stress.yml) on Linux and macOS —
   wait/timing changes don't merge without surviving it.
 
-## Known limitations (v0.2)
+## Known limitations (v0.3)
 
 - No scrollback assertions, and resizing does not reflow scrollback — the
   visible grid is the testable surface.
