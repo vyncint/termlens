@@ -183,6 +183,71 @@ fn mouse_reports_follow_the_utf8_encoding() -> termlens::Result<()> {
     Ok(())
 }
 
+/// Everything the mouse API can express, captured off the wire under
+/// SGR encoding with full (any-event) tracking.
+#[test]
+fn buttons_modifiers_drag_and_horizontal_wheel_reach_the_wire() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        // Wide enough that the captured wire stays on one row.
+        .size(200, 24)
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"stty -icanon -echo; printf '\033[?1003h\033[?1006h'; printf READY; ",
+                // 78 bytes: 20 (right press+release) + 20 (ctrl+left)
+                // + 10 (wheel left) + 28 (drag press+motion+release).
+                r#"wire=$(head -c 78 | tr '\033' 'E'); printf '|%s|' "$wire"; read guard"#
+            ),
+        ])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("READY"))?;
+
+    // Right-click: SGR button 2. Ctrl-click: 0 + 16. Wheel left: 66.
+    t.click_with(termlens::MouseButton::Right, 10, 4)?;
+    t.click_with(termlens::MouseButton::Left.ctrl(), 3, 1)?;
+    t.scroll(5, 5, termlens::Scroll::Left)?;
+    // Drag left button from (2,2) to (6,3): press, motion (0+32), release.
+    t.drag(termlens::MouseButton::Left, (2, 2), (6, 3))?;
+
+    t.wait_until(|s| s.row_text(0).contains("|"))?;
+    let text = t.screen().row_text(0);
+    for expected in [
+        "[<2;11;5M",
+        "[<2;11;5m", // right press + release
+        "[<16;4;2M",
+        "[<16;4;2m", // ctrl + left
+        "[<66;6;6M", // horizontal wheel
+        "[<0;3;3M",
+        "[<32;7;4M",
+        "[<0;7;4m", // drag: press, motion, release
+    ] {
+        assert!(text.contains(expected), "missing {expected} in:\n{text}");
+    }
+    Ok(())
+}
+
+/// A drag is refused under X10, where there is no release to report —
+/// the same standard `click` applies to "no tracking at all".
+#[test]
+fn drag_is_refused_when_the_mode_cannot_express_it() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args(["-c", r"printf '\033[?9h'; printf READY; read guard"])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("READY"))?;
+
+    let err = t
+        .drag(termlens::MouseButton::Left, (1, 1), (4, 4))
+        .expect_err("X10 reports presses only");
+    assert!(matches!(err, Error::Input(_)), "got: {err}");
+    assert!(err.to_string().contains("X10"), "unhelpful: {err}");
+
+    t.send(Key::Enter);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 #[test]
 fn arrows_follow_the_apps_cursor_key_mode() -> termlens::Result<()> {
     // The script enables DECCKM (CSI ?1 h), reads 3 bytes, reports them,

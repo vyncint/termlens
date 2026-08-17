@@ -107,12 +107,125 @@ fn dup_writer(_master: &dyn portable_pty::MasterPty) -> Option<std::fs::File> {
 }
 
 /// Scroll-wheel direction for [`Terminal::scroll`].
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scroll {
     /// Wheel up (away from the user).
     Up,
     /// Wheel down (toward the user).
     Down,
+    /// Horizontal wheel left (or a trackpad swipe).
+    Left,
+    /// Horizontal wheel right.
+    Right,
+}
+
+/// A mouse button, for [`Terminal::click_with`] and [`Terminal::drag`].
+///
+/// Add modifiers the same way [`Key`](crate::Key) does:
+/// `MouseButton::Left.ctrl()`.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MouseButton {
+    /// The primary button — what [`Terminal::click`] sends.
+    Left,
+    /// The middle button (wheel click).
+    Middle,
+    /// The secondary button, conventionally a context menu.
+    Right,
+}
+
+impl MouseButton {
+    fn code(self) -> u8 {
+        match self {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+        }
+    }
+
+    /// This button held with `Ctrl` — the usual multi-select idiom.
+    #[must_use]
+    pub fn ctrl(self) -> MouseChord {
+        MouseChord::from(self).ctrl()
+    }
+
+    /// This button held with `Alt`.
+    #[must_use]
+    pub fn alt(self) -> MouseChord {
+        MouseChord::from(self).alt()
+    }
+
+    /// This button held with `Shift`.
+    #[must_use]
+    pub fn shift(self) -> MouseChord {
+        MouseChord::from(self).shift()
+    }
+}
+
+/// A mouse button plus modifier keys — `MouseButton::Left.ctrl()`.
+///
+/// Mirrors the [`Chord`](crate::Chord) builder for keys; anything taking
+/// `impl Into<MouseChord>` accepts a bare [`MouseButton`] too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MouseChord {
+    button: MouseButton,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+}
+
+impl From<MouseButton> for MouseChord {
+    fn from(button: MouseButton) -> Self {
+        Self {
+            button,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        }
+    }
+}
+
+impl MouseChord {
+    /// Add `Ctrl`.
+    #[must_use]
+    pub fn ctrl(mut self) -> Self {
+        self.ctrl = true;
+        self
+    }
+
+    /// Add `Alt`.
+    #[must_use]
+    pub fn alt(mut self) -> Self {
+        self.alt = true;
+        self
+    }
+
+    /// Add `Shift`.
+    #[must_use]
+    pub fn shift(mut self) -> Self {
+        self.shift = true;
+        self
+    }
+
+    /// The xterm button code: the button, plus 4 for shift, 8 for alt
+    /// and 16 for control.
+    fn code(self) -> u8 {
+        self.button.code()
+            + 4 * u8::from(self.shift)
+            + 8 * u8::from(self.alt)
+            + 16 * u8::from(self.ctrl)
+    }
+}
+
+/// The error every mouse action shares: bytes the application never
+/// asked for would be misparsed as keys.
+fn no_mouse_tracking() -> Error {
+    Error::Input(
+        "the application has not enabled mouse tracking \
+         (no CSI ?9/?1000/?1002/?1003 h was seen)"
+            .into(),
+    )
 }
 
 /// A POSIX signal for [`Terminal::signal`]: the graceful-shutdown set.
@@ -998,23 +1111,91 @@ impl Terminal {
     /// garbage keys), or when the position is unrepresentable in the
     /// legacy encoding (columns/rows beyond 222).
     pub fn click(&mut self, col: u16, row: u16) -> Result<()> {
+        self.click_with(MouseButton::Left, col, row)
+    }
+
+    /// Click a specific button, optionally with modifiers, at
+    /// `(col, row)`.
+    ///
+    /// Takes a [`MouseButton`] or a [`MouseChord`], the same way
+    /// [`send`](Self::send) takes a [`Key`](crate::Key) or a
+    /// [`Chord`](crate::Chord):
+    ///
+    /// ```no_run
+    /// # use termlens::MouseButton;
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// t.click_with(MouseButton::Right, 10, 4)?;          // context menu
+    /// t.click_with(MouseButton::Left.ctrl(), 10, 4)?;    // multi-select
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`click`](Self::click).
+    pub fn click_with(&mut self, button: impl Into<MouseChord>, col: u16, row: u16) -> Result<()> {
+        let chord = button.into();
         let modes = self.input_modes();
         let press_only = match modes.mouse {
-            MouseMode::None => {
-                return Err(Error::Input(
-                    "the application has not enabled mouse tracking \
-                     (no CSI ?9/?1000/?1002/?1003 h was seen)"
-                        .into(),
-                ))
-            }
+            MouseMode::None => return Err(no_mouse_tracking()),
             MouseMode::Press => true,
             MouseMode::PressRelease | MouseMode::ButtonMotion | MouseMode::AnyMotion => false,
         };
-        let mut bytes = self.mouse_report(&modes, 0, col, row, true)?;
+        let mut bytes = self.mouse_report(&modes, chord.code(), col, row, true)?;
         if !press_only {
-            bytes.extend(self.mouse_report(&modes, 0, col, row, false)?);
+            bytes.extend(self.mouse_report(&modes, chord.code(), col, row, false)?);
         }
         self.write_or_panic(&bytes, "a mouse click");
+        Ok(())
+    }
+
+    /// Drag from one cell to another: press, motion, release.
+    ///
+    /// What actually reaches the application depends on what it asked
+    /// for, as always. Under button-event or any-event tracking
+    /// (`?1002`/`?1003`) the motion report is included; under plain
+    /// `?1000` the application asked not to hear about motion, so it
+    /// receives the press and release alone — the endpoints, which is
+    /// what selection handling usually needs. Under X10 (`?9`) there is
+    /// no release at all, so a drag cannot be expressed and this is a
+    /// typed error rather than a misleading half-gesture.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Input`] when no mouse tracking is enabled, when the
+    /// tracking mode is X10, or when a position is unrepresentable in
+    /// the encoding the application selected.
+    pub fn drag(
+        &mut self,
+        button: impl Into<MouseChord>,
+        from: (u16, u16),
+        to: (u16, u16),
+    ) -> Result<()> {
+        let chord = button.into();
+        let modes = self.input_modes();
+        let report_motion = match modes.mouse {
+            MouseMode::None => return Err(no_mouse_tracking()),
+            MouseMode::Press => {
+                return Err(Error::Input(
+                    "the application enabled X10 mouse tracking (CSI ?9 h), which \
+                     reports presses only — a drag has no release to report"
+                        .into(),
+                ))
+            }
+            MouseMode::PressRelease => false,
+            MouseMode::ButtonMotion | MouseMode::AnyMotion => true,
+        };
+        let (from_col, from_row) = from;
+        let (to_col, to_row) = to;
+
+        let mut bytes = self.mouse_report(&modes, chord.code(), from_col, from_row, true)?;
+        if report_motion {
+            // A motion report is the button code plus 32.
+            bytes.extend(self.mouse_report(&modes, chord.code() + 32, to_col, to_row, true)?);
+        }
+        bytes.extend(self.mouse_report(&modes, chord.code(), to_col, to_row, false)?);
+        self.write_or_panic(&bytes, "a mouse drag");
         Ok(())
     }
 
@@ -1026,15 +1207,13 @@ impl Terminal {
     pub fn scroll(&mut self, col: u16, row: u16, direction: Scroll) -> Result<()> {
         let modes = self.input_modes();
         if modes.mouse == MouseMode::None {
-            return Err(Error::Input(
-                "the application has not enabled mouse tracking \
-                 (no CSI ?9/?1000/?1002/?1003 h was seen)"
-                    .into(),
-            ));
+            return Err(no_mouse_tracking());
         }
         let button = match direction {
             Scroll::Up => 64,
             Scroll::Down => 65,
+            Scroll::Left => 66,
+            Scroll::Right => 67,
         };
         // Wheel events are presses only; there is no release.
         let bytes = self.mouse_report(&modes, button, col, row, true)?;

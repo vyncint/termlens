@@ -9,7 +9,23 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Changed
+
+- `Scroll` gained `Left` and `Right` variants and is now
+  `#[non_exhaustive]`. Exhaustive `match` on it needs a wildcard arm;
+  marking it non-exhaustive means later additions won't break code
+  again.
+
 ### Added
+
+- A fuller mouse API: `click_with(button, col, row)` for middle and
+  right buttons, `drag(button, from, to)`, modifier chords
+  (`MouseButton::Left.ctrl()`, mirroring `Key::Right.ctrl()`), and
+  horizontal wheel via `Scroll::Left` / `Scroll::Right`. Everything
+  stays mode-aware: encoded for the tracking mode and encoding the
+  application enabled, and refused with a typed error when the mode
+  cannot express the gesture — a drag under X10, which reports no
+  release, is an error rather than a misleading half-gesture.
 
 - Every wait now takes a per-call deadline: `wait_frame_for`,
   `wait_idle_for` and `wait_exit_for` join `wait_until_for`. One

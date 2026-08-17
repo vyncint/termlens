@@ -74,7 +74,7 @@ pub use keys::{Chord, Input, Key};
 pub use screen::{Cell, Color, MouseMode, Screen, Style};
 #[cfg(unix)]
 pub use terminal::Signal;
-pub use terminal::{ExitStatus, Scroll, Terminal, TerminalBuilder};
+pub use terminal::{ExitStatus, MouseButton, MouseChord, Scroll, Terminal, TerminalBuilder};
 
 /// Re-export of [`insta`](https://insta.rs) (feature `insta`, on by
 /// default), so [`assert_screen_snapshot!`] always agrees with the `insta`
