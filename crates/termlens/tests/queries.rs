@@ -69,6 +69,27 @@ fn background_color_query_gets_the_configured_answer() -> termlens::Result<()> {
 }
 
 #[test]
+fn foreground_color_query_gets_the_configured_answer() -> termlens::Result<()> {
+    // OSC 10 reply: ESC ] 1 0 ; rgb:cdcd/d6d6/f4f4 BEL = 24 bytes.
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .foreground_rgb(0xcd, 0xd6, 0xf4)
+        .args([
+            "-c",
+            concat!(
+                r"stty -icanon -echo; printf '\033]10;?\007'; ",
+                r#"reply=$(head -c 24 | tr '\033\007' 'EG'); "#,
+                r#"printf 'unblocked:%s' "$reply"; read guard"#
+            ),
+        ])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("unblocked:E]10;rgb:cdcd/d6d6/f4f4G"))?;
+    t.send(Key::Enter);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+#[test]
 fn text_area_size_reports_the_real_grid() -> termlens::Result<()> {
     // XTWINOPS 18 reply: ESC [ 8 ; 24 ; 80 t = 10 bytes.
     let mut t = sh(concat!(

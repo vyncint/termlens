@@ -234,6 +234,7 @@ struct EmuState {
     respond: bool,
     /// Background color reported to OSC 11 queries.
     background: (u8, u8, u8),
+    foreground: (u8, u8, u8),
     /// Distinct queries that went unanswered, in first-seen order, each
     /// with the read it most recently arrived in — timeout errors surface
     /// these so a blocked probe is diagnosable.
@@ -250,7 +251,12 @@ struct EmuState {
 }
 
 impl EmuState {
-    fn new(emu: Box<dyn Emulator>, respond: bool, background: (u8, u8, u8)) -> Self {
+    fn new(
+        emu: Box<dyn Emulator>,
+        respond: bool,
+        background: (u8, u8, u8),
+        foreground: (u8, u8, u8),
+    ) -> Self {
         Self {
             emu,
             last_activity: Instant::now(),
@@ -261,6 +267,7 @@ impl EmuState {
             frames: VecDeque::with_capacity(FRAME_HISTORY),
             respond,
             background,
+            foreground,
             unanswered: Vec::new(),
             unanswered_overflow: 0,
             replies_dropped: 0,
@@ -330,7 +337,7 @@ impl EmuState {
             Query::OscColor {
                 code,
                 st_terminated,
-            } => osc_color(*code, (0xff, 0xff, 0xff), *st_terminated),
+            } => osc_color(*code, self.foreground, *st_terminated),
             Query::RequestMode(mode) => {
                 // DECRPM. Reporting 0 ("not recognized") for anything we
                 // do not track exactly is deliberate — see
@@ -465,6 +472,7 @@ pub struct TerminalBuilder {
     cwd: Option<PathBuf>,
     answer_queries: bool,
     background: (u8, u8, u8),
+    foreground: (u8, u8, u8),
 }
 
 impl Default for TerminalBuilder {
@@ -479,6 +487,7 @@ impl Default for TerminalBuilder {
             cwd: None,
             answer_queries: true,
             background: (0, 0, 0),
+            foreground: (0xff, 0xff, 0xff),
         }
     }
 }
@@ -578,6 +587,20 @@ impl TerminalBuilder {
     #[must_use]
     pub fn background_rgb(mut self, r: u8, g: u8, b: u8) -> Self {
         self.background = (r, g, b);
+        self
+    }
+
+    /// The foreground color reported to `OSC 10` queries. Defaults to
+    /// white.
+    ///
+    /// Applications that choose a theme by comparing foreground and
+    /// background luminance need both ends configurable; with only
+    /// [`background_rgb`](Self::background_rgb) they always saw
+    /// white-on-*your-background*, so one branch of that logic could
+    /// never be exercised.
+    #[must_use]
+    pub fn foreground_rgb(mut self, r: u8, g: u8, b: u8) -> Self {
+        self.foreground = (r, g, b);
         self
     }
 
@@ -689,6 +712,7 @@ impl TerminalBuilder {
             Box::new(Vt100Emulator::new(self.rows, self.cols)),
             self.answer_queries,
             self.background,
+            self.foreground,
         )));
         let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
 
