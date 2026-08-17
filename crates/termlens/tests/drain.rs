@@ -67,33 +67,51 @@ fn undelivered_replies_are_named_in_the_diagnosis() {
 /// `send_str` into a non-reading child blocked indefinitely — no
 /// deadline applied to writes at all, and the eventual failure (when
 /// the child died) described the teardown rather than the real cause.
+/// The provocation runs on its own thread and is joined with a hard
+/// bound, so this test reports a verdict in every case instead of
+/// becoming the hang it is testing for.
 #[test]
 fn writing_to_a_child_that_is_not_reading_fails_at_the_deadline() {
-    let start = Instant::now();
-    let panicked = std::panic::catch_unwind(|| {
-        let mut t = Terminal::builder()
-            .size(80, 24)
-            .env_clear()
-            .timeout(Duration::from_millis(700))
-            // The child stops itself: a stopped process cannot drain its
-            // input, which fills the PTY buffer for certain. (A single
-            // huge write is not a reliable way to provoke this — macOS
-            // absorbs one of those and blocks on the *small repeated*
-            // writes instead, which is exactly the shape typed input
-            // has.)
-            .args(["-c", "stty -icanon -echo; kill -STOP $$; sleep 30"])
-            .spawn("/bin/sh")
-            .expect("spawn");
-        std::thread::sleep(Duration::from_millis(200));
-        for _ in 0..5000 {
-            t.send_str("xxxxxxxx");
-        }
-    })
-    .expect_err("the write must fail loudly");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(|| {
+            let mut t = Terminal::builder()
+                .size(80, 24)
+                .env_clear()
+                .timeout(Duration::from_millis(700))
+                // The child stops itself: a stopped process cannot drain
+                // its input, so the PTY buffer fills for certain. Small
+                // repeated writes are the provocation that works — a
+                // single huge write is absorbed (measured: 256 KiB in
+                // 13ms on macOS) — and they are the shape typed input
+                // actually has.
+                .args(["-c", "stty -icanon -echo; kill -STOP $$; sleep 30"])
+                .spawn("/bin/sh")
+                .expect("spawn");
+            std::thread::sleep(Duration::from_millis(200));
+            for _ in 0..20_000 {
+                t.send_str("xxxxxxxx");
+            }
+        });
+        let _ = tx.send(outcome.err().map(|payload| {
+            payload
+                .downcast_ref::<String>()
+                .map_or_else(|| "<non-string panic>".to_owned(), Clone::clone)
+        }));
+    });
 
-    let message = panicked
-        .downcast_ref::<String>()
-        .map_or_else(|| "<non-string panic>".to_owned(), Clone::clone);
+    let message = match rx.recv_timeout(Duration::from_secs(20)) {
+        Ok(Some(message)) => message,
+        Ok(None) => panic!(
+            "every write was absorbed, so the deadline path was never reached — \
+             this platform does not block on a full PTY buffer at this volume, \
+             and the test needs a stronger provocation"
+        ),
+        Err(_) => panic!(
+            "the write never returned: it blocked past its own 700ms deadline, \
+             which is exactly the bug this test guards"
+        ),
+    };
     assert!(
         message.contains("not reading its input"),
         "the panic must name the real cause: {message}"
@@ -101,11 +119,6 @@ fn writing_to_a_child_that_is_not_reading_fails_at_the_deadline() {
     assert!(
         message.contains("--- screen ---"),
         "the panic must carry the screen: {message}"
-    );
-    assert!(
-        start.elapsed() < Duration::from_secs(10),
-        "the write blocked past its deadline: {:?}",
-        start.elapsed()
     );
 }
 
