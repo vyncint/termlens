@@ -61,6 +61,31 @@ pub(crate) enum MouseEncoding {
     Utf8,
 }
 
+/// What a `DECRQM` request can be told about a private mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModeState {
+    /// The mode is implemented and currently set.
+    Set,
+    /// The mode is implemented and currently reset.
+    Reset,
+    /// Not implemented, or implemented but not tracked precisely enough
+    /// to answer honestly. Reported as "not recognized", never guessed:
+    /// an application told a mode is reset when it may be set is worse
+    /// off than one told nothing.
+    NotRecognized,
+}
+
+impl ModeState {
+    /// The `Ps` value of the `DECRPM` reply.
+    pub(crate) fn report_value(self) -> u32 {
+        match self {
+            ModeState::Set => 1,
+            ModeState::Reset => 2,
+            ModeState::NotRecognized => 0,
+        }
+    }
+}
+
 /// A VT emulator: consumes raw PTY bytes, maintains a screen grid.
 pub(crate) trait Emulator: Send {
     /// Feed raw bytes from the PTY into the emulator. Stops early — with
@@ -83,6 +108,9 @@ pub(crate) trait Emulator: Send {
 
     /// The input-affecting modes the application has currently set.
     fn input_modes(&self) -> InputModes;
+
+    /// Whether DEC private mode `mode` is set, for answering `DECRQM`.
+    fn mode_state(&self, mode: u32) -> ModeState;
 
     /// Resize the emulated grid to `rows` × `cols`.
     fn set_size(&mut self, rows: u16, cols: u16);

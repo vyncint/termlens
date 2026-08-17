@@ -186,6 +186,79 @@ fn wait_frame_timeouts_carry_the_query_note() {
     );
 }
 
+/// The payoff of answering DECRQM: an application that *probes* before
+/// using synchronized output can turn it on against termlens — so
+/// `wait_frame` works against a program nobody modified for us.
+#[test]
+fn an_app_that_probes_for_synchronized_output_gets_it() -> termlens::Result<()> {
+    let mut t = sh(concat!(
+        // Ask "is mode 2026 supported?" and read the DECRPM reply.
+        r"stty -icanon -echo; printf '\033[?2026$p'; ",
+        r#"reply=$(head -c 10 | tr '\033' 'E'); "#,
+        // A terminal that does not recognize the mode answers `;0$y`.
+        r#"case "$reply" in *';0$y') printf 'unsupported'; read guard; exit 0 ;; esac; "#,
+        // Recognized: bracket the repaint, exactly as a real app would.
+        r"printf '\033[?2026h\033[HPROBED FRAME\033[?2026l'; read guard"
+    ))?;
+
+    t.wait_frame(|s| s.contains("PROBED FRAME"))?;
+    t.send(Key::Enter);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// The reply must be truthful, not merely present: a mode we do not
+/// track exactly is reported as "not recognized" rather than guessed.
+#[test]
+fn mode_reports_are_truthful() -> termlens::Result<()> {
+    let mut t = sh(concat!(
+        r"stty -icanon -echo; printf '\033[?2004h'; ",
+        // 2004 was just set -> `;1$y`; 1 (DECCKM) is untouched -> `;2$y`;
+        // 12 (cursor blink) is not tracked at all -> `;0$y`.
+        r"printf '\033[?2004$p\033[?1$p\033[?12$p'; ",
+        // The three replies are 11 + 8 + 9 = 28 bytes:
+        // ESC[?2004;1$y  ESC[?1;2$y  ESC[?12;0$y
+        r#"reply=$(head -c 28 | tr '\033' 'E'); "#,
+        r#"printf 'got:%s' "$reply"; read guard"#
+    ))?;
+    t.wait_until(|s| s.contains("got:"))?;
+    let row = t.screen().row_text(0);
+    assert!(row.contains("E[?2004;1$y"), "2004 should be set: {row}");
+    assert!(row.contains("E[?1;2$y"), "DECCKM should be reset: {row}");
+    assert!(row.contains("E[?12;0$y"), "12 is not tracked: {row}");
+
+    t.send(Key::Enter);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// The families we recognize but cannot answer are now named in the
+/// timeout instead of hanging silently.
+#[test]
+fn decrqss_and_palette_queries_are_named() {
+    for (label, script, shape) in [
+        (
+            "DECRQSS",
+            r#"printf '\033P$qm\033\\'; head -c 4 >/dev/null; echo never"#,
+            "^[P$qm",
+        ),
+        (
+            "OSC 4",
+            r#"printf '\033]4;1;?\007'; head -c 4 >/dev/null; echo never"#,
+            "^[]4;1;?",
+        ),
+    ] {
+        let mut t = Terminal::builder()
+            .timeout(Duration::from_millis(400))
+            .args(["-c", script])
+            .spawn("/bin/sh")
+            .unwrap();
+        let err = t.wait_until(|s| s.contains("never")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(shape), "{label} not named in: {msg}");
+    }
+}
+
 #[test]
 fn replies_are_not_echoed_into_the_screen() -> termlens::Result<()> {
     // The reply travels the input path; unless the app prints it, it must

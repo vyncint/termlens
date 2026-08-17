@@ -2,7 +2,7 @@
 //! snapshot converts vt100's grid into termlens's own [`Screen`].
 
 use super::seq::{SeqEvent, SeqTracker};
-use super::{Emulator, InputModes, MouseEncoding, Processed, Stop};
+use super::{Emulator, InputModes, ModeState, MouseEncoding, Processed, Stop};
 use crate::screen::{Cell, Color, MouseMode, Screen, Style, TermState};
 
 pub(crate) struct Vt100Emulator {
@@ -95,6 +95,58 @@ impl Emulator for Vt100Emulator {
             },
             bracketed_paste: screen.bracketed_paste(),
             application_cursor: screen.application_cursor(),
+        }
+    }
+
+    fn mode_state(&self, mode: u32) -> ModeState {
+        let screen = self.parser.screen();
+        let on = |set: bool| {
+            if set {
+                ModeState::Set
+            } else {
+                ModeState::Reset
+            }
+        };
+        // Only modes whose state we hold exactly. The mouse tracking
+        // modes are the interesting exclusion: vt100 collapses 9/1000/
+        // 1002/1003 into one mutually exclusive value, so an application
+        // that enabled several (crossterm's EnableMouseCapture sends
+        // 1000, 1002 and 1003 together) would be told the others are
+        // *reset* — a guess dressed up as an answer. Reporting the exact
+        // match and nothing else keeps every reply true.
+        match mode {
+            // Synchronized output. Answering at all is the point: an
+            // application that probes before bracketing its repaints can
+            // then use it, which is what makes wait_frame work against
+            // programs we haven't modified.
+            2026 => on(self.tracker.in_sync_update()),
+            1 => on(screen.application_cursor()),
+            25 => on(!screen.hide_cursor()),
+            47 | 1047 | 1049 => on(screen.alternate_screen()),
+            2004 => on(screen.bracketed_paste()),
+            1006 => on(matches!(
+                screen.mouse_protocol_encoding(),
+                ::vt100::MouseProtocolEncoding::Sgr
+            )),
+            1005 => on(matches!(
+                screen.mouse_protocol_encoding(),
+                ::vt100::MouseProtocolEncoding::Utf8
+            )),
+            9 | 1000 | 1002 | 1003 => {
+                let current = match screen.mouse_protocol_mode() {
+                    ::vt100::MouseProtocolMode::None => 0,
+                    ::vt100::MouseProtocolMode::Press => 9,
+                    ::vt100::MouseProtocolMode::PressRelease => 1000,
+                    ::vt100::MouseProtocolMode::ButtonMotion => 1002,
+                    ::vt100::MouseProtocolMode::AnyMotion => 1003,
+                };
+                if current == mode {
+                    ModeState::Set
+                } else {
+                    ModeState::NotRecognized
+                }
+            }
+            _ => ModeState::NotRecognized,
         }
     }
 

@@ -82,9 +82,14 @@ pub(crate) enum Query {
         /// True when the query used ST; the reply must mirror it.
         st_terminated: bool,
     },
+    /// DECRQM: "is private mode `n` set?" — `CSI ? n $ p`. Answering
+    /// this truthfully lets an application that *probes* before using a
+    /// mode (synchronized output above all) turn it on against termlens.
+    RequestMode(u32),
     /// Recognized as a question, but one termlens has no answer for
-    /// (XTGETTCAP, kitty `CSI ? u`, other DSR/DA/XTWINOPS reports, …).
-    /// Carries a printable rendering for diagnostics.
+    /// (XTGETTCAP, kitty `CSI ? u`, DECRQSS, `OSC 4`/`OSC 52`, other
+    /// DSR/DA/XTWINOPS reports, …). Carries a printable rendering for
+    /// diagnostics.
     Unanswerable(String),
 }
 
@@ -112,6 +117,8 @@ pub(crate) struct SeqTracker {
     // Incremental CSI scanner: enough to recognize mode 2026 and the
     // handful of query shapes, in O(1) space.
     csi_prefix: u8,
+    /// Intermediate byte seen in the current CSI (only `$` matters).
+    csi_intermediate: u8,
     csi_invalid: bool,
     csi_first: bool,
     csi_param: u32,
@@ -138,6 +145,7 @@ impl SeqTracker {
             utf8_remaining: 0,
             sync_update: false,
             csi_prefix: 0,
+            csi_intermediate: 0,
             csi_invalid: false,
             csi_first: true,
             csi_param: 0,
@@ -176,6 +184,7 @@ impl SeqTracker {
 
     fn reset_csi_scanner(&mut self) {
         self.csi_prefix = 0;
+        self.csi_intermediate = 0;
         self.csi_invalid = false;
         self.csi_first = true;
         self.csi_param = 0;
@@ -227,8 +236,12 @@ impl SeqTracker {
                 self.csi_has_digits = true;
             }
             b';' => self.end_csi_param(),
-            // Sub-parameters or intermediates: none of the sequences we
-            // recognize use them.
+            // `$` is the intermediate of the DECRQM request (`CSI ? n $ p`);
+            // recording it keeps the sequence classifiable instead of
+            // discarding it as unrecognized.
+            b'$' => self.csi_intermediate = b'$',
+            // Sub-parameters or other intermediates: none of the sequences
+            // we recognize use them.
             _ => self.csi_invalid = true,
         }
         self.csi_first = false;
@@ -244,6 +257,20 @@ impl SeqTracker {
         }
         let params_empty = self.csi_param_count == 0;
         let single = |v: u32| self.csi_param_count == 1 && self.csi_first_param == v;
+
+        // DECRQM (`CSI ? n $ p`) and DECRQSS-adjacent `$`-intermediate
+        // requests. Handled before the plain-CSI table below, which
+        // assumes no intermediate.
+        if self.csi_intermediate == b'$' {
+            return match (self.csi_prefix, b) {
+                (b'?', b'p') if self.csi_param_count == 1 => {
+                    SeqEvent::Query(Query::RequestMode(self.csi_first_param))
+                }
+                // ANSI-mode DECRQM and mode *reports* we cannot answer.
+                (_, b'p' | b'y') => SeqEvent::Query(Query::Unanswerable(self.seq_printable())),
+                _ => SeqEvent::None,
+            };
+        }
 
         // DEC private mode 2026 (synchronized output).
         if self.csi_prefix == b'?' && self.csi_saw_2026 {
@@ -307,6 +334,18 @@ impl SeqTracker {
                     })
                 }
                 b"12;?" => return SeqEvent::Query(Query::Unanswerable(self.seq_printable())),
+                content
+                    if content.ends_with(b"?")
+                        && (content.starts_with(b"4;") || content.starts_with(b"52;")) =>
+                {
+                    // Palette queries (`OSC 4;n;?`) and clipboard reads
+                    // (`OSC 52;…;?`), recognized so a blocked application
+                    // is diagnosed rather than left silently hanging. The
+                    // `?` matters: both codes also *set* — a palette
+                    // colour, or the clipboard from base64 — and a set is
+                    // not a question.
+                    return SeqEvent::Query(Query::Unanswerable(self.seq_printable()));
+                }
                 content => {
                     // OSC 0 (icon + title) / OSC 2 (title) set the window
                     // title — state the vt100 backend does not track.
@@ -321,9 +360,10 @@ impl SeqTracker {
                 }
             }
         }
-        // DCS: XTGETTCAP is `ESC P + q … ST` — a capability question.
+        // DCS questions: XTGETTCAP (`ESC P + q … ST`) and DECRQSS
+        // (`ESC P $ q … ST`, "what is the current setting of …?").
         let body = &self.seq_buf[..usize::from(self.seq_len)];
-        if body.get(2..4) == Some(b"+q") {
+        if matches!(body.get(2..4), Some(b"+q" | b"$q")) {
             return SeqEvent::Query(Query::Unanswerable(self.seq_printable()));
         }
         SeqEvent::None
@@ -621,6 +661,44 @@ mod tests {
         // Any CSI …n is a DSR-family status request by definition.
         let q = queries_of(b"\x1b[6;1n");
         assert_eq!(q, vec![Query::Unanswerable("^[[6;1n".into())]);
+    }
+
+    #[test]
+    fn recognizes_decrqm_mode_requests() {
+        assert_eq!(queries_of(b"\x1b[?2026$p"), vec![Query::RequestMode(2026)]);
+        assert_eq!(queries_of(b"\x1b[?2004$p"), vec![Query::RequestMode(2004)]);
+        assert_eq!(queries_of(b"\x1b[?1$p"), vec![Query::RequestMode(1)]);
+        // ANSI-mode DECRQM (no `?`) is recognized but not answerable.
+        assert_eq!(
+            queries_of(b"\x1b[4$p"),
+            vec![Query::Unanswerable("^[[4$p".into())]
+        );
+    }
+
+    #[test]
+    fn recognizes_the_remaining_unanswerable_families() {
+        // DECRQSS: "what is the current setting of ...?"
+        assert_eq!(
+            queries_of(b"\x1bP$qm\x1b\\"),
+            vec![Query::Unanswerable("^[P$qm^[\\".into())]
+        );
+        // Palette query and clipboard read.
+        assert_eq!(
+            queries_of(b"\x1b]4;1;?\x07"),
+            vec![Query::Unanswerable("^[]4;1;?^G".into())]
+        );
+        assert_eq!(
+            queries_of(b"\x1b]52;c;?\x07"),
+            vec![Query::Unanswerable("^[]52;c;?^G".into())]
+        );
+    }
+
+    #[test]
+    fn setting_a_palette_colour_is_not_a_query() {
+        // `OSC 4;1;rgb:...` sets rather than asks — only the `?` form is
+        // a question.
+        assert!(queries_of(b"\x1b]4;1;rgb:ff/00/00\x07").is_empty());
+        assert!(queries_of(b"\x1b]52;c;aGVsbG8=\x07").is_empty());
     }
 
     #[test]

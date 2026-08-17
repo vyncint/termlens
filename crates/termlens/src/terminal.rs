@@ -331,6 +331,13 @@ impl EmuState {
                 code,
                 st_terminated,
             } => osc_color(*code, (0xff, 0xff, 0xff), *st_terminated),
+            Query::RequestMode(mode) => {
+                // DECRPM. Reporting 0 ("not recognized") for anything we
+                // do not track exactly is deliberate — see
+                // `Emulator::mode_state`.
+                let value = self.emu.mode_state(*mode).report_value();
+                format!("\x1b[?{mode};{value}$y").into_bytes()
+            }
             Query::Unanswerable(shape) => {
                 self.note_unanswered(shape.clone());
                 return None;
@@ -792,6 +799,7 @@ fn query_shape(query: &Query) -> String {
         Query::SecondaryDa => "^[[>c".into(),
         Query::TextAreaSize => "^[[18t".into(),
         Query::OscColor { code, .. } => format!("^[]{code};?"),
+        Query::RequestMode(mode) => format!("^[[?{mode}$p"),
         Query::Unanswerable(shape) => shape.clone(),
     }
 }
