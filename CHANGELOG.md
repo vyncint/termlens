@@ -9,6 +9,123 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-18
+
+What termlens could not do, and where it quietly did the wrong thing.
+
+Three gaps each made a whole category of subject untestable, and four
+defects were found by adversarially probing the 0.3.0 release rather than
+by reading its source — two of them undercutting the frame guarantee that
+is this crate's headline.
+
+### Changed
+
+- **`wait_frame` and `wait_frame_for` return `Result<Screen>`** — the
+  frame the predicate matched. Assert on that rather than on a later
+  `screen()`, which can already be a newer state; the old shape let a
+  test assert on one instant and read another. The dominant
+  `t.wait_frame(..)?;` call form still compiles unchanged.
+- **`wait_frame` no longer offers a frame twice.** Each call scans only
+  frames newer than the one it last returned. A frame that satisfied a
+  wait cannot satisfy the next, so N calls observe N distinct frames, a
+  burst is observable in emission order (asking backwards now fails), and
+  `send(key)` followed by `wait_frame(|s| s.contains(OLD_STATE))` times
+  out instead of passing on the superseded frame while the assertion
+  after it reads the old screen. A frame completed before the call but
+  never yet returned still matches, deliberately: a fast application must
+  not be able to slip one past two waits. `resize` advances the cursor
+  too — a frame drawn at the old size is not the repaint that answers the
+  new one.
+- **`Style` gained the public fields `blink`, `conceal` and
+  `strikethrough`**, so struct literals need updating
+  (`..Style::default()` keeps working). `with_styles()` emits the new
+  tokens in SGR order — `bold dim italic underline blink reverse conceal
+  strikethrough` — which leaves an existing span's tokens unchanged
+  unless the cell carries one of the three.
+- **Scrollback is retained by default** (1000 rows;
+  `TerminalBuilder::scrollback(0)` restores the old behaviour). Snapshots
+  now carry history, which is invisible in the text rendering, so
+  existing snapshot files stay valid.
+
+### Added
+
+- **Scrollback retention.** Content that scrolled off the top used to
+  cease to exist, which ruled out every application that hands finished
+  output *back* to the terminal — a pager, a log view, a TUI that commits
+  completed blocks into native scrollback and keeps a small live region.
+  `TerminalBuilder::scrollback(rows)` sizes the history, and `Screen`
+  gained `scrollback_rows`, `scrollback_text` and `full_text` — history
+  followed by the visible screen, which is the assertion an author
+  actually writes when the application moves content between regions as
+  it runs. Two limits are stated rather than papered over: history is
+  bounded, and resize does not reflow. It costs nothing where unused: the
+  alternate screen accumulates no history at all.
+- **`Style::conceal`, `blink` and `strikethrough`.** `SGR 5`/`6`, `8` and
+  `9` reached nothing, so three renderings collapsed into one value.
+  Conceal was not a missing nicety but a trap: a test asserting that a
+  password field is masked **passed against an application that printed
+  the secret in clear**, and `with_styles()` could not break the tie
+  either. That was the one failure mode in this crate where a green test
+  certified the bug it was written to catch.
+- **`OSC 52` clipboard capture.** `Screen::clipboard()` reports the most
+  recent write — the decoded text and the target selections as the
+  application named them — so "did it copy the right thing?" is
+  answerable instead of resting on the application's own toast. An
+  undecodable payload reports `None`, never `Some("")`: bad base64, bytes
+  that are not UTF-8 and a payload past the capture bound are all
+  distinct from a real write of nothing. Clipboard *reads* stay
+  named-but-unanswered.
+
+### Fixed
+
+- **A stray `?2026l` no longer publishes a phantom frame.** The frame
+  publisher fired on any End, whether or not a Begin was seen. The
+  damaging case was not a false pass but a suppressed diagnosis:
+  applications reset terminal modes defensively at startup and on crash,
+  and such a string contains `?2026l`, so one stray End pushed the frame
+  count off zero and replaced "the application never emitted a DEC 2026
+  synchronized update — use `wait_until`" with a count implying the
+  predicate was at fault. A frame is now one *completed* update; a
+  Begin/End pair that changed nothing still counts, because the count is
+  of repaints rather than of changes.
+- **`DECRQM` no longer calls the mouse tracking modes "not recognized"
+  when none is active.** The old answer set was self-contradictory —
+  claiming the SGR mouse *encoding* while denying the tracking *modes*
+  those reports come from — and it closed a loop on itself: an
+  application doing ordinary probe-then-enable detection concluded the
+  terminal had no mouse, never enabled tracking, and `click` then refused,
+  blaming it for a decision termlens caused. With nothing tracking,
+  nothing was collapsed and every tracking mode is genuinely reset. The
+  ambiguous case — probing `1000` while `1002` is active — stays "not
+  recognized", since the backend keeps only the last of a group.
+- **`wait_idle` timeouts name an unfinished frame.** An application stuck
+  inside an open synchronized update is silent, so it used to time out
+  "waiting for 100ms of output silence", which reads as nonsense next to
+  a quiet terminal. The message now says the application is inside an
+  unfinished DEC 2026 update and that the screen below is a half-painted
+  frame.
+- Timeout messages from `wait_frame` carry the reason as well as the
+  count: when every frame has already been returned, the message says the
+  application has not repainted rather than implying the predicate is
+  wrong. Pluralization fixed while there.
+
+### Documented
+
+- **A snapshot may be a half-painted frame**, including for an
+  application that brackets every repaint in DEC 2026 exactly as
+  intended: `wait_frame` is frame-gated, `screen()` is not. Now stated on
+  `screen`, on `wait_until`'s third rule, and in `docs/DESIGN.md` §2 with
+  the three routes to a frame-consistent read — one per way of waiting.
+  The behaviour is deliberate: substituting the newest complete frame
+  would let a `wait_until` predicate match content the following
+  `screen()` does not show, and a torn read is what you want when
+  diagnosing an application hung mid-repaint.
+- **`wait_idle` will not declare idleness while a synchronized update is
+  open** — it treats a begun-and-unfinished repaint the way it treats a
+  half-received escape sequence. That is what makes the "settle before
+  whole-screen snapshots" rule work, and it is now a stated guarantee
+  rather than an implementation detail.
+
 ## [0.3.0] - 2026-08-17
 
 The features the first real user's coverage study asked for, in the
