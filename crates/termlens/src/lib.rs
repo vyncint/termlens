@@ -71,7 +71,7 @@ mod wait;
 
 pub use error::{Error, Result};
 pub use keys::{Chord, Input, Key};
-pub use screen::{Cell, Color, MouseMode, Screen, Style};
+pub use screen::{Cell, Clipboard, Color, MouseMode, Screen, Style};
 #[cfg(unix)]
 pub use terminal::Signal;
 pub use terminal::{ExitStatus, MouseButton, MouseChord, Scroll, Terminal, TerminalBuilder};

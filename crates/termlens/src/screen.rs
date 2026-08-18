@@ -66,6 +66,50 @@ pub enum MouseMode {
     AnyMotion,
 }
 
+/// What an application copied with `OSC 52`, as observed at one snapshot.
+///
+/// Read it from a snapshot via [`Screen::clipboard`]. A toast on screen
+/// proves the copy path ran; this proves the payload, which is usually the
+/// behaviour actually under test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Clipboard {
+    targets: Arc<str>,
+    text: Option<Arc<str>>,
+}
+
+impl Clipboard {
+    pub(crate) fn new(targets: &str, text: Option<String>) -> Self {
+        Self {
+            targets: Arc::from(targets),
+            text: text.map(Arc::from),
+        }
+    }
+
+    /// The copied text, or `None` when the payload was not usable text.
+    ///
+    /// `None` means the application sent something termlens could not
+    /// decode: base64 with invalid characters or a broken length, bytes
+    /// that are not valid UTF-8, or a payload past the capture bound. It is
+    /// deliberately distinct from `Some("")`, which is a real write of
+    /// nothing — the way an application clears the clipboard.
+    #[must_use]
+    pub fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+
+    /// The selections written to, exactly as the application named them:
+    /// `c` (clipboard), `p` (primary), `q`, `s`, or `0`–`7`, in any
+    /// combination — an application writing to the wrong one is a real bug
+    /// worth catching.
+    ///
+    /// Empty means the application named none, in which case a real
+    /// terminal picks its default (xterm: clipboard *and* primary).
+    #[must_use]
+    pub fn targets(&self) -> &str {
+        &self.targets
+    }
+}
+
 /// Out-of-band terminal state captured with each snapshot. Deliberately
 /// invisible in the text rendering (existing snapshot files stay valid);
 /// exposed through the accessors on [`Screen`].
@@ -76,6 +120,9 @@ pub(crate) struct TermState {
     pub(crate) bracketed_paste: bool,
     pub(crate) application_cursor: bool,
     pub(crate) mouse: MouseMode,
+    /// Behind an `Arc` deliberately: `Screen` is embedded in every
+    /// `Error` and cloned on every wait, so its size is load-bearing.
+    pub(crate) clipboard: Option<Arc<Clipboard>>,
 }
 
 impl Default for TermState {
@@ -86,6 +133,7 @@ impl Default for TermState {
             bracketed_paste: false,
             application_cursor: false,
             mouse: MouseMode::None,
+            clipboard: None,
         }
     }
 }
@@ -255,6 +303,31 @@ impl Screen {
     #[must_use]
     pub fn mouse_mode(&self) -> MouseMode {
         self.state.mouse
+    }
+
+    /// The most recent `OSC 52` clipboard write observed at this snapshot,
+    /// or `None` if the application has not copied anything yet.
+    ///
+    /// Snapshot state, so it follows snapshot rules: the value is what the
+    /// clipboard held at this observation, which makes a
+    /// [`wait_frame`](crate::Terminal::wait_frame) or
+    /// [`wait_until`](crate::Terminal::wait_until) predicate over a
+    /// clipboard write well-defined.
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// t.wait_until(|s| s.clipboard().is_some_and(|c| c.text() == Some("the title")))?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Clipboard *reads* (`OSC 52 ; c ; ?`) are a different sequence and
+    /// are not answered: they stay named in timeout errors, so an
+    /// application blocked on one is diagnosed rather than left hanging.
+    #[must_use]
+    pub fn clipboard(&self) -> Option<&Clipboard> {
+        self.state.clipboard.as_deref()
     }
 
     /// The cell at `(row, col)`, or `None` when out of bounds.
@@ -856,6 +929,7 @@ mod tests {
         assert!(!default.bracketed_paste());
         assert!(!default.application_cursor());
         assert_eq!(default.mouse_mode(), MouseMode::None);
+        assert!(default.clipboard().is_none());
 
         let state = TermState {
             title: Arc::from("my app"),
@@ -863,12 +937,15 @@ mod tests {
             bracketed_paste: true,
             application_cursor: true,
             mouse: MouseMode::AnyMotion,
+            clipboard: Some(Arc::new(Clipboard::new("c", Some("copied".into())))),
         };
         let cells = vec![Cell::new("x".into(), Style::default(), false, false)];
         let s = Screen::from_parts(1, 1, 0, 0, true, cells, state);
         assert_eq!(s.title(), "my app");
         assert!(s.alternate_screen() && s.bracketed_paste() && s.application_cursor());
         assert_eq!(s.mouse_mode(), MouseMode::AnyMotion);
+        let clip = s.clipboard().expect("captured");
+        assert_eq!((clip.targets(), clip.text()), ("c", Some("copied")));
         // Out-of-band state never leaks into the text format.
         assert_eq!(format!("{s}"), "size: 1x1  cursor: 0,0\nx");
     }

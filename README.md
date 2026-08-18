@@ -97,8 +97,9 @@ chords, and cursor keys are encoded exactly as the application
 configured its terminal (SGR mouse, bracketed paste, DECCKM) — because
 the emulator knows which modes the app enabled. The same knowledge is
 readable from every `Screen`: the window title, the alternate-screen
-flag, and the input modes are plain accessors, so "did the app enter the
-alt screen?" is an assertion, not an inference.
+flag, the input modes and the last `OSC 52` clipboard write are plain
+accessors, so "did the app enter the alt screen?" and "did it copy the
+right text?" are assertions, not inferences.
 
 Screens are immutable snapshots taken under the same
 lock the reader writes through, so every assertion sees a consistent

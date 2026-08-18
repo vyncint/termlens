@@ -71,6 +71,19 @@ would close a loop on itself: the application concludes the terminal has
 no mouse, never enables tracking, and `click` then refuses, blaming the
 application for a decision we caused.
 
+`OSC 52` is the one sequence we **capture** rather than answer. A write
+(`OSC 52 ; targets ; base64`) is not a question, and the only evidence a
+test could otherwise see is the application's own toast — which proves the
+code path ran and nothing about the payload, when the payload is the
+behaviour under test. So the decoded most-recent write lands on the
+snapshot (`Screen::clipboard`), with the target selections exactly as the
+application named them, since writing to the wrong one is a real bug. A
+payload we cannot decode — bad base64, not UTF-8, or past the capture
+bound — reports as `None` and never as `Some("")`: a test asserting an
+empty clipboard must not pass on something we failed to read. Clipboard
+*reads* (`OSC 52 ; … ; ?`) are questions, and stay named-but-unanswered
+like the rest.
+
 Precision: the emulator stops consuming at each query byte (the same
 mechanism as frame boundaries), so a cursor-position report reflects the
 cursor *at the query*, not after later output in the same chunk moved

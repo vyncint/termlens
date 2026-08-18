@@ -20,10 +20,66 @@
 
 use std::sync::Arc;
 
+use crate::screen::Clipboard;
+
 /// OSC strings are captured whole (titles must not truncate), but bounded:
 /// a buggy or hostile stream must not grow memory without limit. No real
 /// title comes anywhere near this.
-const OSC_CAPTURE_MAX: usize = 4096;
+const OSC_CAPTURE_MAX: usize = 64 * 1024;
+
+/// Decode standard base64 (`OSC 52` payloads). `None` for anything that is
+/// not valid: an out-of-alphabet byte, a bad length, or padding in the
+/// wrong place. Returning `None` rather than a best effort is the point —
+/// a partially decoded clipboard would be indistinguishable from a
+/// correct one, and a test asserting on it would pass while proving
+/// nothing.
+fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
+    fn value(b: u8) -> Option<u32> {
+        match b {
+            b'A'..=b'Z' => Some(u32::from(b - b'A')),
+            b'a'..=b'z' => Some(u32::from(b - b'a') + 26),
+            b'0'..=b'9' => Some(u32::from(b - b'0') + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    // Padding is optional in the wild but must be trailing and must not
+    // exceed two bytes; what remains has to be a whole number of quanta.
+    let body = input.strip_suffix(b"==").map_or_else(
+        || input.strip_suffix(b"=").unwrap_or(input),
+        |stripped| stripped,
+    );
+    let pad = input.len() - body.len();
+    if pad > 0 && input.len() % 4 != 0 {
+        return None;
+    }
+    if body.len() % 4 == 1 {
+        return None; // one leftover character encodes nothing
+    }
+
+    let mut out = Vec::with_capacity(body.len() / 4 * 3 + 2);
+    for quantum in body.chunks(4) {
+        let mut bits = 0u32;
+        for &b in quantum {
+            bits = (bits << 6) | value(b)?;
+        }
+        // A short final quantum carries 1 or 2 bytes; shift it up to a
+        // full 24-bit group and keep only the bytes it actually encodes.
+        let carried = match quantum.len() {
+            4 => 3,
+            3 => 2,
+            _ => 1,
+        };
+        bits <<= 6 * (4 - quantum.len());
+        for i in 0..carried {
+            #[allow(clippy::cast_possible_truncation)]
+            out.push((bits >> (16 - 8 * i)) as u8);
+        }
+    }
+    Some(out)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -133,9 +189,16 @@ pub(crate) struct SeqTracker {
     /// Content bytes of the current OSC string (no `ESC ]`, no
     /// terminator), kept whole so titles never truncate.
     osc_buf: Vec<u8>,
+    /// Set when the current OSC string hit [`OSC_CAPTURE_MAX`]. What was
+    /// captured is then a prefix, and a prefix of base64 can still decode —
+    /// to the wrong thing. Reporting the truncation is the only honest
+    /// option, so it is tracked rather than inferred.
+    osc_truncated: bool,
     /// The window title as most recently set via `OSC 0`/`OSC 2`; empty
     /// until the application sets one. Shared so snapshots clone for free.
     title: Arc<str>,
+    /// The most recent `OSC 52` clipboard write, decoded.
+    clipboard: Option<Arc<Clipboard>>,
 }
 
 impl SeqTracker {
@@ -156,7 +219,9 @@ impl SeqTracker {
             seq_buf: [0; 24],
             seq_len: 0,
             osc_buf: Vec::new(),
+            osc_truncated: false,
             title: Arc::from(""),
+            clipboard: None,
         }
     }
 
@@ -174,6 +239,12 @@ impl SeqTracker {
     /// True while the stream is inside a DEC 2026 synchronized update.
     pub(crate) fn in_sync_update(&self) -> bool {
         self.sync_update
+    }
+
+    /// The most recent `OSC 52` clipboard write, or `None` if the
+    /// application has not copied anything.
+    pub(crate) fn clipboard(&self) -> Option<Arc<Clipboard>> {
+        self.clipboard.clone()
     }
 
     /// The window title as most recently set via `OSC 0`/`OSC 2` (empty
@@ -204,6 +275,8 @@ impl SeqTracker {
     fn push_osc(&mut self, b: u8) {
         if self.osc_buf.len() < OSC_CAPTURE_MAX {
             self.osc_buf.push(b);
+        } else {
+            self.osc_truncated = true;
         }
     }
 
@@ -365,6 +438,28 @@ impl SeqTracker {
                         .or_else(|| content.strip_prefix(b"2;"))
                     {
                         self.title = Arc::from(String::from_utf8_lossy(title));
+                    } else if let Some(rest) = content.strip_prefix(b"52;") {
+                        // OSC 52 write: `targets ; base64`. The reads were
+                        // classified above, so anything here is a write.
+                        // Captured rather than answered — "did it copy the
+                        // right thing?" is otherwise unanswerable, since the
+                        // only evidence a test can see is the app's own
+                        // toast, which proves the code path ran and nothing
+                        // about the payload.
+                        //
+                        // Base64 has no `;`, so the first one is the
+                        // separator. No separator at all is not a write.
+                        if let Some(sep) = rest.iter().position(|&b| b == b';') {
+                            let targets = String::from_utf8_lossy(&rest[..sep]).into_owned();
+                            let payload = &rest[sep + 1..];
+                            let text = if self.osc_truncated {
+                                None
+                            } else {
+                                decode_base64(payload)
+                                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                            };
+                            self.clipboard = Some(Arc::new(Clipboard::new(&targets, text)));
+                        }
                     }
                     return SeqEvent::None;
                 }
@@ -417,6 +512,7 @@ impl SeqTracker {
                 }
                 b']' => {
                     self.osc_buf.clear();
+                    self.osc_truncated = false;
                     State::Osc
                 }
                 // DCS, SOS, PM, APC — string sequences terminated by ST.
@@ -603,6 +699,91 @@ mod tests {
         assert!(!t.in_sync_update());
         t.feed(b"\x1b[?20260h"); // different mode number
         assert!(!t.in_sync_update());
+    }
+
+    #[test]
+    fn base64_decodes_or_refuses() {
+        assert_eq!(
+            decode_base64(b"dGhlIHRpdGxl").as_deref(),
+            Some(&b"the title"[..])
+        );
+        // Every padding shape.
+        assert_eq!(decode_base64(b"YQ==").as_deref(), Some(&b"a"[..]));
+        assert_eq!(decode_base64(b"YWI=").as_deref(), Some(&b"ab"[..]));
+        assert_eq!(decode_base64(b"YWJj").as_deref(), Some(&b"abc"[..]));
+        // Unpadded is common in the wild and unambiguous.
+        assert_eq!(decode_base64(b"YQ").as_deref(), Some(&b"a"[..]));
+        assert_eq!(decode_base64(b"YWI").as_deref(), Some(&b"ab"[..]));
+        // A real write of nothing.
+        assert_eq!(decode_base64(b"").as_deref(), Some(&b""[..]));
+
+        // Refusals: out of alphabet, impossible length, misplaced padding.
+        assert_eq!(decode_base64(b"not base64!"), None);
+        assert_eq!(decode_base64(b"YWJjZ"), None);
+        assert_eq!(decode_base64(b"Y===="), None);
+        // One leftover character encodes nothing.
+        assert_eq!(decode_base64(b"Y"), None);
+    }
+
+    #[test]
+    fn osc52_writes_are_captured_with_their_target() {
+        let t = fed(b"\x1b]52;c;V2lyZSB1cCB0aGUgUFRZIHJlYWRlcg==\x07");
+        let clip = t.clipboard().expect("a write was observed");
+        assert_eq!(clip.targets(), "c");
+        assert_eq!(clip.text(), Some("Wire up the PTY reader"));
+
+        // Primary selection, ST-terminated instead of BEL.
+        let t = fed(b"\x1b]52;p;c2VsZWN0ZWQgd29yZHM=\x1b\\");
+        let clip = t.clipboard().expect("a write was observed");
+        assert_eq!(clip.targets(), "p");
+        assert_eq!(clip.text(), Some("selected words"));
+
+        // No target named: the terminal would pick its default, and we
+        // report what the application actually sent rather than guessing.
+        let t = fed(b"\x1b]52;;Y29waWVk\x07");
+        assert_eq!(t.clipboard().expect("write").targets(), "");
+
+        // The most recent write wins.
+        let t = fed(b"\x1b]52;c;YQ==\x07\x1b]52;c;YWI=\x07");
+        assert_eq!(t.clipboard().expect("write").text(), Some("ab"));
+    }
+
+    #[test]
+    fn an_undecodable_payload_is_not_an_empty_clipboard() {
+        // The distinction the whole feature rests on: a test asserting
+        // `text() == Some("")` must not pass on a payload we could not read.
+        let empty = fed(b"\x1b]52;c;\x07");
+        assert_eq!(empty.clipboard().expect("write").text(), Some(""));
+
+        let broken = fed(b"\x1b]52;c;!!!not base64!!!\x07");
+        assert_eq!(broken.clipboard().expect("write").text(), None);
+        assert_eq!(broken.clipboard().expect("write").targets(), "c");
+
+        // Valid base64 that is not text.
+        let not_utf8 = fed(b"\x1b]52;c;//8=\x07");
+        assert_eq!(not_utf8.clipboard().expect("write").text(), None);
+    }
+
+    #[test]
+    fn a_payload_past_the_capture_bound_is_reported_as_unreadable() {
+        // A prefix of base64 can still decode — to the wrong thing. Any
+        // truncation must therefore read as "could not decode".
+        let mut stream = b"\x1b]52;c;".to_vec();
+        stream.extend(std::iter::repeat_n(b'A', OSC_CAPTURE_MAX + 64));
+        stream.push(0x07);
+        let t = fed(&stream);
+        assert_eq!(t.clipboard().expect("write").text(), None);
+    }
+
+    #[test]
+    fn a_clipboard_read_is_a_query_not_a_write() {
+        let mut t = SeqTracker::new();
+        let events: Vec<SeqEvent> = b"\x1b]52;c;?\x07".iter().map(|&b| t.step(b)).collect();
+        assert!(matches!(
+            events.last(),
+            Some(SeqEvent::Query(Query::Unanswerable(_)))
+        ));
+        assert!(t.clipboard().is_none(), "a read must not invent a write");
     }
 
     #[test]

@@ -64,6 +64,7 @@ impl Emulator for Vt100Emulator {
             bracketed_paste: screen.bracketed_paste(),
             application_cursor: screen.application_cursor(),
             mouse: convert_mouse(screen.mouse_protocol_mode()),
+            clipboard: self.tracker.clipboard(),
         };
         Screen::from_parts(
             cols,
