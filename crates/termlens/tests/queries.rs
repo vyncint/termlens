@@ -300,3 +300,33 @@ fn replies_are_not_echoed_into_the_screen() -> termlens::Result<()> {
     assert!(t.wait_exit()?.success());
     Ok(())
 }
+
+#[test]
+fn a_probe_then_enable_application_gets_its_mouse() -> termlens::Result<()> {
+    // The loop this closes on itself: the application probes `?1000$p`, is
+    // told "not recognized", concludes the terminal has no mouse and never
+    // sends `CSI ?1000h` — and `click` then refuses, blaming the
+    // application for a decision termlens caused.
+    //
+    // The script is written to *prove* the decision: if the reply says the
+    // mode is unrecognized it prints REFUSED and never enables tracking,
+    // so a regression fails on the wait below rather than passing quietly.
+    let mut t = sh(concat!(
+        r"stty -icanon -echo; ",
+        r#"printf '\033[?1000$p'; "#,
+        r#"reply=$(head -c 11 | tr '\033' 'E'); "#,
+        r#"case "$reply" in *';0$y') printf 'REFUSED:%s' "$reply"; read g; exit 0;; esac; "#,
+        r#"printf '\033[?1000h\033[?1006h'; printf 'MOUSE-ON:%s|' "$reply"; "#,
+        r#"click=$(head -c 20 | tr '\033' 'E'); printf 'CLICK:%s' "$click"; read g"#
+    ))?;
+    // `;2$y` = implemented and currently reset. The application proceeds.
+    t.wait_until(|s| s.contains("MOUSE-ON:E[?1000;2$y|"))?;
+
+    t.click(9, 4)?;
+    // Press and release, SGR-encoded, 1-based on the wire.
+    t.wait_until(|s| s.contains("CLICK:E[<0;10;5ME[<0;10;5m"))?;
+
+    t.send(Key::Enter);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}

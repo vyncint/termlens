@@ -57,9 +57,19 @@ is what lets an application that *probes* before using synchronized
 output turn it on against termlens — so `wait_frame` can work against a
 program nobody modified for us. Every reply is truthful or absent:
 modes whose state the emulator holds exactly report set/reset, and
-anything else — including the mouse tracking modes, which the backend
-collapses into one mutually exclusive value — reports "not recognized"
-rather than a guess.
+anything else reports "not recognized" rather than a guess.
+
+The mouse tracking modes show where that line actually falls. The
+backend collapses `9`/`1000`/`1002`/`1003` into one mutually exclusive
+value, so it cannot say which members of a group an application set —
+crossterm's `EnableMouseCapture` sends three at once and only the last
+survives. But that ambiguity exists only *while something is tracking*.
+With no tracking mode active — the state every application probes from
+at startup — nothing was collapsed and every tracking mode is genuinely
+reset, so that is what we report. Answering "not recognized" there
+would close a loop on itself: the application concludes the terminal has
+no mouse, never enables tracking, and `click` then refuses, blaming the
+application for a decision we caused.
 
 Precision: the emulator stops consuming at each query byte (the same
 mechanism as frame boundaries), so a cursor-position report reflects the

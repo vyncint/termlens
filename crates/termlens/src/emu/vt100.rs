@@ -107,13 +107,7 @@ impl Emulator for Vt100Emulator {
                 ModeState::Reset
             }
         };
-        // Only modes whose state we hold exactly. The mouse tracking
-        // modes are the interesting exclusion: vt100 collapses 9/1000/
-        // 1002/1003 into one mutually exclusive value, so an application
-        // that enabled several (crossterm's EnableMouseCapture sends
-        // 1000, 1002 and 1003 together) would be told the others are
-        // *reset* — a guess dressed up as an answer. Reporting the exact
-        // match and nothing else keeps every reply true.
+        // Only modes whose state we hold exactly.
         match mode {
             // Synchronized output. Answering at all is the point: an
             // application that probes before bracketing its repaints can
@@ -132,20 +126,28 @@ impl Emulator for Vt100Emulator {
                 screen.mouse_protocol_encoding(),
                 ::vt100::MouseProtocolEncoding::Utf8
             )),
-            9 | 1000 | 1002 | 1003 => {
-                let current = match screen.mouse_protocol_mode() {
-                    ::vt100::MouseProtocolMode::None => 0,
-                    ::vt100::MouseProtocolMode::Press => 9,
-                    ::vt100::MouseProtocolMode::PressRelease => 1000,
-                    ::vt100::MouseProtocolMode::ButtonMotion => 1002,
-                    ::vt100::MouseProtocolMode::AnyMotion => 1003,
-                };
-                if current == mode {
-                    ModeState::Set
-                } else {
-                    ModeState::NotRecognized
-                }
-            }
+            // The mouse tracking modes need care, because vt100 collapses
+            // all four into one mutually exclusive value. Two cases, and
+            // only one of them is ambiguous:
+            //
+            // - Nothing is tracking. Then nothing was collapsed, and every
+            //   tracking mode is genuinely reset — a fact, not a guess. This
+            //   is the state every application is in when it probes at
+            //   startup, so it is the case that decides whether
+            //   capability detection works at all.
+            // - A *different* mode is tracking. The application may have set
+            //   several (crossterm's EnableMouseCapture sends 1000, 1002 and
+            //   1003 together) and vt100 kept only the last, so claiming the
+            //   others are reset would be a guess dressed up as an answer.
+            //   `NotRecognized` stays honest here.
+            9 | 1000 | 1002 | 1003 => match screen.mouse_protocol_mode() {
+                ::vt100::MouseProtocolMode::None => ModeState::Reset,
+                ::vt100::MouseProtocolMode::Press if mode == 9 => ModeState::Set,
+                ::vt100::MouseProtocolMode::PressRelease if mode == 1000 => ModeState::Set,
+                ::vt100::MouseProtocolMode::ButtonMotion if mode == 1002 => ModeState::Set,
+                ::vt100::MouseProtocolMode::AnyMotion if mode == 1003 => ModeState::Set,
+                _ => ModeState::NotRecognized,
+            },
             _ => ModeState::NotRecognized,
         }
     }
@@ -305,6 +307,41 @@ mod tests {
         assert!(!s.bracketed_paste());
         assert!(!s.application_cursor());
         assert_eq!(s.mouse_mode(), MouseMode::None);
+    }
+
+    #[test]
+    fn mouse_tracking_modes_are_reset_until_one_is_enabled() {
+        // The state every application is in when it probes at startup.
+        // Nothing was collapsed, so "reset" is a fact rather than a guess —
+        // and answering it is what lets capability detection succeed.
+        let emu = emu_with(b"plain");
+        for mode in [9, 1000, 1002, 1003] {
+            assert_eq!(emu.mode_state(mode), ModeState::Reset, "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn an_active_tracking_mode_reports_itself_and_stays_silent_on_the_rest() {
+        let emu = emu_with(b"\x1b[?1002h");
+        assert_eq!(emu.mode_state(1002), ModeState::Set);
+        // Genuinely ambiguous: crossterm's EnableMouseCapture sends 1000,
+        // 1002 and 1003 together and vt100 keeps only the last, so calling
+        // the others reset would be a guess dressed up as an answer.
+        for mode in [9, 1000, 1003] {
+            assert_eq!(
+                emu.mode_state(mode),
+                ModeState::NotRecognized,
+                "mode {mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn turning_tracking_off_returns_every_mode_to_reset() {
+        let emu = emu_with(b"\x1b[?1002h\x1b[?1002l");
+        for mode in [9, 1000, 1002, 1003] {
+            assert_eq!(emu.mode_state(mode), ModeState::Reset, "mode {mode}");
+        }
     }
 
     #[test]
