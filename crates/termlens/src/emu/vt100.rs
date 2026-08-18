@@ -1,6 +1,9 @@
 //! The `vt100`-crate backend. Public types never leak from here: every
 //! snapshot converts vt100's grid into termlens's own [`Screen`].
 
+use std::collections::VecDeque;
+use std::sync::Arc;
+
 use super::seq::{SeqEvent, SeqTracker};
 use super::{Emulator, InputModes, ModeState, MouseEncoding, Processed, Stop};
 use crate::screen::{Cell, Color, MouseMode, Screen, Style, TermState};
@@ -8,15 +11,98 @@ use crate::screen::{Cell, Color, MouseMode, Screen, Style, TermState};
 pub(crate) struct Vt100Emulator {
     parser: ::vt100::Parser,
     tracker: SeqTracker,
+    /// How many rows of history to retain (0 disables it entirely).
+    scrollback_len: usize,
+    /// Rows that have scrolled off the top, oldest first, as text.
+    ///
+    /// Materialized here — once per read that scrolled — rather than in
+    /// `snapshot`, which runs far more often (every wait evaluation on a
+    /// chatty stream). A snapshot then costs one `Arc` clone per row
+    /// instead of rebuilding the whole history.
+    history: VecDeque<Arc<str>>,
+    /// Rows of vt100's own scrollback already copied into `history`, so a
+    /// read that scrolled nothing costs one length check.
+    captured: usize,
 }
 
 impl Vt100Emulator {
-    pub(crate) fn new(rows: u16, cols: u16) -> Self {
+    pub(crate) fn new(rows: u16, cols: u16, scrollback_len: usize) -> Self {
         Self {
-            // No scrollback: termlens asserts on the visible screen only.
-            parser: ::vt100::Parser::new(rows, cols, 0),
+            parser: ::vt100::Parser::new(rows, cols, scrollback_len),
             tracker: SeqTracker::new(),
+            scrollback_len,
+            history: VecDeque::new(),
+            captured: 0,
         }
+    }
+
+    /// Copy any rows that have scrolled off since the last call.
+    ///
+    /// vt100 models scrollback as a *stateful view*: `set_scrollback(n)`
+    /// moves the offset so the same accessors read history rows. A
+    /// `Screen` is an immutable snapshot and the whole crate's honesty
+    /// rests on that, so the view is moved here — under `&mut self`, while
+    /// bytes are being consumed — and always restored to 0 before anyone
+    /// can observe the grid. No snapshot ever depends on parser state read
+    /// later.
+    fn capture_scrolled_rows(&mut self) {
+        if self.scrollback_len == 0 {
+            return;
+        }
+        let (rows, cols) = self.parser.screen().size();
+        let screen = self.parser.screen_mut();
+
+        // `set_scrollback` clamps to the real history length, so asking for
+        // more than exists is how we learn how much exists.
+        screen.set_scrollback(usize::MAX);
+        let len = screen.scrollback();
+
+        // Below the cap, history only grows: the new rows are exactly
+        // `captured..len`, and an unchanged length means nothing scrolled.
+        //
+        // At the cap, vt100 evicts from the front and the length stops
+        // changing, so it no longer reveals growth — and an unchanged
+        // length is no longer evidence of an unchanged history. There is no
+        // sound cheap test for "did it scroll?" either: consecutive
+        // identical rows are ordinary output, so comparing the ends of the
+        // history would miss real scrolls. So at the cap we re-read the
+        // window vt100 still holds, which is by definition the newest `cap`
+        // rows — exactly what we should be retaining. That costs O(cap) row
+        // reads per chunk, and only for a run that has already overflowed
+        // its history. Measured on 50,000 lines through an 80x24 screen:
+        // 352ms with retention off, 327ms below the cap (free, within
+        // noise), 639ms on this path — under 2x, for a workload well past
+        // what a test drives.
+        let at_cap = len == self.scrollback_len;
+        if !at_cap && len == self.captured {
+            screen.set_scrollback(0);
+            return;
+        }
+        let from = if at_cap {
+            self.history.clear();
+            0
+        } else {
+            self.captured
+        };
+
+        // At offset `k` the visible window starts at history row `len - k`,
+        // so `set_scrollback(len - i)` puts history row `i` at the top and
+        // the next `rows` rows follow. `Screen::rows` walks the window once,
+        // which matters: `Screen::cell` is O(row) per lookup.
+        let mut i = from;
+        while i < len {
+            screen.set_scrollback(len - i);
+            let take = (len - i).min(usize::from(rows));
+            for line in screen.rows(0, cols).take(take) {
+                self.history.push_back(Arc::from(line.trim_end()));
+            }
+            i += take;
+        }
+        while self.history.len() > self.scrollback_len {
+            self.history.pop_front();
+        }
+        self.captured = len;
+        screen.set_scrollback(0);
     }
 }
 
@@ -30,6 +116,7 @@ impl Emulator for Vt100Emulator {
             };
             if let Some(stop) = stop {
                 self.parser.process(&bytes[..=i]);
+                self.capture_scrolled_rows();
                 return Processed {
                     consumed: i + 1,
                     stop: Some(stop),
@@ -37,6 +124,7 @@ impl Emulator for Vt100Emulator {
             }
         }
         self.parser.process(bytes);
+        self.capture_scrolled_rows();
         Processed {
             consumed: bytes.len(),
             stop: None,
@@ -65,6 +153,7 @@ impl Emulator for Vt100Emulator {
             application_cursor: screen.application_cursor(),
             mouse: convert_mouse(screen.mouse_protocol_mode()),
             clipboard: self.tracker.clipboard(),
+            scrollback: self.history.iter().cloned().collect(),
         };
         Screen::from_parts(
             cols,
@@ -155,6 +244,8 @@ impl Emulator for Vt100Emulator {
 
     fn set_size(&mut self, rows: u16, cols: u16) {
         self.parser.screen_mut().set_size(rows, cols);
+        // A resize can push rows into history on its own.
+        self.capture_scrolled_rows();
     }
 }
 
@@ -207,7 +298,7 @@ mod tests {
     }
 
     fn emu_with(bytes: &[u8]) -> Vt100Emulator {
-        let mut emu = Vt100Emulator::new(4, 10);
+        let mut emu = Vt100Emulator::new(4, 10, 0);
         feed_all(&mut emu, bytes);
         emu
     }
@@ -250,7 +341,7 @@ mod tests {
 
     #[test]
     fn mid_sequence_tracks_partial_escape() {
-        let mut emu = Vt100Emulator::new(4, 10);
+        let mut emu = Vt100Emulator::new(4, 10, 0);
         feed_all(&mut emu, b"text\x1b[3");
         assert!(emu.mid_sequence());
         feed_all(&mut emu, b"1m");
@@ -259,7 +350,7 @@ mod tests {
 
     #[test]
     fn process_stops_at_the_end_of_a_synchronized_update() {
-        let mut emu = Vt100Emulator::new(4, 10);
+        let mut emu = Vt100Emulator::new(4, 10, 0);
         let stream = b"\x1b[?2026hframe1\x1b[?2026lnext";
 
         let first = emu.process(stream);
@@ -280,7 +371,7 @@ mod tests {
 
     #[test]
     fn in_sync_update_is_true_between_bsu_and_esu() {
-        let mut emu = Vt100Emulator::new(4, 10);
+        let mut emu = Vt100Emulator::new(4, 10, 0);
         feed_all(&mut emu, b"\x1b[?2026hpartial");
         assert!(emu.in_sync_update());
         assert!(!emu.mid_sequence()); // the escape itself is finished
@@ -308,6 +399,96 @@ mod tests {
         assert!(!s.bracketed_paste());
         assert!(!s.application_cursor());
         assert_eq!(s.mouse_mode(), MouseMode::None);
+    }
+
+    /// Feed a stream into an emulator with `scrollback` rows of history.
+    fn emu_with_history(scrollback: usize, bytes: &[u8]) -> Vt100Emulator {
+        let mut emu = Vt100Emulator::new(4, 10, scrollback);
+        feed_all(&mut emu, bytes);
+        emu
+    }
+
+    #[test]
+    fn rows_scrolled_off_the_top_are_retained_in_order() {
+        // A 4-row screen fed 7 lines: three scroll off.
+        let emu = emu_with_history(100, b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven");
+        let s = emu.snapshot();
+        assert_eq!(s.scrollback_rows(), 3);
+        assert_eq!(s.scrollback_text(), "one\ntwo\nthree");
+        assert_eq!(s.text(), "four\nfive\nsix\nseven");
+        // The assertion an author actually writes: content reached the
+        // terminal, wherever it currently sits.
+        assert_eq!(s.full_text(), "one\ntwo\nthree\nfour\nfive\nsix\nseven");
+        // The visible-screen queries stay visible-screen queries.
+        assert!(!s.contains("one"));
+        assert!(s.contains("seven"));
+    }
+
+    #[test]
+    fn history_is_bounded_and_drops_its_oldest_rows() {
+        // Ten rows, each ending in a newline, on a 4-row screen: seven
+        // scroll off (row1..row7) and the cap of 3 keeps the newest three.
+        let mut emu = Vt100Emulator::new(4, 10, 3);
+        for n in 1..=10 {
+            feed_all(&mut emu, format!("row{n}\r\n").as_bytes());
+        }
+        let s = emu.snapshot();
+        assert_eq!(s.scrollback_rows(), 3);
+        assert_eq!(s.scrollback_text(), "row5\nrow6\nrow7");
+        assert_eq!(s.text(), "row8\nrow9\nrow10\n");
+        // row1..row4 are past the bound and gone — the honest limit.
+        assert!(!s.full_text().contains("row4"));
+        assert!(s.full_text().contains("row5"));
+    }
+
+    #[test]
+    fn a_history_kept_at_the_cap_keeps_advancing() {
+        // The rebuild path: once at the cap vt100's length stops changing,
+        // so a naive "did the length grow?" check would freeze the history
+        // at its first full window.
+        let mut emu = Vt100Emulator::new(4, 10, 2);
+        feed_all(&mut emu, b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\n");
+        assert_eq!(emu.snapshot().scrollback_text(), "b\nc");
+        feed_all(&mut emu, b"g\r\nh\r\n");
+        assert_eq!(emu.snapshot().scrollback_text(), "d\ne");
+    }
+
+    #[test]
+    fn retention_off_keeps_nothing() {
+        let emu = emu_with_history(0, b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        let s = emu.snapshot();
+        assert_eq!(s.scrollback_rows(), 0);
+        assert_eq!(s.scrollback_text(), "");
+        // full_text is then just the visible screen.
+        assert_eq!(s.full_text(), s.text());
+    }
+
+    #[test]
+    fn the_alternate_screen_accumulates_no_history() {
+        // A full-screen TUI owns its viewport and should cost nothing for a
+        // feature it does not use. vt100 gives the alternate grid zero
+        // scrollback of its own, which is what makes retention safe to
+        // default on.
+        let emu = emu_with_history(
+            100,
+            b"\x1b[?1049h one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix",
+        );
+        assert_eq!(emu.snapshot().scrollback_rows(), 0);
+    }
+
+    #[test]
+    fn history_rows_keep_the_width_they_were_captured_at() {
+        // Documented limit: resize does not reflow.
+        let mut emu = Vt100Emulator::new(2, 10, 100);
+        feed_all(&mut emu, b"0123456789\r\nabcdefghij\r\nnext");
+        assert_eq!(emu.snapshot().scrollback_text(), "0123456789");
+        emu.set_size(2, 4);
+        assert_eq!(
+            emu.snapshot().scrollback_text(),
+            "0123456789",
+            "a captured row keeps its width; narrowing the screen must not \
+             retroactively rewrite history"
+        );
     }
 
     #[test]

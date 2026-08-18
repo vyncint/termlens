@@ -123,6 +123,13 @@ pub(crate) struct TermState {
     /// Behind an `Arc` deliberately: `Screen` is embedded in every
     /// `Error` and cloned on every wait, so its size is load-bearing.
     pub(crate) clipboard: Option<Arc<Clipboard>>,
+    /// Rows that have scrolled off the top, oldest first, as text.
+    ///
+    /// Text rather than cells, deliberately: a thousand rows of styled
+    /// cells per snapshot would dominate the cost of every wait, and
+    /// history is asserted on for its content. The rows are shared, so a
+    /// snapshot pays one `Arc` clone each.
+    pub(crate) scrollback: Arc<[Arc<str>]>,
 }
 
 impl Default for TermState {
@@ -134,6 +141,7 @@ impl Default for TermState {
             application_cursor: false,
             mouse: MouseMode::None,
             clipboard: None,
+            scrollback: Arc::from([] as [Arc<str>; 0]),
         }
     }
 }
@@ -382,10 +390,63 @@ impl Screen {
         out
     }
 
+    /// How many rows have scrolled off the top and are still retained.
+    ///
+    /// Zero when nothing has scrolled — or when the terminal was built with
+    /// [`scrollback(0)`](crate::TerminalBuilder::scrollback). Caps at the
+    /// configured length: past that, the oldest rows are dropped, and this
+    /// stops growing rather than reporting everything the application ever
+    /// wrote.
+    #[must_use]
+    pub fn scrollback_rows(&self) -> usize {
+        self.state.scrollback.len()
+    }
+
+    /// The retained history as text: one line per scrolled-off row, oldest
+    /// first, trailing whitespace stripped, joined with `\n`.
+    ///
+    /// Empty when nothing has scrolled. History is text only — a scrolled
+    /// row has no [`Style`] and no [`cell`](Self::cell) addressing, which
+    /// is what keeps a snapshot cheap enough to take on every wait.
+    #[must_use]
+    pub fn scrollback_text(&self) -> String {
+        let mut out = String::new();
+        for (i, row) in self.state.scrollback.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            out.push_str(row);
+        }
+        out
+    }
+
+    /// History **and** visible screen, as one text block: the retained
+    /// scrolled-off rows followed by [`text`](Self::text).
+    ///
+    /// This is the accessor for the assertion an author actually writes —
+    /// "this block reached the terminal, wherever it currently sits". An
+    /// application that commits finished output into scrollback and keeps a
+    /// small live region moves content between the two regions as it goes,
+    /// so a test that has to know which region to look in is a test that
+    /// breaks when the application scrolls one line further.
+    #[must_use]
+    pub fn full_text(&self) -> String {
+        let mut out = self.scrollback_text();
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&self.text());
+        out
+    }
+
     /// True if `needle` occurs in the rendered text ([`Screen::text`]).
     ///
     /// Because rows are joined with `\n`, multi-line needles match across
     /// consecutive rows (with trailing whitespace stripped per row).
+    ///
+    /// The **visible screen only** — like every other query on this type.
+    /// For content that may already have scrolled off, use
+    /// [`full_text`](Self::full_text).
     #[must_use]
     pub fn contains(&self, needle: &str) -> bool {
         self.text().contains(needle)
@@ -938,6 +999,7 @@ mod tests {
             application_cursor: true,
             mouse: MouseMode::AnyMotion,
             clipboard: Some(Arc::new(Clipboard::new("c", Some("copied".into())))),
+            scrollback: Arc::from([Arc::from("scrolled away")]),
         };
         let cells = vec![Cell::new("x".into(), Style::default(), false, false)];
         let s = Screen::from_parts(1, 1, 0, 0, true, cells, state);
@@ -946,7 +1008,12 @@ mod tests {
         assert_eq!(s.mouse_mode(), MouseMode::AnyMotion);
         let clip = s.clipboard().expect("captured");
         assert_eq!((clip.targets(), clip.text()), ("c", Some("copied")));
-        // Out-of-band state never leaks into the text format.
+        assert_eq!(s.scrollback_rows(), 1);
+        assert_eq!(s.scrollback_text(), "scrolled away");
+        assert_eq!(s.full_text(), "scrolled away\nx");
+        // Out-of-band state never leaks into the text format — including
+        // history, so existing snapshot files stay valid now that
+        // retention is on by default.
         assert_eq!(format!("{s}"), "size: 1x1  cursor: 0,0\nx");
     }
 }

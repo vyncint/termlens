@@ -46,6 +46,20 @@ const MAX_UNANSWERED: usize = 8;
 /// 0.6 MB and 3.8 MB respectively.
 const FRAME_HISTORY: usize = 8;
 
+/// Rows of scrolled-off history a terminal retains by default.
+///
+/// On by default because the alternative is a whole class of application
+/// being untestable rather than merely awkward: anything that hands
+/// finished output *back* to the terminal — a pager, a log view, a TUI
+/// that commits completed blocks into native scrollback and keeps a small
+/// live region — has content that simply ceases to exist without this.
+///
+/// It costs nothing where it is not used. vt100 gives the alternate screen
+/// zero scrollback of its own, so a full-screen TUI that switches to the
+/// alt screen never accumulates history, and a retained row is one shared
+/// string rather than a grid of cells.
+const DEFAULT_SCROLLBACK: usize = 1000;
+
 /// Writes that may be queued for the writer thread before the drain
 /// starts discarding query replies. Reached only when the application
 /// has stopped reading its input entirely, in which case it cannot be
@@ -600,6 +614,7 @@ pub struct TerminalBuilder {
     answer_queries: bool,
     background: (u8, u8, u8),
     foreground: (u8, u8, u8),
+    scrollback: usize,
 }
 
 impl Default for TerminalBuilder {
@@ -615,6 +630,7 @@ impl Default for TerminalBuilder {
             answer_queries: true,
             background: (0, 0, 0),
             foreground: (0xff, 0xff, 0xff),
+            scrollback: DEFAULT_SCROLLBACK,
         }
     }
 }
@@ -692,6 +708,44 @@ impl TerminalBuilder {
     #[must_use]
     pub fn current_dir(mut self, dir: impl AsRef<Path>) -> Self {
         self.cwd = Some(dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// How many rows of scrolled-off history to retain. Defaults to
+    /// **1000**; `0` disables it.
+    ///
+    /// Content that scrolls off the top of the screen is otherwise
+    /// unrecoverable, which rules out testing any application that hands
+    /// finished output *back* to the terminal instead of owning its own
+    /// viewport — a pager, a log view, a TUI that commits completed blocks
+    /// into native scrollback and keeps a small live region. Read the
+    /// history from a snapshot with
+    /// [`Screen::scrollback_text`](crate::Screen::scrollback_text) or, for
+    /// the assertion you usually want,
+    /// [`Screen::full_text`](crate::Screen::full_text).
+    ///
+    /// ```
+    /// # fn main() -> termlens::Result<()> {
+    /// let mut t = termlens::Terminal::builder()
+    ///     .size(20, 3)
+    ///     .scrollback(100)
+    ///     .args(["-c", r"printf 'a\nb\nc\nd\ne\n'; read done"])
+    ///     .spawn("sh")?;
+    /// // "a" has scrolled off a 3-row screen; "e" is still visible.
+    /// t.wait_until(|s| s.full_text().contains("a") && s.contains("e"))?;
+    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Two limits hold and are not papered over: history is bounded by this
+    /// length, so a longer run drops its oldest rows; and a
+    /// [`resize`](Terminal::resize) does not reflow, so rows captured at one
+    /// width keep that width. History is text only — no styles, no cell
+    /// addressing — which is what keeps a snapshot cheap enough to take on
+    /// every wait.
+    #[must_use]
+    pub fn scrollback(mut self, rows: usize) -> Self {
+        self.scrollback = rows;
         self
     }
 
@@ -836,7 +890,7 @@ impl TerminalBuilder {
             .map_err(|e| Error::Pty(format!("taking PTY writer failed: {e}")))?;
 
         let shared = Arc::new(Monitor::new(EmuState::new(
-            Box::new(Vt100Emulator::new(self.rows, self.cols)),
+            Box::new(Vt100Emulator::new(self.rows, self.cols, self.scrollback)),
             self.answer_queries,
             self.background,
             self.foreground,

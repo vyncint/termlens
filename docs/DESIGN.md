@@ -290,6 +290,44 @@ lifecycle edge — open+spawn on one side, kill+reap+close on the other —
 behind a process-wide lock (`PTY_LIFECYCLE` in `terminal.rs`). The lock is
 held for microseconds per edge; steady-state I/O never touches it.
 
+### Scrollback
+
+A `Screen` carries the rows that have scrolled off the top, so content the
+application handed back to the terminal stays assertable:
+`scrollback_rows()`, `scrollback_text()`, and `full_text()` — history
+followed by the visible screen, which is the assertion an author actually
+writes when the application moves content between a live region and
+native scrollback as it runs. Every other query on `Screen` (`contains`,
+`find`, `cell`, `text`) is visible-screen only, unchanged.
+
+Two design constraints shaped this. First, **a snapshot is a fixed
+observation**, and vt100 models scrollback as a *stateful view* —
+`set_scrollback(n)` moves an offset so the same accessors read history. So
+the view is moved only inside `process`, under `&mut`, while bytes are
+being consumed, and always restored before anyone can observe the grid; no
+`Screen` ever depends on parser state read later. Second, **snapshots are
+taken on every wait evaluation**, so history is materialized once per
+chunk that scrolled rather than per snapshot, and is kept as shared text
+rather than cells — a thousand rows of styled cells per snapshot would
+dominate the cost of every wait, and history is asserted on for its
+content.
+
+Below the retention length the history only grows, so a chunk that
+scrolled nothing costs one length check. At the length, vt100 evicts from
+the front and its length stops changing, so growth is no longer visible
+there — and there is no sound cheap substitute, since consecutive
+identical rows are ordinary output and comparing the ends of the history
+would miss real scrolls. So at the bound the window vt100 still holds is
+re-read, which is by definition the newest N rows. Measured on 50,000
+lines through an 80x24 screen: 352ms with retention off, 327ms below the
+bound (free, within noise), 639ms on the re-read path.
+
+Two limits are documented rather than papered over: history is bounded, so
+a longer run drops its oldest rows; and resize does not reflow, so rows
+keep the width they were captured at. The alternate screen accumulates no
+history at all (vt100 gives the alternate grid none), which is what makes
+retention safe to default on for full-screen TUIs.
+
 ## 3. Snapshot text format (spec)
 
 `Display for Screen` produces:

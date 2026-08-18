@@ -101,6 +101,12 @@ flag, the input modes and the last `OSC 52` clipboard write are plain
 accessors, so "did the app enter the alt screen?" and "did it copy the
 right text?" are assertions, not inferences.
 
+**Scrollback is retained** (1000 rows by default), so an application that
+hands finished output *back* to the terminal — a pager, a log view, a TUI
+that commits completed blocks into native scrollback and keeps a small
+live region — stays testable. `full_text()` spans history and screen, so
+an assertion need not know which region a block currently sits in.
+
 Screens are immutable snapshots taken under the same
 lock the reader writes through, so every assertion sees a consistent
 instant. Four layers, one small internal trait between emulator and screen
