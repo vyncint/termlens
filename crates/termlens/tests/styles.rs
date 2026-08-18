@@ -22,14 +22,22 @@ fn list_with_highlight(row: u16) -> String {
 
 #[test]
 fn moving_a_highlight_changes_the_styled_rendering_only() -> termlens::Result<()> {
+    // Both snapshots are whole-screen, so both need the third rule from
+    // `wait_until`'s own docs: settle first. `contains("item two")` becomes
+    // true before the newline *after* it is processed, and the cursor then
+    // sits at (1, 8) instead of (2, 0) — state the predicate never named but
+    // that `Display` renders, so comparing two of them without settling is a
+    // race. Found by the stress gate at iteration 17 of 100.
     let mut first = sh(&list_with_highlight(0))?;
     first.wait_until(|s| s.contains("item two"))?;
+    first.wait_idle(Duration::from_millis(50))?;
     let a = first.screen();
     first.send(Key::Enter);
     first.wait_exit()?;
 
     let mut second = sh(&list_with_highlight(1))?;
     second.wait_until(|s| s.contains("item two"))?;
+    second.wait_idle(Duration::from_millis(50))?;
     let b = second.screen();
     second.send(Key::Enter);
     second.wait_exit()?;
@@ -65,14 +73,19 @@ fn styled_screen_snapshot() -> termlens::Result<()> {
 /// green test certifies the bug it was written to catch.
 #[test]
 fn a_masked_field_is_distinguishable_from_clear_text() -> termlens::Result<()> {
+    // Settled for the same reason as above, and one more: the styled
+    // comparison below asserts a *difference*, so an incidental cursor
+    // difference would let it pass without the styles differing at all.
     let mut masked = sh(r"printf 'pw: \033[8mhunter2\033[28m|'; read guard")?;
     masked.wait_until(|s| s.contains("pw: hunter2|"))?;
+    masked.wait_idle(Duration::from_millis(50))?;
     let a = masked.screen();
     masked.send(Key::Enter);
     masked.wait_exit()?;
 
     let mut clear = sh(r"printf 'pw: hunter2|'; read guard")?;
     clear.wait_until(|s| s.contains("pw: hunter2|"))?;
+    clear.wait_idle(Duration::from_millis(50))?;
     let b = clear.screen();
     clear.send(Key::Enter);
     clear.wait_exit()?;
