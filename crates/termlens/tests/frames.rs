@@ -234,3 +234,75 @@ fn wait_idle_does_not_resolve_inside_an_open_synchronized_update() {
     );
     // Drop kills the parked child.
 }
+
+#[test]
+fn an_unmatched_end_publishes_no_frame() {
+    // `?2026l` with no Begin must not manufacture a frame out of whatever
+    // is on the grid — and must leave the frame count at zero, since that
+    // is what gates the diagnosis below.
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_millis(600))
+        .args([
+            "-c",
+            r"printf '\033[2J\033[HNO-BEGIN\033[?2026l'; read guard",
+        ])
+        .spawn("sh")
+        .unwrap();
+    t.wait_until(|s| s.contains("NO-BEGIN")).unwrap();
+
+    let err = t.wait_frame(|s| s.contains("NO-BEGIN")).unwrap_err();
+    assert!(
+        err.to_string().contains("never emitted"),
+        "a phantom frame would both match and suppress the diagnosis: {err}"
+    );
+}
+
+#[test]
+fn a_defensive_mode_reset_keeps_the_never_emitted_diagnosis() {
+    // Verbatim from a real crash handler: applications reset terminal modes
+    // defensively, and such a string contains `?2026l`. One stray End used
+    // to replace the pointed diagnosis with a frame count, which reads as
+    // "the app is frame-capable, your predicate is wrong".
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_millis(600))
+        .args([
+            "-c",
+            concat!(
+                r"printf '\033[?2026l\033[?25h\033[?1000l\033[?1002l",
+                r"\033[?1003l\033[?2004l\033[?1049l'; ",
+                r"printf '\033[2J\033[HPLAIN-PAINT'; read guard"
+            ),
+        ])
+        .spawn("sh")
+        .unwrap();
+    t.wait_until(|s| s.contains("PLAIN-PAINT")).unwrap();
+
+    let err = t.wait_frame(|s| s.contains("NEVER-DRAWN")).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("never emitted a DEC 2026 synchronized update"),
+        "the reset must not look like a repaint: {msg}"
+    );
+    assert!(
+        !msg.contains("complete frames observed"),
+        "no frame was drawn, so no count should be claimed: {msg}"
+    );
+}
+
+#[test]
+fn a_begin_end_pair_that_drew_nothing_is_still_a_frame() {
+    // Deliberate: `frames_seen` counts repaints, not changes. An
+    // application that opens and closes a synchronized update completed a
+    // repaint, even if the result is identical — deciding otherwise would
+    // mean diffing grids and calling a genuine no-op repaint a non-event.
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(5))
+        .args([
+            "-c",
+            r"printf '\033[2J\033[HSTATIC'; printf '\033[?2026h\033[?2026l'; read guard",
+        ])
+        .spawn("sh")
+        .unwrap();
+    t.wait_frame(|s| s.contains("STATIC")).unwrap();
+    t.send(Key::Enter);
+}

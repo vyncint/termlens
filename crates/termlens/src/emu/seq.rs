@@ -279,7 +279,17 @@ impl SeqTracker {
                     self.sync_update = true;
                     return SeqEvent::SyncBegin;
                 }
-                b'l' => {
+                // Only an End that closes a Begin we saw ends a frame.
+                // An unmatched End is ordinary application behaviour, not a
+                // malformed stream: programs defensively reset terminal
+                // modes at startup and on crash, and such a reset string
+                // naturally contains `?2026l`. Treating it as a frame would
+                // manufacture one out of whatever happened to be on the
+                // grid — and, worse, push `frames_seen` off zero, which is
+                // what gates the "never emitted a synchronized update"
+                // diagnosis. Silently not ending a frame is the whole
+                // correct response.
+                b'l' if self.sync_update => {
                     self.sync_update = false;
                     return SeqEvent::SyncEnd;
                 }
@@ -593,6 +603,34 @@ mod tests {
         assert!(!t.in_sync_update());
         t.feed(b"\x1b[?20260h"); // different mode number
         assert!(!t.in_sync_update());
+    }
+
+    #[test]
+    fn an_end_that_closes_no_begin_is_not_a_frame() {
+        // Applications reset terminal modes defensively at startup and on
+        // crash, and such a reset string contains `?2026l`. It must not end
+        // a frame that never began.
+        let mut t = SeqTracker::new();
+        let events: Vec<SeqEvent> = b"\x1b[?2026l".iter().map(|&b| t.step(b)).collect();
+        assert!(!events.contains(&SeqEvent::SyncEnd));
+        assert!(!t.in_sync_update());
+
+        // Taken verbatim from a real crash handler.
+        let reset = b"\x1b[?2026l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?2004l\x1b[?1049l";
+        let mut t = SeqTracker::new();
+        let events: Vec<SeqEvent> = reset.iter().map(|&b| t.step(b)).collect();
+        assert!(!events.contains(&SeqEvent::SyncEnd));
+
+        // And the End of a real frame still ends it, once only.
+        let mut t = SeqTracker::new();
+        let events: Vec<SeqEvent> = b"\x1b[?2026h\x1b[?2026l\x1b[?2026l"
+            .iter()
+            .map(|&b| t.step(b))
+            .collect();
+        assert_eq!(
+            events.iter().filter(|e| **e == SeqEvent::SyncEnd).count(),
+            1
+        );
     }
 
     #[test]

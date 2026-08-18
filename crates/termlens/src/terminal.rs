@@ -1491,6 +1491,15 @@ impl Terminal {
     /// a burst like a progress counter ticking `1`, `2`, `3` in one
     /// write is observable step by step by three successive calls.
     ///
+    /// A frame is one *completed* synchronized update: an
+    /// `EndSynchronizedUpdate` that closes a Begin this terminal actually
+    /// saw. An unmatched End publishes nothing — the `?2026l` inside the
+    /// mode-reset string applications emit defensively at startup and on
+    /// crash is not a repaint, and treating it as one would both invent a
+    /// frame and hide the "never emitted a synchronized update" diagnosis
+    /// below. A Begin/End pair that changed no cell *does* publish: the
+    /// count is of repaints, not of changes.
+    ///
     /// Two honest limits follow from the retention bound: a burst longer
     /// than 8 frames drops its oldest, and because retained frames stay
     /// matchable, a predicate that was true of an earlier frame resolves
