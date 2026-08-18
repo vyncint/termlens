@@ -1097,6 +1097,31 @@ impl Terminal {
     ///
     /// Taken under the reader lock: the snapshot is a consistent view of
     /// everything the child had written up to this instant.
+    ///
+    /// # It may be a half-painted frame
+    ///
+    /// "Up to this instant" is the literal truth, and the instant can fall
+    /// **inside** a repaint. An application that brackets every repaint in
+    /// DEC 2026 synchronized updates is no exception: `screen()` returns
+    /// the live grid unconditionally, so if the application has opened an
+    /// update and painted three of its five rows, that is what you get.
+    /// Only [`wait_frame`](Self::wait_frame) is frame-gated, and it is
+    /// frame-gated *because* this is not.
+    ///
+    /// This is deliberate — a torn read is exactly what you want when
+    /// diagnosing an application hung mid-repaint, which is why timeout
+    /// and [`Error::Eof`](crate::Error::Eof) screens keep showing it — but
+    /// it means a whole-screen assertion needs one of:
+    ///
+    /// - the `Screen` returned by [`wait_frame`](Self::wait_frame), for an
+    ///   application that emits synchronized updates: it is the frame the
+    ///   predicate matched, complete by construction;
+    /// - [`wait_idle`](Self::wait_idle) first, which will not call a
+    ///   terminal idle while an update is open (see there) — the "settle
+    ///   before whole-screen snapshots" rule on
+    ///   [`wait_until`](Self::wait_until);
+    /// - or a predicate naming the last thing the application paints, so
+    ///   that its truth implies the repaint finished.
     #[must_use]
     pub fn screen(&self) -> Screen {
         self.shared.lock().snapshot()
@@ -1428,10 +1453,16 @@ impl Terminal {
     ///    snapshotting a whole screen — not on a line drawn midway.
     /// 3. **Settle before whole-screen snapshots**: a snapshot asserts on
     ///    cells no predicate named, so [`wait_idle`](Self::wait_idle)
-    ///    first.
+    ///    first. This is also what keeps such a snapshot from being torn:
+    ///    a predicate here can become true *inside* a repaint, and
+    ///    [`screen`](Self::screen) taken at that moment is half-painted —
+    ///    including for an application that brackets every repaint
+    ///    correctly. `wait_idle` will not declare idleness while an update
+    ///    is open.
     ///
     /// Applications that emit DEC 2026 synchronized updates need none of
-    /// this — [`wait_frame`](Self::wait_frame) sees only complete frames.
+    /// this — [`wait_frame`](Self::wait_frame) sees only complete frames
+    /// and hands back the one it matched.
     /// After a [`resize`](Self::resize), also see the stale-frame trap
     /// documented there.
     ///
@@ -1679,9 +1710,18 @@ impl Terminal {
         }
     }
 
-    /// Block until the terminal has been quiet — no bytes for `quiet` and
-    /// the stream not ending mid-escape-sequence. EOF counts as idle
-    /// (nothing more can arrive).
+    /// Block until the terminal has been quiet — no bytes for `quiet`, the
+    /// stream not ending mid-escape-sequence, and **no synchronized update
+    /// left open**. EOF counts as idle (nothing more can arrive).
+    ///
+    /// That last condition is a guarantee, not an implementation detail: an
+    /// application that has begun a DEC 2026 repaint and not finished it is
+    /// mid-update in exactly the sense a half-received escape sequence is,
+    /// so it is not idle. This is what makes the "settle before
+    /// whole-screen snapshots" rule work — after `wait_idle` returns, a
+    /// [`screen`](Self::screen) snapshot cannot be a torn frame. An
+    /// application that opens an update and never closes it therefore times
+    /// out here, and the error says so.
     ///
     /// This is a heuristic: "no output for N ms" is evidence, not proof,
     /// that the application finished rendering. Prefer
@@ -1737,11 +1777,26 @@ impl Terminal {
 
             let now = Instant::now();
             if now >= deadline {
+                // A terminal that is *silent* but mid-frame would otherwise
+                // time out "waiting for 100ms of output silence", which
+                // reads as nonsense to someone looking at a quiet terminal.
+                // Name the real state: the application is inside a repaint
+                // it never finished.
+                let stuck_mid_frame = guard.emu.in_sync_update();
                 let screen = guard.peek_snapshot();
                 let note = guard.query_note();
                 drop(guard);
+                let waiting_for = if stuck_mid_frame {
+                    format!(
+                        "{quiet:?} of output silence — the application is inside an \
+                         unfinished DEC 2026 synchronized update (Begin with no End), so \
+                         the screen below is a half-painted frame{note}"
+                    )
+                } else {
+                    format!("{quiet:?} of output silence{note}")
+                };
                 return Err(Error::Timeout {
-                    waiting_for: format!("{quiet:?} of output silence{note}"),
+                    waiting_for,
                     timeout,
                     screen,
                 });

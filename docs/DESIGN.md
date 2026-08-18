@@ -158,6 +158,35 @@ expiry the error **embeds the full screen dump** — a CI log alone answers
 `Drop` kills + reaps the child unconditionally (unless already reaped):
 tests never leak zombies, including on panic.
 
+### `screen()` is the live grid, frames or no frames
+
+`wait_frame` is the only frame-gated observation in the crate. `screen()`
+returns the grid as it stands, and "as it stands" can be **inside** a
+repaint — for an application that brackets every repaint in DEC 2026
+exactly as intended, just as much as for one that never heard of
+synchronized output. Open an update, paint row 1, and a snapshot taken
+there has row 1 and nothing else. The application did everything right
+and still gets the pre-2026 failure mode.
+
+This is deliberate, and the alternative is worse. Serving the newest
+*complete* frame from `screen()` while an update is open would mean that
+a `wait_until` predicate could match content the following `screen()`
+does not show — the predicate reads the live grid, so it sees the
+half-painted row that the substituted frame lacks. Disagreeing with your
+own predicate is a nastier failure than tearing. And the torn read is
+positively wanted in one case: an application hung mid-repaint is
+diagnosed by seeing the half-painted grid, which is why timeout and
+`Error::Eof` screens keep showing it.
+
+So the honest answer is three routes to a frame-consistent screen, each
+matching a way of waiting:
+
+| you waited with | use |
+|---|---|
+| `wait_frame` | the `Screen` it returns — the matched frame, complete by construction |
+| `wait_until` | `wait_idle` after it (no idleness while an update is open), then `screen()` |
+| neither | a predicate naming the last thing the app paints, so its truth implies the repaint finished |
+
 ### The three rules for race-free waits
 
 `wait_until(pred)` guarantees exactly one thing: every byte up to and

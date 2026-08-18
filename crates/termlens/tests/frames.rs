@@ -75,14 +75,19 @@ fn apps_without_synchronized_output_time_out_with_guidance() {
     // hello-tui never emits DEC 2026.
     let mut t = Terminal::builder()
         .size(80, 24)
-        .timeout(Duration::from_millis(500))
+        // Generous default: the fixture's first paint is not what is under
+        // test here, and on a loaded runner it can take a while. The
+        // deadline that matters is the per-call one below.
+        .timeout(Duration::from_secs(10))
         .env_clear()
         .spawn(util::fixture_bin("hello-tui"))
         .unwrap();
     t.wait_until(|s| s.contains("╯")).unwrap();
 
     let start = Instant::now();
-    let err = t.wait_frame(|_| true).unwrap_err();
+    let err = t
+        .wait_frame_for(|_| true, Duration::from_millis(500))
+        .unwrap_err();
     assert!(start.elapsed() >= Duration::from_millis(500));
 
     let msg = err.to_string();
@@ -440,4 +445,68 @@ fn a_resize_stops_offering_frames_drawn_at_the_old_size() -> termlens::Result<()
         "a pre-resize frame must not answer a post-resize wait: {stale:?}"
     );
     Ok(())
+}
+
+/// `screen()` is the live grid even for an application that brackets
+/// every repaint — the tear is real, documented, and wanted for
+/// diagnosis. `wait_frame`'s return value is the frame-consistent read.
+#[test]
+fn a_snapshot_can_be_mid_frame_for_a_synchronized_application() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .size(80, 24)
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                // Frame OPEN, one of two rows painted.
+                r"printf '\033[?2026h\033[2J\033[HROW-ONE'; read a; ",
+                // Second row, then the frame closes.
+                r"printf '\033[2;1HROW-TWO\033[?2026l'; read b"
+            ),
+        ])
+        .spawn("sh")?;
+
+    t.wait_until(|s| s.contains("ROW-ONE"))?;
+    let torn = t.screen();
+    assert!(torn.contains("ROW-ONE"), "row 0 is painted:\n{torn}");
+    assert!(
+        torn.row_text(1).trim_end().is_empty(),
+        "the frame is not finished, and screen() says so:\n{torn}"
+    );
+
+    t.send(Key::Enter);
+    // The frame-consistent read has both rows, by construction.
+    let frame = t.wait_frame(|s| s.contains("ROW-TWO"))?;
+    assert!(
+        frame.contains("ROW-ONE") && frame.contains("ROW-TWO"),
+        "{frame}"
+    );
+
+    t.send(Key::Enter);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// A terminal that is silent *because* it is stuck mid-repaint used to
+/// time out "waiting for 100ms of output silence", which reads as
+/// nonsense next to a quiet terminal.
+#[test]
+fn a_wait_idle_timeout_names_an_unfinished_frame() {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_millis(600))
+        .args(["-c", r"printf '\033[?2026hhalf a frame'; read guard"])
+        .spawn("sh")
+        .unwrap();
+    t.wait_until(|s| s.contains("half a frame")).unwrap();
+
+    let err = t.wait_idle(Duration::from_millis(100)).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unfinished DEC 2026 synchronized update"),
+        "the real state must be named: {msg}"
+    );
+    assert!(
+        msg.contains("half-painted frame"),
+        "and what the embedded screen is: {msg}"
+    );
 }
