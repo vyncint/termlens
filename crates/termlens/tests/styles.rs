@@ -22,22 +22,23 @@ fn list_with_highlight(row: u16) -> String {
 
 #[test]
 fn moving_a_highlight_changes_the_styled_rendering_only() -> termlens::Result<()> {
-    // Both snapshots are whole-screen, so both need the third rule from
-    // `wait_until`'s own docs: settle first. `contains("item two")` becomes
-    // true before the newline *after* it is processed, and the cursor then
-    // sits at (1, 8) instead of (2, 0) — state the predicate never named but
-    // that `Display` renders, so comparing two of them without settling is a
-    // race. Found by the stress gate at iteration 17 of 100.
+    // Wait on the cursor as well as the text — rule 1, and the same idiom
+    // `fixtures.rs` uses for the same reason. `contains("item two")` turns
+    // true before the newline *after* it is processed, leaving the cursor at
+    // (1, 8) instead of its resting (2, 0); that is state no predicate here
+    // named but that `Display` renders, so comparing two whole snapshots
+    // without pinning it is a race. Found by the stress gate at iteration
+    // 17 of 100, with byte-identical grids and only the cursor differing.
+    let settled = |s: &termlens::Screen| s.contains("item two") && s.cursor() == (2, 0, true);
+
     let mut first = sh(&list_with_highlight(0))?;
-    first.wait_until(|s| s.contains("item two"))?;
-    first.wait_idle(Duration::from_millis(50))?;
+    first.wait_until(settled)?;
     let a = first.screen();
     first.send(Key::Enter);
     first.wait_exit()?;
 
     let mut second = sh(&list_with_highlight(1))?;
-    second.wait_until(|s| s.contains("item two"))?;
-    second.wait_idle(Duration::from_millis(50))?;
+    second.wait_until(settled)?;
     let b = second.screen();
     second.send(Key::Enter);
     second.wait_exit()?;
@@ -59,7 +60,10 @@ fn styled_screen_snapshot() -> termlens::Result<()> {
         r"printf '\033[1;31mERROR\033[0m plain \033[4;34munderlined\033[0m\n'; ",
         r"printf 'second row \033[7mselected\033[0m\n'; read guard"
     ))?;
-    t.wait_until(|s| s.contains("selected"))?;
+    // Same trailing-newline race as above, and a snapshot embeds the cursor:
+    // caught by the stress gate at iteration 46 of 100 as `cursor: 1,19`
+    // against the recorded `cursor: 2,0`.
+    t.wait_until(|s| s.contains("selected") && s.cursor() == (2, 0, true))?;
     insta::assert_snapshot!(t.screen().with_styles());
     t.send(Key::Enter);
     assert!(t.wait_exit()?.success());
@@ -73,19 +77,20 @@ fn styled_screen_snapshot() -> termlens::Result<()> {
 /// green test certifies the bug it was written to catch.
 #[test]
 fn a_masked_field_is_distinguishable_from_clear_text() -> termlens::Result<()> {
-    // Settled for the same reason as above, and one more: the styled
-    // comparison below asserts a *difference*, so an incidental cursor
-    // difference would let it pass without the styles differing at all.
+    // The cursor is pinned for the same reason, plus one specific to this
+    // test: the styled comparison below asserts a *difference*, so an
+    // incidental cursor difference would let it pass without the styles
+    // differing at all — passing for the wrong reason.
+    let settled = |s: &termlens::Screen| s.contains("pw: hunter2|") && s.cursor() == (0, 12, true);
+
     let mut masked = sh(r"printf 'pw: \033[8mhunter2\033[28m|'; read guard")?;
-    masked.wait_until(|s| s.contains("pw: hunter2|"))?;
-    masked.wait_idle(Duration::from_millis(50))?;
+    masked.wait_until(settled)?;
     let a = masked.screen();
     masked.send(Key::Enter);
     masked.wait_exit()?;
 
     let mut clear = sh(r"printf 'pw: hunter2|'; read guard")?;
-    clear.wait_until(|s| s.contains("pw: hunter2|"))?;
-    clear.wait_idle(Duration::from_millis(50))?;
+    clear.wait_until(settled)?;
     let b = clear.screen();
     clear.send(Key::Enter);
     clear.wait_exit()?;
