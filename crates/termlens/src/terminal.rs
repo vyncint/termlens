@@ -352,7 +352,11 @@ struct EmuState {
     /// [`FRAME_HISTORY`]. Several frames can complete inside one read, so
     /// keeping only the newest made rapid intermediate states — a
     /// progress counter ticking 1, 2, 3 in one write — unobservable.
-    frames: VecDeque<Screen>,
+    ///
+    /// Each frame carries its `frames_seen` index at publication, which is
+    /// what lets a waiter ask for frames *newer than the last one it was
+    /// given* rather than rescanning the whole ring forever.
+    frames: VecDeque<(u64, Screen)>,
     /// Whether to answer recognized terminal queries (builder-configured).
     respond: bool,
     /// Background color reported to OSC 11 queries.
@@ -900,6 +904,7 @@ impl TerminalBuilder {
             default_timeout: self.timeout,
             exit_status: None,
             command_desc,
+            frame_cursor: 0,
         })
     }
 }
@@ -944,6 +949,16 @@ fn check_size(cols: u16, rows: u16) -> Result<()> {
 
 /// Canonical printable shape of a known query (for diagnostics when the
 /// responder is disabled).
+/// "1 complete frame" / "2 complete frames". Timeout messages are read by
+/// people under pressure; the diagnosis is the point of this crate.
+fn frames_phrase(n: u64) -> String {
+    if n == 1 {
+        "1 complete frame".to_owned()
+    } else {
+        format!("{n} complete frames")
+    }
+}
+
 fn query_shape(query: &Query) -> String {
     match query {
         Query::CursorPosition { private: false } => "^[[6n".into(),
@@ -994,7 +1009,7 @@ fn reader_loop(
                                 if state.frames.len() == FRAME_HISTORY {
                                     state.frames.pop_front();
                                 }
-                                state.frames.push_back(frame);
+                                state.frames.push_back((state.frames_seen, frame));
                             }
                             Some(Stop::Query(query)) => {
                                 if let Some(reply) = state.answer(&query) {
@@ -1063,6 +1078,12 @@ pub struct Terminal {
     default_timeout: Duration,
     exit_status: Option<ExitStatus>,
     command_desc: String,
+    /// Index of the newest frame [`wait_frame`](Terminal::wait_frame) has
+    /// already returned from this terminal. Each call looks only past it,
+    /// so N successive calls observe N distinct frames and a frame cannot
+    /// satisfy two waits. Advanced by a resize too: a frame drawn at the
+    /// old size is not the repaint that answers the new one.
+    frame_cursor: u64,
 }
 
 impl Terminal {
@@ -1484,12 +1505,37 @@ impl Terminal {
     /// demands (single predicate, wait on the last-painted region; see
     /// `docs/DESIGN.md` §2).
     ///
-    /// Frames completed *before* the call are evaluated too, so a fast
-    /// application cannot slip one past you — including when several
-    /// complete inside a single read. The terminal retains the last
-    /// **8** completed frames and each call scans them oldest first, so
-    /// a burst like a progress counter ticking `1`, `2`, `3` in one
-    /// write is observable step by step by three successive calls.
+    /// Returns the frame that matched. Assert on *that* `Screen` rather
+    /// than calling [`screen`](Self::screen) afterwards: the live grid can
+    /// already have moved on to a newer state, and the returned frame is
+    /// the instant the predicate actually saw.
+    ///
+    /// # Each call observes a frame no earlier call did
+    ///
+    /// The terminal retains the last **8** completed frames, and each call
+    /// scans — oldest first — only those *newer than the frame it last
+    /// returned to you*. Two properties follow, and they are the ones that
+    /// make this method worth using:
+    ///
+    /// - **A burst is observable step by step.** Several frames can
+    ///   complete inside a single read; a progress counter ticking `1`,
+    ///   `2`, `3` in one write is seen by three successive calls, in the
+    ///   order the application drew them. Asking for `1` after `3` fails,
+    ///   because `1` is behind the cursor — the sequence is enforced, not
+    ///   merely available.
+    /// - **A frame cannot satisfy two waits.** N successive calls observe
+    ///   N distinct frames, so `wait_frame(x)` twice does not pass twice
+    ///   on one repaint.
+    ///
+    /// A frame completed before the call but never yet returned *is* still
+    /// matched, deliberately: a fast application cannot slip a frame past
+    /// you between your last wait and this one. What is gone is the old
+    /// behaviour where any of the last 8 frames matched forever — so
+    /// `send(key)` followed by `wait_frame(|s| s.contains(OLD_STATE))` now
+    /// times out instead of passing on the superseded frame.
+    ///
+    /// A [`resize`](Self::resize) also advances the cursor: a frame drawn
+    /// at the old size is not the repaint that answers the new one.
     ///
     /// A frame is one *completed* synchronized update: an
     /// `EndSynchronizedUpdate` that closes a Begin this terminal actually
@@ -1500,11 +1546,9 @@ impl Terminal {
     /// below. A Begin/End pair that changed no cell *does* publish: the
     /// count is of repaints, not of changes.
     ///
-    /// Two honest limits follow from the retention bound: a burst longer
-    /// than 8 frames drops its oldest, and because retained frames stay
-    /// matchable, a predicate that was true of an earlier frame resolves
-    /// immediately rather than waiting for a new one. Where that matters,
-    /// assert on something only the newer frame can show.
+    /// One honest limit follows from the retention bound: a burst longer
+    /// than 8 frames drops its oldest, so frames beyond that are gone
+    /// before any predicate can see them.
     ///
     /// ```
     /// # fn main() -> termlens::Result<()> {
@@ -1512,7 +1556,8 @@ impl Terminal {
     ///     .timeout(std::time::Duration::from_secs(10))
     ///     .args(["-c", r"printf '\033[?2026hFrame ready\033[?2026l'; read quit"])
     ///     .spawn("sh")?;
-    /// t.wait_frame(|screen| screen.contains("Frame ready"))?;
+    /// let frame = t.wait_frame(|screen| screen.contains("Frame ready"))?;
+    /// assert!(frame.contains("Frame ready"));
     /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
     /// # }
     /// ```
@@ -1523,7 +1568,7 @@ impl Terminal {
     /// application never emitted a single synchronized update, since
     /// `wait_frame` can then never succeed; use `wait_until` for such apps.
     /// [`Error::Eof`] as soon as the PTY closes with no matching frame.
-    pub fn wait_frame(&mut self, predicate: impl FnMut(&Screen) -> bool) -> Result<()> {
+    pub fn wait_frame(&mut self, predicate: impl FnMut(&Screen) -> bool) -> Result<Screen> {
         self.wait_frame_deadline(predicate, self.default_timeout)
     }
 
@@ -1538,7 +1583,7 @@ impl Terminal {
         &mut self,
         predicate: impl FnMut(&Screen) -> bool,
         timeout: Duration,
-    ) -> Result<()> {
+    ) -> Result<Screen> {
         self.wait_frame_deadline(predicate, timeout)
     }
 
@@ -1546,19 +1591,25 @@ impl Terminal {
         &mut self,
         mut predicate: impl FnMut(&Screen) -> bool,
         timeout: Duration,
-    ) -> Result<()> {
+    ) -> Result<Screen> {
         const WHAT: &str = "a complete frame matching the predicate";
         let deadline = Instant::now() + timeout;
+        let cursor = self.frame_cursor;
         let mut seen_frame = None;
         let outcome = self.shared.wait_until(deadline, |state| {
-            if state.frames_seen > 0 && seen_frame != Some(state.frames_seen) {
+            if state.frames_seen > cursor && seen_frame != Some(state.frames_seen) {
                 seen_frame = Some(state.frames_seen);
-                // Oldest retained frame first: several frames can
+                // Oldest unobserved frame first: several frames can
                 // complete inside one read, and a test asserting on a
-                // sequence must be able to see them in the order the
-                // application drew them.
-                if state.frames.iter().any(&mut predicate) {
-                    return Some(Ok(()));
+                // sequence must see them in the order the application drew
+                // them. Frames at or behind the cursor were already handed
+                // to an earlier wait and are not offered twice.
+                let matched = state
+                    .frames
+                    .iter()
+                    .find(|(index, frame)| *index > cursor && predicate(frame));
+                if let Some((index, frame)) = matched {
+                    return Some(Ok((*index, frame.clone())));
                 }
             }
             if state.eof {
@@ -1570,7 +1621,11 @@ impl Terminal {
             None
         });
         match outcome {
-            Ok(inner) => inner,
+            Ok(Ok((index, frame))) => {
+                self.frame_cursor = index;
+                Ok(frame)
+            }
+            Ok(Err(e)) => Err(e),
             Err(Expired) => {
                 // The live screen, like every other wait: the error's
                 // header says "screen at timeout" and a CI log is often
@@ -1584,7 +1639,19 @@ impl Terminal {
                     let note = guard.query_note();
                     (guard.frames_seen, screen, note)
                 };
-                let waiting_for = if frames == 0 {
+                let waiting_for = if frames > 0 && frames == cursor {
+                    // Every frame the application drew has already been
+                    // handed to an earlier wait, so it has not repainted
+                    // since. Naming that is the difference between "your
+                    // predicate is wrong" and "the app never redrew".
+                    format!(
+                        "{WHAT} — the application has not completed a repaint since the \
+                         frame this terminal last returned ({} in total). If it does not \
+                         repaint in response to this input, assert on the screen with \
+                         wait_until instead{note}",
+                        frames_phrase(frames)
+                    )
+                } else if frames == 0 {
                     // An application blocked on an unanswered probe never
                     // reaches its first repaint, so this is exactly where
                     // the query note earns its place: without it the
@@ -1595,8 +1662,13 @@ impl Terminal {
                          bracketed in BeginSynchronizedUpdate/EndSynchronizedUpdate; \
                          for other apps use wait_until (docs/DESIGN.md §2){note}"
                     )
+                } else if cursor == 0 {
+                    format!("{WHAT} ({} observed){note}", frames_phrase(frames))
                 } else {
-                    format!("{WHAT} ({frames} complete frames observed){note}")
+                    format!(
+                        "{WHAT} ({} since the last one returned, {frames} in total){note}",
+                        frames_phrase(frames - cursor)
+                    )
                 };
                 Err(Error::Timeout {
                     waiting_for,
@@ -1835,7 +1907,9 @@ impl Terminal {
     /// Wait for something only the post-SIGWINCH frame can show — content
     /// that needs the new width, a complete status bar on the new bottom
     /// row — or use [`wait_frame`](Self::wait_frame) where the app emits
-    /// synchronized updates. `docs/DESIGN.md` §2 shows the trap in full.
+    /// synchronized updates, which is unconditionally safe here: a resize
+    /// advances the frame cursor, so only a frame completed *after* it can
+    /// satisfy the wait. `docs/DESIGN.md` §2 shows the trap in full.
     ///
     /// # Errors
     ///
@@ -1854,9 +1928,14 @@ impl Terminal {
                 pixel_height: 0,
             })
             .map_err(|e| Error::Pty(format!("resize failed: {e}")))?;
-        self.shared.mutate(|state| {
+        // A frame drawn at the old size cannot be the repaint that answers
+        // this resize, so it stops being offered — which is what makes the
+        // advice in the stale-frame trap above actually hold for
+        // `wait_frame`.
+        self.frame_cursor = self.shared.mutate(|state| {
             state.emu.set_size(rows, cols);
             state.touch();
+            state.frames_seen
         });
         Ok(())
     }

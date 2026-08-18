@@ -117,15 +117,30 @@ expiry the error **embeds the full screen dump** — a CI log alone answers
   including multi-mode lists); the reader splits each chunk at every
   frame end and snapshots the screen *at that instant*, so the predicate
   sees exactly the frame as the app finished it — even when the same read
-  already carries the next frame's opening bytes. The last **8**
-  completed frames are retained and each call scans them oldest first, so
-  frames completed before the call are still observable (fast apps can't
-  slip one past the wait) and a burst of frames arriving in one read can
-  be asserted on step by step. Honest caveats: a burst longer than the
-  retention bound drops its oldest frames, and a retained frame stays
-  matchable, so a predicate satisfied by an earlier frame resolves at
-  once rather than waiting for a new one. An app that never emits a
-  synchronized update makes the timeout error say so and point at
+  already carries the next frame's opening bytes. It **returns the frame
+  it matched**, so the assertion lands on the instant the predicate saw
+  rather than on a `screen()` taken afterwards, which can already be a
+  newer state.
+
+  The last **8** completed frames are retained, and each call scans —
+  oldest first — only those *newer than the frame it last returned*. That
+  one cursor gives both properties that matter: a burst arriving in one
+  read is assertable step by step in the order the application drew it
+  (asking backwards fails, so the sequence is enforced rather than
+  merely available), and a frame cannot satisfy two waits. A frame
+  completed before the call but never yet returned *is* still matched —
+  deliberately, so a fast application cannot slip one past you between
+  two waits — but a *superseded* frame no longer can, which is what makes
+  `send(key); wait_frame(old_state)` fail instead of passing on stale
+  content. `resize` advances the cursor too: a frame drawn at the old
+  size is not the repaint that answers the new one.
+
+  Honest caveat: a burst longer than the retention bound drops its
+  oldest frames. A frame is one *completed* update — an End that closes a
+  Begin we saw, so the `?2026l` in a defensive mode-reset string is not a
+  repaint — and a Begin/End pair that changed nothing still counts, since
+  the count is of repaints rather than of changes. An app that never
+  emits a synchronized update makes the timeout error say so and point at
   `wait_until`.
 - `wait_idle(quiet)` — resolves when **no bytes for `quiet`** AND the
   stream does not end mid-escape-sequence (or mid-UTF-8-character) AND no
@@ -205,7 +220,9 @@ clipped old frame still says `tasks (10)` — the wait resolves before
 the app has repainted at all. Wait for something only the
 post-SIGWINCH frame can show — content that needs the new width, a
 complete status bar on the new bottom row — or use `wait_frame` where
-the app emits synchronized updates.
+the app emits synchronized updates, which is now unconditionally safe
+here: `resize` advances the frame cursor, so only a frame completed
+*after* the resize can satisfy the wait.
 
 ### The instant-exit caveat (macOS PTY teardown)
 

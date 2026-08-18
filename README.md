@@ -127,11 +127,13 @@ design. termlens's position:
 - **`wait_frame` gives exact frame boundaries** for apps that bracket
   repaints in DEC 2026 synchronized updates (crossterm's
   `BeginSynchronizedUpdate`/`EndSynchronizedUpdate`): the predicate only
-  ever sees complete frames, never a torn repaint. The last 8 frames are
-  retained, so a burst arriving in one read is assertable step by step —
-  and applications that *probe* for synchronized output before using it
-  get a truthful `DECRQM` answer, so they enable it against termlens
-  unmodified.
+  ever sees complete frames, never a torn repaint, and the call returns
+  the frame it matched. Each call observes a frame no earlier call did, so
+  a burst arriving in one read is assertable step by step in emission
+  order, one repaint cannot satisfy two waits, and a superseded frame
+  cannot answer a wait made after your input. Applications that *probe*
+  for synchronized output before using it get a truthful `DECRQM` answer,
+  so they enable it against termlens unmodified.
 - **Every wait takes a per-call deadline** (`wait_until_for`,
   `wait_frame_for`, `wait_idle_for`, `wait_exit_for`), so one slow step
   doesn't force a generous timeout on the whole suite. Writes are bounded

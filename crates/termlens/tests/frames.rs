@@ -35,20 +35,14 @@ fn a_frame_is_internally_consistent() -> termlens::Result<()> {
 
     t.send_str("hi");
     // Both the input line and the last-key line are painted in the same
-    // synchronized update; a frame satisfying one must satisfy the other.
-    t.wait_frame(|s| s.contains("input: hi"))?;
-    let frame_ok = std::cell::Cell::new(false);
-    t.wait_frame(|s| {
-        if s.contains("input: hi") {
-            frame_ok.set(s.contains("last: char:i"));
-            true
-        } else {
-            false
-        }
-    })?;
+    // synchronized update, so a frame satisfying one must satisfy the
+    // other. The returned frame is what the predicate saw, so the sibling
+    // row is checked on that exact instant rather than on a later
+    // `screen()` that may already have moved on.
+    let frame = t.wait_frame(|s| s.contains("input: hi"))?;
     assert!(
-        frame_ok.get(),
-        "frame satisfied one row but not its sibling"
+        frame.contains("last: char:i"),
+        "frame satisfied one row but not its sibling:\n{frame}"
     );
 
     t.send(Key::Esc);
@@ -65,16 +59,7 @@ fn a_torn_repaint_is_never_observed() -> termlens::Result<()> {
     // and ends the synchronized update. The bytes arrive in two bursts;
     // the frame completes only with the second.
     t.send(Key::F(2));
-    let mut observed = None;
-    t.wait_frame(|s| {
-        if s.contains("torn: left") {
-            observed = Some(s.row_text(5));
-            true
-        } else {
-            false
-        }
-    })?;
-    let row = observed.expect("predicate matched");
+    let row = t.wait_frame(|s| s.contains("torn: left"))?.row_text(5);
     assert!(
         row.contains("torn: left right"),
         "wait_frame observed a torn frame: {row:?}"
@@ -134,10 +119,12 @@ fn wait_frame_timeouts_embed_the_live_screen_not_the_last_frame() {
         screen.contains("LIVE SCREEN"),
         "the embedded screen is stale — it must match the header:\n{screen}"
     );
-    // The frame count still tells you what wait_frame actually saw.
+    // The only frame drawn was already returned, so the message says the
+    // application has not repainted rather than blaming the predicate.
+    let msg = err.to_string();
     assert!(
-        err.to_string().contains("1 complete frames observed"),
-        "the frame count belongs in the message: {err}"
+        msg.contains("has not completed a repaint") && msg.contains("1 complete frame in total"),
+        "the frame count and the reason belong in the message: {msg}"
     );
 }
 
@@ -160,12 +147,17 @@ fn every_frame_of_a_burst_is_observable_in_order() -> termlens::Result<()> {
         ])
         .spawn("sh")?;
 
-    // Wait for the last one first, so all three have certainly arrived
-    // (and been coalesced into as few reads as the OS chose).
-    t.wait_frame(|s| s.contains("STEP 3"))?;
-    // Every intermediate frame is still there.
-    t.wait_frame(|s| s.contains("STEP 1"))?;
-    t.wait_frame(|s| s.contains("STEP 2"))?;
+    // Settle on the live screen first, so all three frames have certainly
+    // arrived (and been coalesced into as few reads as the OS chose)
+    // before any of them is consumed. `wait_until` observes the grid, not
+    // the frame ring, so it leaves the cursor where it is.
+    t.wait_until(|s| s.contains("STEP 3"))?;
+
+    // Now every frame of the burst is observable, oldest first, and each
+    // call returns the frame it matched.
+    assert!(t.wait_frame(|s| s.contains("STEP 1"))?.contains("STEP 1"));
+    assert!(t.wait_frame(|s| s.contains("STEP 2"))?.contains("STEP 2"));
+    assert!(t.wait_frame(|s| s.contains("STEP 3"))?.contains("STEP 3"));
 
     t.send(Key::Enter);
     assert!(t.wait_exit()?.success());
@@ -186,13 +178,14 @@ fn a_burst_longer_than_the_retention_bound_drops_its_oldest_frames() -> termlens
         .args(["-c", &format!("printf '{script}'; read guard")])
         .spawn("sh")?;
 
-    t.wait_frame(|s| s.contains("FRAME 12"))?;
-    // The most recent 8 are retained: 05..=12.
+    t.wait_until(|s| s.contains("FRAME 12"))?;
+    // The most recent 8 are retained: 05..=12, so 05 is the oldest that
+    // can still be observed.
     t.wait_frame(|s| s.contains("FRAME 05"))?;
     // The first four are gone, and the error says how many were seen.
     let err = t.wait_frame(|s| s.contains("FRAME 01")).unwrap_err();
     assert!(
-        err.to_string().contains("12 complete frames observed"),
+        err.to_string().contains("12 in total"),
         "the frame count belongs in the message: {err}"
     );
     Ok(())
@@ -305,4 +298,146 @@ fn a_begin_end_pair_that_drew_nothing_is_still_a_frame() {
         .unwrap();
     t.wait_frame(|s| s.contains("STATIC")).unwrap();
     t.send(Key::Enter);
+}
+
+/// The headline case: `send(key); wait_frame(OLD_STATE)` used to pass on
+/// the retained frame, and the assertion after it read the old screen. A
+/// regression in which the key stopped working was invisible.
+#[test]
+fn a_superseded_frame_no_longer_satisfies_a_wait() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"printf '\033[?2026h\033[2J\033[HSTATE-A\033[?2026l'; read a; ",
+                r"printf '\033[?2026h\033[2J\033[HSTATE-B\033[?2026l'; read b"
+            ),
+        ])
+        .spawn("sh")?;
+
+    assert!(t.wait_frame(|s| s.contains("STATE-A"))?.contains("STATE-A"));
+    t.send(Key::Enter);
+
+    let stale = t.wait_frame_for(|s| s.contains("STATE-A"), Duration::from_millis(700));
+    assert!(
+        matches!(stale, Err(Error::Timeout { .. })),
+        "waiting for the superseded state must fail: {stale:?}"
+    );
+
+    // The frame the application actually drew is there for the asking.
+    assert!(t.wait_frame(|s| s.contains("STATE-B"))?.contains("STATE-B"));
+
+    t.send(Key::Enter);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+#[test]
+fn one_frame_cannot_satisfy_two_waits() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            r"printf '\033[?2026h\033[2J\033[HONLY-FRAME\033[?2026l'; read guard",
+        ])
+        .spawn("sh")?;
+
+    t.wait_frame(|s| s.contains("ONLY-FRAME"))?;
+    let again = t.wait_frame_for(|s| s.contains("ONLY-FRAME"), Duration::from_millis(700));
+    assert!(
+        matches!(again, Err(Error::Timeout { .. })),
+        "one repaint must not satisfy two waits: {again:?}"
+    );
+
+    t.send(Key::Enter);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// The burst is observable in emission order, which means out of order it
+/// is *not*: a frame already returned is behind the cursor.
+#[test]
+fn a_burst_frame_asked_for_out_of_order_is_gone() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_millis(700))
+        .args([
+            "-c",
+            concat!(
+                r"printf '\033[?2026h\033[HSTEP 1\033[?2026l",
+                r"\033[?2026h\033[HSTEP 2\033[?2026l",
+                r"\033[?2026h\033[HSTEP 3\033[?2026l'; read guard"
+            ),
+        ])
+        .spawn("sh")?;
+
+    t.wait_until(|s| s.contains("STEP 3"))?;
+    t.wait_frame(|s| s.contains("STEP 3"))?;
+
+    let backwards = t.wait_frame(|s| s.contains("STEP 1"));
+    assert!(
+        matches!(backwards, Err(Error::Timeout { .. })),
+        "STEP 1 was already passed over: {backwards:?}"
+    );
+    Ok(())
+}
+
+/// `wait_frame` returns the instant the predicate saw, which can differ
+/// from the live grid by the time the call returns.
+#[test]
+fn the_returned_frame_is_the_matched_instant_not_the_live_screen() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            // One complete frame, then unbracketed output that lands after
+            // the frame was published.
+            r"printf '\033[?2026h\033[2J\033[HFRAMED\033[?2026l'; printf '\r\nLIVE'; read guard",
+        ])
+        .spawn("sh")?;
+
+    let frame = t.wait_frame(|s| s.contains("FRAMED"))?;
+    t.wait_until(|s| s.contains("LIVE"))?;
+
+    assert!(
+        !frame.contains("LIVE"),
+        "the returned frame must be the instant the update ended:\n{frame}"
+    );
+    assert!(
+        t.screen().contains("LIVE"),
+        "the live screen has moved on:\n{}",
+        t.screen()
+    );
+
+    t.send(Key::Enter);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// A frame drawn at the old size is not the repaint that answers a
+/// resize, which is what makes the advice in `resize`'s stale-frame trap
+/// hold for `wait_frame`.
+#[test]
+fn a_resize_stops_offering_frames_drawn_at_the_old_size() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .size(80, 24)
+        .timeout(Duration::from_millis(700))
+        .args([
+            "-c",
+            // Paints one frame, then ignores SIGWINCH and never repaints.
+            r"printf '\033[?2026h\033[2J\033[HBEFORE-RESIZE\033[?2026l'; read guard",
+        ])
+        .spawn("sh")?;
+
+    // Deliberately not consumed: this proves the resize moves the cursor,
+    // not that an earlier wait did.
+    t.wait_until(|s| s.contains("BEFORE-RESIZE"))?;
+    t.resize(40, 10)?;
+
+    let stale = t.wait_frame(|s| s.contains("BEFORE-RESIZE"));
+    assert!(
+        matches!(stale, Err(Error::Timeout { .. })),
+        "a pre-resize frame must not answer a post-resize wait: {stale:?}"
+    );
+    Ok(())
 }
