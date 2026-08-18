@@ -5,12 +5,17 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::seq::{SeqEvent, SeqTracker};
+use super::shadow::AttrShadow;
 use super::{Emulator, InputModes, ModeState, MouseEncoding, Processed, Stop};
 use crate::screen::{Cell, Color, MouseMode, Screen, Style, TermState};
 
 pub(crate) struct Vt100Emulator {
     parser: ::vt100::Parser,
     tracker: SeqTracker,
+    /// Carries blink, conceal and strikethrough, which vt100 drops. See
+    /// `emu/shadow.rs` for why this is a second parser rather than
+    /// hand-rolled attribute tracking.
+    shadow: AttrShadow,
     /// How many rows of history to retain (0 disables it entirely).
     scrollback_len: usize,
     /// Rows that have scrolled off the top, oldest first, as text.
@@ -30,6 +35,7 @@ impl Vt100Emulator {
         Self {
             parser: ::vt100::Parser::new(rows, cols, scrollback_len),
             tracker: SeqTracker::new(),
+            shadow: AttrShadow::new(rows, cols),
             scrollback_len,
             history: VecDeque::new(),
             captured: 0,
@@ -116,6 +122,7 @@ impl Emulator for Vt100Emulator {
             };
             if let Some(stop) = stop {
                 self.parser.process(&bytes[..=i]);
+                self.shadow.feed(&bytes[..=i]);
                 self.capture_scrolled_rows();
                 return Processed {
                     consumed: i + 1,
@@ -124,6 +131,7 @@ impl Emulator for Vt100Emulator {
             }
         }
         self.parser.process(bytes);
+        self.shadow.feed(bytes);
         self.capture_scrolled_rows();
         Processed {
             consumed: bytes.len(),
@@ -135,13 +143,21 @@ impl Emulator for Vt100Emulator {
         let screen = self.parser.screen();
         let (rows, cols) = screen.size();
         let mut cells = Vec::with_capacity(usize::from(rows) * usize::from(cols));
+        // The shadow grid is the same shape as the primary — vt100's
+        // attributes never influence geometry, and the two streams differ
+        // only by rewritten SGR — so cell (row, col) means the same in both.
+        debug_assert_eq!(
+            screen.contents(),
+            self.shadow.contents(),
+            "the attribute shadow diverged from the primary grid"
+        );
         for row in 0..rows {
             for col in 0..cols {
                 // In-range lookups on vt100 are always Some; blank fallback
                 // keeps this total rather than panicking inside a snapshot.
                 cells.push(screen.cell(row, col).map_or_else(
                     || Cell::new(String::new(), Style::default(), false, false),
-                    convert_cell,
+                    |cell| convert_cell(cell, self.shadow.cell(row, col)),
                 ));
             }
         }
@@ -244,6 +260,7 @@ impl Emulator for Vt100Emulator {
 
     fn set_size(&mut self, rows: u16, cols: u16) {
         self.parser.screen_mut().set_size(rows, cols);
+        self.shadow.set_size(rows, cols);
         // A resize can push rows into history on its own.
         self.capture_scrolled_rows();
     }
@@ -259,7 +276,10 @@ fn convert_mouse(mode: ::vt100::MouseProtocolMode) -> MouseMode {
     }
 }
 
-fn convert_cell(cell: &::vt100::Cell) -> Cell {
+/// Build a [`Cell`] from the primary grid cell and its shadow counterpart,
+/// whose bold/italic/underline flags are this cell's
+/// blink/conceal/strikethrough (see `emu/shadow.rs`).
+fn convert_cell(cell: &::vt100::Cell, shadow: Option<&::vt100::Cell>) -> Cell {
     let style = Style {
         fg: convert_color(cell.fgcolor()),
         bg: convert_color(cell.bgcolor()),
@@ -268,6 +288,9 @@ fn convert_cell(cell: &::vt100::Cell) -> Cell {
         italic: cell.italic(),
         underline: cell.underline(),
         reverse: cell.inverse(),
+        blink: shadow.is_some_and(::vt100::Cell::bold),
+        conceal: shadow.is_some_and(::vt100::Cell::italic),
+        strikethrough: shadow.is_some_and(::vt100::Cell::underline),
     };
     Cell::new(
         cell.contents().to_owned(),
@@ -331,6 +354,86 @@ mod tests {
         assert!(style.bold && style.italic && style.underline && style.reverse);
         assert_eq!(style.fg, Color::Indexed(1));
         assert_eq!(screen.cell(0, 1).unwrap().style(), &Style::default());
+    }
+
+    #[test]
+    fn blink_conceal_and_strikethrough_reach_the_cells() {
+        // The three attributes vt100 drops. Recovered via the shadow parser
+        // (see `emu/shadow.rs`).
+        let emu = emu_with(b"\x1b[5mB\x1b[0m\x1b[8mC\x1b[0m\x1b[9mS\x1b[0mp");
+        let s = emu.snapshot();
+        let style = |col| *s.cell(0, col).unwrap().style();
+
+        assert!(style(0).blink && !style(0).conceal && !style(0).strikethrough);
+        assert!(style(1).conceal && !style(1).blink && !style(1).strikethrough);
+        assert!(style(2).strikethrough && !style(2).blink && !style(2).conceal);
+        // And a plain cell after the reset carries none of them.
+        assert_eq!(style(3), Style::default());
+    }
+
+    #[test]
+    fn the_new_attributes_coexist_with_the_old_ones() {
+        // A real bold must not read as a blink, and vice versa: the two
+        // parsers must not leak into each other.
+        let emu = emu_with(b"\x1b[1;31mA\x1b[0m\x1b[5mB\x1b[0m\x1b[1;5;4mC");
+        let s = emu.snapshot();
+        let a = *s.cell(0, 0).unwrap().style();
+        assert!(a.bold && !a.blink);
+        assert_eq!(a.fg, Color::Indexed(1));
+
+        let b = *s.cell(0, 1).unwrap().style();
+        assert!(b.blink && !b.bold);
+
+        let c = *s.cell(0, 2).unwrap().style();
+        assert!(c.bold && c.blink && c.underline && !c.strikethrough);
+    }
+
+    #[test]
+    fn each_attribute_has_its_own_reset() {
+        let emu = emu_with(b"\x1b[5;8;9mX\x1b[25mY\x1b[28mZ\x1b[29mW");
+        let s = emu.snapshot();
+        let style = |col| *s.cell(0, col).unwrap().style();
+
+        let x = style(0);
+        assert!(x.blink && x.conceal && x.strikethrough);
+        let y = style(1);
+        assert!(!y.blink && y.conceal && y.strikethrough);
+        let z = style(2);
+        assert!(!z.blink && !z.conceal && z.strikethrough);
+        assert_eq!(style(3), Style::default());
+    }
+
+    #[test]
+    fn a_palette_colour_is_never_mistaken_for_an_attribute() {
+        // `38;5;196` selects palette entry 196. Reading its `5` as blink
+        // would mark a whole run with an attribute the application never
+        // set — and 256-colour output is everywhere.
+        let emu = emu_with(b"\x1b[38;5;196mX\x1b[0m\x1b[38;2;0;8;9mY");
+        let s = emu.snapshot();
+        let x = *s.cell(0, 0).unwrap().style();
+        assert_eq!(x.fg, Color::Indexed(196));
+        assert!(!x.blink && !x.conceal && !x.strikethrough);
+
+        let y = *s.cell(0, 1).unwrap().style();
+        assert_eq!(y.fg, Color::Rgb(0, 8, 9));
+        assert!(!y.conceal && !y.strikethrough);
+    }
+
+    #[test]
+    fn attributes_survive_the_geometry_the_shadow_must_track() {
+        // Erase fills cells with the current attributes, scrolling moves
+        // rows, and the alternate screen swaps grids. The shadow follows the
+        // same byte stream, so all three must line up — the snapshot's
+        // debug assertion checks the grids match on every call here.
+        let emu = emu_with(b"\x1b[8mmasked\r\nrow2\r\nrow3\r\nrow4\r\nrow5");
+        let s = emu.snapshot();
+        // "masked" scrolled off; every remaining cell is still concealed.
+        assert!(s.cell(0, 0).unwrap().style().conceal, "{s}");
+        assert!(s.cell(3, 0).unwrap().style().conceal, "{s}");
+
+        let emu = emu_with(b"\x1b[9mstruck\x1b[?1049hALT");
+        let s = emu.snapshot();
+        assert!(s.cell(0, 0).unwrap().style().strikethrough, "{s}");
     }
 
     #[test]

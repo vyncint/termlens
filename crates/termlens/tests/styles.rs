@@ -57,3 +57,73 @@ fn styled_screen_snapshot() -> termlens::Result<()> {
     assert!(t.wait_exit()?.success());
     Ok(())
 }
+
+/// The trap this exists to close. A test asserting that a password field is
+/// masked used to pass just as happily against an application that printed
+/// the secret in clear, because `SGR 8` reached nothing and the two
+/// renderings were identical in the grid — the one failure mode where a
+/// green test certifies the bug it was written to catch.
+#[test]
+fn a_masked_field_is_distinguishable_from_clear_text() -> termlens::Result<()> {
+    let mut masked = sh(r"printf 'pw: \033[8mhunter2\033[28m|'; read guard")?;
+    masked.wait_until(|s| s.contains("pw: hunter2|"))?;
+    let a = masked.screen();
+    masked.send(Key::Enter);
+    masked.wait_exit()?;
+
+    let mut clear = sh(r"printf 'pw: hunter2|'; read guard")?;
+    clear.wait_until(|s| s.contains("pw: hunter2|"))?;
+    let b = clear.screen();
+    clear.send(Key::Enter);
+    clear.wait_exit()?;
+
+    // Identical text — a real terminal holds the characters either way, and
+    // so does termlens. That is why `text()` cannot tell them apart.
+    assert_eq!(a.text(), b.text());
+
+    // The assertion a test author actually wants, and could not write:
+    let secret_is_masked =
+        |s: &termlens::Screen| (4..11).all(|col| s.cell(0, col).is_some_and(|c| c.style().conceal));
+    assert!(
+        secret_is_masked(&a),
+        "the field is masked:\n{}",
+        a.with_styles()
+    );
+    assert!(
+        !secret_is_masked(&b),
+        "and clear text must fail the same assertion:\n{}",
+        b.with_styles()
+    );
+
+    // The styled rendering separates them too, which is what makes a
+    // snapshot test catch this.
+    assert_ne!(a.with_styles().to_string(), b.with_styles().to_string());
+    Ok(())
+}
+
+#[test]
+fn strikethrough_and_blink_appear_in_the_styled_rendering() -> termlens::Result<()> {
+    let mut t = sh(concat!(
+        r"printf 'done \033[9mship it\033[29m ",
+        r"\033[5;31moverdue\033[0m plain'; read guard"
+    ))?;
+    t.wait_until(|s| s.contains("plain"))?;
+    let s = t.screen();
+    let styled = s.with_styles().to_string();
+
+    // Tokens are emitted in SGR order, so the existing ones keep their
+    // places and the new ones slot in around `reverse`.
+    assert!(styled.contains("strikethrough"), "{styled}");
+    assert!(styled.contains("blink"), "{styled}");
+    assert!(styled.contains("fg=1"), "{styled}");
+
+    // A blinking red badge is no longer indistinguishable from a plain red
+    // one — the tie `with_styles()` could not break.
+    let overdue = s.find("overdue").expect("painted");
+    let badge = *s.cell(overdue.0, overdue.1).unwrap().style();
+    assert!(badge.blink && badge.fg == termlens::Color::Indexed(1));
+
+    t.send(Key::Enter);
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}

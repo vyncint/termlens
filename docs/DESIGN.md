@@ -368,7 +368,10 @@ Rules:
    0-based column range (`start-end`, or just `start` for one column)
    followed by style tokens in fixed order: `fg=`, `bg=` (indexed colors
    as decimal, RGB as `#rrggbb`), then `bold`, `dim`, `italic`,
-   `underline`, `reverse`. Default-styled spans are omitted entirely —
+   `underline`, `blink`, `reverse`, `conceal`, `strikethrough` — SGR order,
+   which is the order the original five were already in, so an existing
+   span's tokens are unchanged unless the cell carries one of the three
+   attributes added in 0.4. Default-styled spans are omitted entirely —
    absence means default — so a highlight moving rows diffs as exactly
    two lines. A fully default-styled screen renders `styles:` followed by
    `(none)`, so the snapshot itself records that styles were asserted.
@@ -406,10 +409,57 @@ But it is an implementation detail:
   the terminal loop needs, so candidate backends (wezterm-term for wider
   escape coverage, alacritty_terminal for fidelity to a real terminal's
   quirks) can be evaluated behind a feature flag without touching layer 3+.
-- Known vt100 limits we accept in v0.2: no scrollback assertions (parser
-  runs with scrollback 0), no reflow of scrollback on resize, cluster
+- Known vt100 limits: no reflow of scrollback on resize, and cluster
   handling for exotic emoji is whatever vt100 does (pinned by the
   unicode-torture snapshot rather than promised).
+
+### The attribute shadow
+
+vt100 0.16's `Attrs` is `{ fgcolor, bgcolor, mode: u8 }` and its SGR
+dispatch handles only `0 1 2 3 4 7 22 23 24 27` plus the colour params.
+`5`/`6` (blink), `8` (conceal), `9` (strikethrough) and their resets never
+reach a cell. That is not a missing nicety: **a test asserting that a
+password field is masked passes against an application that prints the
+secret in clear**, because the two renderings are identical in the grid and
+`with_styles()` cannot break the tie either. It is the one place in this
+crate where a green test certifies the bug it was written to catch.
+
+Upstream is the right home for the fix — three spare bits are sitting in
+`mode: u8` — but 0.16.2 (July 2025) is the newest release, `Attrs` has no
+public setter reachable from `Callbacks::unhandled_csi`, and a published
+crate cannot carry a `[patch.crates.io]`. So the three attributes are
+recovered from **a second `vt100::Parser` fed the same byte stream with
+only SGR sequences rewritten**, so that three attributes vt100 does keep
+act as carriers for the three it drops (`5`/`6`→`1`, `8`→`3`, `9`→`4`, with
+`25`/`28`/`29` mapped to the matching resets and every other parameter
+dropped from the shadow stream).
+
+This is sound for a reason that can be checked rather than hoped for: **in
+vt100, attributes never influence geometry.** `Attrs` is read in exactly
+two places — as the fill value for `clear`/`erase`, and by the escape-code
+*output* functions. Cursor movement, wrapping, scrolling, tabs and cell
+placement are attribute-independent, and SGR sequences never move the
+cursor. So a stream differing only by the replacement of complete plain-SGR
+sequences produces an identically-shaped grid, and shadow cell `(r, c)` is
+primary cell `(r, c)`. A debug assertion compares the two grids on every
+snapshot, so the whole test suite checks the invariant instead of taking it
+on trust.
+
+Note what this deliberately is *not*: nothing here attributes styles to
+cells by hand. vt100 does the attribution, twice — so there is no second
+cursor, no duplicated wrap, scroll-region or alternate-screen logic, and
+nothing to diverge quietly. The alternative considered and rejected was
+vendoring a patched vt100: 3,950 lines of someone else's code carried
+permanently, in a crate whose value is being reviewable, to hold an
+80-line patch. The rewriter's one real trap is that the `5` in `38;5;196`
+selects palette mode rather than blink, so extended-colour parameters are
+stepped over in both the semicolon and colon forms; anything that is not a
+plain SGR (private prefix, intermediate byte, aborted sequence) passes
+through byte-for-byte, which is what makes "cannot diverge" true rather
+than merely likely.
+
+When upstream gains the attributes, `emu/shadow.rs` deletes and
+`convert_cell` reads the three flags directly.
 
 ## 5. Environment policy
 

@@ -40,6 +40,20 @@ pub struct Style {
     pub underline: bool,
     /// Reverse video (foreground and background swapped).
     pub reverse: bool,
+    /// Blinking (`SGR 5`/`6`; the two rates are not distinguished).
+    pub blink: bool,
+    /// Concealed: the cell holds text the terminal does not display
+    /// (`SGR 8`) — a masked password field, typically.
+    ///
+    /// This is the attribute worth checking explicitly. Without it, a test
+    /// asserting that a field is masked passes just as happily against an
+    /// application that printed the secret in clear, because the two
+    /// renderings are identical in the grid. [`Screen::cell`] still reports
+    /// the underlying text, exactly as a real terminal holds it — what
+    /// changes is that you can now tell the difference.
+    pub conceal: bool,
+    /// Struck through (`SGR 9`).
+    pub strikethrough: bool,
 }
 
 /// Which mouse events the application asked its terminal to report.
@@ -670,12 +684,18 @@ impl Style {
         let mut tokens = Vec::new();
         color("fg", self.fg, &mut tokens);
         color("bg", self.bg, &mut tokens);
+        // SGR order, which is the order the existing tokens were already
+        // in — so a cell's tokens are unchanged unless it carries one of
+        // the new attributes.
         for (on, name) in [
             (self.bold, "bold"),
             (self.dim, "dim"),
             (self.italic, "italic"),
             (self.underline, "underline"),
+            (self.blink, "blink"),
             (self.reverse, "reverse"),
+            (self.conceal, "conceal"),
+            (self.strikethrough, "strikethrough"),
         ] {
             if on {
                 tokens.push(name.to_owned());

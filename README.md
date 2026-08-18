@@ -131,6 +131,10 @@ design. termlens's position:
   of output and is exact: the condition either becomes true or you get a
   screen-carrying timeout. The three rules for race-free waits (and the
   resize stale-frame trap) are in [docs/DESIGN.md](docs/DESIGN.md) §2.
+- **Styles are complete enough to catch a masked field.** `Style` carries
+  `blink`, `conceal` and `strikethrough` alongside the usual attributes, so
+  a test asserting that a password field is masked fails against an
+  application that prints the secret in clear — the two are identical text.
 - **`wait_frame` gives exact frame boundaries** for apps that bracket
   repaints in DEC 2026 synchronized updates (crossterm's
   `BeginSynchronizedUpdate`/`EndSynchronizedUpdate`): the predicate only
