@@ -46,13 +46,21 @@ fn undelivered_replies_are_named_in_the_diagnosis() {
     let mut t = Terminal::builder()
         .size(80, 24)
         .env_clear()
-        .timeout(Duration::from_millis(600))
+        .timeout(Duration::from_secs(10))
         .args(["-c", FLOOD])
         .spawn("/bin/sh")
         .expect("spawn");
 
+    // Let the whole flood land first. The child prints DONE *after* its
+    // last query, so once that is on screen the drain has read every
+    // reply-generating byte and the queue has long since overflowed. Racing
+    // a wall-clock deadline against the flood instead would make this test
+    // sensitive to how fast the reader thread happens to be.
+    t.wait_until(|s| s.contains("DONE"))
+        .expect("the drain kept running");
+
     let err = t
-        .wait_until(|s| s.contains("never-appears"))
+        .wait_until_for(|s| s.contains("never-appears"), Duration::from_millis(200))
         .expect_err("the predicate can never hold");
     let message = err.to_string();
     assert!(matches!(err, Error::Timeout { .. }), "got: {err}");

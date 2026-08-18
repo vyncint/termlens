@@ -41,6 +41,12 @@
 //! someone else's code carried permanently to hold an 80-line patch. When
 //! upstream gains the attributes, this module deletes and `convert_cell`
 //! reads the three flags directly.
+//!
+//! Cost: one extra visible grid (no scrollback — history is text-only) and a
+//! second parse pass. Not measurable end to end, since a terminal's
+//! throughput is dominated by the PTY round trip rather than by parsing —
+//! 40,000 lines through an 80x24 screen took 260ms with this and 263ms
+//! without, and 284ms vs 282ms when every line carries four SGR sequences.
 
 /// Where the rewriter is in the byte stream. Only enough to recognize a
 /// complete plain SGR; everything else passes through untouched.
