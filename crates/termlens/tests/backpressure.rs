@@ -1,6 +1,9 @@
 //! Query replies under load: a startup batch of probes must be answered in
-//! full, and an application that genuinely never reads must be diagnosed
-//! rather than quietly shorted.
+//! full.
+//!
+//! The other half of this story — what a harness can know about an
+//! application that never reads its replies — lives in `drain.rs`, next to
+//! the deadlock it must never cause.
 
 use std::time::Duration;
 
@@ -51,59 +54,6 @@ fn a_batch_of_probes_is_answered_in_full() -> termlens::Result<()> {
     // lost while the answers still fit, which is the bug.
     for n in [50usize, 200, 400] {
         assert_eq!(answered(n)?, n, "asked {n} probes back to back");
-    }
-    Ok(())
-}
-
-/// An application that never reads its input is the case the bounded queue
-/// exists for — and what a harness can *know* about it differs by platform,
-/// so this test asserts different things on each and says why.
-///
-/// On macOS a write into a full terminal input queue **blocks**, so the
-/// replies are visibly stuck in our writer and every wait error names them.
-/// On Linux the `n_tty` driver **discards** input once its buffer is full
-/// rather than blocking the writer: the write succeeds, the kernel throws the
-/// bytes away, and nothing observable distinguishes that from delivery. We
-/// cannot report what we were never told.
-///
-/// Both platforms still give the same *diagnosable* failure — a timeout
-/// carrying the screen — which is the part that does not depend on the
-/// kernel.
-#[test]
-fn an_application_that_never_reads_produces_a_diagnosable_failure() -> termlens::Result<()> {
-    // Enough queries to fill any terminal's input queue, and a child that
-    // never reads a byte back. `exec` in the tail so the sleeping process
-    // *is* the child rather than a grandchild that would outlive the kill and
-    // hold the terminal open.
-    let script = "stty -icanon -echo; i=0; \
-                  while [ $i -lt 2000 ]; do printf '\\033[6n'; i=$((i+1)); done; \
-                  printf ASKED; exec sleep 30";
-    let mut t = Terminal::builder()
-        .size(80, 6)
-        .timeout(Duration::from_millis(900))
-        .args(["-c", script])
-        .spawn("/bin/sh")?;
-
-    let err = t
-        .wait_until(|s| s.contains("NEVER-APPEARS"))
-        .expect_err("must time out");
-    let msg = err.to_string();
-
-    // True everywhere: the failure carries the screen, so the log shows what
-    // the application had done.
-    assert!(err.screen().is_some_and(|s| s.contains("ASKED")), "{msg}");
-
-    // True only where the kernel makes it knowable.
-    #[cfg(target_os = "macos")]
-    {
-        assert!(
-            msg.contains("not reading its input"),
-            "a blocked write means the cause is knowable: {msg}"
-        );
-        assert!(
-            msg.contains("could not be delivered"),
-            "and the undelivered replies counted: {msg}"
-        );
     }
     Ok(())
 }

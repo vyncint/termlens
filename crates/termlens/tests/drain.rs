@@ -39,10 +39,26 @@ fn a_child_that_never_reads_its_replies_cannot_wedge_the_drain() {
     );
 }
 
-/// Undeliverable replies are evidence, not silence: the diagnosis says
-/// the application is not reading its input.
+/// Undeliverable replies are evidence, not silence — where the kernel lets
+/// us have the evidence.
+///
+/// This used to hold on both platforms, and for the wrong reason: replies
+/// were enqueued one per answer, so a flood overflowed our own 64-deep queue
+/// and the drops were ours to count. Batching per read fixed that (a
+/// well-behaved application was losing answers too), and it moved where the
+/// truth lives.
+///
+/// Now the replies reach the kernel, and the platforms diverge. A write into
+/// a full terminal input queue **blocks** on macOS, so they are visibly stuck
+/// in our writer and the count is exact. Linux's `n_tty` **discards** input
+/// once its 4 KB buffer is full: the write succeeds, the bytes are gone, and
+/// nothing distinguishes that from delivery. We cannot report what we were
+/// never told, so the assertion is scoped to where it can be true.
+///
+/// The trade is deliberate: a diagnosis for a pathological application, in
+/// exchange for a well-behaved one actually getting its answers.
 #[test]
-fn undelivered_replies_are_named_in_the_diagnosis() {
+fn undelivered_replies_are_named_where_the_kernel_makes_them_visible() {
     let mut t = Terminal::builder()
         .size(80, 24)
         .env_clear()
@@ -63,7 +79,16 @@ fn undelivered_replies_are_named_in_the_diagnosis() {
         .wait_until_for(|s| s.contains("never-appears"), Duration::from_millis(200))
         .expect_err("the predicate can never hold");
     let message = err.to_string();
+    // True everywhere: the failure is a timeout carrying the screen, so a CI
+    // log shows what the application had managed to do.
     assert!(matches!(err, Error::Timeout { .. }), "got: {err}");
+    assert!(
+        err.screen().is_some_and(|s| s.contains("DONE")),
+        "{message}"
+    );
+
+    // True only where a blocked write makes the backlog knowable.
+    #[cfg(target_os = "macos")]
     assert!(
         message.contains("not reading its input"),
         "the backlog should be diagnosed: {message}"

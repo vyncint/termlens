@@ -37,12 +37,18 @@ listed under a **Changed** or **Removed** heading.
   a real terminal too.
 - **Undelivered replies are counted whether dropped or blocked mid-write**, so
   a non-reading application is named in the wait error rather than producing a
-  plain timeout. How much of this is knowable turns out to differ by platform,
-  and `docs/DESIGN.md` §1 now says so: a write into a full terminal input queue
-  blocks on macOS, where the count is exact, while Linux's `n_tty` *discards*
-  input once its 4 KB buffer is full — the write succeeds, the kernel throws
-  the bytes away, and nothing distinguishes that from delivery. We cannot
-  report what we were never told.
+  plain timeout.
+  **One diagnosis got weaker on Linux, and that is the price of the fix
+  above.** The note used to appear there because replies overflowed *our* queue
+  — the same overflow that was losing a well-behaved application's answers.
+  With that fixed, the replies reach the kernel, and the platforms diverge: a
+  write into a full terminal input queue blocks on macOS, where the backlog
+  stays visible and the count is exact, while Linux's `n_tty` *discards* input
+  once its 4 KB buffer is full — the write succeeds, the bytes are gone, and
+  nothing distinguishes that from delivery. We cannot report what we were never
+  told. `docs/DESIGN.md` §1 states the split; the trade is a diagnosis for a
+  pathological application in exchange for a well-behaved one actually
+  receiving its answers.
 - **`drag` reports one motion per cell crossed**, on a straight interpolated
   path, instead of a single report at the destination. Seven cells crossed
   used to produce one motion event. Invisible to an application that only
