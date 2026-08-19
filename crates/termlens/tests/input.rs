@@ -1,7 +1,7 @@
 //! Typed input beyond plain keys: mouse (mode-aware), modifier chords,
 //! bracketed paste, and cursor-key modes.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use termlens::{Error, Key, Scroll, Terminal};
 
@@ -528,5 +528,58 @@ fn typed_input_to_a_live_child_that_has_not_read_yet_succeeds() -> termlens::Res
     t.send_str("pending\n")?;
     t.wait_until(|s| s.contains("got:pending"))?;
     assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// `send_after` delays, then sends — and the delay is real, which is the
+/// whole mechanism: it exists to put this write and the previous one in
+/// separate reads.
+#[test]
+fn send_after_delays_then_delivers() -> termlens::Result<()> {
+    let mut t = spawn_form_echo()?;
+    t.wait_frame(|s| s.contains("form-echo ready"))?;
+
+    let at = Instant::now();
+    t.send_after(Duration::from_millis(120), Key::Char('z'))?;
+    let waited = at.elapsed();
+    assert!(
+        waited >= Duration::from_millis(120),
+        "the delay must actually happen: {waited:?}"
+    );
+    t.wait_frame(|s| s.contains("input: z"))?;
+
+    t.send(Key::Esc)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// The remedy, on the case it was written for. With nothing following in the
+/// same read, the `Esc` stands alone and is decoded as an `Esc` rather than
+/// half an `Alt` chord — form-echo quits on it, which makes that
+/// unmistakable. The follow-up key then has nowhere to go, and saying so is
+/// exactly what a separated write means for a fixture that exits on `Esc`.
+///
+/// The byte-level identity behind the hazard is pinned deterministically in
+/// `keys.rs`; the merge itself is a race, so nothing here asserts on it.
+#[test]
+fn a_separated_esc_is_decoded_as_an_esc() -> termlens::Result<()> {
+    let mut t = spawn_form_echo()?;
+    t.wait_frame(|s| s.contains("form-echo ready"))?;
+
+    t.send(Key::Esc)?;
+    assert!(
+        t.wait_exit()?.success(),
+        "an Esc with nothing behind it is an Esc"
+    );
+
+    // And the key that would have merged with it now reports that it could
+    // not be delivered, rather than vanishing.
+    assert!(
+        matches!(
+            t.send_after(Duration::from_millis(10), Key::Char('j')),
+            Err(Error::Write { .. })
+        ),
+        "the follow-up key must not vanish silently"
+    );
     Ok(())
 }

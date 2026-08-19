@@ -128,6 +128,15 @@ listed under a **Changed** or **Removed** heading.
   background — and it matters because for an application that *probes first*
   the pixel path is not merely unasserted, it is unreachable: the code never
   runs, so nothing about it is testable.
+- **`Terminal::send_after`** — wait, then send, so this write and the previous
+  one land in separate reads. The remedy for the `Esc` wire ambiguity when the
+  `Esc` has no observable effect to wait for: a vim-style TUI where `Esc`
+  leaves insert mode silently and `j` then moves down could not be driven at
+  all, because sending them together is byte-identical to `Alt+j`. The delay
+  is a named argument, not a hidden constant, and `send(Key::Esc)` carries no
+  default separation — most suites send `Esc` with nothing behind it, and a
+  hidden sleep would slow all of them for a hazard they do not have while
+  making the tests that need it work for a reason invisible at the call site.
 - **`Terminal::focus_in` / `Terminal::focus_out`** and
   **`Screen::focus_events`** — focus reporting (mode 1004). The unfocused
   branch of a UI was not merely unasserted, it was **unreachable**: no input

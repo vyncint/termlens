@@ -24,14 +24,19 @@ pub enum Key {
     /// byte-identical to an [`Alt`](Key::Alt) chord, and every input
     /// parser resolves it as one — real keyboards are saved only by human
     /// inter-key delay, which [`send`](crate::Terminal::send) does not
-    /// add. Make the `Esc`'s effect observable and wait for it before
-    /// sending the next key:
+    /// add. Where the `Esc` has an observable effect, wait for it and the
+    /// next key is unambiguous:
     ///
     /// ```text
     /// t.send(Key::Esc)?;
     /// t.wait_until(|s| s.contains("NORMAL"))?; // Esc took effect
     /// t.send(Key::Char('?'))?;                 // now unambiguous
     /// ```
+    ///
+    /// Where it has none — leaving a text field's insert mode often changes
+    /// nothing visible — there is nothing to wait *for*, and
+    /// [`send_after`](crate::Terminal::send_after) puts a named delay
+    /// between the two writes instead.
     Esc,
     /// Tab (`0x09`).
     Tab,
@@ -417,6 +422,17 @@ mod tests {
         for (chord, bytes) in table {
             assert_eq!(chord.encode(), *bytes, "wrong encoding for {chord:?}");
         }
+    }
+
+    /// The hazard `send_after` exists for, stated as the identity it is.
+    /// Nothing in an encoding can fix this — the two are the same bytes — so
+    /// the only remedy is to separate the writes in time.
+    #[test]
+    fn esc_then_a_key_is_byte_identical_to_an_alt_chord() {
+        let mut separate = Key::Esc.encode();
+        separate.extend(Key::Char('j').encode());
+        assert_eq!(separate, Key::Alt('j').encode());
+        assert_eq!(separate, b"\x1bj");
     }
 
     #[test]

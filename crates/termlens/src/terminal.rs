@@ -1561,6 +1561,55 @@ impl Terminal {
         self.write_input(&key.encode_modal(application_cursor), &what)
     }
 
+    /// Wait `delay`, then send one key — so this write and the previous one
+    /// land in **separate reads**.
+    ///
+    /// The remedy for the [`Esc`](crate::Key::Esc) wire ambiguity when the
+    /// `Esc` has no observable effect to wait for. `Esc` followed
+    /// immediately by another key is byte-identical to an `Alt` chord, and
+    /// whether the application sees one chord or two presses depends on
+    /// whether its input loop happens to read both writes together. A
+    /// vim-style TUI where `Esc` leaves insert mode silently and `j` then
+    /// moves down cannot otherwise be driven at all:
+    ///
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// t.send(termlens::Key::Esc)?;
+    /// // Two presses, not Alt+j — the delay is what makes it so.
+    /// t.send_after(Duration::from_millis(20), termlens::Key::Char('j'))?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # This is a heuristic, and the delay is deliberately at the call site
+    ///
+    /// It works by making the application's *read* boundary fall between the
+    /// two writes, and nothing here can force that: an application that
+    /// polls slowly, or is descheduled at the wrong moment, can still merge
+    /// them. So the delay is a named argument rather than a hidden constant
+    /// — a test that only passes because of a sleep should say the sleep out
+    /// loud.
+    ///
+    /// For the same reason `send(Key::Esc)` does **not** carry a default
+    /// separation. Most suites send `Esc` where nothing follows it, and a
+    /// hidden sleep would slow every one of them for a hazard they do not
+    /// have — while making the tests that *do* depend on it work for a
+    /// reason invisible at the call site.
+    ///
+    /// `delay` is a plain sleep on the calling thread and is **not** bounded
+    /// by the terminal's deadline: it is time you asked to spend, not a wait
+    /// for something to happen.
+    ///
+    /// # Errors
+    ///
+    /// Same contract as [`send`](Self::send), evaluated after the delay.
+    pub fn send_after(&mut self, delay: Duration, key: impl Input + fmt::Debug) -> Result<()> {
+        thread::sleep(delay);
+        self.send(key)
+    }
+
     /// Send a string literally (UTF-8 bytes, no key mapping, no newline).
     ///
     /// # Errors
