@@ -27,9 +27,15 @@ What the project does continuously, enforced by required CI on every change:
 - **Provenance**: every commit requires a DCO sign-off from a human author
   of record; bot-authored commits are rejected by CI.
 
-Resource-exhaustion notes for the paranoid: the emulator runs with zero
-scrollback, the reader uses a fixed buffer, every wait is deadline-bounded,
-and a hostile child can at worst waste its own test's time budget.
+Resource-exhaustion notes for the paranoid: every buffer a child's output
+can reach is bounded, and a hostile child can at worst waste its own test's
+time budget. The reader uses a fixed 8 KiB buffer; every wait is
+deadline-bounded; retained scrollback is capped at the configured length
+(1000 rows by default, `scrollback(0)` to disable) and held as text rather
+than cells; at most 8 completed frames are retained for `wait_frame`; a
+captured `OSC 52` payload is dropped past 64 KiB; queued query replies stop
+at a fixed depth; and the set of distinct unanswered queries kept for
+diagnostics is capped, with the remainder counted.
 
 ## Supported versions
 

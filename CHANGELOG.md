@@ -9,6 +9,50 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The README no longer contradicts itself about scrollback.** Its
+  limitations section was still headed `(v0.3)` and still opened with "No
+  scrollback assertions" — sixty lines below the paragraph explaining that
+  scrollback is retained, 1000 rows by default. Since the README is the
+  crates.io front page, the first thing a reader learned about 0.4's
+  headline feature was that it did not exist. The section now states the
+  bounds that actually hold: history is capped, text only and unreflowed;
+  `wait_frame` needs the application to opt into DEC 2026 and retains eight
+  frames; and the questions termlens declines to guess at are named.
+- **`SECURITY.md` no longer claims the emulator runs with zero
+  scrollback.** That sentence was the whole memory-bound argument in the
+  resource-exhaustion note, and 0.4 made it false — the emulator is
+  constructed with the configured history length. Every bound a child's
+  output can reach is listed in its place: history length, retained frames,
+  the read buffer, the `OSC 52` capture cap, the reply queue, and the
+  diagnostics set.
+
+### Documented
+
+- **The crate-level docs describe 0.4, not 0.2.** The docs.rs landing page
+  never mentioned `wait_frame`, retained scrollback, per-call deadlines or
+  the clipboard accessor, so the crate's own front page understated it by
+  two releases. It now names them, in the same breath as the guarantees
+  that make them worth using.
+- **`docs/DESIGN.md` §2 records the per-call deadlines.** The document that
+  calls itself the contract for wait semantics had never mentioned the
+  `_for` variants. It also now records the `wait_idle` timeout that names
+  an unfinished frame instead of reporting silence against a quiet
+  terminal.
+- **`docs/HANDOFF.md` is marked as the historical v0.1 record it is**,
+  rather than reading as a description of the project today — it described
+  a private repository and an unfinished go-public checklist. The checklist
+  keeps its original text, with the outcome recorded beneath it, including
+  the one item resolved differently on purpose (required approvals stay at
+  0: a solo maintainer cannot approve their own pull request).
+- The announcement draft carried v0.1's limitations, two of which have
+  since shipped; it now describes 0.4, and no longer claims to be untracked
+  while sitting in the repository. The bug-report template no longer offers
+  `0.1.0` as its example version.
+
+No library code changed in this release.
+
 ## [0.4.0] - 2026-08-18
 
 What termlens could not do, and where it quietly did the wrong thing.

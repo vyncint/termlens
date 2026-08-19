@@ -1,6 +1,15 @@
 # termlens (née termtest) — Build Handoff Report
 
-Date: 2026-08-09. Repo: <https://github.com/vyncint/termlens> (private).
+> **Status: historical record of the v0.1 build.** Everything below describes
+> the project as it stood on 2026-08-09 and is kept as the record of that
+> work, not as a description of termlens today. Since then the repository has
+> been made public, the crate has been published, and the API has grown
+> through 0.2, 0.3 and 0.4 — `CHANGELOG.md` says what each release changed,
+> and `README.md` plus `docs/DESIGN.md` describe the current design. The
+> go-public checklist in §3 has its outcome recorded beneath it.
+
+Date: 2026-08-09. Repo: <https://github.com/vyncint/termlens> (private at
+the time; public since).
 Everything below was verified against live GitHub state, not assumed.
 "The build brief" below means the commissioning document this build
 executed. It is **not** part of the repository, so wherever a requirement
@@ -171,6 +180,15 @@ Then:
       (`docs/RELEASING.md` end-to-end).
 - [ ] Announce: r/rust, This Week in Rust (PR to `rust-lang/this-week-in-rust`),
       awesome-ratatui PR, and the ratatui forum/Discord testing channel.
+
+**Outcome (2026-08-19).** The repository is public and the crate is
+published, so the badges are live. The ruleset still enforces, secret
+scanning and push protection are on, and Discussions stayed off. Two items
+resolved differently from the plan: required approvals are deliberately
+still **0**, because a solo maintainer cannot approve their own pull
+request and requiring one approval would block every release; and the
+announcements are still in flight, with the draft in
+`docs/announce-r-rust.md`.
 
 ## 4. Deviations from the build brief, and why
 

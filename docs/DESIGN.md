@@ -116,10 +116,12 @@ need a silent terminal; the diagnosis still works.
 ## 2. Wait semantics
 
 Every wait runs under the terminal's **default deadline** (builder
-`timeout`, 5s default). There is deliberately no unbounded wait: a hung
-TUI in CI must produce a readable failure, not a 6-hour job timeout. On
-expiry the error **embeds the full screen dump** — a CI log alone answers
-"what was the app showing?".
+`timeout`, 5s default) or a per-call one: each `wait_*` has a `_for` twin
+(`wait_until_for`, `wait_frame_for`, `wait_idle_for`, `wait_exit_for`), so
+one known-slow step does not force its deadline on the whole suite. There
+is deliberately no unbounded wait: a hung TUI in CI must produce a readable
+failure, not a 6-hour job timeout. On expiry the error **embeds the full
+screen dump** — a CI log alone answers "what was the app showing?".
 
 - `wait_until(pred)` — re-evaluates `pred` on a fresh snapshot whenever the
   reader delivers bytes (condvar notification), with a 50ms poll cap as a
@@ -160,10 +162,13 @@ expiry the error **embeds the full screen dump** — a CI log alone answers
   synchronized update is open (a begun-but-unfinished DEC 2026 repaint is
   by definition mid-update). The sequence conditions come from a minimal
   tracker (`emu/seq.rs`) — not a VT parser, just enough state to answer
-  "did the stream stop inside an update?". EOF counts as idle. **This is
-  a heuristic**: silence is evidence of a finished render, not proof.
-  Prefer `wait_until` on visible content, or `wait_frame` where the app
-  uses synchronized output.
+  "did the stream stop inside an update?". EOF counts as idle. An
+  application that opens an update and never closes it therefore times out
+  here, and the message says exactly that instead of "waiting for 100ms of
+  output silence", which reads as nonsense against a quiet terminal.
+  **This is a heuristic**: silence is evidence of a finished render, not
+  proof. Prefer `wait_until` on visible content, or `wait_frame` where the
+  app uses synchronized output.
 - `wait_exit()` — polls `try_wait` on a capped backoff ladder (1→20ms),
   then grace-drains the PTY (≤500ms) so the final screen is complete
   before returning. Idempotent via a cached status.

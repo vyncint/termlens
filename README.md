@@ -161,10 +161,20 @@ design. termlens's position:
   [stress workflow](.github/workflows/stress.yml) on Linux and macOS —
   wait/timing changes don't merge without surviving it.
 
-## Known limitations (v0.3)
+## Known limitations (v0.4)
 
-- No scrollback assertions, and resizing does not reflow scrollback — the
-  visible grid is the testable surface.
+- Scrollback is **bounded** (1000 rows by default), **text only** — a
+  scrolled-off row has no styles and no cell addressing — and is **not
+  reflowed** by a `resize`. The visible grid stays the fully-featured
+  surface.
+- `wait_frame` needs the application to bracket its repaints in DEC 2026
+  synchronized updates, and only the last 8 completed frames are retained;
+  everything else waits with `wait_until`, under the three rules in
+  [docs/DESIGN.md](docs/DESIGN.md) §2.
+- Some questions stay deliberately unanswered — kitty's `CSI ? u`,
+  `XTGETTCAP`, DECRQSS, `OSC 52` *reads* — because a guessed reply is worse
+  than none. An application blocked on one is **named in the next timeout**
+  rather than left to hang unexplained.
 - Unix only for now (Linux + macOS in CI). The PTY layer (`portable-pty`)
   supports ConPTY, so Windows is planned, not designed out.
 - A child that writes and exits within its first milliseconds can lose

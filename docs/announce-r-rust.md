@@ -1,8 +1,9 @@
 # Announcement draft — users.rust-lang.org
 
 Post at https://users.rust-lang.org → log in with GitHub → **New Topic** →
-category **announcements** → paste title and body below. Delete this file
-after posting (it is deliberately untracked and not linked from anywhere).
+category **announcements** → paste title and body below. Once it is posted,
+delete this file (through a PR — `main` is protected). It is tracked, but
+deliberately not linked from anywhere.
 
 The same text also works verbatim on the ratatui forum
 (https://forum.ratatui.rs) and as a #rustlang post elsewhere.
@@ -39,6 +40,18 @@ it continuously through a vt100 emulator into an immutable screen grid;
 waits are all deadline-bounded, and a timeout error embeds the full
 screen dump — so a CI log alone shows what the app was displaying.
 
+Two things worth pointing at beyond the basics. If your app brackets its
+repaints in DEC 2026 synchronized updates (crossterm's
+`BeginSynchronizedUpdate`), `wait_frame` evaluates predicates only on
+complete frames and hands back the one it matched — never a torn screen,
+and each call observes a frame no earlier call did, so a burst is
+assertable step by step. Apps that *probe* for the mode before using it
+get a truthful `DECRQM` answer, so they enable it against termlens
+unmodified. And the style model carries blink, conceal and strikethrough,
+which is what stops a test asserting "the password field is masked" from
+passing against an app that printed the secret in clear — the two are
+identical text.
+
 The part I'm proudest of is the flake story. CI runs the whole suite 100
 times on Linux **and** macOS before anything merges to the wait paths.
 That gate caught, among other things, a genuine macOS kernel race where
@@ -47,9 +60,12 @@ pty* because device numbers recycle instantly — termlens serializes pty
 lifecycle edges behind a process-wide lock so your parallel tests don't
 hit it.
 
-Honest limitations (v0.1): Unix only for now (portable-pty supports
-ConPTY, so Windows is planned), no scrollback assertions, and styles are
-captured per-cell but not yet part of the text snapshot format.
+Honest limitations (v0.4): Unix only for now (portable-pty supports
+ConPTY, so Windows is planned); scrollback is retained but bounded, text
+only, and not reflowed on resize; `wait_frame` needs the app to opt into
+DEC 2026; and a few questions (kitty `CSI ? u`, `XTGETTCAP`, `OSC 52`
+*reads*) are deliberately left unanswered rather than guessed — an app
+blocked on one is named in the next timeout instead of hanging silently.
 
 - crates.io: https://crates.io/crates/termlens (`cargo add termlens --dev`)
 - GitHub: https://github.com/vyncint/termlens
