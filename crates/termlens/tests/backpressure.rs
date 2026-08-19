@@ -12,22 +12,28 @@ use termlens::{Key, Terminal};
 /// Ask `n` cursor-position queries back to back, then read everything, and
 /// count the answers. Each DSR reply carries exactly one `R`.
 ///
-/// The read *loops* rather than making one long `dd`. A single read ends at
-/// the first gap longer than its `VTIME`, and under a loaded runner the
-/// answers arrive in bursts with real gaps between them — so a one-shot read
-/// stops early and measures the machine instead of the harness. Stress found
-/// exactly that: 310 of 400 on a busy macOS runner, with nothing wrong on
-/// this side of the PTY.
+/// Read in **one continuous `dd` of exactly the expected byte count**, and
+/// the shape of that read is load-bearing in both directions — stress taught
+/// me twice.
+///
+/// A single read sized by a *timeout* stops at the first gap longer than its
+/// `VTIME`, so on a busy runner it ends early and measures scheduling: 310 of
+/// 400 on macOS. Replacing it with a retry loop was worse, and for a reason
+/// worth remembering — each retry is a `fork`+`exec` of `dd`, and **nothing
+/// reads the terminal in between**, so on a slow runner the input queue
+/// overflows in those gaps and the kernel discards: 235 of 400.
+///
+/// Exactly-sized works because every reply here is `ESC[1;1R`, six bytes,
+/// identical — the cursor cannot move while the queries are being asked,
+/// since a DSR query prints nothing. So `dd` stops the instant it has them
+/// all, with no gap for the queue to overflow through, and `time 100` bounds
+/// it at ten seconds of silence if answers really are missing.
 fn answered(n: usize) -> termlens::Result<usize> {
     let script = format!(
-        "stty -icanon -echo min 0 time 5; i=0; \
+        "stty -icanon -echo min 0 time 100; i=0; \
          while [ $i -lt {n} ]; do printf '\\033[6n'; i=$((i+1)); done; \
          printf ASKED; \
-         got=0; tries=0; \
-         while [ $got -lt {n} ] && [ $tries -lt 40 ]; do \
-           chunk=$(dd bs=1 count=8192 2>/dev/null | tr -cd 'R' | wc -c | tr -d ' '); \
-           got=$((got+chunk)); tries=$((tries+1)); \
-         done; \
+         got=$(dd bs=1 count=$(({n} * 6)) 2>/dev/null | tr -cd 'R' | wc -c | tr -d ' '); \
          printf ' GOT[%s] DONE' \"$got\"; read guard"
     );
     let mut t = Terminal::builder()
