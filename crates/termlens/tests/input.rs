@@ -1,5 +1,5 @@
-//! Typed input beyond plain keys: mouse (mode-aware), and — as the tier
-//! progresses — modifier chords, bracketed paste, and cursor-key modes.
+//! Typed input beyond plain keys: mouse (mode-aware), modifier chords,
+//! bracketed paste, and cursor-key modes.
 
 use std::time::Duration;
 
