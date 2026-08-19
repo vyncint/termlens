@@ -44,7 +44,7 @@ fn content_scrolled_off_the_top_is_still_assertable() -> termlens::Result<()> {
     assert!(s.full_text().contains("line-40"));
     assert!(s.scrollback_rows() >= 34, "rows: {}", s.scrollback_rows());
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -61,7 +61,7 @@ fn full_text_answers_without_knowing_which_region_holds_it() -> termlens::Result
     let s = t.screen();
     assert_eq!(s.scrollback_rows(), 0, "nothing has scrolled yet");
     assert!(s.full_text().contains("line-1\n"));
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
 
     // Same assertion, same content, now past the top of a smaller screen.
@@ -70,7 +70,7 @@ fn full_text_answers_without_knowing_which_region_holds_it() -> termlens::Result
     let s = t.screen();
     assert!(s.scrollback_rows() > 0, "some rows must have scrolled");
     assert!(s.full_text().contains("line-1\n"));
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -93,7 +93,7 @@ fn the_retention_bound_drops_the_oldest_rows() -> termlens::Result<()> {
     // The newest retained rows are there; the visible screen holds the rest.
     assert!(s.full_text().contains("line-60"));
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -109,7 +109,7 @@ fn retention_can_be_switched_off() -> termlens::Result<()> {
     assert_eq!(s.full_text(), s.text(), "full_text is then just the screen");
     assert!(!s.full_text().contains("line-1\n"));
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -133,7 +133,7 @@ fn history_is_observable_from_a_predicate() -> termlens::Result<()> {
     t.wait_until(|s| s.scrollback_text().contains("committed-block"))?;
     assert!(!t.screen().contains("committed-block"));
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }

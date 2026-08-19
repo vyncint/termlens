@@ -108,7 +108,7 @@ fn replies_still_reach_an_application_that_reads_them() -> termlens::Result<()> 
         ])
         .spawn("/bin/sh")?;
     t.wait_until(|s| s.contains("unblocked:E[1;4R"))?;
-    t.send(termlens::Key::Enter);
+    t.send(termlens::Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }

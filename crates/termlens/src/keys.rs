@@ -28,9 +28,9 @@ pub enum Key {
     /// sending the next key:
     ///
     /// ```text
-    /// t.send(Key::Esc);
+    /// t.send(Key::Esc)?;
     /// t.wait_until(|s| s.contains("NORMAL"))?; // Esc took effect
-    /// t.send(Key::Char('?'));                  // now unambiguous
+    /// t.send(Key::Char('?'))?;                 // now unambiguous
     /// ```
     Esc,
     /// Tab (`0x09`).

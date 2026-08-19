@@ -23,11 +23,11 @@
 //!     .args(["-c", r#"read line; echo "got: $line"; read quit"#])
 //!     .spawn("sh")?;
 //!
-//! t.send_str("hello");
-//! t.send(Key::Enter);
+//! t.send_str("hello")?;
+//! t.send(Key::Enter)?;
 //! t.wait_until(|screen| screen.contains("got: hello"))?;
 //!
-//! t.send(Key::Enter); // release `read quit`; the script finishes
+//! t.send(Key::Enter)?; // release `read quit`; the script finishes
 //! let status = t.wait_exit()?;
 //! assert!(status.success());
 //! # Ok(())

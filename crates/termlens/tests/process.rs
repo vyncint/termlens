@@ -16,7 +16,7 @@ fn current_dir_runs_the_child_where_asked() -> termlens::Result<()> {
         .args(["-c", "pwd; read _"])
         .spawn("sh")?;
     t.wait_until(|s| s.contains(dir.to_str().expect("utf-8 temp dir")))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -30,7 +30,7 @@ fn pid_reports_the_direct_child() -> termlens::Result<()> {
     let pid = t.pid().expect("unix reports pids");
     // The shell's $$ is the exact process the harness spawned.
     t.wait_until(|s| s.contains(&format!("pid:{pid};")))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -80,7 +80,7 @@ fn wait_until_for_overrides_the_default_timeout_upward() -> termlens::Result<()>
         .args(["-c", "sleep 1; printf late-bloomer; read _"])
         .spawn("sh")?;
     t.wait_until_for(|s| s.contains("late-bloomer"), Duration::from_secs(30))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }

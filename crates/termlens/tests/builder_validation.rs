@@ -106,7 +106,7 @@ fn resize_to_zero_is_refused_without_touching_the_pty_or_the_grid() -> termlens:
     assert_eq!(t.screen().size(), (80, 24));
     t.resize(70, 20)?;
     assert_eq!(t.screen().size(), (70, 20));
-    t.send(termlens::Key::Enter);
+    t.send(termlens::Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }

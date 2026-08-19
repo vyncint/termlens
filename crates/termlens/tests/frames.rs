@@ -23,7 +23,7 @@ fn the_frame_completed_before_the_call_is_evaluated() -> termlens::Result<()> {
     // The fixture's first synchronized frame has long completed by the time
     // this wait starts; entry evaluation must still see it.
     t.wait_frame(|s| s.contains("form-echo ready"))?;
-    t.send(Key::Esc);
+    t.send(Key::Esc)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -33,7 +33,7 @@ fn a_frame_is_internally_consistent() -> termlens::Result<()> {
     let mut t = spawn_form_echo()?;
     t.wait_frame(|s| s.contains("form-echo ready"))?;
 
-    t.send_str("hi");
+    t.send_str("hi")?;
     // Both the input line and the last-key line are painted in the same
     // synchronized update, so a frame satisfying one must satisfy the
     // other. The returned frame is what the predicate saw, so the sibling
@@ -45,7 +45,7 @@ fn a_frame_is_internally_consistent() -> termlens::Result<()> {
         "frame satisfied one row but not its sibling:\n{frame}"
     );
 
-    t.send(Key::Esc);
+    t.send(Key::Esc)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -58,14 +58,14 @@ fn a_torn_repaint_is_never_observed() -> termlens::Result<()> {
     // F2 paints "torn: left", flushes, sleeps 150ms, then paints " right"
     // and ends the synchronized update. The bytes arrive in two bursts;
     // the frame completes only with the second.
-    t.send(Key::F(2));
+    t.send(Key::F(2))?;
     let row = t.wait_frame(|s| s.contains("torn: left"))?.row_text(5);
     assert!(
         row.contains("torn: left right"),
         "wait_frame observed a torn frame: {row:?}"
     );
 
-    t.send(Key::Esc);
+    t.send(Key::Esc)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -95,7 +95,7 @@ fn apps_without_synchronized_output_time_out_with_guidance() {
     assert!(msg.contains("wait_until"), "no alternative named in: {msg}");
     assert!(err.screen().is_some(), "timeout must still embed a screen");
 
-    t.send(Key::Char('q'));
+    t.send(Key::Char('q')).unwrap();
     assert!(t.wait_exit().unwrap().success());
 }
 
@@ -164,7 +164,7 @@ fn every_frame_of_a_burst_is_observable_in_order() -> termlens::Result<()> {
     assert!(t.wait_frame(|s| s.contains("STEP 2"))?.contains("STEP 2"));
     assert!(t.wait_frame(|s| s.contains("STEP 3"))?.contains("STEP 3"));
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -204,7 +204,7 @@ fn wait_frame_fails_fast_on_eof() {
         .spawn("sh")
         .unwrap();
     t.wait_frame(|s| s.contains("done")).unwrap();
-    t.send(Key::Enter);
+    t.send(Key::Enter).unwrap();
 
     let start = Instant::now();
     let err = t.wait_frame(|s| s.contains("never painted")).unwrap_err();
@@ -302,7 +302,7 @@ fn a_begin_end_pair_that_drew_nothing_is_still_a_frame() {
         .spawn("sh")
         .unwrap();
     t.wait_frame(|s| s.contains("STATIC")).unwrap();
-    t.send(Key::Enter);
+    t.send(Key::Enter).unwrap();
 }
 
 /// The headline case: `send(key); wait_frame(OLD_STATE)` used to pass on
@@ -322,7 +322,7 @@ fn a_superseded_frame_no_longer_satisfies_a_wait() -> termlens::Result<()> {
         .spawn("sh")?;
 
     assert!(t.wait_frame(|s| s.contains("STATE-A"))?.contains("STATE-A"));
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
 
     let stale = t.wait_frame_for(|s| s.contains("STATE-A"), Duration::from_millis(700));
     assert!(
@@ -333,7 +333,7 @@ fn a_superseded_frame_no_longer_satisfies_a_wait() -> termlens::Result<()> {
     // The frame the application actually drew is there for the asking.
     assert!(t.wait_frame(|s| s.contains("STATE-B"))?.contains("STATE-B"));
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -355,7 +355,7 @@ fn one_frame_cannot_satisfy_two_waits() -> termlens::Result<()> {
         "one repaint must not satisfy two waits: {again:?}"
     );
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -414,7 +414,7 @@ fn the_returned_frame_is_the_matched_instant_not_the_live_screen() -> termlens::
         t.screen()
     );
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -474,7 +474,7 @@ fn a_snapshot_can_be_mid_frame_for_a_synchronized_application() -> termlens::Res
         "the frame is not finished, and screen() says so:\n{torn}"
     );
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     // The frame-consistent read has both rows, by construction.
     let frame = t.wait_frame(|s| s.contains("ROW-TWO"))?;
     assert!(
@@ -482,7 +482,7 @@ fn a_snapshot_can_be_mid_frame_for_a_synchronized_application() -> termlens::Res
         "{frame}"
     );
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }

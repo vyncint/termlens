@@ -34,13 +34,13 @@ fn moving_a_highlight_changes_the_styled_rendering_only() -> termlens::Result<()
     let mut first = sh(&list_with_highlight(0))?;
     first.wait_until(settled)?;
     let a = first.screen();
-    first.send(Key::Enter);
+    first.send(Key::Enter)?;
     first.wait_exit()?;
 
     let mut second = sh(&list_with_highlight(1))?;
     second.wait_until(settled)?;
     let b = second.screen();
-    second.send(Key::Enter);
+    second.send(Key::Enter)?;
     second.wait_exit()?;
 
     // The pinning scenario from the coverage study: identical text…
@@ -65,7 +65,7 @@ fn styled_screen_snapshot() -> termlens::Result<()> {
     // against the recorded `cursor: 2,0`.
     t.wait_until(|s| s.contains("selected") && s.cursor() == (2, 0, true))?;
     insta::assert_snapshot!(t.screen().with_styles());
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -86,13 +86,13 @@ fn a_masked_field_is_distinguishable_from_clear_text() -> termlens::Result<()> {
     let mut masked = sh(r"printf 'pw: \033[8mhunter2\033[28m|'; read guard")?;
     masked.wait_until(settled)?;
     let a = masked.screen();
-    masked.send(Key::Enter);
+    masked.send(Key::Enter)?;
     masked.wait_exit()?;
 
     let mut clear = sh(r"printf 'pw: hunter2|'; read guard")?;
     clear.wait_until(settled)?;
     let b = clear.screen();
-    clear.send(Key::Enter);
+    clear.send(Key::Enter)?;
     clear.wait_exit()?;
 
     // Identical text — a real terminal holds the characters either way, and
@@ -141,7 +141,7 @@ fn strikethrough_and_blink_appear_in_the_styled_rendering() -> termlens::Result<
     let badge = *s.cell(overdue.0, overdue.1).unwrap().style();
     assert!(badge.blink && badge.fg == termlens::Color::Indexed(1));
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }

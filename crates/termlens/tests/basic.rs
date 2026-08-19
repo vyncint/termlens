@@ -23,7 +23,7 @@ fn sh(script: &str) -> termlens::Result<Terminal> {
 fn echo_reaches_the_screen_and_child_exits_cleanly() -> termlens::Result<()> {
     let mut t = sh("echo hello from a real PTY; read guard")?;
     t.wait_until(|s| s.contains("hello from a real PTY"))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     let status = t.wait_exit()?;
     assert!(status.success(), "full status: {status}");
     assert_eq!(status.code(), 0);
@@ -35,7 +35,7 @@ fn exit_codes_are_reported() -> termlens::Result<()> {
     // The `read` keeps the exit from racing PTY setup; the line discipline
     // buffers our Enter even if it lands before `read` starts.
     let mut t = sh("read guard; exit 7")?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     let status = t.wait_exit()?;
     assert!(!status.success());
     assert_eq!(status.code(), 7, "full status: {status}");
@@ -48,7 +48,7 @@ fn exit_codes_are_reported() -> termlens::Result<()> {
 #[test]
 fn signal_deaths_are_reported_as_signals_not_exit_codes() -> termlens::Result<()> {
     let mut t = sh("read guard; kill -TERM $$")?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     let status = t.wait_exit()?;
     assert!(!status.success());
     // strsignal spelling differs per libc ("Terminated" / "Terminated: 15"),
@@ -67,7 +67,7 @@ fn env_vars_reach_the_child() -> termlens::Result<()> {
         .args(["-c", r#"echo "marker=$TERMTEST_MARKER"; read guard"#])
         .spawn(SH)?;
     t.wait_until(|s| s.contains("marker=42"))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     t.wait_exit()?;
     Ok(())
 }
@@ -100,7 +100,7 @@ fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termlens::
         screen.contains("term=xterm-256color"),
         "default TERM missing:\n{screen}"
     );
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     t.wait_exit()?;
     Ok(())
 }
@@ -112,7 +112,7 @@ fn explicit_term_overrides_the_default() -> termlens::Result<()> {
         .args(["-c", r#"echo "term=$TERM"; read guard"#])
         .spawn(SH)?;
     t.wait_until(|s| s.contains("term=vt100"))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     t.wait_exit()?;
     Ok(())
 }
@@ -120,10 +120,10 @@ fn explicit_term_overrides_the_default() -> termlens::Result<()> {
 #[test]
 fn send_str_and_enter_round_trip_through_the_line_discipline() -> termlens::Result<()> {
     let mut t = sh(r#"read line; echo "got: $line"; read guard"#)?;
-    t.send_str("hello");
-    t.send(Key::Enter);
+    t.send_str("hello")?;
+    t.send(Key::Enter)?;
     t.wait_until(|s| s.contains("got: hello"))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -160,7 +160,7 @@ fn waits_fail_fast_on_eof_instead_of_burning_the_timeout() {
     // Deterministic sequencing: observe the output, then let the child
     // exit, then wait for something that can never appear.
     t.wait_until(|s| s.contains("bye")).unwrap();
-    t.send(Key::Enter);
+    t.send(Key::Enter).unwrap();
 
     let start = Instant::now();
     let err = t.wait_until(|s| s.contains("never printed")).unwrap_err();
@@ -189,7 +189,7 @@ fn wait_idle_resolves_in_output_gaps() -> termlens::Result<()> {
     );
 
     t.wait_until(|s| s.contains("b"))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     t.wait_exit()?;
     Ok(())
 }

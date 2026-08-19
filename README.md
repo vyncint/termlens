@@ -148,8 +148,9 @@ design. termlens's position:
 - **Every wait takes a per-call deadline** (`wait_until_for`,
   `wait_frame_for`, `wait_idle_for`, `wait_exit_for`), so one slow step
   doesn't force a generous timeout on the whole suite. Writes are bounded
-  too: typing into an application that has stopped reading fails with the
-  screen attached instead of hanging.
+  too, and every input call returns `Result`: typing into an application
+  that has stopped reading, or into a child that has exited, is an error
+  carrying the screen rather than a hang or a panic.
 - **`wait_idle(quiet)` is an honest heuristic** for everything else. It
   resolves when nothing arrived for `quiet`, the stream isn't
   mid-escape-sequence, and no synchronized update is open. Silence is

@@ -21,7 +21,7 @@ fn slow_app(script: &str) -> Terminal {
 fn wait_frame_for_overrides_the_builder_default() -> termlens::Result<()> {
     let mut t = slow_app(r"sleep 1; printf '\033[?2026hlate frame\033[?2026l'; read guard");
     t.wait_frame_for(|s| s.contains("late frame"), Duration::from_secs(30))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit_for(Duration::from_secs(30))?.success());
     Ok(())
 }
@@ -45,7 +45,7 @@ fn wait_idle_for_overrides_the_builder_default() -> termlens::Result<()> {
     // deadline. `per_call_timeouts_report_their_own_deadline` covers the
     // deadline behaviour against a still-chattering child.)
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit_for(Duration::from_secs(30))?.success());
     Ok(())
 }

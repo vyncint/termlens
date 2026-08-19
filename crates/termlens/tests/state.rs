@@ -37,7 +37,7 @@ fn screen_reports_title_alternate_screen_and_input_modes() -> termlens::Result<(
             && s.mouse_mode() == MouseMode::ButtonMotion
     })?;
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     t.wait_until(|s| {
         s.contains("modes: off")
             && s.title() == "phase two" // OSC 2, ST-terminated
@@ -47,7 +47,7 @@ fn screen_reports_title_alternate_screen_and_input_modes() -> termlens::Result<(
             && s.mouse_mode() == MouseMode::None
     })?;
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -68,11 +68,11 @@ fn mouse_mode_reports_the_exact_tracking_mode() -> termlens::Result<()> {
         .spawn("sh")?;
 
     t.wait_until(|s| s.contains("9") && s.mouse_mode() == MouseMode::Press)?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     t.wait_until(|s| s.contains("1000") && s.mouse_mode() == MouseMode::PressRelease)?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     t.wait_until(|s| s.contains("1003") && s.mouse_mode() == MouseMode::AnyMotion)?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -109,7 +109,7 @@ fn a_clipboard_write_is_observable_with_its_payload() -> termlens::Result<()> {
         "the escape leaked into the grid:\n{s}"
     );
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -131,7 +131,7 @@ fn an_unreadable_clipboard_payload_is_reported_as_such() -> termlens::Result<()>
     assert_eq!(clip.text(), None);
     assert_eq!(clip.targets(), "p");
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }

@@ -68,14 +68,36 @@ pub enum Error {
     /// pid may belong to someone else by now).
     #[error("input not receivable: {0}")]
     Input(String),
+
+    /// Typed input could not be delivered: the child is gone and the OS
+    /// tore the terminal down, or it stopped reading its input and the
+    /// write gave up at the terminal's deadline rather than blocking
+    /// forever.
+    ///
+    /// Distinct from [`Error::Input`] on purpose. `Input` means the
+    /// application cannot make sense of these bytes — a test bug. This
+    /// means the bytes could not be handed over at all, which is a fact
+    /// about the child rather than about the test, so the screen at the
+    /// moment of the failure is embedded the way a timeout's is.
+    #[error("failed to send {what}\n--- screen at the failed write ---\n{screen}")]
+    Write {
+        /// What was being sent, which command it was going to, and why the
+        /// write failed.
+        what: Box<str>,
+        /// The screen when the write failed.
+        screen: Screen,
+    },
 }
 
 impl Error {
-    /// The screen embedded in [`Error::Timeout`] / [`Error::Eof`], if any.
+    /// The screen embedded in [`Error::Timeout`], [`Error::Eof`] or
+    /// [`Error::Write`], if any.
     #[must_use]
     pub fn screen(&self) -> Option<&Screen> {
         match self {
-            Error::Timeout { screen, .. } | Error::Eof { screen, .. } => Some(screen),
+            Error::Timeout { screen, .. }
+            | Error::Eof { screen, .. }
+            | Error::Write { screen, .. } => Some(screen),
             _ => None,
         }
     }

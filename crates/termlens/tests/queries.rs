@@ -26,7 +26,7 @@ fn cursor_position_reports_the_position_at_the_query() -> termlens::Result<()> {
         r#"printf '\nunblocked:%s' "$reply"; read guard"#
     ))?;
     t.wait_until(|s| s.contains("unblocked:E[1;4R"))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -42,7 +42,7 @@ fn device_attribute_probes_are_unblocked() -> termlens::Result<()> {
         r#"printf 'unblocked:%s' "$reply"; read guard"#
     ))?;
     t.wait_until(|s| s.contains("unblocked:E[?62;22c"))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -63,7 +63,7 @@ fn background_color_query_gets_the_configured_answer() -> termlens::Result<()> {
         ])
         .spawn("/bin/sh")?;
     t.wait_until(|s| s.contains("unblocked:E]11;rgb:1e1e/1e1e/2e2eG"))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -84,7 +84,7 @@ fn foreground_color_query_gets_the_configured_answer() -> termlens::Result<()> {
         ])
         .spawn("/bin/sh")?;
     t.wait_until(|s| s.contains("unblocked:E]10;rgb:cdcd/d6d6/f4f4G"))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -98,7 +98,7 @@ fn text_area_size_reports_the_real_grid() -> termlens::Result<()> {
         r#"printf 'unblocked:%s' "$reply"; read guard"#
     ))?;
     t.wait_until(|s| s.contains("unblocked:E[8;24;80t"))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -223,7 +223,7 @@ fn an_app_that_probes_for_synchronized_output_gets_it() -> termlens::Result<()> 
     ))?;
 
     t.wait_frame(|s| s.contains("PROBED FRAME"))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -248,7 +248,7 @@ fn mode_reports_are_truthful() -> termlens::Result<()> {
     assert!(row.contains("E[?1;2$y"), "DECCKM should be reset: {row}");
     assert!(row.contains("E[?12;0$y"), "12 is not tracked: {row}");
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -296,7 +296,7 @@ fn replies_are_not_echoed_into_the_screen() -> termlens::Result<()> {
         "reply leaked into the grid:\n{}",
         t.screen()
     );
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -326,7 +326,7 @@ fn a_probe_then_enable_application_gets_its_mouse() -> termlens::Result<()> {
     // Press and release, SGR-encoded, 1-based on the wire.
     t.wait_until(|s| s.contains("CLICK:E[<0;10;5ME[<0;10;5m"))?;
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }

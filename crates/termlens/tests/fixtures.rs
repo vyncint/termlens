@@ -33,7 +33,7 @@ fn hello_tui_draws_a_static_alt_screen_frame() -> termlens::Result<()> {
     assert_eq!(screen.find("hello-tui"), Some((1, 2)));
     insta::assert_snapshot!(t.screen());
 
-    t.send(Key::Char('q'));
+    t.send(Key::Char('q'))?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -43,7 +43,7 @@ fn form_echo_round_trips_typed_input_and_special_keys() -> termlens::Result<()> 
     let mut t = spawn_fixture("form-echo")?;
     t.wait_until(|s| s.contains("form-echo ready"))?;
 
-    t.send_str("hello");
+    t.send_str("hello")?;
     t.wait_until(|s| s.contains("input: hello"))?;
 
     // Each special key must round-trip: our xterm encoding -> PTY ->
@@ -65,18 +65,18 @@ fn form_echo_round_trips_typed_input_and_special_keys() -> termlens::Result<()> 
         (Key::Alt('x'), "last: alt:x"),
         (Key::Ctrl('a'), "last: ctrl:a"),
     ] {
-        t.send(key);
+        t.send(key)?;
         t.wait_until(|s| s.contains(name))?;
     }
 
-    t.send(Key::Backspace);
+    t.send(Key::Backspace)?;
     t.wait_until(|s| s.contains("input: hell") && s.contains("last: backspace"))?;
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     t.wait_until(|s| s.contains("submitted: hell"))?;
     insta::assert_snapshot!(t.screen());
 
-    t.send(Key::Esc);
+    t.send(Key::Esc)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -85,7 +85,7 @@ fn form_echo_round_trips_typed_input_and_special_keys() -> termlens::Result<()> 
 fn form_echo_reports_nonzero_exit_codes() -> termlens::Result<()> {
     let mut t = spawn_fixture("form-echo")?;
     t.wait_until(|s| s.contains("form-echo ready"))?;
-    t.send(Key::Ctrl('x'));
+    t.send(Key::Ctrl('x'))?;
     let status = t.wait_exit()?;
     assert!(!status.success());
     assert_eq!(status.code(), 42, "full status: {status}");
@@ -104,7 +104,7 @@ fn resize_reaches_the_child_as_sigwinch() -> termlens::Result<()> {
     t.resize(66, 20)?;
     t.wait_until(|s| s.contains("size: 66x20"))?;
 
-    t.send(Key::Char('q'));
+    t.send(Key::Char('q'))?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -126,7 +126,7 @@ fn unicode_torture_renders_with_correct_widths() -> termlens::Result<()> {
     insta::assert_snapshot!(screen);
 
     // Release the fixture's stdin guard now that everything is asserted.
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }

@@ -31,7 +31,7 @@ fn clicks_round_trip_through_the_apps_tracking_mode() -> termlens::Result<()> {
     t.scroll(3, 2, Scroll::Down)?;
     t.wait_frame(|s| s.contains("last: mouse:scrolldown:3,2"))?;
 
-    t.send(Key::Esc);
+    t.send(Key::Esc)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -49,11 +49,11 @@ fn modifier_chords_round_trip_through_crossterms_parser() -> termlens::Result<()
         (Key::F(5).ctrl().shift(), "last: ctrl+shift+f:5"),
         (Key::Delete.alt(), "last: alt+delete"),
     ] {
-        t.send(chord);
+        t.send(chord)?;
         t.wait_frame(|s| s.contains(name))?;
     }
 
-    t.send(Key::Esc);
+    t.send(Key::Esc)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -64,10 +64,10 @@ fn paste_is_one_event_under_bracketed_paste() -> termlens::Result<()> {
     t.wait_frame(|s| s.contains("form-echo ready"))?;
 
     // One paste event — not eleven key presses — proves the wrapper.
-    t.paste("hello world");
+    t.paste("hello world")?;
     t.wait_frame(|s| s.contains("input: hello world") && s.contains("last: paste:11"))?;
 
-    t.send(Key::Esc);
+    t.send(Key::Esc)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -86,9 +86,9 @@ fn paste_falls_back_to_plain_bytes_without_the_mode() -> termlens::Result<()> {
             ),
         ])
         .spawn("/bin/sh")?;
-    t.paste("plain");
+    t.paste("plain")?;
     t.wait_until(|s| s.contains("got:plain"))?;
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -100,12 +100,12 @@ fn an_embedded_paste_marker_cannot_end_the_paste() -> termlens::Result<()> {
     let mut t = spawn_form_echo()?;
     t.wait_frame(|s| s.contains("form-echo ready"))?;
 
-    t.paste("AB\x1b[201~CD");
+    t.paste("AB\x1b[201~CD")?;
     // One paste event carrying all four characters — the markers are
     // gone, so nothing arrives as key presses.
     t.wait_frame(|s| s.contains("input: ABCD") && s.contains("last: paste:4"))?;
 
-    t.send(Key::Esc);
+    t.send(Key::Esc)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -133,7 +133,7 @@ fn a_pasted_line_break_arrives_as_carriage_return() -> termlens::Result<()> {
         .spawn("/bin/sh")?;
     t.wait_until(|s| s.contains("READY"))?;
 
-    t.paste("a\nb");
+    t.paste("a\nb")?;
     t.wait_until(|s| s.contains("WIRE-EOF"))?;
     let row = t.screen().row_text(0);
     assert!(
@@ -143,7 +143,7 @@ fn a_pasted_line_break_arrives_as_carriage_return() -> termlens::Result<()> {
 
     // ICRNL is off, so the guard `read` needs a literal newline — the
     // CR that Key::Enter sends is no longer translated for it.
-    t.send_str("\n");
+    t.send_str("\n")?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -182,7 +182,7 @@ fn mouse_reports_follow_the_utf8_encoding() -> termlens::Result<()> {
     // and shows the wire instead of timing out. Seven of them because a
     // correct click already supplied all seven bytes; these are only ever
     // read when it did not.
-    t.send_str("\n\n\n\n\n\n\n");
+    t.send_str("\n\n\n\n\n\n\n")?;
     t.wait_until(|s| s.contains("WIRE-EOF"))?;
 
     let wire = t.screen().row_text(0);
@@ -190,7 +190,7 @@ fn mouse_reports_follow_the_utf8_encoding() -> termlens::Result<()> {
         wire.contains("1b5b4d20c28524"),
         "expected ESC [ M 0x20 c2 85 0x24 (UTF-8 column 100), got: {wire}"
     );
-    t.send_str("QUIT\n");
+    t.send_str("QUIT\n")?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -255,7 +255,7 @@ fn drag_is_refused_when_the_mode_cannot_express_it() -> termlens::Result<()> {
     assert!(matches!(err, Error::Input(_)), "got: {err}");
     assert!(err.to_string().contains("X10"), "unhelpful: {err}");
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -278,14 +278,14 @@ fn arrows_follow_the_apps_cursor_key_mode() -> termlens::Result<()> {
         .spawn("/bin/sh")?;
 
     t.wait_until(|s| s.contains("APP"))?;
-    t.send(Key::Up);
+    t.send(Key::Up)?;
     t.wait_until(|s| s.contains("got:EOA"))?;
 
     t.wait_until(|s| s.contains("NORM"))?;
-    t.send(Key::Up);
+    t.send(Key::Up)?;
     t.wait_until(|s| s.contains("got:E[A"))?;
 
-    t.send(Key::Enter);
+    t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -305,6 +305,78 @@ fn clicking_without_mouse_tracking_is_a_typed_error() {
     assert!(matches!(err, Error::Input(_)), "got: {err}");
     assert!(err.to_string().contains("mouse tracking"), "{err}");
 
-    t.send(Key::Char('q'));
+    t.send(Key::Char('q')).unwrap();
     assert!(t.wait_exit().unwrap().success());
+}
+
+/// Typed input to a child that is gone is an error the test can handle,
+/// not a panic and not silence. `write_or_panic` used to make this the one
+/// failure that could only reach a test by aborting it.
+#[test]
+fn typed_input_to_a_departed_child_is_a_typed_error() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args(["-c", "printf bye"])
+        .spawn("/bin/sh")?;
+    assert!(t.wait_exit()?.success());
+
+    let err = t.send(Key::Enter).unwrap_err();
+    assert!(matches!(err, Error::Write { .. }), "got: {err}");
+    // The screen travels with it, like a timeout's.
+    assert!(err.screen().is_some_and(|s| s.contains("bye")), "{err}");
+    assert!(err.to_string().contains("Enter"), "{err}");
+
+    // Same contract for the other two.
+    assert!(matches!(t.send_str("x"), Err(Error::Write { .. })));
+    assert!(matches!(t.paste("x"), Err(Error::Write { .. })));
+    Ok(())
+}
+
+/// A mouse click at a departed child names the child, not the tracking
+/// mode. The old order asked "did it enable mouse tracking?" first, which
+/// a child that has exited necessarily has not — so the answer was always
+/// technically true and never the reason.
+#[test]
+fn a_mouse_click_at_a_departed_child_blames_the_child() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args(["-c", "printf bye"])
+        .spawn("/bin/sh")?;
+    assert!(t.wait_exit()?.success());
+
+    for err in [
+        t.click(1, 1).unwrap_err(),
+        t.scroll(1, 1, Scroll::Up).unwrap_err(),
+        t.drag(termlens::MouseButton::Left, (1, 1), (2, 2))
+            .unwrap_err(),
+    ] {
+        assert!(matches!(err, Error::Write { .. }), "got: {err}");
+        assert!(
+            !err.to_string().contains("mouse tracking"),
+            "must not blame the tracking mode: {err}"
+        );
+        assert!(err.to_string().contains("exited"), "{err}");
+    }
+    Ok(())
+}
+
+/// The other half of the contract: a child that is *alive* but has not read
+/// yet is not a failure. The bytes sit in the terminal's input queue
+/// exactly as they would on a real terminal, and the write succeeded.
+#[test]
+fn typed_input_to_a_live_child_that_has_not_read_yet_succeeds() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            "printf READY; sleep 0.4; read line; printf ' got:%s' \"$line\"",
+        ])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("READY"))?;
+
+    // Sent while the child is sleeping, well before its `read`.
+    t.send_str("pending\n")?;
+    t.wait_until(|s| s.contains("got:pending"))?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
 }

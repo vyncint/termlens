@@ -94,10 +94,20 @@ released — the state lock and the writer lock are never held together.
 Every write — query replies and typed input alike — is handed to a
 dedicated writer thread over a bounded queue. Typed input carries an
 acknowledgement channel, so the test thread applies the terminal's
-deadline and panics with the screen ("the application is not reading its
-input") instead of blocking forever; there is no portable way to ask
-whether a PTY write *would* block, since `POLLOUT` on a macOS master
-reports writable and then blocks anyway.
+deadline and returns `Error::Write` with the screen ("the application is
+not reading its input") instead of blocking forever; there is no portable
+way to ask whether a PTY write *would* block, since `POLLOUT` on a macOS
+master reports writable and then blocks anyway.
+
+Which failures are errors and which are panics is a deliberate split, not
+an accident of history. `send`/`send_str`/`paste`/`click`/`drag`/`scroll`
+all return `Result`, because *whether the child is still there to receive
+input* is a fact about the run, discovered at runtime, and a test may
+legitimately want to handle it. `Key::F(13)` still panics, because there
+is no thirteenth function key on any terminal and never will be: that is a
+mistake in the test's own source, and the same category as indexing a
+slice out of bounds. Environmental failures are errors; impossible
+arguments are panics.
 
 Replies go to that same thread, fire-and-forget: writing them from the
 reader thread would block whenever the application stopped reading its
