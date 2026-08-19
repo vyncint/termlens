@@ -47,6 +47,66 @@ const MAX_UNANSWERED: usize = 8;
 /// 0.6 MB and 3.8 MB respectively.
 const FRAME_HISTORY: usize = 8;
 
+/// How many per-frame timings a terminal keeps.
+///
+/// Deliberately larger than [`FRAME_HISTORY`], and bounded on its own terms:
+/// a frame is a whole grid snapshot, while a timing is three words, so there
+/// is no reason to forget a repaint's cost as soon as its content ages out. A
+/// suite holding a p99 line wants a run's worth, not the last eight.
+const FRAME_TIMING_HISTORY: usize = 512;
+
+/// What one completed repaint cost.
+///
+/// Read the series with [`Terminal::frame_timings`].
+///
+/// # What the span does and does not include
+///
+/// The duration is the wall-clock time between the application's **own
+/// markers** — its `BeginSynchronizedUpdate` and `EndSynchronizedUpdate` —
+/// observed through a PTY. Both ends are stamped at the byte that carried the
+/// marker, not when the read arrived, so a burst delivered in one read is
+/// still measured per frame.
+///
+/// That means it includes the application's write pacing, not just its render
+/// cost: a program that computes a frame quickly and then dribbles it out in
+/// small writes measures slow, correctly, because that is what a terminal on
+/// the other end experiences. It is not a render benchmark, and treating it as
+/// one will mislead you. What it is good for is a *trend*: the same
+/// application, the same fixture, a p99 that grew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameTiming {
+    index: u64,
+    duration: Duration,
+    printable: u32,
+}
+
+impl FrameTiming {
+    /// Which repaint this was, counting from 1 — the same numbering
+    /// [`Screen::repaints`](crate::Screen::repaints) reports.
+    #[must_use]
+    pub fn index(&self) -> u64 {
+        self.index
+    }
+
+    /// Wall-clock time between the application's Begin and End markers. See
+    /// the type docs for what that includes.
+    #[must_use]
+    pub fn duration(&self) -> Duration {
+        self.duration
+    }
+
+    /// Printable characters the application wrote inside this repaint.
+    ///
+    /// The other half of a performance regression: a repaint can get slower,
+    /// or it can get *bigger*, and no content predicate sees either. Counted
+    /// per character rather than per byte, so a screen of CJK does not read as
+    /// three times the work.
+    #[must_use]
+    pub fn printable_chars(&self) -> u32 {
+        self.printable
+    }
+}
+
 /// Rows of scrolled-off history a terminal retains by default.
 ///
 /// On by default because the alternative is a whole class of application
@@ -444,6 +504,8 @@ struct EmuState {
     /// what lets a waiter ask for frames *newer than the last one it was
     /// given* rather than rescanning the whole ring forever.
     frames: VecDeque<(u64, Screen)>,
+    /// Per-frame cost, kept separately and for longer than `frames`.
+    timings: VecDeque<FrameTiming>,
     /// Whether to answer recognized terminal queries (builder-configured).
     respond: bool,
     /// Background color reported to OSC 11 queries.
@@ -508,6 +570,7 @@ impl EmuState {
             snapshot_cache: None,
             frames_seen: 0,
             frames: VecDeque::with_capacity(FRAME_HISTORY),
+            timings: VecDeque::new(),
             respond,
             background,
             foreground,
@@ -1490,13 +1553,30 @@ fn reader_loop(
                         let processed = state.emu.process(&buf[offset..n]);
                         offset += processed.consumed;
                         match processed.stop {
-                            Some(Stop::FrameComplete) => {
+                            Some(Stop::FrameComplete(span)) => {
                                 state.frames_seen += 1;
-                                let frame = state.emu.snapshot();
+                                // Through `build_snapshot`, so a retained
+                                // frame carries the repaint count like every
+                                // other snapshot. Taking it straight from the
+                                // emulator left `Screen::repaints()` at zero
+                                // on exactly the screens `wait_frame` hands
+                                // back — the ones most likely to be asked.
+                                let frame = state.build_snapshot();
                                 if state.frames.len() == FRAME_HISTORY {
                                     state.frames.pop_front();
                                 }
                                 state.frames.push_back((state.frames_seen, frame));
+                                // Timings outlive the frame ring: a
+                                // performance line is held over a run, not
+                                // over the last eight repaints.
+                                if state.timings.len() == FRAME_TIMING_HISTORY {
+                                    state.timings.pop_front();
+                                }
+                                state.timings.push_back(FrameTiming {
+                                    index: state.frames_seen,
+                                    duration: span.duration,
+                                    printable: span.printable,
+                                });
                             }
                             Some(Stop::Query(query)) => {
                                 if let Some(reply) = state.answer(&query) {
@@ -1635,6 +1715,39 @@ impl Terminal {
     #[must_use]
     pub fn screen(&self) -> Screen {
         self.shared.lock().snapshot()
+    }
+
+    /// Per-frame cost for every repaint this terminal has seen, oldest
+    /// first — the wall-clock span between the application's own
+    /// synchronized-update markers, and how much it drew inside them.
+    ///
+    /// This is what lets a suite hold a performance line as well as a
+    /// correctness one. A TUI's most common regression is not wrong output; it
+    /// is a repaint that got slower or larger, and no content predicate can
+    /// see either.
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// t.wait_frame(|s| s.contains("ready"))?;
+    /// let mut spans: Vec<_> = t.frame_timings().iter().map(|f| f.duration()).collect();
+    /// spans.sort_unstable();
+    /// let p99 = spans[spans.len() * 99 / 100];
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Read [`FrameTiming`] for what the span includes — it is measured
+    /// through a PTY and covers the application's write pacing, so it is a
+    /// trend to watch rather than a render benchmark.
+    ///
+    /// The series is bounded at the last **512** repaints, independently of
+    /// the eight frames [`wait_frame`](Self::wait_frame) retains: a timing is
+    /// three words where a frame is a whole grid, so there is no reason for a
+    /// cost to be forgotten as soon as its content ages out.
+    #[must_use]
+    pub fn frame_timings(&self) -> Vec<FrameTiming> {
+        self.shared.lock().timings.iter().copied().collect()
     }
 
     /// Send one key press or modifier [`Chord`](crate::Chord). See

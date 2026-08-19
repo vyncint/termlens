@@ -172,3 +172,31 @@ fn a_kitty_transmission_does_not_pollute_the_timeout() -> termlens::Result<()> {
     t.send(Key::Enter)?;
     Ok(())
 }
+
+/// The frame `wait_frame` returns must carry the repaint count too — it is
+/// the screen a test is most likely to ask, since asserting on the returned
+/// frame rather than a later `screen()` is the documented idiom. Retained
+/// frames used to be built straight from the emulator, which skipped the
+/// count and left it at zero.
+#[test]
+fn a_frame_from_wait_frame_carries_the_repaint_count() -> termlens::Result<()> {
+    let mut t = sh(concat!(
+        r"printf READY; read a; ",
+        r"printf '\033[?2026hone\033[?2026l'; ",
+        r"printf '\033[?2026htwo\033[?2026l'; ",
+        r"read b"
+    ))?;
+    t.wait_until(|s| s.contains("READY"))?;
+    t.send(Key::Enter)?;
+
+    let first = t.wait_frame(|s| s.contains("one"))?;
+    assert_eq!(first.repaints(), 1, "the first frame is repaint 1: {first}");
+    let second = t.wait_frame(|s| s.contains("two"))?;
+    assert_eq!(second.repaints(), 2, "and the second is 2: {second}");
+    // And the live grid agrees with the frame it last handed out.
+    assert_eq!(t.screen().repaints(), 2);
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}

@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use termlens::{Error, Key, Terminal};
+use termlens::{Error, FrameTiming, Key, Terminal};
 
 mod common;
 use common as util;
@@ -509,4 +509,107 @@ fn a_wait_idle_timeout_names_an_unfinished_frame() {
         msg.contains("half-painted frame"),
         "and what the embedded screen is: {msg}"
     );
+}
+
+/// A repaint that got slower, or bigger, is the most common TUI regression
+/// and no content predicate sees either. form-echo's F2 draw sleeps 150ms
+/// *inside* one synchronized update, so it is the outlier the series has to
+/// show.
+#[test]
+fn the_timing_series_shows_a_deliberately_slow_repaint() -> termlens::Result<()> {
+    let mut t = spawn_form_echo()?;
+    t.wait_frame(|s| s.contains("form-echo ready"))?;
+
+    // A few ordinary repaints first, to have something to be an outlier
+    // against.
+    for c in ['a', 'b', 'c'] {
+        t.send(Key::Char(c))?;
+        t.wait_frame(|s| s.contains(&format!("input: {}", "abc".split(c).next().unwrap_or(""))))?;
+    }
+    let quick = t.frame_timings();
+    assert!(quick.len() >= 4, "one per repaint so far: {}", quick.len());
+    let slowest_quick = quick.iter().map(|f| f.duration()).max().unwrap();
+
+    t.send(Key::F(2))?;
+    let torn = t.wait_frame(|s| s.contains("torn: left") && s.contains("right"))?;
+    assert!(torn.contains("torn: left right"), "{torn}");
+
+    let all = t.frame_timings();
+    let slow = all.last().expect("the torn frame");
+    assert_eq!(
+        slow.index(),
+        torn.repaints(),
+        "the series and the frame count agree on which repaint this was"
+    );
+    assert!(
+        slow.duration() >= Duration::from_millis(150),
+        "the deliberate 150ms sleep must be inside the span: {:?}",
+        slow.duration()
+    );
+    assert!(
+        slow.duration() > slowest_quick * 5,
+        "and it must stand out: {:?} vs {slowest_quick:?}",
+        slow.duration()
+    );
+
+    // The size half of the same question: every repaint drew something, and
+    // the count is per character.
+    assert!(
+        all.iter().all(|f| f.printable_chars() > 0),
+        "each repaint drew something: {:?}",
+        all.iter()
+            .map(FrameTiming::printable_chars)
+            .collect::<Vec<_>>()
+    );
+    // "torn: left" + " right" = 16 printable characters, and nothing else in
+    // that update is printable.
+    assert_eq!(slow.printable_chars(), 16, "{slow:?}");
+
+    t.send(Key::Esc)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// Timings are per frame even when a burst arrives in one read — the markers
+/// are stamped at the byte that carried them, not when the read landed.
+#[test]
+fn a_burst_in_one_read_is_timed_per_frame() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .size(40, 6)
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"printf READY; read a; ",
+                // Three frames in a single write, so they arrive as one read.
+                r"printf '\033[?2026hone\033[?2026l\033[?2026htwotwo\033[?2026l\033[?2026hthree!\033[?2026l'; ",
+                r"printf ' DONE'; read b"
+            ),
+        ])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("READY"))?;
+    assert!(t.frame_timings().is_empty(), "nothing has repainted yet");
+
+    t.send(Key::Enter)?;
+    t.wait_until(|s| s.contains("DONE"))?;
+
+    let timings = t.frame_timings();
+    assert_eq!(timings.len(), 3, "three frames, three timings: {timings:?}");
+    assert_eq!(
+        timings.iter().map(FrameTiming::index).collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "numbered in emission order"
+    );
+    // Each frame is credited with what *it* drew, not the whole read.
+    assert_eq!(
+        timings
+            .iter()
+            .map(FrameTiming::printable_chars)
+            .collect::<Vec<_>>(),
+        vec![3, 6, 6],
+        "one/twotwo/three! — per frame, not per read"
+    );
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
 }

@@ -100,11 +100,23 @@ listed under a **Changed** or **Removed** heading.
 ### Added
 
 - **`Screen::repaints`** — how many synchronized updates the application has
-  completed, as of this observation. It counts *repaints, not changes*, so a
+  completed, as of this observation, on every snapshot **including the frames
+  `wait_frame` returns**. It counts *repaints, not changes*, so a
   Begin/End pair that drew nothing still counts, which is exactly the
   property an amplification test needs: "one wheel notch produced four
   repaints" is invisible to every content predicate, because each
   intermediate frame shows correct content.
+- **`Terminal::frame_timings` and `FrameTiming`** — per-repaint wall-clock cost
+  and printable-character count, so a suite can hold a performance line as well
+  as a correctness one. A TUI's most common regression is not wrong output; it
+  is a repaint that got slower or larger, and no content predicate sees either.
+  Both ends of the span are stamped at the byte carrying the marker, not when
+  the read arrived, so a burst delivered in one read is still timed per frame.
+  The docs state what the span includes rather than leaving it to be assumed:
+  it is measured through a PTY and covers the application's write pacing, so it
+  is a trend to watch and not a render benchmark. Bounded at 512 repaints,
+  independently of the eight frames `wait_frame` retains, since a timing is
+  three words where a frame is a whole grid.
 - **`Screen::bells`** — how many times the application rang `BEL`. The bell
   is often the only feedback a rejected input produces, so "an invalid key
   does nothing" and "an invalid key is refused with a bell" used to be the

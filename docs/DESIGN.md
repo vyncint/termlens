@@ -469,6 +469,19 @@ Rules:
    declining both protocols, which is why an application that transmits one
    anyway is worth catching.
 
+   Per-frame **cost** is the one observation that does not fit a snapshot: a
+   `Screen` is an instant, and a performance line is a series. So
+   `Terminal::frame_timings` keeps one `FrameTiming` per repaint — the span
+   between the application's own DEC 2026 markers, and the printable
+   characters written inside them — bounded at 512 and independently of the
+   eight frames `wait_frame` retains, because a timing is three words where a
+   frame is a whole grid. Both ends are stamped at the byte carrying the
+   marker rather than when the read arrived, so a burst delivered in one read
+   is still timed per frame. The span is measured through a PTY and therefore
+   includes the application's write pacing: it is a trend to watch, not a
+   render benchmark, and the rustdoc says so where someone would otherwise
+   assume otherwise.
+
    All of it lives behind one `Arc` on `Screen`. `Screen` is embedded in
    every `Error`, so its size is load-bearing: the counters alone pushed
    `Result<T>` past clippy's `result_large_err` threshold, and the `Arc`

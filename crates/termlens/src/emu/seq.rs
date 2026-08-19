@@ -245,6 +245,10 @@ pub(crate) struct SeqTracker {
     bells: u64,
     /// Inline graphics payloads transmitted.
     graphics: GraphicsSeen,
+    /// Printable characters written since the current frame began. Reset by
+    /// the Begin, read by the End — so it measures what one repaint drew,
+    /// which is the other half of "did this repaint get more expensive?".
+    frame_printable: u32,
     /// True while the application has focus reporting (mode 1004) enabled.
     /// Tracked here because vt100 does not model 1004 at all — the same
     /// reason the window title is tracked here.
@@ -297,6 +301,7 @@ impl SeqTracker {
             clipboard: None,
             bells: 0,
             graphics: GraphicsSeen::default(),
+            frame_printable: 0,
             focus_events: false,
             dcs_introducer: 0,
             dcs_final: 0,
@@ -348,6 +353,12 @@ impl SeqTracker {
     /// True while the application has focus reporting (mode 1004) enabled.
     pub(crate) fn focus_events(&self) -> bool {
         self.focus_events
+    }
+
+    /// Printable characters written since the current frame began, cleared
+    /// for the next one.
+    pub(crate) fn take_frame_printable(&mut self) -> u32 {
+        std::mem::replace(&mut self.frame_printable, 0)
     }
 
     fn reset_dcs_scanner(&mut self, introducer: u8) {
@@ -471,6 +482,7 @@ impl SeqTracker {
             match b {
                 b'h' => {
                     self.sync_update = true;
+                    self.frame_printable = 0;
                     return SeqEvent::SyncBegin;
                 }
                 // Only an End that closes a Begin we saw ends a frame.
@@ -715,6 +727,13 @@ impl SeqTracker {
                     // and both of those are other states.
                     if b == BEL && self.utf8_remaining == 0 {
                         self.bells = self.bells.saturating_add(1);
+                    }
+                    // One per *character*: continuation bytes arrive while
+                    // `utf8_remaining` is non-zero, so nothing is counted
+                    // twice. Controls, the BEL just handled included, are not
+                    // printable.
+                    if self.utf8_remaining == 0 && b >= 0x20 && b != 0x7f {
+                        self.frame_printable = self.frame_printable.saturating_add(1);
                     }
                     self.track_utf8(b);
                     State::Ground

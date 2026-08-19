@@ -85,7 +85,7 @@ pub use screen::{Cell, Clipboard, Color, GraphicsSeen, MouseMode, Screen, Style}
 #[cfg(unix)]
 pub use terminal::Signal;
 pub use terminal::{
-    ExitStatus, Graphics, MouseButton, MouseChord, Scroll, Terminal, TerminalBuilder,
+    ExitStatus, FrameTiming, Graphics, MouseButton, MouseChord, Scroll, Terminal, TerminalBuilder,
 };
 
 /// Re-export of [`insta`](https://insta.rs) (feature `insta`, on by

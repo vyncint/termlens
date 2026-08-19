@@ -17,12 +17,20 @@ pub(crate) use self::vt100::Vt100Emulator;
 use crate::screen::MouseMode;
 use crate::Screen;
 
+/// What one completed repaint cost, measured between the application's own
+/// markers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameSpan {
+    pub(crate) duration: std::time::Duration,
+    pub(crate) printable: u32,
+}
+
 /// Why the emulator stopped consuming mid-segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Stop {
     /// A synchronized update ended (DEC 2026 ESU): the screen at this
-    /// instant is a complete frame.
-    FrameComplete,
+    /// instant is a complete frame, and the span is what it cost.
+    FrameComplete(FrameSpan),
     /// The application asked the terminal a question; the screen state
     /// (cursor, size) is exactly as of the query.
     Query(Query),

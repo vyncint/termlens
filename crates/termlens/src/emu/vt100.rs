@@ -3,10 +3,11 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::seq::{SeqEvent, SeqTracker};
 use super::shadow::AttrShadow;
-use super::{Emulator, InputModes, ModeState, MouseEncoding, Processed, Stop};
+use super::{Emulator, FrameSpan, InputModes, ModeState, MouseEncoding, Processed, Stop};
 use crate::screen::{Cell, Color, MouseMode, Screen, Style, TermState};
 
 pub(crate) struct Vt100Emulator {
@@ -18,6 +19,9 @@ pub(crate) struct Vt100Emulator {
     shadow: AttrShadow,
     /// How many rows of history to retain (0 disables it entirely).
     scrollback_len: usize,
+    /// When the current synchronized update began, stamped at the byte that
+    /// opened it. `None` outside a frame.
+    frame_started: Option<Instant>,
     /// Rows that have scrolled off the top, oldest first, as text.
     ///
     /// Materialized here — once per read that scrolled — rather than in
@@ -31,12 +35,27 @@ pub(crate) struct Vt100Emulator {
 }
 
 impl Vt100Emulator {
+    /// Close out the frame that just ended: how long it ran between the
+    /// application's own markers, and how much it drew.
+    fn close_frame(&mut self) -> FrameSpan {
+        let started = self.frame_started.take();
+        debug_assert!(
+            started.is_some(),
+            "a frame only ends where a Begin was seen, so the start must exist"
+        );
+        FrameSpan {
+            duration: started.map_or(Duration::ZERO, |at| at.elapsed()),
+            printable: self.tracker.take_frame_printable(),
+        }
+    }
+
     pub(crate) fn new(rows: u16, cols: u16, scrollback_len: usize) -> Self {
         Self {
             parser: ::vt100::Parser::new(rows, cols, scrollback_len),
             tracker: SeqTracker::new(),
             shadow: AttrShadow::new(rows, cols),
             scrollback_len,
+            frame_started: None,
             history: VecDeque::new(),
             captured: 0,
         }
@@ -116,9 +135,17 @@ impl Emulator for Vt100Emulator {
     fn process(&mut self, bytes: &[u8]) -> Processed {
         for (i, &byte) in bytes.iter().enumerate() {
             let stop = match self.tracker.step(byte) {
-                SeqEvent::SyncEnd => Some(Stop::FrameComplete),
+                SeqEvent::SyncEnd => Some(Stop::FrameComplete(self.close_frame())),
                 SeqEvent::Query(query) => Some(Stop::Query(query)),
-                SeqEvent::None | SeqEvent::SyncBegin => None,
+                SeqEvent::None => None,
+                SeqEvent::SyncBegin => {
+                    // Stamped here, at the byte that opened the update,
+                    // rather than when the read arrived: a read can carry a
+                    // whole burst, and stamping per chunk would fold PTY
+                    // scheduling into the measurement.
+                    self.frame_started = Some(Instant::now());
+                    None
+                }
             };
             if let Some(stop) = stop {
                 self.parser.process(&bytes[..=i]);
@@ -466,7 +493,11 @@ mod tests {
         let stream = b"\x1b[?2026hframe1\x1b[?2026lnext";
 
         let first = emu.process(stream);
-        assert_eq!(first.stop, Some(Stop::FrameComplete));
+        assert!(
+            matches!(first.stop, Some(Stop::FrameComplete(_))),
+            "stop: {:?}",
+            first.stop
+        );
         // Everything through the ESU is consumed; "next" is not.
         assert_eq!(
             &stream[..first.consumed],
