@@ -11,6 +11,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -60,10 +61,18 @@ const FRAME_HISTORY: usize = 8;
 /// string rather than a grid of cells.
 const DEFAULT_SCROLLBACK: usize = 1000;
 
-/// Writes that may be queued for the writer thread before the drain
-/// starts discarding query replies. Reached only when the application
-/// has stopped reading its input entirely, in which case it cannot be
-/// waiting on those bytes.
+/// Writes that may be queued for the writer thread before the drain starts
+/// discarding query replies.
+///
+/// The depth counts *reads*, not answers: the reader batches every reply from
+/// one read into a single entry, and the writer coalesces whatever is queued
+/// behind it into one `write(2)`. That matters because the original premise
+/// here — a full queue means the application stopped reading — was false. It
+/// filled because the reader could build answers faster than the writer could
+/// issue one syscall each, so a startup batch of 200 probes lost 27 answers
+/// with nothing blocked anywhere. With one entry per read, filling this really
+/// does take 64 reads' worth of undelivered answers, which no reading
+/// application produces.
 const REPLY_QUEUE_DEPTH: usize = 64;
 
 /// One write handed to the writer thread.
@@ -74,6 +83,10 @@ const REPLY_QUEUE_DEPTH: usize = 64;
 struct WriteRequest {
     bytes: Vec<u8>,
     ack: Option<mpsc::SyncSender<io::Result<()>>>,
+    /// How many query replies these bytes carry, so the writer can clear
+    /// them from the pending count once they are genuinely out. Zero for
+    /// typed input, which reports through `ack` instead.
+    replies: usize,
 }
 
 /// How long `Drop` will wait for a killed child to be reaped before
@@ -396,6 +409,17 @@ impl fmt::Display for ExitStatus {
     }
 }
 
+/// Everything the query responder needs, gathered because it is one
+/// decision: what this terminal claims to be when an application asks.
+struct Responder {
+    respond: bool,
+    background: (u8, u8, u8),
+    foreground: (u8, u8, u8),
+    cell_size: Option<(u16, u16)>,
+    graphics: Graphics,
+    term_name: String,
+}
+
 /// Shared between the test thread and the PTY reader thread.
 struct EmuState {
     emu: Box<dyn Emulator>,
@@ -442,6 +466,20 @@ struct EmuState {
     /// Query replies the reader could not deliver because the child was
     /// not reading its input — evidence for the diagnosis, not an error.
     replies_dropped: usize,
+    /// Replies handed to the writer thread and not yet written, because the
+    /// PTY input queue is full and the write is blocked.
+    ///
+    /// An atomic rather than state behind the lock: the writer thread updates
+    /// it, and it must never need the state lock — the rule that the state
+    /// lock and the writer lock are never held together is what keeps the
+    /// harness from deadlocking itself.
+    ///
+    /// This is the case the bounded queue exists for, and the one the note
+    /// used to miss. Batching answers per read made dropping rare, which is
+    /// right — but it also meant a genuinely non-reading application produced
+    /// a plain timeout, with the replies stuck in the writer and nothing
+    /// saying so.
+    replies_pending: Arc<AtomicUsize>,
     /// Reads delivered by the PTY so far. A query last seen in an earlier
     /// read than this cannot be what the application is blocked on: it
     /// produced output after asking.
@@ -451,13 +489,17 @@ struct EmuState {
 impl EmuState {
     fn new(
         emu: Box<dyn Emulator>,
-        respond: bool,
-        background: (u8, u8, u8),
-        foreground: (u8, u8, u8),
-        cell_size: Option<(u16, u16)>,
-        graphics: Graphics,
-        term_name: String,
+        responder: Responder,
+        replies_pending: Arc<AtomicUsize>,
     ) -> Self {
+        let Responder {
+            respond,
+            background,
+            foreground,
+            cell_size,
+            graphics,
+            term_name,
+        } = responder;
         Self {
             emu,
             last_activity: Instant::now(),
@@ -475,6 +517,7 @@ impl EmuState {
             unanswered: Vec::new(),
             unanswered_overflow: 0,
             replies_dropped: 0,
+            replies_pending,
             reads: 0,
         }
     }
@@ -647,11 +690,12 @@ impl EmuState {
     /// rest of the same chunk, so output the application batched into the
     /// same `write` as its probe is not evidence of progress.
     fn query_note(&self) -> String {
-        let backlog = if self.replies_dropped > 0 {
+        let stuck = self.replies_pending.load(Ordering::Relaxed);
+        let undelivered = self.replies_dropped + stuck;
+        let backlog = if undelivered > 0 {
             format!(
                 " — note: the application is not reading its input \
-                 ({} terminal replies could not be delivered)",
-                self.replies_dropped
+                 ({undelivered} terminal replies could not be delivered)"
             )
         } else {
             String::new()
@@ -1091,14 +1135,18 @@ impl TerminalBuilder {
             .take_writer()
             .map_err(|e| Error::Pty(format!("taking PTY writer failed: {e}")))?;
 
+        let replies_pending = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(Monitor::new(EmuState::new(
             Box::new(Vt100Emulator::new(self.rows, self.cols, self.scrollback)),
-            self.answer_queries,
-            self.background,
-            self.foreground,
-            self.cell_size,
-            self.graphics,
-            term_name,
+            Responder {
+                respond: self.answer_queries,
+                background: self.background,
+                foreground: self.foreground,
+                cell_size: self.cell_size,
+                graphics: self.graphics,
+                term_name,
+            },
+            Arc::clone(&replies_pending),
         )));
         let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
 
@@ -1112,17 +1160,42 @@ impl TerminalBuilder {
         let write_tx = match dup_writer(pair.master.as_ref()) {
             Some(mut pty_writer) => {
                 let (tx, rx) = mpsc::sync_channel::<WriteRequest>(REPLY_QUEUE_DEPTH);
+                let written = Arc::clone(&replies_pending);
                 thread::Builder::new()
                     .name("termlens-pty-writer".into())
                     .spawn(move || {
                         while let Ok(request) = rx.recv() {
+                            // Take everything already queued behind this one
+                            // and write it as a single `write(2)`. One
+                            // syscall per burst instead of one per entry is
+                            // what keeps the writer from becoming the
+                            // bottleneck the reader outruns.
+                            let mut bytes = request.bytes;
+                            let mut acks: Vec<_> = request.ack.into_iter().collect();
+                            let mut replies = request.replies;
+                            while let Ok(next) = rx.try_recv() {
+                                bytes.extend_from_slice(&next.bytes);
+                                acks.extend(next.ack);
+                                replies += next.replies;
+                            }
                             let result = pty_writer
-                                .write_all(&request.bytes)
+                                .write_all(&bytes)
                                 .and_then(|()| pty_writer.flush());
+                            // Only after the bytes are actually out: while
+                            // this write is blocked, those replies are
+                            // undelivered, and that is precisely what the
+                            // next wait's error needs to be able to say.
+                            written.fetch_sub(replies, Ordering::Relaxed);
                             let failed = result.is_err();
-                            if let Some(ack) = request.ack {
-                                // The caller may have given up already.
-                                let _ = ack.send(result);
+                            for ack in acks {
+                                // Every waiter in the batch learns the same
+                                // outcome, which is the truth: their bytes
+                                // went out together. Callers may have given
+                                // up already.
+                                let _ = ack.send(match &result {
+                                    Ok(()) => Ok(()),
+                                    Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
+                                });
                             }
                             if failed {
                                 break; // terminal gone; nothing left to write
@@ -1140,9 +1213,18 @@ impl TerminalBuilder {
         let reader_shared = Arc::clone(&shared);
         let reader_writer = Arc::clone(&writer);
         let reader_tx = write_tx.clone();
+        let reader_pending = Arc::clone(&replies_pending);
         thread::Builder::new()
             .name("termlens-pty-reader".into())
-            .spawn(move || reader_loop(reader, &reader_shared, &reader_writer, reader_tx.as_ref()))
+            .spawn(move || {
+                reader_loop(
+                    reader,
+                    &reader_shared,
+                    &reader_writer,
+                    reader_tx.as_ref(),
+                    &reader_pending,
+                )
+            })
             .map_err(Error::Io)?;
 
         let child = pair.slave.spawn_command(cmd).map_err(|e| Error::Spawn {
@@ -1383,6 +1465,7 @@ fn reader_loop(
     shared: &Monitor<EmuState>,
     writer: &SharedWriter,
     replies_to: Option<&mpsc::SyncSender<WriteRequest>>,
+    pending: &AtomicUsize,
 ) {
     let mut buf = [0u8; 8192];
     loop {
@@ -1426,19 +1509,39 @@ fn reader_loop(
                     state.touch();
                     replies
                 });
-                for reply in replies {
+                // One queue entry per *read*, not per reply. A single read
+                // can carry dozens of queries — a startup batch is a
+                // legitimate pattern — and enqueueing each answer separately
+                // made the reader outrun the writer, which issues one
+                // `write(2)` per entry. The queue then filled and answers
+                // were discarded although nothing was blocked: measured at
+                // 173 of 200 delivered back-to-back, and 200 of 200 with a
+                // millisecond between the queries. Batching is what removes
+                // that mismatch; ordering is unchanged, since the bytes are
+                // concatenated in the order they were built.
+                if !replies.is_empty() {
+                    let batch: Vec<u8> = replies.concat();
+                    let count = replies.len();
                     match replies_to {
-                        // Hand off without waiting. A full queue means the
-                        // application has stopped reading its input
-                        // entirely, so it cannot be waiting on these bytes
-                        // — and the drain must keep running regardless.
+                        // Still without waiting. Now that a full queue means
+                        // 64 reads' worth of answers are already pending, it
+                        // really does mean the application has stopped
+                        // reading — and the drain must keep running
+                        // regardless, or the child blocks writing into a full
+                        // output buffer and the harness deadlocks itself.
                         Some(tx) => {
                             let request = WriteRequest {
-                                bytes: reply,
+                                bytes: batch,
                                 ack: None, // fire and forget: never wait here
+                                replies: count,
                             };
+                            // Counted as pending *before* the hand-off, so a
+                            // wait that fails while the write is blocked can
+                            // say how many answers are stuck.
+                            pending.fetch_add(count, Ordering::Relaxed);
                             if let Err(mpsc::TrySendError::Full(_)) = tx.try_send(request) {
-                                shared.mutate(|state| state.replies_dropped += 1);
+                                pending.fetch_sub(count, Ordering::Relaxed);
+                                shared.mutate(|state| state.replies_dropped += count);
                             }
                         }
                         // No responder thread (no descriptor to duplicate):
@@ -1446,7 +1549,7 @@ fn reader_loop(
                         None => {
                             let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
                             if let Some(writer) = writer.as_mut() {
-                                let _ = writer.write_all(&reply).and_then(|()| writer.flush());
+                                let _ = writer.write_all(&batch).and_then(|()| writer.flush());
                             }
                         }
                     }
@@ -1977,6 +2080,8 @@ impl Terminal {
         let request = WriteRequest {
             bytes: bytes.to_vec(),
             ack: Some(ack_tx),
+            // Typed input, not a reply: it reports through `ack`.
+            replies: 0,
         };
         // A full queue means the writer thread is already stuck on an
         // earlier write, which is the same diagnosis. (`send_timeout` is

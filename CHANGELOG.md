@@ -23,6 +23,20 @@ listed under a **Changed** or **Removed** heading.
   therefore an error on one CI runner and silently discarded on the other.
   Every sender now checks for a closed terminal before writing, so the
   answer is the same everywhere and no keystroke is lost quietly.
+- **A batch of startup probes is answered in full.** 200 queries asked back to
+  back returned 173 answers; 400 returned 235; 1000 returned 285. The stated
+  cause — the application had stopped reading — was wrong: the same 200
+  queries a millisecond apart were all answered, so nothing was blocked
+  anywhere. The reader was enqueueing one channel entry per *reply* while the
+  writer issued one `write(2)` per entry, and the queue filled because the
+  reader outran it. Replies from one read are now one entry, the writer
+  coalesces whatever is queued behind it into a single write, and 50/200/400/1000
+  are all answered completely.
+- **An application that never reads is named in the wait error.** Batching made
+  discards rare, which is right — but it also meant a genuinely non-reading
+  application produced a plain timeout with the answers stuck in the writer and
+  nothing saying so. Undelivered replies are now counted whether they were
+  dropped *or* are blocked mid-write, so the note appears in either case.
 - **`drag` reports one motion per cell crossed**, on a straight interpolated
   path, instead of a single report at the destination. Seven cells crossed
   used to produce one motion event. Invisible to an application that only

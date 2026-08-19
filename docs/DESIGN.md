@@ -131,9 +131,25 @@ Replies go to that same thread, fire-and-forget: writing them from the
 reader thread would block whenever the application stopped reading its
 input; the drain would stop, the child would then block writing into a
 full output buffer, and the harness would deadlock itself with no test
-input involved. A full queue means the application is not reading at
-all — so it cannot be waiting on those bytes — and the replies are
-counted and named in the next wait's error instead.
+input involved.
+
+**One queue entry per read, not per reply**, and the writer coalesces
+whatever is queued behind the entry it took into a single `write(2)`. This
+is not an optimization; it is the fix for a correctness bug. The queue was
+filling for a reason that had nothing to do with the application: the reader
+could build answers faster than the writer could issue one syscall each, so
+a startup batch of 200 probes lost 27 answers with nothing blocked anywhere
+— confirmed by spacing the same queries a millisecond apart, which answered
+all 200. The comment in the source claiming a full queue meant the
+application had stopped reading was simply false.
+
+With one entry per read, filling the queue really does take 64 reads' worth
+of undelivered answers, which no reading application produces. That makes a
+discard rare and moves the diagnosis: an application that genuinely never
+reads now leaves its answers *stuck in a blocked write* rather than dropped,
+so both are counted — a lock-free pending count the writer clears only once
+bytes are actually out — and the next wait's error names the total either
+way.
 
 `XTGETTCAP` is answered from a table of capabilities the crate actually
 implements, and every entry was checked against the code that implements it
