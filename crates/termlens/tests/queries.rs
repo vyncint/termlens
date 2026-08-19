@@ -377,3 +377,145 @@ fn decrqm_answers_for_focus_reporting() -> termlens::Result<()> {
     }
     Ok(())
 }
+
+/// Pixel geometry: unset it stays unanswered and named, set it makes the
+/// two escape replies and `TIOCGWINSZ` agree instead of contradicting.
+#[test]
+fn cell_size_answers_the_pixel_reports_and_the_ioctl() -> termlens::Result<()> {
+    // Unset: no reply, and the query is named in the next timeout.
+    let mut mute = Terminal::builder()
+        .size(80, 6)
+        .timeout(Duration::from_millis(700))
+        .args([
+            "-c",
+            r"stty -icanon -echo; printf '\033[16t'; printf MARK; read g",
+        ])
+        .spawn("/bin/sh")?;
+    let err = mute
+        .wait_until(|s| s.contains("NEVER"))
+        .expect_err("must time out");
+    assert!(err.to_string().contains("^[[16t"), "named: {err}");
+    mute.send(Key::Enter)?;
+
+    // Declared: both reports answer from it.
+    let mut t = Terminal::builder()
+        .size(80, 24)
+        .cell_size(10, 20)
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                // `min 0 time 20` so a read returns on a 2s timer instead of
+                // blocking on a byte count guessed wrong.
+                r"stty -icanon -echo min 0 time 20; ",
+                r"printf '\033[16t'; a=$(dd bs=1 count=32 2>/dev/null | tr -d '\033'); ",
+                r"printf '\033[14t'; b=$(dd bs=1 count=32 2>/dev/null | tr -d '\033'); ",
+                r#"printf 'cell[%s] win[%s] DONE' "$a" "$b"; read g"#
+            ),
+        ])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let row = t.screen().row_text(0);
+    // CSI 6 ; height ; width t   and   CSI 4 ; rows*h ; cols*w t
+    assert!(row.contains("cell[[6;20;10t]"), "{row:?}");
+    assert!(row.contains("win[[4;480;800t]"), "{row:?}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// The ioctl must agree with the escape replies, and a resize must move
+/// both — otherwise an application gets two different answers to the same
+/// question depending on how it asks.
+#[test]
+fn tiocgwinsz_agrees_with_the_declared_cell_size() -> termlens::Result<()> {
+    let read_winsize = r#"python3 -c 'import fcntl,struct,sys,termios; b=fcntl.ioctl(0,termios.TIOCGWINSZ,b"\0"*8); r,c,xp,yp=struct.unpack("HHHH",b); print(f"{c}x{r} px {xp}x{yp}", flush=True)'"#;
+    let script = format!("{read_winsize}; read a; {read_winsize}; printf DONE; read b");
+
+    let mut t = Terminal::builder()
+        .size(80, 24)
+        .cell_size(10, 20)
+        .timeout(Duration::from_secs(20))
+        .args(["-c", &script])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("px"))?;
+    assert!(
+        t.screen().contains("80x24 px 800x480"),
+        "the ioctl must carry the declared geometry:\n{}",
+        t.screen()
+    );
+
+    t.resize(40, 12)?;
+    t.send(Key::Enter)?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    assert!(
+        t.screen().contains("40x12 px 400x240"),
+        "a resize must recompute it:\n{}",
+        t.screen()
+    );
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// Declaring graphics support is how an application that probes first can
+/// reach its pixel path at all. The default claims nothing, which is what
+/// makes the declaration meaningful.
+#[test]
+fn declared_graphics_support_reaches_the_probe() -> termlens::Result<()> {
+    // Default: DA1 has no `4`, and the kitty probe goes unanswered.
+    let mut plain = Terminal::builder()
+        .size(80, 6)
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            r"stty -icanon -echo; printf '\033[c'; head -c 9 | tr -d '\033'; printf ' DONE'; read g",
+        ])
+        .spawn("/bin/sh")?;
+    plain.wait_until(|s| s.contains("DONE"))?;
+    let row = plain.screen().row_text(0);
+    assert!(
+        row.contains("[?62;22c"),
+        "nothing claimed by default: {row:?}"
+    );
+    assert!(!row.contains(";4;"), "no sixel by default: {row:?}");
+    plain.send(Key::Enter)?;
+
+    // Sixel declared: DA1 gains `4`, so a probing application sees it.
+    let mut sixel = Terminal::builder()
+        .size(80, 6)
+        .graphics(termlens::Graphics::Sixel)
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            r"stty -icanon -echo; printf '\033[c'; head -c 11 | tr -d '\033'; printf ' DONE'; read g",
+        ])
+        .spawn("/bin/sh")?;
+    sixel.wait_until(|s| s.contains("DONE"))?;
+    assert!(
+        sixel.screen().row_text(0).contains("[?62;4;22c"),
+        "{:?}",
+        sixel.screen().row_text(0)
+    );
+    sixel.send(Key::Enter)?;
+
+    // Kitty declared: the a=q probe is answered OK, echoing the id.
+    let mut kitty = Terminal::builder()
+        .size(80, 6)
+        .graphics(termlens::Graphics::Kitty)
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            r"stty -icanon -echo; printf '\033_Gi=7,a=q;\033\\'; head -c 9 | tr -d '\033'; printf ' DONE'; read g",
+        ])
+        .spawn("/bin/sh")?;
+    kitty.wait_until(|s| s.contains("DONE"))?;
+    assert!(
+        kitty.screen().row_text(0).contains("_Gi=7;OK"),
+        "the reply echoes the id the probe named: {:?}",
+        kitty.screen().row_text(0)
+    );
+    kitty.send(Key::Enter)?;
+    Ok(())
+}

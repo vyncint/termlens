@@ -91,6 +91,23 @@ listed under a **Changed** or **Removed** heading.
   as a question: a transmission is an instruction, and treating one as a
   query would put "the application queried the terminal" into the next
   timeout of every application that draws.
+- **`TerminalBuilder::cell_size`** — pixels per character cell, which is the
+  one number every layout decision in an image-drawing application rests on.
+  `CSI 16 t` then answers `CSI 6 ; h ; w t`, `CSI 14 t` answers the window
+  size in pixels, and `TIOCGWINSZ` carries the same geometry instead of
+  contradicting it; a `resize` recomputes all three. Opt-in: unset, the two
+  reports stay unanswered and the ioctl reports zero pixels — which is what a
+  real terminal reports when it has none, so the default is not a lie and no
+  existing suite moves onto a pixel branch.
+- **`TerminalBuilder::graphics` and `Graphics`** — declare the inline-graphics
+  support of the terminal being simulated. `Graphics::Sixel` adds `4` to the
+  DA1 reply; `Graphics::Kitty` answers the `a=q` capability probe with
+  `APC _G i=<id> ; OK ST`, echoing the id the probe named. Default unchanged:
+  nothing claimed. This is not the harness lying — it is the test author
+  stating which terminal is simulated, the way `background_rgb` states a
+  background — and it matters because for an application that *probes first*
+  the pixel path is not merely unasserted, it is unreachable: the code never
+  runs, so nothing about it is testable.
 - **`Terminal::focus_in` / `Terminal::focus_out`** and
   **`Screen::focus_events`** — focus reporting (mode 1004). The unfocused
   branch of a UI was not merely unasserted, it was **unreachable**: no input

@@ -142,11 +142,37 @@ pub(crate) enum Query {
     /// this truthfully lets an application that *probes* before using a
     /// mode (synchronized output above all) turn it on against termlens.
     RequestMode(u32),
+    /// Window size in pixels: `CSI 14 t`.
+    WindowSizePixels,
+    /// Character cell size in pixels: `CSI 16 t`.
+    CellSizePixels,
+    /// The kitty graphics capability probe (`APC _G … a=q … ST`), carrying
+    /// the image id it named so a reply can echo it back.
+    ///
+    /// Classified rather than refused outright: whether it is answerable
+    /// depends on what the test declared the terminal supports, and that is
+    /// policy, which lives with the caller.
+    KittyGraphics {
+        /// The `i=` value, if the probe gave one.
+        id: Option<u32>,
+        /// Printable rendering, for the timeout note when unanswered.
+        shape: String,
+    },
     /// Recognized as a question, but one termlens has no answer for
     /// (XTGETTCAP, kitty `CSI ? u`, DECRQSS, `OSC 4`/`OSC 52`, other
     /// DSR/DA/XTWINOPS reports, …). Carries a printable rendering for
     /// diagnostics.
     Unanswerable(String),
+}
+
+/// The numeric value of `key` in a kitty control block (`i=3,a=q`), if it
+/// carries one. Keys are comma-separated `name=value` pairs.
+fn kitty_key(control: &[u8], key: &[u8]) -> Option<u32> {
+    control
+        .split(|&b| b == b',')
+        .find_map(|pair| pair.strip_prefix(key))
+        .and_then(|digits| std::str::from_utf8(digits).ok())
+        .and_then(|digits| digits.parse().ok())
 }
 
 /// Render a captured escape sequence printably (`ESC` becomes `^[`).
@@ -460,6 +486,11 @@ impl SeqTracker {
             (0, b'c') if params_empty || single(0) => Some(Query::PrimaryDa),
             (b'>', b'c') if params_empty || single(0) => Some(Query::SecondaryDa),
             (0, b't') if single(18) => Some(Query::TextAreaSize),
+            // Pixel geometry. Arithmetic, not rendering: answering claims
+            // nothing the emulator cannot do, and DA1 goes on declining
+            // graphics either way.
+            (0, b't') if single(14) => Some(Query::WindowSizePixels),
+            (0, b't') if single(16) => Some(Query::CellSizePixels),
             // Questions we can recognize but not answer.
             (_, b'n') | (b'=', b'c') => Some(Query::Unanswerable(self.seq_printable())),
             (b'?', b'u') if params_empty => {
@@ -469,7 +500,7 @@ impl SeqTracker {
                 Some(Query::Unanswerable(self.seq_printable()))
             }
             (0, b't')
-                if matches!(self.csi_first_param, 11 | 13 | 14 | 16 | 19 | 20 | 21)
+                if matches!(self.csi_first_param, 11 | 13 | 19 | 20 | 21)
                     && self.csi_param_count == 1 =>
             {
                 Some(Query::Unanswerable(self.seq_printable()))
@@ -556,16 +587,20 @@ impl SeqTracker {
             let is_query = control.windows(3).any(|w| w == b"a=q");
             if !is_query {
                 self.graphics.record(true, self.dcs_data_len);
+                return SeqEvent::None;
             }
-            if is_query {
-                // Only an explicit `a=q` is a question. A transmission is an
-                // instruction, and classifying one as a query would put "the
-                // application queried the terminal" into the next timeout of
-                // every application that draws — a false diagnosis, and a
-                // loud one.
-                return SeqEvent::Query(Query::Unanswerable(self.seq_printable()));
-            }
-            return SeqEvent::None;
+            // Only an explicit `a=q` is a question. A transmission is an
+            // instruction, and classifying one as a query would put "the
+            // application queried the terminal" into the next timeout of
+            // every application that draws — a false diagnosis, and a loud
+            // one.
+            // The control block is `G` followed by the comma-separated
+            // keys, so the keys start one byte in.
+            let id = kitty_key(&control[1..], b"i=");
+            return SeqEvent::Query(Query::KittyGraphics {
+                id,
+                shape: self.seq_printable(),
+            });
         }
         // Sixel: `DCS <params> q <data> ST`, with no intermediate byte. The
         // intermediate is the whole distinction from the two DCS questions
@@ -833,9 +868,11 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                SeqEvent::Query(Query::Unanswerable(q)) if q.contains("_G")
+                SeqEvent::Query(Query::KittyGraphics { id: Some(1), shape })
+                    if shape.contains("_G")
             )),
-            "the query must be named for the timeout note: {events:?}"
+            "the query must be classified, with its id, for a reply or a \
+             timeout note: {events:?}"
         );
         // A query carries no picture, so it is not counted as one.
         assert!(t.graphics().is_empty());
@@ -1111,12 +1148,40 @@ mod tests {
         );
     }
 
+    /// The pixel reports used to be lumped in with the whole `CSI t` family
+    /// as unanswerable. They are arithmetic, so they are now their own
+    /// questions — while the rest of the family stays declined.
+    #[test]
+    fn pixel_geometry_queries_are_classified_apart_from_the_rest() {
+        assert_eq!(queries_of(b"\x1b[14t"), vec![Query::WindowSizePixels]);
+        assert_eq!(queries_of(b"\x1b[16t"), vec![Query::CellSizePixels]);
+        assert_eq!(queries_of(b"\x1b[18t"), vec![Query::TextAreaSize]);
+        for shape in [&b"\x1b[11t"[..], b"\x1b[13t", b"\x1b[19t", b"\x1b[20t"] {
+            assert!(
+                matches!(queries_of(shape).as_slice(), [Query::Unanswerable(_)]),
+                "still declined: {shape:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kitty_probe_without_an_id_still_classifies() {
+        assert_eq!(
+            queries_of(b"\x1b_Ga=q;\x1b\\"),
+            vec![Query::KittyGraphics {
+                id: None,
+                shape: "^[_Ga=q;^[\\".into()
+            }]
+        );
+    }
+
     #[test]
     fn recognizes_unanswerable_questions_with_their_shape() {
         let q = queries_of(b"\x1b[?u");
         assert_eq!(q, vec![Query::Unanswerable("^[[?u".into())]);
-        let q = queries_of(b"\x1b[14t");
-        assert_eq!(q, vec![Query::Unanswerable("^[[14t".into())]);
+        // 14t and 16t are classified in their own right now; 13t is not.
+        let q = queries_of(b"\x1b[13t");
+        assert_eq!(q, vec![Query::Unanswerable("^[[13t".into())]);
         let q = queries_of(b"\x1bP+q544e\x1b\\"); // XTGETTCAP
         assert_eq!(q, vec![Query::Unanswerable("^[P+q544e^[\\".into())]);
         let q = queries_of(b"\x1b[=c"); // DA3

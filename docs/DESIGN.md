@@ -71,6 +71,24 @@ would close a loop on itself: the application concludes the terminal has
 no mouse, never enables tracking, and `click` then refuses, blaming the
 application for a decision we caused.
 
+Two answers are **declared rather than derived**, and they are the exception
+that shows where the honesty rule actually points. A cell size in pixels
+(`cell_size`, answering `CSI 14 t` and `CSI 16 t`, and filling the PTY's
+pixel fields so `TIOCGWINSZ` agrees) and inline-graphics support
+(`graphics`, adding `4` to DA1 or answering kitty's `a=q`) are facts about a
+terminal, not about an emulator, so there is nothing for us to be truthful
+*about* until a test says which terminal it is simulating. Both default to
+claiming nothing, which keeps every existing suite where it was.
+
+What makes the declaration legitimate rather than a lie is the failure it
+removes. An application that **asks before drawing** is told no, correctly
+takes its text path, and its pixel branch then never executes — so the branch
+is not unasserted, it is unreachable, and no test can say anything about code
+that does not run. That is the same shape as the `?2026` finding: one
+unrecognized query was the difference between an unmodified binary being
+untestable-by-frame and fully frame-testable. Declining by default is right;
+having no way to decline differently was not.
+
 `OSC 52` is the one sequence we **capture** rather than answer. A write
 (`OSC 52 ; targets ; base64`) is not a question, and the only evidence a
 test could otherwise see is the application's own toast — which proves the

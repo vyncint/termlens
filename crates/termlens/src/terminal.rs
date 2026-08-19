@@ -130,6 +130,36 @@ fn dup_writer(_master: &dyn portable_pty::MasterPty) -> Option<std::fs::File> {
     None
 }
 
+/// Inline-graphics support a test declares the simulated terminal has.
+///
+/// Default [`None`](Graphics::None): termlens claims nothing it cannot
+/// render, so an application that probes is told there is no graphics
+/// support and correctly takes its text path.
+///
+/// That default is right, and it has a consequence worth separating from
+/// mere unassertability: for an application that **asks first**, the pixel
+/// path is not just unasserted, it is **unreachable** — the code never runs,
+/// so nothing about it is testable, well-behaved or not. Declaring support
+/// is not the harness lying; it is the test author stating which terminal is
+/// being simulated, exactly as
+/// [`background_rgb`](TerminalBuilder::background_rgb) states a background.
+///
+/// One terminal is simulated at a time. Pair this with
+/// [`cell_size`](TerminalBuilder::cell_size): an application that draws
+/// pixels needs to know how big a cell is before it can lay anything out.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Graphics {
+    /// Nothing claimed. DA1 reports `?62;22c` and the kitty probe goes
+    /// unanswered — the default, and the honest one.
+    #[default]
+    None,
+    /// Sixel: DA1 gains `4`, so a probing application sees the capability.
+    Sixel,
+    /// Kitty graphics: the `a=q` capability probe is answered `OK`.
+    Kitty,
+}
+
 /// Scroll-wheel direction for [`Terminal::scroll`].
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,6 +425,11 @@ struct EmuState {
     /// Background color reported to OSC 11 queries.
     background: (u8, u8, u8),
     foreground: (u8, u8, u8),
+    /// Pixels per character cell, as the test declared them. `None` leaves
+    /// `CSI 14 t` / `CSI 16 t` unanswered.
+    cell_size: Option<(u16, u16)>,
+    /// Inline-graphics support the test declared the terminal has.
+    graphics: Graphics,
     /// Distinct queries that went unanswered, in first-seen order, each
     /// with the read it most recently arrived in — timeout errors surface
     /// these so a blocked probe is diagnosable.
@@ -416,6 +451,8 @@ impl EmuState {
         respond: bool,
         background: (u8, u8, u8),
         foreground: (u8, u8, u8),
+        cell_size: Option<(u16, u16)>,
+        graphics: Graphics,
     ) -> Self {
         Self {
             emu,
@@ -428,6 +465,8 @@ impl EmuState {
             respond,
             background,
             foreground,
+            cell_size,
+            graphics,
             unanswered: Vec::new(),
             unanswered_overflow: 0,
             replies_dropped: 0,
@@ -482,13 +521,55 @@ impl EmuState {
                 format!("\x1b[{prefix}{};{}R", row + 1, col + 1).into_bytes()
             }
             Query::OperatingStatus => b"\x1b[0n".to_vec(),
-            // VT220 with ANSI color: honest — nothing claimed (sixel,
-            // kitty, …) that the emulator cannot render.
-            Query::PrimaryDa => b"\x1b[?62;22c".to_vec(),
+            // VT220 with ANSI color. By default nothing is claimed that the
+            // emulator cannot render; `4` (sixel) appears only when a test
+            // declared it, which is the author stating which terminal is
+            // being simulated rather than the harness inventing a claim.
+            Query::PrimaryDa => match self.graphics {
+                Graphics::Sixel => b"\x1b[?62;4;22c".to_vec(),
+                _ => b"\x1b[?62;22c".to_vec(),
+            },
             Query::SecondaryDa => b"\x1b[>1;10;0c".to_vec(),
             Query::TextAreaSize => {
                 let screen = self.emu.snapshot();
                 format!("\x1b[8;{};{}t", screen.rows(), screen.cols()).into_bytes()
+            }
+            // Pixel geometry, answered only from a declared cell size.
+            // Unconfigured, these stay unanswered and named in the next
+            // timeout: zero is what a real terminal reports when it has no
+            // pixel geometry, and applications are written to read that as
+            // "unknown" — so silence keeps an existing suite on the path it
+            // takes today instead of moving it onto a pixel branch.
+            Query::CellSizePixels => match self.cell_size {
+                Some((w, h)) => format!("\x1b[6;{h};{w}t").into_bytes(),
+                None => {
+                    self.note_unanswered(query_shape(query));
+                    return None;
+                }
+            },
+            Query::WindowSizePixels => match self.cell_size {
+                Some((w, h)) => {
+                    let screen = self.emu.snapshot();
+                    let height = u32::from(screen.rows()) * u32::from(h);
+                    let width = u32::from(screen.cols()) * u32::from(w);
+                    format!("\x1b[4;{height};{width}t").into_bytes()
+                }
+                None => {
+                    self.note_unanswered(query_shape(query));
+                    return None;
+                }
+            },
+            // The kitty capability probe. Answered only when a test declared
+            // kitty support; otherwise it stays a named-but-unanswered query,
+            // which is what it was before there was any way to declare.
+            Query::KittyGraphics { id, shape } => {
+                if self.graphics == Graphics::Kitty {
+                    let id = id.unwrap_or(0);
+                    format!("\x1b_Gi={id};OK\x1b\\").into_bytes()
+                } else {
+                    self.note_unanswered(shape.clone());
+                    return None;
+                }
             }
             Query::OscColor {
                 code: 11,
@@ -639,6 +720,8 @@ pub struct TerminalBuilder {
     background: (u8, u8, u8),
     foreground: (u8, u8, u8),
     scrollback: usize,
+    cell_size: Option<(u16, u16)>,
+    graphics: Graphics,
 }
 
 impl Default for TerminalBuilder {
@@ -655,6 +738,8 @@ impl Default for TerminalBuilder {
             background: (0, 0, 0),
             foreground: (0xff, 0xff, 0xff),
             scrollback: DEFAULT_SCROLLBACK,
+            cell_size: None,
+            graphics: Graphics::None,
         }
     }
 }
@@ -830,6 +915,52 @@ impl TerminalBuilder {
         self
     }
 
+    /// Pixels per character cell, which is the one number every layout
+    /// decision in an image-drawing application rests on.
+    ///
+    /// Unset by default, and then `CSI 14 t` (window size in pixels) and
+    /// `CSI 16 t` (cell size in pixels) stay unanswered and named in the next
+    /// timeout, while `TIOCGWINSZ` reports zero pixels. That is not a gap
+    /// dressed up as a default: zero is exactly what a real terminal reports
+    /// when it has no pixel geometry to give, and applications are written to
+    /// read it as "unknown". Leaving it unset also keeps an existing suite on
+    /// the path its application takes today rather than moving it onto a
+    /// pixel branch.
+    ///
+    /// Setting it makes all three agree — the two escape replies and the
+    /// ioctl — and a [`resize`](Terminal::resize) recomputes them:
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// let mut t = termlens::Terminal::builder()
+    ///     .size(80, 24)
+    ///     .cell_size(10, 20)                       // px per cell
+    ///     .graphics(termlens::Graphics::Sixel)     // and a way to draw
+    ///     .spawn("./my-app")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// This is arithmetic, not rendering: answering claims nothing the
+    /// emulator cannot do, and DA1 goes on declining graphics unless
+    /// [`graphics`](Self::graphics) says otherwise.
+    #[must_use]
+    pub fn cell_size(mut self, width: u16, height: u16) -> Self {
+        self.cell_size = Some((width, height));
+        self
+    }
+
+    /// Declare the inline-graphics support the simulated terminal has.
+    /// Defaults to [`Graphics::None`] — nothing claimed.
+    ///
+    /// See [`Graphics`] for why declaring is not the harness lying, and pair
+    /// it with [`cell_size`](Self::cell_size).
+    #[must_use]
+    pub fn graphics(mut self, graphics: Graphics) -> Self {
+        self.graphics = graphics;
+        self
+    }
+
     /// Reject configurations that cannot produce a working terminal.
     ///
     /// These are all programming errors in the test, and each has a
@@ -899,8 +1030,11 @@ impl TerminalBuilder {
             .openpty(PtySize {
                 rows: self.rows,
                 cols: self.cols,
-                pixel_width: 0,
-                pixel_height: 0,
+                // So TIOCGWINSZ agrees with the escape replies instead of
+                // contradicting them. Zero when no cell size was declared,
+                // which is what a real terminal reports when it has none.
+                pixel_width: pixel_span(self.cols, self.cell_size.map(|(w, _)| w)),
+                pixel_height: pixel_span(self.rows, self.cell_size.map(|(_, h)| h)),
             })
             .map_err(|e| Error::Pty(format!("openpty failed: {e}")))?;
 
@@ -939,6 +1073,8 @@ impl TerminalBuilder {
             self.answer_queries,
             self.background,
             self.foreground,
+            self.cell_size,
+            self.graphics,
         )));
         let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
 
@@ -1004,6 +1140,7 @@ impl TerminalBuilder {
             exit_status: None,
             command_desc,
             frame_cursor: 0,
+            cell_size: self.cell_size,
         })
     }
 }
@@ -1034,6 +1171,13 @@ fn strip_paste_markers(text: &str) -> String {
 /// 5000x5000 was accepted and turned the first wait into a 16-second
 /// timeout that blamed the predicate.
 const MAX_DIMENSION: u16 = 1000;
+
+/// `cells * per_cell` for `TIOCGWINSZ`, saturating, and 0 when no cell size
+/// was declared — the value a real terminal reports when it has no pixel
+/// geometry.
+fn pixel_span(cells: u16, per_cell: Option<u16>) -> u16 {
+    per_cell.map_or(0, |px| cells.saturating_mul(px))
+}
 
 /// Reject a terminal size that cannot work, or cannot work usefully.
 ///
@@ -1091,6 +1235,9 @@ fn query_shape(query: &Query) -> String {
         Query::PrimaryDa => "^[[c".into(),
         Query::SecondaryDa => "^[[>c".into(),
         Query::TextAreaSize => "^[[18t".into(),
+        Query::WindowSizePixels => "^[[14t".into(),
+        Query::CellSizePixels => "^[[16t".into(),
+        Query::KittyGraphics { shape, .. } => shape.clone(),
         Query::OscColor { code, .. } => format!("^[]{code};?"),
         Query::RequestMode(mode) => format!("^[[?{mode}$p"),
         Query::Unanswerable(shape) => shape.clone(),
@@ -1208,6 +1355,9 @@ pub struct Terminal {
     /// satisfy two waits. Advanced by a resize too: a frame drawn at the
     /// old size is not the repaint that answers the new one.
     frame_cursor: u64,
+    /// Declared pixels per cell, kept so a resize can recompute the PTY's
+    /// pixel geometry rather than silently dropping it.
+    cell_size: Option<(u16, u16)>,
 }
 
 impl Terminal {
@@ -2209,8 +2359,8 @@ impl Terminal {
             .resize(PtySize {
                 rows,
                 cols,
-                pixel_width: 0,
-                pixel_height: 0,
+                pixel_width: pixel_span(cols, self.cell_size.map(|(w, _)| w)),
+                pixel_height: pixel_span(rows, self.cell_size.map(|(_, h)| h)),
             })
             .map_err(|e| Error::Pty(format!("resize failed: {e}")))?;
         // A frame drawn at the old size cannot be the repaint that answers
