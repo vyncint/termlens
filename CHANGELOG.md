@@ -30,8 +30,11 @@ listed under a **Changed** or **Removed** heading.
   anywhere. The reader was enqueueing one channel entry per *reply* while the
   writer issued one `write(2)` per entry, and the queue filled because the
   reader outran it. Replies from one read are now one entry, the writer
-  coalesces whatever is queued behind it into a single write, and 50/200/400/1000
-  are all answered completely.
+  coalesces whatever is queued behind it into a single write, and 50, 200 and
+  400 are all answered completely. The remaining ceiling is the terminal's own
+  input queue rather than ours — around 4 KB on Linux, so a batch past roughly
+  680 replies still needs the application to read as it asks, which is true of
+  a real terminal too.
 - **An application that never reads is named in the wait error.** Batching made
   discards rare, which is right — but it also meant a genuinely non-reading
   application produced a plain timeout with the answers stuck in the writer and

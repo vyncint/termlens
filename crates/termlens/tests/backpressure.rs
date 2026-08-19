@@ -41,9 +41,15 @@ fn answered(n: usize) -> termlens::Result<usize> {
 /// writer issued one `write(2)` each.
 #[test]
 fn a_batch_of_probes_is_answered_in_full() -> termlens::Result<()> {
-    // 200 and 400 are the sizes the issue measured losses at; 1000 is where
-    // it recorded 285 of 1000 answered.
-    for n in [50usize, 200, 400, 1000] {
+    // 200 and 400 are the sizes the issue measured losses at (94 and 161
+    // answered).
+    //
+    // The ceiling here is the terminal's own input queue, not ours: 400 DSR
+    // replies are ~2.4 KB, inside Linux's 4 KB `N_TTY_BUF_SIZE`, while 1000
+    // would be ~6 KB and could not be delivered before the application read
+    // — a real terminal blocks there too. What this pins is that nothing is
+    // lost while the answers still fit, which is the bug.
+    for n in [50usize, 200, 400] {
         assert_eq!(answered(n)?, n, "asked {n} probes back to back");
     }
     Ok(())
@@ -55,10 +61,13 @@ fn a_batch_of_probes_is_answered_in_full() -> termlens::Result<()> {
 /// indistinguishable from a query never asked.
 #[test]
 fn an_application_that_never_reads_is_named_in_the_error() -> termlens::Result<()> {
-    // Thousands of queries, and a child that never reads a byte back.
+    // Enough queries to fill any terminal's input queue, and a child that
+    // never reads a byte back. `exec` in the tail so the sleeping process
+    // *is* the child rather than a grandchild that would outlive the kill and
+    // hold the terminal open.
     let script = "stty -icanon -echo; i=0; \
-                  while [ $i -lt 4000 ]; do printf '\\033[6n'; i=$((i+1)); done; \
-                  printf ASKED; while true; do sleep 5; done";
+                  while [ $i -lt 2000 ]; do printf '\\033[6n'; i=$((i+1)); done; \
+                  printf ASKED; exec sleep 30";
     let mut t = Terminal::builder()
         .size(80, 6)
         .timeout(Duration::from_millis(900))
