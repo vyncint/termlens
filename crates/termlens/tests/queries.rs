@@ -519,3 +519,103 @@ fn declared_graphics_support_reaches_the_probe() -> termlens::Result<()> {
     kitty.send(Key::Enter)?;
     Ok(())
 }
+
+/// XTGETTCAP was the last of the common startup probes with no reply. Both
+/// halves matter: a known capability is answered truthfully, and an unknown
+/// one is *explicitly* declined — which is what turns a hang into a decision.
+#[test]
+fn xtgettcap_answers_what_it_knows_and_declines_the_rest() -> termlens::Result<()> {
+    // TN=544e, colors=636f6c6f7273, and a made-up name that must be refused.
+    let mut t = Terminal::builder()
+        .size(120, 6)
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"stty -icanon -echo min 0 time 20; ",
+                r"printf '\033P+q544e;636f6c6f7273;7a7a7a7a\033\\'; ",
+                r"dd bs=1 count=200 2>/dev/null | tr -d '\033' | tr -s '\\' '|'; ",
+                r"printf ' DONE'; read g"
+            ),
+        ])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let text = t.screen().text();
+
+    // TN -> "xterm-256color", hex 787465726d2d323536636f6c6f72
+    assert!(
+        text.contains("P1+r544e=787465726d2d323536636f6c6f72"),
+        "TN must report the TERM the child was given:\n{text}"
+    );
+    // colors -> "256", hex 323536
+    assert!(
+        text.contains("P1+r636f6c6f7273=323536"),
+        "colors must be answered:\n{text}"
+    );
+    // An unknown capability is declined with status 0, not ignored.
+    assert!(
+        text.contains("P0+r7a7a7a7a"),
+        "an unknown capability must be explicitly refused:\n{text}"
+    );
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// `TN` reports whatever `TERM` the child was actually given, so an
+/// application cannot get two different answers to "which terminal is this?".
+#[test]
+fn xtgettcap_tn_follows_the_configured_term() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .size(120, 6)
+        .env("TERM", "xterm")
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"stty -icanon -echo min 0 time 20; ",
+                r"printf '\033P+q544e\033\\'; ",
+                r"dd bs=1 count=80 2>/dev/null | tr -d '\033' | tr -s '\\' '|'; ",
+                r#"printf ' term=%s DONE' "$TERM"; read g"#
+            ),
+        ])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let text = t.screen().text();
+    // "xterm" is hex 787465726d
+    assert!(text.contains("P1+r544e=787465726d"), "{text}");
+    assert!(text.contains("term=xterm"), "{text}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// A key capability must be the bytes termlens actually sends, or an
+/// application that reads it and then matches input against it will not
+/// match what arrives.
+#[test]
+fn xtgettcap_key_capabilities_match_what_send_emits() -> termlens::Result<()> {
+    // kcuu1 = 6b63757531; the value must be ESC [ A = 1b5b41.
+    let mut t = Terminal::builder()
+        .size(120, 6)
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"stty -icanon -echo min 0 time 20; ",
+                r"printf '\033P+q6b63757531\033\\'; ",
+                r"dd bs=1 count=80 2>/dev/null | tr -d '\033' | tr -s '\\' '|'; ",
+                r"printf ' DONE'; read g"
+            ),
+        ])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let text = t.screen().text();
+    assert!(text.contains("P1+r6b63757531=1b5b41"), "{text}");
+    // And that is exactly what Key::Up encodes to in default mode.
+    assert_eq!(termlens::Key::Up.encode(), b"\x1b[A");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}

@@ -91,6 +91,17 @@ listed under a **Changed** or **Removed** heading.
   as a question: a transmission is an instruction, and treating one as a
   query would put "the application queried the terminal" into the next
   timeout of every application that draws.
+- **`XTGETTCAP` is answered** — the last of the common startup probes with no
+  reply. A capability termlens genuinely implements gets a truthful
+  `DCS 1 + r <name>=<value> ST`; anything else gets an explicit
+  `DCS 0 + r <name> ST`, which is the half that turns a hang into a decision:
+  the application learns the answer is no instead of waiting for one. The set
+  is `TN`/`name` (whatever `TERM` the child was actually given, so the two
+  cannot disagree), `Co`/`colors`, and the cursor, home/end, delete, page and
+  backspace keys — each the exact bytes `Key::encode` emits, checked against
+  the code that emits them rather than copied from a terminfo file. One reply
+  per requested capability, because the status flag is per-reply and a mixed
+  request cannot be answered in one frame without lying about half of it.
 - **`TerminalBuilder::cell_size`** — pixels per character cell, which is the
   one number every layout decision in an image-drawing application rests on.
   `CSI 16 t` then answers `CSI 6 ; h ; w t`, `CSI 14 t` answers the window

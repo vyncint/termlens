@@ -430,6 +430,9 @@ struct EmuState {
     cell_size: Option<(u16, u16)>,
     /// Inline-graphics support the test declared the terminal has.
     graphics: Graphics,
+    /// The `TERM` the child was given, reported back for XTGETTCAP's `TN`
+    /// so the two cannot disagree.
+    term_name: String,
     /// Distinct queries that went unanswered, in first-seen order, each
     /// with the read it most recently arrived in — timeout errors surface
     /// these so a blocked probe is diagnosable.
@@ -453,6 +456,7 @@ impl EmuState {
         foreground: (u8, u8, u8),
         cell_size: Option<(u16, u16)>,
         graphics: Graphics,
+        term_name: String,
     ) -> Self {
         Self {
             emu,
@@ -467,6 +471,7 @@ impl EmuState {
             foreground,
             cell_size,
             graphics,
+            term_name,
             unanswered: Vec::new(),
             unanswered_overflow: 0,
             replies_dropped: 0,
@@ -585,6 +590,17 @@ impl EmuState {
                 // `Emulator::mode_state`.
                 let value = self.emu.mode_state(*mode).report_value();
                 format!("\x1b[?{mode};{value}$y").into_bytes()
+            }
+            Query::RequestTermcap { names, shape } => {
+                match termcap_reply(names, &self.term_name) {
+                    Some(reply) => reply,
+                    None => {
+                        // Nothing in the request was even readable as a hex
+                        // name, so there is no cap to answer or decline.
+                        self.note_unanswered(shape.clone());
+                        return None;
+                    }
+                }
             }
             Query::Unanswerable(shape) => {
                 self.note_unanswered(shape.clone());
@@ -1046,6 +1062,13 @@ impl TerminalBuilder {
         if self.env_clear {
             cmd.env_clear();
         }
+        // Whatever the child is told TERM is, XTGETTCAP's `TN` reports the
+        // same string — an application must not be able to get two different
+        // answers to "which terminal is this?".
+        let term_name = self.envs.iter().find(|(k, _)| k == "TERM").map_or_else(
+            || "xterm-256color".to_owned(),
+            |(_, v)| v.to_string_lossy().into_owned(),
+        );
         if !self.envs.iter().any(|(k, _)| k == "TERM") {
             cmd.env("TERM", "xterm-256color");
         }
@@ -1075,6 +1098,7 @@ impl TerminalBuilder {
             self.foreground,
             self.cell_size,
             self.graphics,
+            term_name,
         )));
         let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
 
@@ -1172,6 +1196,84 @@ fn strip_paste_markers(text: &str) -> String {
 /// timeout that blamed the predicate.
 const MAX_DIMENSION: u16 = 1000;
 
+/// The value termlens can truthfully report for a terminfo capability, or
+/// `None` to decline it.
+///
+/// Every entry is something the crate genuinely implements, checked against
+/// the code that implements it rather than copied from a terminfo file. The
+/// key capabilities are the exact bytes [`Key::encode`](crate::Key::encode)
+/// produces in default mode, so an application that reads them and then
+/// matches incoming input against them will match what we actually send.
+///
+/// Declining is the default for everything else, and it is not a shrug: a
+/// guessed capability is worse than an absent one, because the application
+/// will believe it.
+fn termcap_value(name: &str, term_name: &str) -> Option<String> {
+    Some(match name {
+        // The terminal name we told the child, so `TN` and `$TERM` agree.
+        "TN" | "name" => term_name.to_owned(),
+        // 256 indexed colours, which is what `xterm-256color` promises and
+        // what the emulator renders.
+        "Co" | "colors" => "256".to_owned(),
+        // Key capabilities: exactly what `Key::encode` emits.
+        "kbs" => "\u{7f}".to_owned(),
+        "kcuu1" => "\u{1b}[A".to_owned(),
+        "kcud1" => "\u{1b}[B".to_owned(),
+        "kcuf1" => "\u{1b}[C".to_owned(),
+        "kcub1" => "\u{1b}[D".to_owned(),
+        "khome" => "\u{1b}[H".to_owned(),
+        "kend" => "\u{1b}[F".to_owned(),
+        "kdch1" => "\u{1b}[3~".to_owned(),
+        "kpp" => "\u{1b}[5~".to_owned(),
+        "knp" => "\u{1b}[6~".to_owned(),
+        _ => return None,
+    })
+}
+
+/// Build the XTGETTCAP reply for a `;`-separated list of hex-encoded names.
+///
+/// One `DCS` per requested capability: the status flag is per-reply (`1` =
+/// known, `0` = unsupported), so a mixed request cannot be answered in a
+/// single frame without lying about one half of it. `None` when nothing in
+/// the request decoded as a name at all.
+fn termcap_reply(names: &str, term_name: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut decoded_any = false;
+    for hex_name in names.split(';').filter(|s| !s.is_empty()) {
+        let Some(name) = decode_hex(hex_name) else {
+            continue;
+        };
+        decoded_any = true;
+        match termcap_value(&name, term_name) {
+            Some(value) => out.extend_from_slice(
+                format!("\x1bP1+r{hex_name}={}\x1b\\", encode_hex(value.as_bytes())).as_bytes(),
+            ),
+            // Explicitly unsupported, which is the half of this that turns a
+            // hang into a decision: the application learns the answer is no
+            // instead of waiting for one.
+            None => {
+                out.extend_from_slice(format!("\x1bP0+r{hex_name}\x1b\\").as_bytes());
+            }
+        }
+    }
+    decoded_any.then_some(out)
+}
+
+/// Hex to text, or `None` if it is not an even-length hex string.
+fn decode_hex(hex: &str) -> Option<String> {
+    if hex.len() % 2 != 0 || hex.is_empty() {
+        return None;
+    }
+    let bytes: Option<Vec<u8>> = (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok())
+        .collect();
+    String::from_utf8(bytes?).ok()
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// `cells * per_cell` for `TIOCGWINSZ`, saturating, and 0 when no cell size
 /// was declared — the value a real terminal reports when it has no pixel
 /// geometry.
@@ -1238,6 +1340,7 @@ fn query_shape(query: &Query) -> String {
         Query::WindowSizePixels => "^[[14t".into(),
         Query::CellSizePixels => "^[[16t".into(),
         Query::KittyGraphics { shape, .. } => shape.clone(),
+        Query::RequestTermcap { shape, .. } => shape.clone(),
         Query::OscColor { code, .. } => format!("^[]{code};?"),
         Query::RequestMode(mode) => format!("^[[?{mode}$p"),
         Query::Unanswerable(shape) => shape.clone(),

@@ -135,7 +135,16 @@ input involved. A full queue means the application is not reading at
 all — so it cannot be waiting on those bytes — and the replies are
 counted and named in the next wait's error instead.
 
-Whatever remains unanswered (XTGETTCAP, pixel-size reports, …) is
+`XTGETTCAP` is answered from a table of capabilities the crate actually
+implements, and every entry was checked against the code that implements it
+rather than copied from a terminfo file — the key capabilities are literally
+the bytes `Key::encode` produces, so an application that reads them and then
+matches incoming input against them matches what we send. Anything else gets
+the explicit "unsupported" reply, which is the half that matters: a
+capability we guessed at would be believed, while a refusal lets the
+application decide instead of wait.
+
+Whatever remains unanswered (DECRQSS, the non-pixel `CSI t` reports, …) is
 recorded, and the next wait timeout names it: "the application queried
 the terminal (`^[[14t`) and received no answer" — a hang becomes a
 diagnosis. `answer_queries(false)` mutes the responder for tests that

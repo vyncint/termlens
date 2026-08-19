@@ -158,6 +158,15 @@ pub(crate) enum Query {
         /// Printable rendering, for the timeout note when unanswered.
         shape: String,
     },
+    /// XTGETTCAP: "what is capability `name`?" — `DCS + q <hex names> ST`,
+    /// carrying the hex-encoded names exactly as asked, since the reply must
+    /// echo each one back.
+    RequestTermcap {
+        /// Hex-encoded names, `;`-separated, as the application wrote them.
+        names: String,
+        /// Printable rendering, for the timeout note when unanswered.
+        shape: String,
+    },
     /// Recognized as a question, but one termlens has no answer for
     /// (XTGETTCAP, kitty `CSI ? u`, DECRQSS, `OSC 4`/`OSC 52`, other
     /// DSR/DA/XTWINOPS reports, …). Carries a printable rendering for
@@ -254,9 +263,13 @@ pub(crate) struct SeqTracker {
     /// Payload bytes after the header, so a payload's size is reportable
     /// without keeping the payload.
     dcs_data_len: u64,
-    /// The opening bytes of a DCS-class payload, enough to read a kitty
-    /// control block (`G` plus `key=value` pairs up to the first `;`).
-    dcs_head: [u8; 48],
+    /// The opening bytes of a DCS-class payload: enough for a kitty control
+    /// block (`G` plus `key=value` pairs up to the first `;`) and for an
+    /// XTGETTCAP name list, whose hex names run about six bytes each. A
+    /// longer list truncates, and the names that survive are still answered
+    /// — a partial answer beats none, and the ones we drop get no reply,
+    /// which is what an application already has to handle.
+    dcs_head: [u8; 128],
     dcs_head_len: u8,
 }
 
@@ -289,7 +302,7 @@ impl SeqTracker {
             dcs_final: 0,
             dcs_intermediate: 0,
             dcs_data_len: 0,
-            dcs_head: [0; 48],
+            dcs_head: [0; 128],
             dcs_head_len: 0,
         }
     }
@@ -609,8 +622,23 @@ impl SeqTracker {
             self.graphics.record(false, self.dcs_data_len);
             return SeqEvent::None;
         }
-        // DCS questions: XTGETTCAP (`ESC P + q … ST`) and DECRQSS
-        // (`ESC P $ q … ST`, "what is the current setting of …?").
+        // XTGETTCAP (`ESC P + q <hex names> ST`). The names are needed to
+        // answer, so they come out of the header capture rather than the
+        // 24-byte diagnostic buffer.
+        if self.dcs_introducer == b'P' && self.dcs_intermediate == b'+' && self.dcs_final == b'q' {
+            let head = &self.dcs_head[..usize::from(self.dcs_head_len)];
+            // `head` starts at `+`; the names follow the `q`.
+            let names = head
+                .iter()
+                .position(|&b| b == b'q')
+                .map(|at| String::from_utf8_lossy(&head[at + 1..]).into_owned())
+                .unwrap_or_default();
+            return SeqEvent::Query(Query::RequestTermcap {
+                names,
+                shape: self.seq_printable(),
+            });
+        }
+        // DECRQSS (`ESC P $ q … ST`, "what is the current setting of …?").
         let body = &self.seq_buf[..usize::from(self.seq_len)];
         if matches!(body.get(2..4), Some(b"+q" | b"$q")) {
             return SeqEvent::Query(Query::Unanswerable(self.seq_printable()));
@@ -1164,6 +1192,22 @@ mod tests {
         }
     }
 
+    /// The names must come out intact, since the reply has to echo each one
+    /// back — and they are longer than the 24-byte diagnostic buffer can
+    /// hold, which is why they come from the header capture instead.
+    #[test]
+    fn xtgettcap_carries_the_names_it_was_asked_for() {
+        // "TN" and "colors", hex-encoded, as xterm-style clients send them.
+        let q = queries_of(b"\x1bP+q544e;636f6c6f7273\x1b\\");
+        assert_eq!(
+            q,
+            vec![Query::RequestTermcap {
+                names: "544e;636f6c6f7273".into(),
+                shape: "^[P+q544e;636f6c6f7273^[\\".into(),
+            }]
+        );
+    }
+
     #[test]
     fn a_kitty_probe_without_an_id_still_classifies() {
         assert_eq!(
@@ -1182,8 +1226,9 @@ mod tests {
         // 14t and 16t are classified in their own right now; 13t is not.
         let q = queries_of(b"\x1b[13t");
         assert_eq!(q, vec![Query::Unanswerable("^[[13t".into())]);
-        let q = queries_of(b"\x1bP+q544e\x1b\\"); // XTGETTCAP
-        assert_eq!(q, vec![Query::Unanswerable("^[P+q544e^[\\".into())]);
+        // XTGETTCAP is answerable now; DECRQSS still is not.
+        let q = queries_of(b"\x1bP$qm\x1b\\"); // DECRQSS
+        assert_eq!(q, vec![Query::Unanswerable("^[P$qm^[\\".into())]);
         let q = queries_of(b"\x1b[=c"); // DA3
         assert_eq!(q, vec![Query::Unanswerable("^[[=c".into())]);
         let q = queries_of(b"\x1b]12;?\x07"); // cursor color
