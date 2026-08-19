@@ -49,7 +49,7 @@ fn signal_term_exercises_the_graceful_shutdown_path() -> termlens::Result<()> {
     t.signal(Signal::Term)?;
     t.wait_until(|s| s.contains("got-term"))?;
     let status = t.wait_exit()?;
-    assert_eq!(status.code(), 7, "status: {status}");
+    assert_eq!(status.code(), Some(7), "status: {status}");
     assert_eq!(status.signal(), None, "trapped, not killed: {status}");
     Ok(())
 }
@@ -105,4 +105,52 @@ fn wait_until_for_overrides_the_default_timeout_downward() {
         other => panic!("expected a timeout, got: {other}"),
     }
     // Drop kills the parked child.
+}
+
+/// A signalled child has no exit code, and `code()` now says so. It used to
+/// report the OS placeholder (1) alongside the true signal, so
+/// `assert_eq!(status.code(), 1)` passed on a SIGTERM path — and would have
+/// kept passing if the application later began exiting 1 for a real reason.
+#[test]
+#[cfg(unix)]
+fn a_signalled_child_reports_no_exit_code() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args(["-c", "printf READY; read guard"])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("READY"))?;
+
+    t.signal(termlens::Signal::Term)?;
+    let status = t.wait_exit()?;
+
+    assert!(!status.success(), "status: {status}");
+    assert_eq!(
+        status.code(),
+        None,
+        "a signalled child has no code: {status}"
+    );
+    assert!(
+        status.signal().is_some(),
+        "the signal is the answer: {status}"
+    );
+    // The Display no longer carries the invented number either.
+    let shown = status.to_string();
+    assert!(shown.starts_with("killed by signal"), "{shown}");
+    assert!(!shown.contains("code"), "{shown}");
+    Ok(())
+}
+
+/// The normal path is unchanged: a real exit code is still reported, now
+/// wrapped in `Some`.
+#[test]
+fn a_normally_exited_child_still_reports_its_code() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args(["-c", "exit 7"])
+        .spawn("/bin/sh")?;
+    let status = t.wait_exit()?;
+    assert_eq!(status.code(), Some(7), "status: {status}");
+    assert_eq!(status.signal(), None);
+    assert_eq!(status.to_string(), "exit code 7");
+    Ok(())
 }

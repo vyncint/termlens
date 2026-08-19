@@ -26,7 +26,7 @@ fn echo_reaches_the_screen_and_child_exits_cleanly() -> termlens::Result<()> {
     t.send(Key::Enter)?;
     let status = t.wait_exit()?;
     assert!(status.success(), "full status: {status}");
-    assert_eq!(status.code(), 0);
+    assert_eq!(status.code(), Some(0));
     Ok(())
 }
 
@@ -38,7 +38,7 @@ fn exit_codes_are_reported() -> termlens::Result<()> {
     t.send(Key::Enter)?;
     let status = t.wait_exit()?;
     assert!(!status.success());
-    assert_eq!(status.code(), 7, "full status: {status}");
+    assert_eq!(status.code(), Some(7), "full status: {status}");
 
     // Idempotent: a second wait returns the cached status.
     assert_eq!(t.wait_exit()?, status);

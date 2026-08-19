@@ -297,17 +297,21 @@ impl Signal {
 /// Exit status of the child process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitStatus {
-    code: u32,
+    code: Option<u32>,
     success: bool,
     signal: Option<Box<str>>,
 }
 
 impl ExitStatus {
     fn from_pty(status: &portable_pty::ExitStatus) -> Self {
+        let signal = status.signal().map(Box::<str>::from);
         Self {
-            code: status.exit_code(),
+            // A signalled process has no exit status: POSIX gives you one
+            // or the other. The OS reports a placeholder (1) in that slot
+            // and reporting it back would invent a value.
+            code: signal.is_none().then(|| status.exit_code()),
             success: status.success(),
-            signal: status.signal().map(Into::into),
+            signal,
         }
     }
 
@@ -317,11 +321,21 @@ impl ExitStatus {
         self.success
     }
 
-    /// The raw exit code as reported by the OS. Note that a signal-killed
-    /// child has no real exit code — the OS reports a placeholder (1);
-    /// check [`signal`](Self::signal) to tell the two cases apart.
+    /// The exit code, or `None` when a signal killed the child.
+    ///
+    /// POSIX gives a process *either* an exit status *or* a terminating
+    /// signal, never both, so `None` is the honest answer rather than a
+    /// gap in the API. The OS does put a placeholder (1) in the code slot
+    /// for a signalled child, and returning it made
+    /// `assert_eq!(status.code(), 1)` pass on a `SIGTERM` path — which
+    /// would keep passing if the application later started exiting 1 for a
+    /// real reason, a different event entirely.
+    ///
+    /// Mirrors [`std::process::ExitStatus::code`], which is `Option` for
+    /// the same reason. [`signal`](Self::signal) has the answer when this
+    /// is `None`, and [`Display`](fmt::Display) prints whichever applies.
     #[must_use]
-    pub fn code(&self) -> u32 {
+    pub fn code(&self) -> Option<u32> {
         self.code
     }
 
@@ -331,7 +345,7 @@ impl ExitStatus {
     /// Distinguishing "the app exited 1" from "something killed the app" is
     /// the difference between a failing test and a failing test *harness* —
     /// always assert with the full status in the message, e.g.
-    /// `assert_eq!(status.code(), 7, "status: {status}")`.
+    /// `assert_eq!(status.code(), Some(7), "status: {status}")`.
     #[must_use]
     pub fn signal(&self) -> Option<&str> {
         self.signal.as_deref()
@@ -340,9 +354,14 @@ impl ExitStatus {
 
 impl fmt::Display for ExitStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.signal {
-            Some(signal) => write!(f, "killed by signal: {signal} (code {})", self.code),
-            None => write!(f, "exit code {}", self.code),
+        match (&self.signal, self.code) {
+            // No "(code 1)" tail: that number is the OS placeholder, not a
+            // status the process ever returned.
+            (Some(signal), _) => write!(f, "killed by signal: {signal}"),
+            (None, Some(code)) => write!(f, "exit code {code}"),
+            // Neither: not reachable through `from_pty`, but the type
+            // allows it, so say so rather than printing a made-up code.
+            (None, None) => write!(f, "exited with no status reported"),
         }
     }
 }

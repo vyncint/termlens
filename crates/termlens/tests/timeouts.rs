@@ -54,7 +54,7 @@ fn wait_idle_for_overrides_the_builder_default() -> termlens::Result<()> {
 fn wait_exit_for_overrides_the_builder_default() -> termlens::Result<()> {
     let mut t = slow_app("sleep 1; exit 3");
     let status = t.wait_exit_for(Duration::from_secs(30))?;
-    assert_eq!(status.code(), 3, "status: {status}");
+    assert_eq!(status.code(), Some(3), "status: {status}");
     Ok(())
 }
 

@@ -30,6 +30,22 @@ listed under a **Changed** or **Removed** heading.
   application was simply gone. The tracking-mode error is unchanged for a
   live application that really has not enabled it.
 
+- **`ExitStatus::code` returns `Option<u32>`**, `None` when a signal killed
+  the child. A signalled process has no exit status — POSIX gives one or
+  the other — and the OS placeholder (1) that filled the slot made
+  `assert_eq!(status.code(), 1)` pass on a `SIGTERM` path, which would keep
+  passing if the application later started exiting 1 for a real reason.
+  `Display` no longer prints the invented `(code 1)` tail either. Mirrors
+  `std::process::ExitStatus::code`.
+- **`Screen::rect_text` panics on a backwards range** instead of returning
+  `""` or a bare `"\n"`, and both axes now behave identically — they did
+  not. It reads as "this pane is empty", a plausible assertion outcome, so
+  a call with its arguments swapped passed for the wrong reason and kept
+  passing. A panic rather than an error for the same reason `&slice[3..0]`
+  panics: a backwards literal range is a mistake in the calling source, not
+  a fact about the terminal. Out-of-range bounds are a different thing and
+  stay clamped.
+
 ### Added
 
 - **`Error::Write`**, carrying the screen at the moment of the failed

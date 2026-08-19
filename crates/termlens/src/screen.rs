@@ -550,10 +550,29 @@ impl Screen {
     /// Cells contribute as in [`Screen::row_text`]: blanks render as
     /// spaces, and a wide character contributes where its leading cell
     /// sits — even when the rectangle cuts it in half.
+    ///
+    /// # Panics
+    ///
+    /// If either range runs backwards (`3..0`). Note the argument order:
+    /// this is the one API in the crate that takes **columns first**, to
+    /// match [`TerminalBuilder::size`](crate::TerminalBuilder::size), while
+    /// every cell address elsewhere is `(row, col)`. Swapping the two is
+    /// therefore the mistake to expect, and a swap can invert a range.
+    ///
+    /// A panic rather than an error, deliberately, and for the same reason
+    /// `&slice[3..0]` panics: a backwards range is not a fact about the
+    /// terminal discovered at runtime, it is a mistake in the calling
+    /// source. Returned quietly it read as `""` — "this pane is empty",
+    /// a perfectly plausible assertion outcome — so a mis-ordered call
+    /// passed for the wrong reason and kept passing. Clippy's
+    /// `reversed_empty_ranges` already refuses a written-out `3..0`; this
+    /// covers the computed bounds it cannot see. Out-of-*range* bounds are
+    /// different and stay clamped: asking for more screen than exists is a
+    /// reasonable thing to do.
     #[must_use]
     pub fn rect_text(&self, cols: impl RangeBounds<u16>, rows: impl RangeBounds<u16>) -> String {
-        let (col_start, col_end) = clamp_range(&cols, self.cols);
-        let (row_start, row_end) = clamp_range(&rows, self.rows);
+        let (col_start, col_end) = clamp_range(&cols, self.cols, "column");
+        let (row_start, row_end) = clamp_range(&rows, self.rows, "row");
         let mut out = String::new();
         for row in row_start..row_end {
             if row > row_start {
@@ -652,7 +671,12 @@ impl Screen {
 }
 
 /// Clamp any range expression to `0..len`, as `(start, end)` exclusive.
-fn clamp_range(range: &impl RangeBounds<u16>, len: u16) -> (u16, u16) {
+///
+/// # Panics
+///
+/// If the range runs backwards, naming the axis. See [`Screen::rect_text`]
+/// for why this is a panic and not an error.
+fn clamp_range(range: &impl RangeBounds<u16>, len: u16, axis: &str) -> (u16, u16) {
     let start = match range.start_bound() {
         Bound::Included(&s) => s,
         Bound::Excluded(&s) => s.saturating_add(1),
@@ -663,6 +687,13 @@ fn clamp_range(range: &impl RangeBounds<u16>, len: u16) -> (u16, u16) {
         Bound::Excluded(&e) => e,
         Bound::Unbounded => len,
     };
+    // Checked on what the caller wrote, before clamping, so the message
+    // quotes their numbers. Clamping cannot create an inversion: both
+    // bounds are clamped to the same `len`.
+    assert!(
+        start <= end,
+        "rect_text: {axis} range starts at {start} but ends at {end}"
+    );
     (start.min(len), end.min(len))
 }
 
@@ -897,6 +928,40 @@ mod tests {
         assert_eq!(s.rect_text(0..3, 5..9), ""); // rows clamp to nothing
         assert_eq!(s.rect_text(20..30, ..1), ""); // cols clamp to nothing
         assert_eq!(s.rect_text(.., ..), s.text()); // the whole screen
+    }
+
+    /// Both axes, because they used to disagree: a reversed column range
+    /// returned a bare "\n" and a reversed row range returned "", and
+    /// neither said anything was wrong.
+    ///
+    /// The bounds come from variables on purpose. A *literal* `3..0` is
+    /// already caught by clippy's `reversed_empty_ranges`, so the case that
+    /// reaches a running test is the computed one — which is also the shape
+    /// a swapped-argument mistake actually takes.
+    #[test]
+    #[should_panic(expected = "column range starts at 3 but ends at 0")]
+    fn a_reversed_column_range_panics() {
+        let s = screen(10, 3, &["0123456789", "abcdefghij", "xyz"]);
+        let (from, to) = (3, 0);
+        let _ = s.rect_text(from..to, 0..2);
+    }
+
+    #[test]
+    #[should_panic(expected = "row range starts at 2 but ends at 0")]
+    fn a_reversed_row_range_panics() {
+        let s = screen(10, 3, &["0123456789", "abcdefghij", "xyz"]);
+        let (from, to) = (2, 0);
+        let _ = s.rect_text(0..3, from..to);
+    }
+
+    /// Out-of-range is not the same mistake and stays clamped: asking for
+    /// more screen than exists is reasonable, asking backwards is not.
+    #[test]
+    fn out_of_range_bounds_still_clamp() {
+        let s = screen(10, 3, &["0123456789", "abcdefghij", "xyz"]);
+        assert_eq!(s.rect_text(8..99, ..1), "89");
+        assert_eq!(s.rect_text(.., 1..99), "abcdefghij\nxyz");
+        assert_eq!(s.rect_text(5..5, ..), "\n\n"); // empty but not inverted
     }
 
     #[test]

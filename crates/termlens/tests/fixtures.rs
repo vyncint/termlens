@@ -88,7 +88,7 @@ fn form_echo_reports_nonzero_exit_codes() -> termlens::Result<()> {
     t.send(Key::Ctrl('x'))?;
     let status = t.wait_exit()?;
     assert!(!status.success());
-    assert_eq!(status.code(), 42, "full status: {status}");
+    assert_eq!(status.code(), Some(42), "full status: {status}");
     Ok(())
 }
 
