@@ -355,8 +355,31 @@ fn a_mouse_click_at_a_departed_child_blames_the_child() -> termlens::Result<()> 
             !err.to_string().contains("mouse tracking"),
             "must not blame the tracking mode: {err}"
         );
-        assert!(err.to_string().contains("exited"), "{err}");
+        assert!(err.to_string().contains("the child is gone"), "{err}");
     }
+    Ok(())
+}
+
+/// Refusing the write is ours, not the OS's, and that is the point: a raw
+/// write to a closed terminal fails with EIO on macOS and *succeeds* on
+/// Linux. This test failed on Linux and passed on macOS before `send`
+/// gained the liveness check, which is exactly the split it exists to
+/// close — a keystroke silently swallowed on one runner and reported on the
+/// other.
+#[test]
+fn a_departed_child_is_refused_identically_on_every_platform() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args(["-c", "printf bye"])
+        .spawn("/bin/sh")?;
+    assert!(t.wait_exit()?.success());
+    // Not "the write failed" — the terminal is closed, so there is nothing
+    // to write to, and that verdict is reached before any syscall.
+    let err = t.send_str("swallowed?").unwrap_err();
+    assert!(
+        err.to_string().contains("the terminal is closed"),
+        "the refusal must name the closed terminal, not an OS errno: {err}"
+    );
     Ok(())
 }
 

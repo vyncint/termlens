@@ -1187,18 +1187,25 @@ impl Terminal {
     /// # Errors
     ///
     /// [`Error::Write`] when the bytes cannot be handed to the child — it
-    /// exited and the OS tore the terminal down, or it stopped reading its
-    /// input and the write gave up at the terminal's deadline rather than
-    /// blocking forever. The error embeds the screen, so a CI log shows
-    /// what the application was displaying when the keystroke had nowhere
-    /// to go.
+    /// released the terminal, or it stopped reading its input and the write
+    /// gave up at the terminal's deadline rather than blocking forever. The
+    /// error embeds the screen, so a CI log shows what the application was
+    /// displaying when the keystroke had nowhere to go.
+    ///
+    /// This is the same answer on every platform. A raw write to a closed
+    /// terminal fails with `EIO` on macOS and *succeeds* on Linux, where
+    /// the bytes queue up for a reader that no longer exists; termlens
+    /// checks first, so a keystroke is never silently swallowed on one OS
+    /// and reported on another.
     ///
     /// [`send_str`](Self::send_str), [`paste`](Self::paste),
     /// [`click`](Self::click), [`drag`](Self::drag) and
     /// [`scroll`](Self::scroll) share this contract.
     pub fn send(&mut self, key: impl Input + fmt::Debug) -> Result<()> {
+        let what = format!("{key:?}");
+        self.ensure_deliverable(&what)?;
         let application_cursor = self.input_modes().application_cursor;
-        self.write_input(&key.encode_modal(application_cursor), &format!("{key:?}"))
+        self.write_input(&key.encode_modal(application_cursor), &what)
     }
 
     /// Send a string literally (UTF-8 bytes, no key mapping, no newline).
@@ -1207,6 +1214,7 @@ impl Terminal {
     ///
     /// Same contract as [`send`](Self::send).
     pub fn send_str(&mut self, s: &str) -> Result<()> {
+        self.ensure_deliverable("literal text")?;
         self.write_input(s.as_bytes(), "literal text")
     }
 
@@ -1239,6 +1247,7 @@ impl Terminal {
     ///
     /// Same contract as [`send`](Self::send).
     pub fn paste(&mut self, text: &str) -> Result<()> {
+        self.ensure_deliverable("a paste")?;
         // Real terminals send CR for a pasted line break; \r\n collapses
         // to a single CR rather than two line breaks.
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
@@ -1423,30 +1432,40 @@ impl Terminal {
         }
     }
 
-    /// Refuse an input operation the child provably cannot receive.
+    /// Refuse an input operation nothing can receive.
     ///
-    /// Called *before* the mouse-tracking check, because the two failures
-    /// are not equally likely to be the real one: a reaped child cannot
-    /// have enabled tracking either, so checking the mode first reports a
-    /// missing `CSI ?1000 h` when the actual cause is that nobody is
-    /// there. The write itself would fail too, but with EIO — accurate and
-    /// far less informative than naming the exit.
+    /// Two reasons this is a check of our own rather than a reliance on the
+    /// write failing.
+    ///
+    /// **The platforms disagree.** Writing to a master whose slave is
+    /// closed fails with `EIO` on macOS and *succeeds* on Linux, where the
+    /// bytes land in an input queue with no reader left to drain it. So
+    /// without this, the same call reports an error on one CI runner and
+    /// silently discards a keystroke on the other — and silence is the
+    /// worse half, because the test then fails at a later wait whose screen
+    /// never changed, far from the cause.
+    ///
+    /// **It gives the mouse path the right diagnosis.** Called before the
+    /// mouse-tracking check, because a child that is gone never enabled
+    /// tracking either: checking the mode first answers "no `CSI ?1000 h`
+    /// was seen", which is true and is not the reason.
+    ///
+    /// The signal is **EOF, not "did we reap something"**. EOF means every
+    /// slave descriptor is closed, which is exactly the condition under
+    /// which no one can read — while a reaped child says nothing about a
+    /// grandchild that inherited the terminal and is still reading it.
     fn ensure_deliverable(&mut self, what: &str) -> Result<()> {
-        let gone = match &self.exit_status {
-            Some(status) => Some(format!("the child has exited ({status})")),
-            None => self
-                .shared
-                .lock()
-                .eof
-                .then(|| "the child released the terminal (EOF)".to_owned()),
-        };
-        match gone {
-            None => Ok(()),
-            Some(reason) => Err(Error::Write {
-                what: format!("{what} to `{}` ({reason})", self.command_desc).into(),
-                screen: self.screen(),
-            }),
+        if !self.shared.lock().eof {
+            return Ok(());
         }
+        let reason = match &self.exit_status {
+            Some(status) => format!("the child is gone ({status}) and the terminal is closed"),
+            None => "the child released the terminal (EOF), so nothing can read this".to_owned(),
+        };
+        Err(Error::Write {
+            what: format!("{what} to `{}` ({reason})", self.command_desc).into(),
+            screen: self.screen(),
+        })
     }
 
     /// Write to the child, bounded by the default deadline.

@@ -16,6 +16,13 @@ listed under a **Changed** or **Removed** heading.
   cannot be delivered is something a test can see, handle, or propagate
   with `?` — previously the only route from a failed write to the test was
   aborting it. Call sites grow a `?`; that is the whole migration.
+- **Typed input to a closed terminal is refused identically on Linux and
+  macOS.** It was not: a write to a master whose slave descriptors are all
+  closed fails with `EIO` on macOS and *succeeds* on Linux, queueing the
+  bytes for a reader that no longer exists. The same keystroke was
+  therefore an error on one CI runner and silently discarded on the other.
+  Every sender now checks for a closed terminal before writing, so the
+  answer is the same everywhere and no keystroke is lost quietly.
 - **A mouse action at a departed child names the child.** `click`, `drag`
   and `scroll` check liveness *before* the mouse-tracking mode, because a
   child that has exited necessarily never enabled tracking either — so the
