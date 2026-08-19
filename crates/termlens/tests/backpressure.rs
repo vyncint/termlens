@@ -55,12 +55,22 @@ fn a_batch_of_probes_is_answered_in_full() -> termlens::Result<()> {
     Ok(())
 }
 
-/// An application that never reads its input is a different case, and the one
-/// the bounded queue exists for. It must be *told*, in every wait error,
-/// rather than quietly shorted — a discarded answer that surfaces nowhere is
-/// indistinguishable from a query never asked.
+/// An application that never reads its input is the case the bounded queue
+/// exists for — and what a harness can *know* about it differs by platform,
+/// so this test asserts different things on each and says why.
+///
+/// On macOS a write into a full terminal input queue **blocks**, so the
+/// replies are visibly stuck in our writer and every wait error names them.
+/// On Linux the `n_tty` driver **discards** input once its buffer is full
+/// rather than blocking the writer: the write succeeds, the kernel throws the
+/// bytes away, and nothing observable distinguishes that from delivery. We
+/// cannot report what we were never told.
+///
+/// Both platforms still give the same *diagnosable* failure — a timeout
+/// carrying the screen — which is the part that does not depend on the
+/// kernel.
 #[test]
-fn an_application_that_never_reads_is_named_in_the_error() -> termlens::Result<()> {
+fn an_application_that_never_reads_produces_a_diagnosable_failure() -> termlens::Result<()> {
     // Enough queries to fill any terminal's input queue, and a child that
     // never reads a byte back. `exec` in the tail so the sleeping process
     // *is* the child rather than a grandchild that would outlive the kill and
@@ -78,13 +88,22 @@ fn an_application_that_never_reads_is_named_in_the_error() -> termlens::Result<(
         .wait_until(|s| s.contains("NEVER-APPEARS"))
         .expect_err("must time out");
     let msg = err.to_string();
-    assert!(
-        msg.contains("not reading its input"),
-        "the cause must be named: {msg}"
-    );
-    assert!(
-        msg.contains("could not be delivered"),
-        "and the undelivered replies counted: {msg}"
-    );
+
+    // True everywhere: the failure carries the screen, so the log shows what
+    // the application had done.
+    assert!(err.screen().is_some_and(|s| s.contains("ASKED")), "{msg}");
+
+    // True only where the kernel makes it knowable.
+    #[cfg(target_os = "macos")]
+    {
+        assert!(
+            msg.contains("not reading its input"),
+            "a blocked write means the cause is knowable: {msg}"
+        );
+        assert!(
+            msg.contains("could not be delivered"),
+            "and the undelivered replies counted: {msg}"
+        );
+    }
     Ok(())
 }

@@ -35,11 +35,14 @@ listed under a **Changed** or **Removed** heading.
   input queue rather than ours — around 4 KB on Linux, so a batch past roughly
   680 replies still needs the application to read as it asks, which is true of
   a real terminal too.
-- **An application that never reads is named in the wait error.** Batching made
-  discards rare, which is right — but it also meant a genuinely non-reading
-  application produced a plain timeout with the answers stuck in the writer and
-  nothing saying so. Undelivered replies are now counted whether they were
-  dropped *or* are blocked mid-write, so the note appears in either case.
+- **Undelivered replies are counted whether dropped or blocked mid-write**, so
+  a non-reading application is named in the wait error rather than producing a
+  plain timeout. How much of this is knowable turns out to differ by platform,
+  and `docs/DESIGN.md` §1 now says so: a write into a full terminal input queue
+  blocks on macOS, where the count is exact, while Linux's `n_tty` *discards*
+  input once its 4 KB buffer is full — the write succeeds, the kernel throws
+  the bytes away, and nothing distinguishes that from delivery. We cannot
+  report what we were never told.
 - **`drag` reports one motion per cell crossed**, on a straight interpolated
   path, instead of a single report at the destination. Seven cells crossed
   used to produce one motion event. Invisible to an application that only
