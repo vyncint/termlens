@@ -130,3 +130,49 @@ fn a_missing_program_still_reports_the_underlying_search_failure() {
         "the empty-name guard must not swallow real search failures: {message}"
     );
 }
+
+/// An implausible size used to be accepted, and the consequence appeared
+/// nowhere near the cause: 5000x5000 spawned fine, then the first wait
+/// spent 16 seconds building snapshots before timing out with a message
+/// about the predicate.
+#[test]
+fn an_implausible_size_is_refused_with_the_limit_named() {
+    for (cols, rows) in [(5000, 5000), (1001, 24), (80, 1001), (u16::MAX, u16::MAX)] {
+        let err = Terminal::builder()
+            .size(cols, rows)
+            .args(["-c", "true"])
+            .spawn("/bin/sh")
+            .expect_err("a terminal this large is refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("1000"),
+            "the limit belongs in the message: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("{cols}x{rows}")),
+            "the offending size belongs in the message: {msg}"
+        );
+    }
+}
+
+/// The boundary itself is legal, and a resize is held to the same limit —
+/// `resize` is where a computed dimension is most likely to go wrong.
+#[test]
+fn the_limit_is_inclusive_and_resize_honours_it() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .size(1000, 1000)
+        .timeout(Duration::from_secs(20))
+        .args(["-c", "printf READY; read guard"])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("READY"))?;
+    assert_eq!(t.screen().size(), (1000, 1000));
+
+    let err = t.resize(1001, 1000).expect_err("past the limit");
+    assert!(err.to_string().contains("1000"), "{err}");
+    // Refused without disturbing the grid, like the zero case.
+    assert_eq!(t.screen().size(), (1000, 1000));
+
+    t.send_str("\n")?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}

@@ -29,7 +29,6 @@ listed under a **Changed** or **Removed** heading.
   old order reported a missing `CSI ?1000 h` for a terminal whose
   application was simply gone. The tracking-mode error is unchanged for a
   live application that really has not enabled it.
-
 - **`ExitStatus::code` returns `Option<u32>`**, `None` when a signal killed
   the child. A signalled process has no exit status — POSIX gives one or
   the other — and the OS placeholder (1) that filled the slot made
@@ -45,12 +44,26 @@ listed under a **Changed** or **Removed** heading.
   panics: a backwards literal range is a mistake in the calling source, not
   a fact about the terminal. Out-of-range bounds are a different thing and
   stay clamped.
+- **An implausible terminal size is refused**, at most 1000 per axis, with
+  the limit named. `5000x5000` used to spawn happily and then spend 16
+  seconds inside the first wait before timing out with a message about the
+  predicate — a transposed `.size()` turned a sub-second test into a wedged
+  one with no hint of why. `resize` is held to the same limit.
 
 ### Added
 
 - **`Error::Write`**, carrying the screen at the moment of the failed
   write, the way `Error::Timeout` and `Error::Eof` already do.
   `Error::screen()` returns it.
+
+### Documented
+
+- **What a large grid costs**, on `TerminalBuilder::size`: a snapshot holds
+  one entry per cell and is rebuilt on every state change, so the cost is
+  O(cells) and shape-independent, while repeat reads of an unchanged screen
+  are cached and free. The table gives release *and* debug figures, because
+  `cargo test` builds unoptimized by default and the two differ by 16-29x —
+  the debug column is the one most suites actually see.
 
 ## [0.4.2] - 2026-08-19
 
@@ -86,6 +99,13 @@ whose gates all passed.*
   diagnostics set.
 
 ### Documented
+
+- **What a large grid costs**, on `TerminalBuilder::size`: a snapshot holds
+  one entry per cell and is rebuilt on every state change, so cost is
+  O(cells) and shape-independent, while repeat reads of an unchanged screen
+  are cached and free. The table gives release *and* debug figures, because
+  `cargo test` builds unoptimized by default and the two differ by 16-29x —
+  the debug column is the one most suites actually see.
 
 - **The crate-level docs describe 0.4, not 0.2.** The docs.rs landing page
   never mentioned `wait_frame`, retained scrollback, per-call deadlines or

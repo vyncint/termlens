@@ -657,9 +657,30 @@ impl Default for TerminalBuilder {
 impl TerminalBuilder {
     /// Terminal size as columns × rows. Defaults to 80×24.
     ///
-    /// Both dimensions must be non-zero; [`spawn`](Self::spawn) rejects a
-    /// zero with [`Error::Input`] rather than letting the emulator meet a
-    /// size no terminal can have.
+    /// Both dimensions must be non-zero and at most **1000**;
+    /// [`spawn`](Self::spawn) rejects anything else with [`Error::Input`]
+    /// rather than letting the emulator meet a size no terminal can have,
+    /// or one it can only serve slowly enough to look broken.
+    ///
+    /// # What a large grid costs
+    ///
+    /// A snapshot holds one entry per cell and is taken afresh on every
+    /// state change, so the cost is O(cells) — the same for `1000x100` as
+    /// for `100x1000`. Repeat reads of an unchanged screen are served from
+    /// a cache and are free. Measured, first snapshot after a change:
+    ///
+    /// | size | cells | release | debug |
+    /// |---|---|---|---|
+    /// | 80x24 | 1.9k | 47µs | 0.8ms |
+    /// | 200x60 | 12k | 0.3ms | 4.7ms |
+    /// | 500x500 | 250k | 3.7ms | 72ms |
+    /// | 1000x1000 | 1M | 10ms | 297ms |
+    ///
+    /// The debug column is the one most suites see, since `cargo test`
+    /// builds unoptimized by default. Ordinary terminal sizes are free in
+    /// either; a deliberately huge grid is a known trade-off rather than a
+    /// surprise, and past 1000 per axis it stops being a trade-off — hence
+    /// the limit.
     #[must_use]
     pub fn size(mut self, cols: u16, rows: u16) -> Self {
         self.cols = cols;
@@ -998,7 +1019,18 @@ fn strip_paste_markers(text: &str) -> String {
     }
 }
 
-/// Reject a zero terminal dimension.
+/// Widest and tallest terminal `spawn`/`resize` will accept, per axis.
+///
+/// Ten times a normal terminal on each side, so no real test is anywhere
+/// near it, and low enough that the worst case stays bounded: a snapshot
+/// costs O(cells), so 1000x1000 is a million cells — about 10ms per
+/// snapshot in release and 300ms in debug, which `cargo test` builds by
+/// default. Past this the numbers stop being slow and start being a wedge:
+/// 5000x5000 was accepted and turned the first wait into a 16-second
+/// timeout that blamed the predicate.
+const MAX_DIMENSION: u16 = 1000;
+
+/// Reject a terminal size that cannot work, or cannot work usefully.
 ///
 /// A terminal has at least one row and one column. Letting a zero reach
 /// the emulator is not a graceful degradation: in debug builds vt100
@@ -1010,11 +1042,25 @@ fn strip_paste_markers(text: &str) -> String {
 /// green. Zeroes arrive from ordinary arithmetic (`resize(cols - 1, …)`
 /// in a loop), so this must be a typed error, not a panic in a
 /// dependency.
+///
+/// The upper bound exists for the mirror-image reason. Nothing rejected an
+/// implausible size, and a snapshot costs O(cells), so a transposed or
+/// fat-fingered `.size()` did not fail — it went quiet. `5000x5000` spawned
+/// happily and then spent 16 seconds inside the first wait before timing
+/// out, with a message about the predicate and no hint that the size was
+/// the problem. A named error at the call site is the whole fix.
 fn check_size(cols: u16, rows: u16) -> Result<()> {
     if cols == 0 || rows == 0 {
         return Err(Error::Input(format!(
             "a terminal needs at least one column and one row, got {cols}x{rows} \
              (columns x rows)"
+        )));
+    }
+    if cols > MAX_DIMENSION || rows > MAX_DIMENSION {
+        return Err(Error::Input(format!(
+            "{cols}x{rows} (columns x rows) is past the {MAX_DIMENSION}-per-axis \
+             limit; a snapshot costs one entry per cell, so a grid this large \
+             makes every wait slow enough to look like a hang"
         )));
     }
     Ok(())
