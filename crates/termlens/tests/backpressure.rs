@@ -64,6 +64,10 @@ fn a_batch_of_probes_is_answered_in_full() -> termlens::Result<()> {
     // 200 and 400 are the sizes the issue measured losses at (94 and 161
     // answered).
     //
+    // 400 is also the size that failed on a loaded macOS runner at 235
+    // answered, twice, while the queue was bounded by slots rather than
+    // bytes — see `fine_grained_arrival_is_answered_in_full` for why.
+    //
     // The ceiling here is the terminal's own input queue, not ours: 400 DSR
     // replies are ~2.4 KB, inside Linux's 4 KB `N_TTY_BUF_SIZE`, while 1000
     // would be ~6 KB and could not be delivered before the application read
@@ -71,6 +75,46 @@ fn a_batch_of_probes_is_answered_in_full() -> termlens::Result<()> {
     // lost while the answers still fit, which is the bug.
     for n in [50usize, 200, 400] {
         assert_eq!(answered(n)?, n, "asked {n} probes back to back");
+    }
+    Ok(())
+}
+
+/// The shape that defeated a slot-counted queue: queries arriving across
+/// *many small reads* instead of one.
+///
+/// Batching per read fixed the original loss on a fast machine, where a
+/// startup batch lands in a single read. On a slow one the application's
+/// writes dribble out, the same 400 queries arrive in hundreds of reads, and
+/// 64 slots ran out again — 235 of 400 on a loaded macOS runner, at the same
+/// number twice. A fork per query reproduces that arrival shape on purpose.
+#[test]
+fn fine_grained_arrival_is_answered_in_full() -> termlens::Result<()> {
+    for n in [100usize, 400] {
+        // `$(true)` forks per iteration, so each query is written separately
+        // and the reader sees it in its own read.
+        let script = format!(
+            "stty -icanon -echo min 0 time 100; i=0; \
+             while [ $i -lt {n} ]; do x=$(true); printf '\\033[6n'; i=$((i+1)); done; \
+             printf ASKED; \
+             got=$(dd bs=1 count=$(({n} * 6)) 2>/dev/null | tr -cd 'R' | wc -c | tr -d ' '); \
+             printf ' GOT[%s] DONE' \"$got\"; read guard"
+        );
+        let mut t = Terminal::builder()
+            .size(80, 6)
+            .timeout(Duration::from_secs(40))
+            .args(["-c", &script])
+            .spawn("/bin/sh")?;
+        t.wait_until(|s| s.contains("DONE"))?;
+        let text = t.screen().text();
+        let got: usize = text
+            .split("GOT[")
+            .nth(1)
+            .and_then(|s| s.split(']').next())
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(usize::MAX);
+        assert_eq!(got, n, "one read per query must not lose answers");
+        t.send(Key::Enter)?;
+        assert!(t.wait_exit()?.success());
     }
     Ok(())
 }

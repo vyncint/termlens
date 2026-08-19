@@ -129,19 +129,28 @@ impl FrameTiming {
 /// string rather than a grid of cells.
 const DEFAULT_SCROLLBACK: usize = 1000;
 
-/// Writes that may be queued for the writer thread before the drain starts
-/// discarding query replies.
+/// Reply bytes that may be waiting for the writer thread before the drain
+/// starts discarding query replies.
 ///
-/// The depth counts *reads*, not answers: the reader batches every reply from
-/// one read into a single entry, and the writer coalesces whatever is queued
-/// behind it into one `write(2)`. That matters because the original premise
-/// here — a full queue means the application stopped reading — was false. It
-/// filled because the reader could build answers faster than the writer could
-/// issue one syscall each, so a startup batch of 200 probes lost 27 answers
-/// with nothing blocked anywhere. With one entry per read, filling this really
-/// does take 64 reads' worth of undelivered answers, which no reading
-/// application produces.
-const REPLY_QUEUE_DEPTH: usize = 64;
+/// **Bytes, not entries**, and that distinction is the whole point. Two
+/// earlier versions of this bound counted queue slots, and both were the wrong
+/// invariant:
+///
+/// - One slot per *reply* filled at 64 answers, so a startup batch of 200
+///   probes lost 27 of them with nothing blocked anywhere — the reader simply
+///   built answers faster than the writer issued one `write(2)` each.
+/// - One slot per *read* fixed that on a fast machine, where a batch of
+///   queries arrives in a single read. On a slow one the application's writes
+///   dribble out, the same 400 queries arrive across hundreds of small reads,
+///   and 64 slots ran out again: 235 of 400 on a loaded macOS runner, twice,
+///   at the same number both times.
+///
+/// What actually needs bounding is memory, so that is what is bounded. A DSR
+/// reply is six bytes, so a mebibyte is on the order of a hundred thousand
+/// undelivered answers — past any real application, and still a hard ceiling
+/// against a hostile one. The queue itself is unbounded, so the reader can
+/// never block on it and the drain can never stall.
+const REPLY_QUEUE_BYTES: usize = 1 << 20;
 
 /// One write handed to the writer thread.
 ///
@@ -1207,6 +1216,9 @@ impl TerminalBuilder {
             .map_err(|e| Error::Pty(format!("taking PTY writer failed: {e}")))?;
 
         let replies_pending = Arc::new(AtomicUsize::new(0));
+        // Reply bytes waiting for the writer, so the drain can refuse on a
+        // memory bound instead of on a queue-slot count.
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(Monitor::new(EmuState::new(
             Box::new(Vt100Emulator::new(self.rows, self.cols, self.scrollback)),
             Responder {
@@ -1230,8 +1242,9 @@ impl TerminalBuilder {
         // deadline and no diagnosis.
         let write_tx = match dup_writer(pair.master.as_ref()) {
             Some(mut pty_writer) => {
-                let (tx, rx) = mpsc::sync_channel::<WriteRequest>(REPLY_QUEUE_DEPTH);
+                let (tx, rx) = mpsc::channel::<WriteRequest>();
                 let written = Arc::clone(&replies_pending);
+                let drained = Arc::clone(&queued_bytes);
                 thread::Builder::new()
                     .name("termlens-pty-writer".into())
                     .spawn(move || {
@@ -1249,6 +1262,7 @@ impl TerminalBuilder {
                                 acks.extend(next.ack);
                                 replies += next.replies;
                             }
+                            let queued = bytes.len();
                             let result = pty_writer
                                 .write_all(&bytes)
                                 .and_then(|()| pty_writer.flush());
@@ -1257,6 +1271,10 @@ impl TerminalBuilder {
                             // undelivered, and that is precisely what the
                             // next wait's error needs to be able to say.
                             written.fetch_sub(replies, Ordering::Relaxed);
+                            drained.fetch_sub(
+                                queued.min(drained.load(Ordering::Relaxed)),
+                                Ordering::Relaxed,
+                            );
                             let failed = result.is_err();
                             for ack in acks {
                                 // Every waiter in the batch learns the same
@@ -1285,6 +1303,7 @@ impl TerminalBuilder {
         let reader_writer = Arc::clone(&writer);
         let reader_tx = write_tx.clone();
         let reader_pending = Arc::clone(&replies_pending);
+        let reader_queued = Arc::clone(&queued_bytes);
         thread::Builder::new()
             .name("termlens-pty-reader".into())
             .spawn(move || {
@@ -1294,6 +1313,7 @@ impl TerminalBuilder {
                     &reader_writer,
                     reader_tx.as_ref(),
                     &reader_pending,
+                    &reader_queued,
                 )
             })
             .map_err(Error::Io)?;
@@ -1535,8 +1555,9 @@ fn reader_loop(
     mut reader: Box<dyn Read + Send>,
     shared: &Monitor<EmuState>,
     writer: &SharedWriter,
-    replies_to: Option<&mpsc::SyncSender<WriteRequest>>,
+    replies_to: Option<&mpsc::Sender<WriteRequest>>,
     pending: &AtomicUsize,
+    queued_bytes: &AtomicUsize,
 ) {
     let mut buf = [0u8; 8192];
     loop {
@@ -1618,18 +1639,28 @@ fn reader_loop(
                         // regardless, or the child blocks writing into a full
                         // output buffer and the harness deadlocks itself.
                         Some(tx) => {
-                            let request = WriteRequest {
-                                bytes: batch,
-                                ack: None, // fire and forget: never wait here
-                                replies: count,
-                            };
-                            // Counted as pending *before* the hand-off, so a
-                            // wait that fails while the write is blocked can
-                            // say how many answers are stuck.
-                            pending.fetch_add(count, Ordering::Relaxed);
-                            if let Err(mpsc::TrySendError::Full(_)) = tx.try_send(request) {
-                                pending.fetch_sub(count, Ordering::Relaxed);
+                            // Refuse only on the memory bound. The queue is
+                            // unbounded, so this hand-off cannot block and the
+                            // drain cannot stall — which is the constraint
+                            // that rules out backpressuring the reader.
+                            let size = batch.len();
+                            if queued_bytes.load(Ordering::Relaxed) + size > REPLY_QUEUE_BYTES {
                                 shared.mutate(|state| state.replies_dropped += count);
+                            } else {
+                                // Counted as pending *before* the hand-off, so
+                                // a wait that fails while the write is blocked
+                                // can say how many answers are stuck.
+                                pending.fetch_add(count, Ordering::Relaxed);
+                                queued_bytes.fetch_add(size, Ordering::Relaxed);
+                                let request = WriteRequest {
+                                    bytes: batch,
+                                    ack: None, // fire and forget: never wait
+                                    replies: count,
+                                };
+                                if tx.send(request).is_err() {
+                                    pending.fetch_sub(count, Ordering::Relaxed);
+                                    queued_bytes.fetch_sub(size, Ordering::Relaxed);
+                                }
                             }
                         }
                         // No responder thread (no descriptor to duplicate):
@@ -1668,7 +1699,7 @@ pub struct Terminal {
     writer: SharedWriter,
     /// Queue to the writer thread. `None` only when no descriptor could
     /// be duplicated, in which case writes go through `writer` directly.
-    write_tx: Option<mpsc::SyncSender<WriteRequest>>,
+    write_tx: Option<mpsc::Sender<WriteRequest>>,
     shared: Arc<Monitor<EmuState>>,
     default_timeout: Duration,
     exit_status: Option<ExitStatus>,
@@ -2204,25 +2235,12 @@ impl Terminal {
             // Typed input, not a reply: it reports through `ack`.
             replies: 0,
         };
-        // A full queue means the writer thread is already stuck on an
-        // earlier write, which is the same diagnosis. (`send_timeout` is
-        // still unstable, so this is a bounded retry on `try_send`.)
-        let deadline = Instant::now() + self.default_timeout;
-        let mut pending = request;
-        loop {
-            match tx.try_send(pending) {
-                Ok(()) => break,
-                Err(mpsc::TrySendError::Full(returned)) => {
-                    if Instant::now() >= deadline {
-                        return Err(not_reading());
-                    }
-                    pending = returned;
-                    thread::sleep(Duration::from_millis(1));
-                }
-                Err(mpsc::TrySendError::Disconnected(_)) => {
-                    return Err("the terminal is closed".to_owned())
-                }
-            }
+        // The queue is unbounded, so handing off cannot block and there is
+        // no full-queue case to retry. The deadline that matters is the
+        // acknowledgement below: it is the write itself that can stall, when
+        // the application has stopped reading and the PTY buffer is full.
+        if tx.send(request).is_err() {
+            return Err("the terminal is closed".to_owned());
         }
         match ack_rx.recv_timeout(self.default_timeout) {
             Ok(Ok(())) => Ok(()),

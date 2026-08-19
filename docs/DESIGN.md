@@ -133,22 +133,35 @@ input; the drain would stop, the child would then block writing into a
 full output buffer, and the harness would deadlock itself with no test
 input involved.
 
-**One queue entry per read, not per reply**, and the writer coalesces
-whatever is queued behind the entry it took into a single `write(2)`. This
-is not an optimization; it is the fix for a correctness bug. The queue was
-filling for a reason that had nothing to do with the application: the reader
-could build answers faster than the writer could issue one syscall each, so
-a startup batch of 200 probes lost 27 answers with nothing blocked anywhere
-— confirmed by spacing the same queries a millisecond apart, which answered
-all 200. The comment in the source claiming a full queue meant the
-application had stopped reading was simply false.
+**The queue is unbounded, capped on undelivered reply *bytes*, and the writer
+coalesces everything queued into one `write(2)`.** That shape is the third
+attempt, and the two it replaced are worth recording, because each was a
+plausible invariant that turned out to be the wrong one.
 
-With one entry per read, filling the queue really does take 64 reads' worth
-of undelivered answers, which no reading application produces. That makes a
-discard rare and moves the diagnosis: an application that genuinely never
-reads leaves its answers *stuck in a blocked write* rather than dropped, so
-both are counted — a lock-free pending count the writer clears only once
-bytes are actually out — and the next wait's error names the total.
+One slot per *reply* filled at 64 answers. A startup batch of 200 probes lost
+27 with nothing blocked anywhere — confirmed by spacing the same queries a
+millisecond apart, which answered all 200. So the source comment claiming a
+full queue meant the application had stopped reading was simply false; the
+reader was outrunning our own writer.
+
+One slot per *read* fixed that on a fast machine, where a batch arrives in a
+single read. On a slow one the application's writes dribble out, the same 400
+queries arrive in hundreds of reads, and 64 slots ran out again — 235 of 400
+on a loaded macOS runner, at the same number twice, which is what a fixed
+ceiling looks like rather than a race.
+
+Slots were never the thing worth bounding. What must be bounded is memory, so
+that is what is: an unbounded channel with a 1 MiB ceiling on queued reply
+bytes. The reader therefore can never block on the hand-off — which is the
+constraint that rules out backpressuring it at all, since a blocked reader
+stops the drain and deadlocks the harness — a real application is never
+shorted, and a hostile one still cannot grow memory without limit.
+
+A discard is now rare, which moves the diagnosis: an application that
+genuinely never reads leaves its answers *stuck in a blocked write* rather
+than dropped, so both are counted — a lock-free pending count the writer
+clears only once bytes are actually out — and the next wait's error names the
+total.
 
 **How much of that is knowable differs by platform, and the honest answer is
 that Linux hides it.** A write into a full terminal input queue blocks on

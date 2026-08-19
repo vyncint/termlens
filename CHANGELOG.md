@@ -23,18 +23,22 @@ listed under a **Changed** or **Removed** heading.
   therefore an error on one CI runner and silently discarded on the other.
   Every sender now checks for a closed terminal before writing, so the
   answer is the same everywhere and no keystroke is lost quietly.
-- **A batch of startup probes is answered in full.** 200 queries asked back to
-  back returned 173 answers; 400 returned 235; 1000 returned 285. The stated
-  cause — the application had stopped reading — was wrong: the same 200
-  queries a millisecond apart were all answered, so nothing was blocked
-  anywhere. The reader was enqueueing one channel entry per *reply* while the
-  writer issued one `write(2)` per entry, and the queue filled because the
-  reader outran it. Replies from one read are now one entry, the writer
-  coalesces whatever is queued behind it into a single write, and 50, 200 and
-  400 are all answered completely. The remaining ceiling is the terminal's own
-  input queue rather than ours — around 4 KB on Linux, so a batch past roughly
-  680 replies still needs the application to read as it asks, which is true of
-  a real terminal too.
+- **A batch of startup probes is answered in full**, and the reply queue is
+  now bounded by **memory rather than by queue slots** — which took three
+  attempts to get right, each one teaching what the invariant actually is.
+  200 queries asked back to back returned 173 answers; 400 returned 235; 1000
+  returned 285. The stated cause — the application had stopped reading — was
+  wrong: the same 200 queries a millisecond apart were all answered, so
+  nothing was blocked anywhere. The reader was enqueueing one entry per
+  *reply* while the writer issued one `write(2)` per entry, so it outran the
+  writer and the 64-slot queue overflowed. Batching per *read* fixed that on a
+  fast machine — but on a slow one an application's writes dribble out, the
+  same 400 queries arrive in hundreds of small reads, and 64 slots ran out
+  again at 235 of 400. Slots were never the thing worth bounding: the queue is
+  now unbounded with a 1 MiB ceiling on undelivered reply *bytes*, so the
+  reader can never block, a real application is never shorted, and a hostile
+  one still cannot grow memory without limit. The writer coalesces whatever is
+  queued into a single write.
 - **Undelivered replies are counted whether dropped or blocked mid-write**, so
   a non-reading application is named in the wait error rather than producing a
   plain timeout.
