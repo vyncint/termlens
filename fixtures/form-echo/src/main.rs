@@ -18,8 +18,9 @@ use std::io::{self, Write};
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    MouseEvent, MouseEventKind,
 };
 use crossterm::style::Print;
 use crossterm::terminal::{
@@ -28,11 +29,24 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 
-#[derive(Default)]
 struct App {
     input: String,
     last: String,
     submitted: String,
+    /// A window starts focused, which is why the *unfocused* branch is the
+    /// one that needs an event to become reachable.
+    focused: bool,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            input: String::new(),
+            last: String::new(),
+            submitted: String::new(),
+            focused: true,
+        }
+    }
 }
 
 /// Stable, greppable one-token description of a key event.
@@ -99,6 +113,10 @@ fn draw(out: &mut impl Write, app: &App) -> io::Result<()> {
         "form-echo ready".to_string(),
         format!("input: {}", app.input),
         format!("last: {}", app.last),
+        format!(
+            "window: {}",
+            if app.focused { "focused" } else { "unfocused" }
+        ),
         format!("submitted: {}", app.submitted),
     ];
     for (row, line) in lines.iter().enumerate() {
@@ -133,6 +151,7 @@ fn cleanup(out: &mut impl Write) -> io::Result<()> {
     execute!(
         out,
         DisableBracketedPaste,
+        DisableFocusChange,
         DisableMouseCapture,
         Show,
         LeaveAlternateScreen
@@ -148,7 +167,8 @@ fn main() -> io::Result<()> {
         EnterAlternateScreen,
         Hide,
         EnableMouseCapture,
-        EnableBracketedPaste
+        EnableBracketedPaste,
+        EnableFocusChange
     )?;
 
     let mut app = App::default();
@@ -168,6 +188,22 @@ fn main() -> io::Result<()> {
                     app.last = description;
                     draw(&mut out, &app)?;
                 }
+                continue;
+            }
+            // A real TUI dims its chrome when the window loses focus. This
+            // one names the state instead, so a test can assert on either
+            // branch — the point being that without focus delivery only one
+            // of the two is ever reachable.
+            Event::FocusGained => {
+                app.focused = true;
+                app.last = "focus:gained".to_owned();
+                draw(&mut out, &app)?;
+                continue;
+            }
+            Event::FocusLost => {
+                app.focused = false;
+                app.last = "focus:lost".to_owned();
+                draw(&mut out, &app)?;
                 continue;
             }
             _ => continue,

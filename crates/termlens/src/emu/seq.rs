@@ -182,6 +182,11 @@ pub(crate) struct SeqTracker {
     csi_first_param: u32,
     csi_param_count: u8,
     csi_saw_2026: bool,
+    /// Set when the current CSI's parameter list contains 1004 (focus
+    /// reporting), the same trick `csi_saw_2026` uses — a mode can arrive
+    /// anywhere in a multi-mode list, so scanning for it beats assuming it
+    /// is the only parameter.
+    csi_saw_1004: bool,
     /// Raw capture of the current sequence (from ESC), for diagnostics
     /// and DCS query recognition. Bounded; long sequences truncate.
     seq_buf: [u8; 24],
@@ -205,6 +210,10 @@ pub(crate) struct SeqTracker {
     bells: u64,
     /// Inline graphics payloads transmitted.
     graphics: GraphicsSeen,
+    /// True while the application has focus reporting (mode 1004) enabled.
+    /// Tracked here because vt100 does not model 1004 at all — the same
+    /// reason the window title is tracked here.
+    focus_events: bool,
     /// Which introducer opened the current DCS-class string: `P` (DCS),
     /// `X` (SOS), `^` (PM) or `_` (APC). Sixel and kitty graphics differ
     /// only by this, so consuming all four alike — which is all the tracker
@@ -240,6 +249,7 @@ impl SeqTracker {
             csi_first_param: 0,
             csi_param_count: 0,
             csi_saw_2026: false,
+            csi_saw_1004: false,
             seq_buf: [0; 24],
             seq_len: 0,
             osc_buf: Vec::new(),
@@ -248,6 +258,7 @@ impl SeqTracker {
             clipboard: None,
             bells: 0,
             graphics: GraphicsSeen::default(),
+            focus_events: false,
             dcs_introducer: 0,
             dcs_final: 0,
             dcs_intermediate: 0,
@@ -295,6 +306,11 @@ impl SeqTracker {
         self.graphics
     }
 
+    /// True while the application has focus reporting (mode 1004) enabled.
+    pub(crate) fn focus_events(&self) -> bool {
+        self.focus_events
+    }
+
     fn reset_dcs_scanner(&mut self, introducer: u8) {
         self.dcs_introducer = introducer;
         self.dcs_final = 0;
@@ -313,6 +329,7 @@ impl SeqTracker {
         self.csi_first_param = 0;
         self.csi_param_count = 0;
         self.csi_saw_2026 = false;
+        self.csi_saw_1004 = false;
     }
 
     fn push_seq(&mut self, b: u8) {
@@ -338,6 +355,9 @@ impl SeqTracker {
     fn end_csi_param(&mut self) {
         if self.csi_param == 2026 {
             self.csi_saw_2026 = true;
+        }
+        if self.csi_param == 1004 {
+            self.csi_saw_1004 = true;
         }
         if self.csi_param_count == 0 {
             self.csi_first_param = self.csi_param;
@@ -393,6 +413,18 @@ impl SeqTracker {
                 (_, b'p' | b'y') => SeqEvent::Query(Query::Unanswerable(self.seq_printable())),
                 _ => SeqEvent::None,
             };
+        }
+
+        // DEC private mode 1004 (focus reporting). vt100 does not model it,
+        // so an application that enables it is invisible without this — and
+        // `focus_in`/`focus_out` refuse to send events the application never
+        // asked for, exactly as `click` refuses without mouse tracking.
+        if self.csi_prefix == b'?' && self.csi_saw_1004 {
+            match b {
+                b'h' => self.focus_events = true,
+                b'l' => self.focus_events = false,
+                _ => {}
+            }
         }
 
         // DEC private mode 2026 (synchronized output).

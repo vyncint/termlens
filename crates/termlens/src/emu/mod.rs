@@ -46,6 +46,11 @@ pub(crate) struct InputModes {
     pub(crate) mouse_encoding: MouseEncoding,
     pub(crate) bracketed_paste: bool,
     pub(crate) application_cursor: bool,
+    /// Focus reporting (mode 1004). Lives here rather than behind a new
+    /// trait method: it is an input-affecting mode like the others, and the
+    /// `Emulator` surface is deliberately the narrowest the terminal loop
+    /// needs.
+    pub(crate) focus_events: bool,
 }
 
 /// How the application asked for mouse coordinates to be encoded. The

@@ -170,6 +170,7 @@ impl Emulator for Vt100Emulator {
             mouse: convert_mouse(screen.mouse_protocol_mode()),
             clipboard: self.tracker.clipboard(),
             bells: self.tracker.bells(),
+            focus_events: self.tracker.focus_events(),
             graphics: self.tracker.graphics(),
             // Filled in by the terminal, which owns the frame count.
             repaints: 0,
@@ -205,6 +206,7 @@ impl Emulator for Vt100Emulator {
             },
             bracketed_paste: screen.bracketed_paste(),
             application_cursor: screen.application_cursor(),
+            focus_events: self.tracker.focus_events(),
         }
     }
 
@@ -228,6 +230,9 @@ impl Emulator for Vt100Emulator {
             25 => on(!screen.hide_cursor()),
             47 | 1047 | 1049 => on(screen.alternate_screen()),
             2004 => on(screen.bracketed_paste()),
+            // Tracked by termlens itself, so the state is exact — which is
+            // what the honesty rule requires before answering.
+            1004 => on(self.tracker.focus_events()),
             1006 => on(matches!(
                 screen.mouse_protocol_encoding(),
                 ::vt100::MouseProtocolEncoding::Sgr

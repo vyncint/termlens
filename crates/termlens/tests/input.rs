@@ -309,6 +309,59 @@ fn clicking_without_mouse_tracking_is_a_typed_error() {
     assert!(t.wait_exit().unwrap().success());
 }
 
+/// Both focus states, through crossterm's own event stream. Before this the
+/// unfocused branch of a UI was not merely unasserted, it was **unreachable**
+/// — no input existed that could enter it, so the code never ran.
+#[test]
+fn focus_events_reach_the_application_in_both_directions() -> termlens::Result<()> {
+    let mut t = spawn_form_echo()?;
+    // Assert on the frame the wait returned rather than waiting again: the
+    // application has not repainted since, and a frame satisfies exactly one
+    // wait.
+    let ready = t.wait_frame(|s| s.contains("form-echo ready"))?;
+    // The application asked for focus reporting, and a test can see that it
+    // did before trying to deliver one.
+    assert!(ready.focus_events(), "form-echo enables mode 1004");
+    // A window starts focused, which is why the other branch needed an event.
+    assert!(ready.contains("window: focused"), "{ready}");
+
+    t.focus_out()?;
+    t.wait_frame(|s| s.contains("window: unfocused") && s.contains("last: focus:lost"))?;
+
+    t.focus_in()?;
+    t.wait_frame(|s| s.contains("window: focused") && s.contains("last: focus:gained"))?;
+
+    t.send(Key::Esc)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// Focus events are refused when the application never asked for them, the
+/// same contract `click` has for mouse tracking — feeding an application
+/// events it did not request is not what a terminal does, and the bytes
+/// would be misparsed as keys.
+#[test]
+fn focus_events_are_refused_without_mode_1004() -> termlens::Result<()> {
+    // hello-tui enables the alternate screen and nothing else.
+    let mut t = Terminal::builder()
+        .size(80, 24)
+        .timeout(Duration::from_secs(10))
+        .env_clear()
+        .spawn(util::fixture_bin("hello-tui"))?;
+    t.wait_until(|s| s.contains("╯"))?;
+    assert!(!t.screen().focus_events());
+
+    for err in [t.focus_in().unwrap_err(), t.focus_out().unwrap_err()] {
+        assert!(matches!(err, Error::Input(_)), "got: {err}");
+        assert!(err.to_string().contains("focus reporting"), "{err}");
+        assert!(err.to_string().contains("1004"), "{err}");
+    }
+
+    t.send(Key::Char('q'))?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// Typed input to a child that is gone is an error the test can handle,
 /// not a panic and not silence. `write_or_panic` used to make this the one
 /// failure that could only reach a test by aborting it.

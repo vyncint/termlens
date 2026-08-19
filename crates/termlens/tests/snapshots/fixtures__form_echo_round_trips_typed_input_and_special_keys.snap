@@ -1,10 +1,10 @@
 ---
 source: crates/termlens/tests/fixtures.rs
-assertion_line: 116
 expression: t.screen()
 ---
 size: 80x24  cursor: hidden
 form-echo ready
 input:
 last: enter
+window: focused
 submitted: hell

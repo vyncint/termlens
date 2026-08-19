@@ -330,3 +330,50 @@ fn a_probe_then_enable_application_gets_its_mouse() -> termlens::Result<()> {
     assert!(t.wait_exit()?.success());
     Ok(())
 }
+
+/// Mode 1004 is now answerable, because termlens tracks it exactly — the
+/// honesty rule's precondition. Before, an application probing for focus
+/// support was told "not recognized" even right after enabling it.
+#[test]
+fn decrqm_answers_for_focus_reporting() -> termlens::Result<()> {
+    // Reply values: 1 = set, 2 = reset, 0 = not recognized.
+    for (script, expect, label) in [
+        (
+            r"printf '\033[?1004$p'",
+            ";2$y",
+            "reset before the app enables it",
+        ),
+        (
+            r"printf '\033[?1004h\033[?1004$p'",
+            ";1$y",
+            "set after enabling",
+        ),
+        (
+            r"printf '\033[?1004h\033[?1004l\033[?1004$p'",
+            ";2$y",
+            "reset again after disabling",
+        ),
+    ] {
+        let mut t = Terminal::builder()
+            .size(80, 6)
+            .timeout(Duration::from_secs(10))
+            .args([
+                "-c",
+                &format!(
+                    "stty -icanon -echo; {script}; \
+                     head -c 11 | tr -d '\\033'; printf ' DONE'; read guard"
+                ),
+            ])
+            .spawn("/bin/sh")?;
+        t.wait_until(|s| s.contains("DONE"))?;
+        let row = t.screen().row_text(0);
+        assert!(row.contains(expect), "{label}: got {row:?}");
+        assert!(
+            !row.contains(";0$y"),
+            "{label}: must not report unrecognized"
+        );
+        t.send(Key::Enter)?;
+        assert!(t.wait_exit()?.success());
+    }
+    Ok(())
+}

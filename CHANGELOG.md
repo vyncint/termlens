@@ -91,6 +91,15 @@ listed under a **Changed** or **Removed** heading.
   as a question: a transmission is an instruction, and treating one as a
   query would put "the application queried the terminal" into the next
   timeout of every application that draws.
+- **`Terminal::focus_in` / `Terminal::focus_out`** and
+  **`Screen::focus_events`** — focus reporting (mode 1004). The unfocused
+  branch of a UI was not merely unasserted, it was **unreachable**: no input
+  existed that could enter it, so the code never ran. Mode-aware like every
+  other input — refused with a typed error when the application never enabled
+  1004, exactly as `click` is refused without mouse tracking. `DECRQM` now
+  answers for 1004 as well, since termlens tracks it exactly, which is the
+  honesty rule's precondition; it previously reported "not recognized" even
+  immediately after the application enabled it.
 - **`Error::Write`**, carrying the screen at the moment of the failed
   write, the way `Error::Timeout` and `Error::Eof` already do.
   `Error::screen()` returns it.

@@ -1331,6 +1331,64 @@ impl Terminal {
         }
     }
 
+    /// Tell the application the window **gained** focus (`ESC [ I`).
+    ///
+    /// Mode-aware in the way every other input is: sent only when the
+    /// application enabled focus reporting (`CSI ?1004 h`), and a typed
+    /// error when it did not. That is the same contract
+    /// [`click`](Self::click) uses for mouse tracking, and the same
+    /// reasoning — a real terminal does not send an application events it
+    /// never asked for, and bytes it did not ask for would be misparsed as
+    /// keys.
+    ///
+    /// Real TUIs use focus to pause animations, dim their chrome or drop a
+    /// cursor block, and without a way to deliver the event the unfocused
+    /// branch of that code is unreachable rather than merely unasserted.
+    /// [`Screen::focus_events`](crate::Screen::focus_events) reads the mode
+    /// back, so a test can assert the application asked in the first place.
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// t.wait_until(|s| s.focus_events())?;   // it asked
+    /// t.focus_out()?;
+    /// t.wait_until(|s| s.contains("paused"))?;
+    /// t.focus_in()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Write`] when the child is gone, then [`Error::Input`] when
+    /// the application has not enabled focus reporting.
+    pub fn focus_in(&mut self) -> Result<()> {
+        self.focus(true)
+    }
+
+    /// Tell the application the window **lost** focus (`ESC [ O`).
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`focus_in`](Self::focus_in).
+    pub fn focus_out(&mut self) -> Result<()> {
+        self.focus(false)
+    }
+
+    fn focus(&mut self, gained: bool) -> Result<()> {
+        let what = if gained { "focus-in" } else { "focus-out" };
+        self.ensure_deliverable(what)?;
+        if !self.input_modes().focus_events {
+            return Err(Error::Input(
+                "the application has not enabled focus reporting \
+                 (no CSI ?1004 h was seen)"
+                    .into(),
+            ));
+        }
+        let bytes: &[u8] = if gained { b"\x1b[I" } else { b"\x1b[O" };
+        self.write_input(bytes, what)
+    }
+
     /// Click the primary button at `(col, row)` (0-based, like
     /// [`Screen::cell`]). Sends a press — and, when the application's
     /// tracking mode reports them, a release — encoded exactly as the

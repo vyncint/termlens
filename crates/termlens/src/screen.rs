@@ -214,6 +214,8 @@ pub(crate) struct TermState {
     /// Bells rung in ground state (a `BEL` terminating an OSC string is a
     /// terminator, not a bell).
     pub(crate) bells: u64,
+    /// Whether the application enabled focus reporting (mode 1004).
+    pub(crate) focus_events: bool,
     /// Inline graphics payloads transmitted.
     pub(crate) graphics: GraphicsSeen,
     /// Completed synchronized updates. Filled in by the terminal rather
@@ -238,6 +240,7 @@ impl Default for TermState {
             mouse: MouseMode::None,
             clipboard: None,
             bells: 0,
+            focus_events: false,
             graphics: GraphicsSeen::default(),
             repaints: 0,
             scrollback: Arc::from([] as [Arc<str>; 0]),
@@ -412,6 +415,16 @@ impl Screen {
     #[must_use]
     pub fn application_cursor(&self) -> bool {
         self.state.application_cursor
+    }
+
+    /// True while the application has focus reporting (mode 1004) enabled.
+    /// [`Terminal::focus_in`](crate::Terminal::focus_in) and
+    /// [`Terminal::focus_out`](crate::Terminal::focus_out) consult the same
+    /// state, so a test can assert the application asked for focus events
+    /// before trying to deliver one.
+    #[must_use]
+    pub fn focus_events(&self) -> bool {
+        self.state.focus_events
     }
 
     /// Which mouse events the application asked to be reported —
@@ -1403,6 +1416,7 @@ mod tests {
             mouse: MouseMode::AnyMotion,
             clipboard: Some(Arc::new(Clipboard::new("c", Some("copied".into())))),
             bells: 3,
+            focus_events: true,
             graphics: {
                 let mut g = GraphicsSeen::default();
                 g.record(true, 120);
@@ -1421,6 +1435,7 @@ mod tests {
         assert_eq!((clip.targets(), clip.text()), ("c", Some("copied")));
         assert_eq!(s.scrollback_rows(), 1);
         assert_eq!(s.bells(), 3);
+        assert!(s.focus_events());
         assert_eq!(s.repaints(), 9);
         assert_eq!(s.graphics().kitty(), 1);
         assert_eq!(s.graphics().sixel(), 1);

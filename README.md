@@ -99,7 +99,9 @@ the emulator knows which modes the app enabled. The same knowledge is
 readable from every `Screen`: the window title, the alternate-screen
 flag, the input modes and the last `OSC 52` clipboard write are plain
 accessors, so "did the app enter the alt screen?" and "did it copy the
-right text?" are assertions, not inferences.
+right text?" are assertions, not inferences. Focus events go the other way:
+`focus_out()` reaches an application that enabled mode 1004, so the
+unfocused branch of a UI can be driven at all.
 
 **Scrollback is retained** (1000 rows by default), so an application that
 hands finished output *back* to the terminal — a pager, a log view, a TUI
