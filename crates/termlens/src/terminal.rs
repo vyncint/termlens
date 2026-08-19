@@ -528,9 +528,14 @@ impl EmuState {
                 return screen.clone();
             }
         }
-        let screen = self.emu.snapshot();
+        let screen = self.build_snapshot();
         self.snapshot_cache = Some((self.generation, screen.clone()));
         screen
+    }
+
+    /// Build a snapshot and stamp on the state the emulator does not own.
+    fn build_snapshot(&self) -> Screen {
+        self.emu.snapshot().with_repaints(self.frames_seen)
     }
 
     /// One-line diagnosis when a query went unanswered, appended to every
@@ -600,7 +605,7 @@ impl EmuState {
                 return screen.clone();
             }
         }
-        self.emu.snapshot()
+        self.build_snapshot()
     }
 }
 

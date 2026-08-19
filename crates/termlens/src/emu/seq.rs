@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use crate::screen::Clipboard;
+use crate::screen::{Clipboard, GraphicsSeen};
 
 /// OSC strings are captured whole (titles must not truncate), but bounded:
 /// a buggy or hostile stream must not grow memory without limit. No real
@@ -199,6 +199,30 @@ pub(crate) struct SeqTracker {
     title: Arc<str>,
     /// The most recent `OSC 52` clipboard write, decoded.
     clipboard: Option<Arc<Clipboard>>,
+    /// Bells rung in ground state. A `BEL` closing an OSC string is a
+    /// terminator and one inside a DCS-class string is payload; neither is
+    /// a bell, and both are handled by the state machine rather than here.
+    bells: u64,
+    /// Inline graphics payloads transmitted.
+    graphics: GraphicsSeen,
+    /// Which introducer opened the current DCS-class string: `P` (DCS),
+    /// `X` (SOS), `^` (PM) or `_` (APC). Sixel and kitty graphics differ
+    /// only by this, so consuming all four alike — which is all the tracker
+    /// needed before — cannot tell them apart.
+    dcs_introducer: u8,
+    /// Final byte of the current DCS header, 0 until seen. Sixel's is `q`
+    /// with no intermediate; XTGETTCAP and DECRQSS reach `q` through `+`
+    /// and `$`, which is what keeps them from being counted as pictures.
+    dcs_final: u8,
+    /// Intermediate byte in the current DCS header (`+` or `$` in practice).
+    dcs_intermediate: u8,
+    /// Payload bytes after the header, so a payload's size is reportable
+    /// without keeping the payload.
+    dcs_data_len: u64,
+    /// The opening bytes of a DCS-class payload, enough to read a kitty
+    /// control block (`G` plus `key=value` pairs up to the first `;`).
+    dcs_head: [u8; 48],
+    dcs_head_len: u8,
 }
 
 impl SeqTracker {
@@ -222,6 +246,14 @@ impl SeqTracker {
             osc_truncated: false,
             title: Arc::from(""),
             clipboard: None,
+            bells: 0,
+            graphics: GraphicsSeen::default(),
+            dcs_introducer: 0,
+            dcs_final: 0,
+            dcs_intermediate: 0,
+            dcs_data_len: 0,
+            dcs_head: [0; 48],
+            dcs_head_len: 0,
         }
     }
 
@@ -251,6 +283,24 @@ impl SeqTracker {
     /// until the application sets one).
     pub(crate) fn title(&self) -> Arc<str> {
         Arc::clone(&self.title)
+    }
+
+    /// Bells rung in ground state so far.
+    pub(crate) fn bells(&self) -> u64 {
+        self.bells
+    }
+
+    /// Inline graphics payloads transmitted so far.
+    pub(crate) fn graphics(&self) -> GraphicsSeen {
+        self.graphics
+    }
+
+    fn reset_dcs_scanner(&mut self, introducer: u8) {
+        self.dcs_introducer = introducer;
+        self.dcs_final = 0;
+        self.dcs_intermediate = 0;
+        self.dcs_data_len = 0;
+        self.dcs_head_len = 0;
     }
 
     fn reset_csi_scanner(&mut self) {
@@ -465,6 +515,33 @@ impl SeqTracker {
                 }
             }
         }
+        // An APC opening with `G` is the kitty graphics protocol.
+        if self.dcs_introducer == b'_' && self.dcs_head.first() == Some(&b'G') {
+            let control = self.dcs_control_block();
+            // Count the payload either way: "did this go out as an image?"
+            // and, more often, "did it *not*?" are the assertions, and a
+            // query carries no picture but is still traffic worth seeing.
+            let is_query = control.windows(3).any(|w| w == b"a=q");
+            if !is_query {
+                self.graphics.record(true, self.dcs_data_len);
+            }
+            if is_query {
+                // Only an explicit `a=q` is a question. A transmission is an
+                // instruction, and classifying one as a query would put "the
+                // application queried the terminal" into the next timeout of
+                // every application that draws — a false diagnosis, and a
+                // loud one.
+                return SeqEvent::Query(Query::Unanswerable(self.seq_printable()));
+            }
+            return SeqEvent::None;
+        }
+        // Sixel: `DCS <params> q <data> ST`, with no intermediate byte. The
+        // intermediate is the whole distinction from the two DCS questions
+        // below, which reach the same `q` final through `+` and `$`.
+        if self.dcs_introducer == b'P' && self.dcs_final == b'q' && self.dcs_intermediate == 0 {
+            self.graphics.record(false, self.dcs_data_len);
+            return SeqEvent::None;
+        }
         // DCS questions: XTGETTCAP (`ESC P + q … ST`) and DECRQSS
         // (`ESC P $ q … ST`, "what is the current setting of …?").
         let body = &self.seq_buf[..usize::from(self.seq_len)];
@@ -472,6 +549,43 @@ impl SeqTracker {
             return SeqEvent::Query(Query::Unanswerable(self.seq_printable()));
         }
         SeqEvent::None
+    }
+
+    /// The captured head of a DCS-class payload, cut at the first `;`.
+    ///
+    /// A kitty payload is `G <key=value>,… ; <base64>`; only the control
+    /// block before the `;` is worth reading, and stopping there keeps a
+    /// base64 blob from being scanned for keys it cannot contain.
+    fn dcs_control_block(&self) -> &[u8] {
+        let head = &self.dcs_head[..usize::from(self.dcs_head_len)];
+        match head.iter().position(|&b| b == b';') {
+            Some(sep) => &head[..sep],
+            None => head,
+        }
+    }
+
+    /// Consume one byte of a DCS-class string: header first, then payload.
+    fn push_dcs(&mut self, b: u8) {
+        // Every byte between the introducer and the terminator, for both
+        // protocols alike — a sixel's parameters and a kitty control block
+        // are a handful of bytes against an image's thousands, and counting
+        // them uniformly is easier to reason about than two rules.
+        self.dcs_data_len += 1;
+        if self.dcs_introducer != b'_' && self.dcs_final == 0 {
+            match b {
+                // Parameter and private bytes stay in the header.
+                0x30..=0x3f => {}
+                // Intermediates: `+` (XTGETTCAP) and `$` (DECRQSS).
+                0x20..=0x2f => self.dcs_intermediate = b,
+                // Final byte closes the header; the rest is payload.
+                0x40..=0x7e => self.dcs_final = b,
+                _ => {}
+            }
+        }
+        if usize::from(self.dcs_head_len) < self.dcs_head.len() {
+            self.dcs_head[usize::from(self.dcs_head_len)] = b;
+            self.dcs_head_len += 1;
+        }
     }
 
     /// Feed one byte: capture it if it belongs to a sequence, then run
@@ -501,6 +615,12 @@ impl SeqTracker {
                     self.utf8_remaining = 0;
                     State::Esc
                 } else {
+                    // Only here is a BEL a bell. Inside OSC it terminates
+                    // the string and inside a DCS-class string it is data,
+                    // and both of those are other states.
+                    if b == BEL && self.utf8_remaining == 0 {
+                        self.bells = self.bells.saturating_add(1);
+                    }
                     self.track_utf8(b);
                     State::Ground
                 }
@@ -516,7 +636,10 @@ impl SeqTracker {
                     State::Osc
                 }
                 // DCS, SOS, PM, APC — string sequences terminated by ST.
-                b'P' | b'X' | b'^' | b'_' => State::Dcs,
+                b'P' | b'X' | b'^' | b'_' => {
+                    self.reset_dcs_scanner(b);
+                    State::Dcs
+                }
                 0x20..=0x2f => State::EscIntermediate,
                 ESC => State::Esc,
                 CAN | SUB => State::Ground,
@@ -557,7 +680,10 @@ impl SeqTracker {
             State::Dcs => match b {
                 ESC => State::DcsEsc,
                 CAN | SUB => State::Ground,
-                _ => State::Dcs, // BEL is data inside DCS-class strings
+                _ => {
+                    self.push_dcs(b);
+                    State::Dcs // BEL is data inside DCS-class strings
+                }
             },
             State::OscEsc => match b {
                 b'\\' => {
@@ -610,6 +736,94 @@ mod tests {
         let mut t = SeqTracker::new();
         t.feed(bytes);
         t
+    }
+
+    /// Every event a `BEL` byte can be, and only one of them is a bell.
+    #[test]
+    fn only_a_bel_in_ground_state_is_a_bell() {
+        assert_eq!(fed(b"a\x07b").bells(), 1);
+        assert_eq!(fed(b"\x07\x07\x07").bells(), 3, "a count, not a flag");
+        assert_eq!(fed(b"plain").bells(), 0);
+
+        // Terminating an OSC string: punctuation, not a bell. And the title
+        // must still arrive, which is the thing that would break if the BEL
+        // were intercepted before the state machine saw it.
+        let t = fed(b"\x1b]0;my app\x07");
+        assert_eq!(t.bells(), 0);
+        assert_eq!(&*t.title(), "my app");
+
+        // Payload inside a DCS-class string.
+        assert_eq!(fed(b"\x1bPq\x07\x07\x1b\\").bells(), 0);
+        // A bell after a sequence closes still counts.
+        assert_eq!(fed(b"\x1b]0;t\x07\x07").bells(), 1);
+    }
+
+    /// Kitty and sixel payloads, and the two DCS *questions* that share
+    /// sixel's `q` final byte and must not be counted as pictures.
+    #[test]
+    fn graphics_payloads_are_counted_by_protocol() {
+        let kitty = fed(b"\x1b_Gf=24,s=1,v=1,a=T;AAAABBBB\x1b\\");
+        assert_eq!(kitty.graphics().kitty(), 1);
+        assert_eq!(kitty.graphics().sixel(), 0);
+        // Everything between the introducer and the terminator.
+        assert_eq!(kitty.graphics().bytes(), 26);
+        assert_eq!(fed(b"\x1bPq~~\x1b\\").graphics().bytes(), 3, "q~~");
+
+        let sixel = fed(b"\x1bPq#0;2;0;0;0#0~~-~~\x1b\\");
+        assert_eq!(sixel.graphics().sixel(), 1);
+        assert_eq!(sixel.graphics().kitty(), 0);
+
+        // Sixel with parameters before the `q`.
+        assert_eq!(fed(b"\x1bP0;1;0q~~\x1b\\").graphics().sixel(), 1);
+
+        // Neither of these is a picture: both reach `q` through an
+        // intermediate byte, which is the whole distinction.
+        assert!(fed(b"\x1bP+q544e\x1b\\").graphics().is_empty(), "XTGETTCAP");
+        assert!(fed(b"\x1bP$qm\x1b\\").graphics().is_empty(), "DECRQSS");
+
+        // Two of each accumulate.
+        let both = fed(b"\x1b_Ga=T;AA\x1b\\\x1bPq~\x1b\\\x1b_Ga=T;BB\x1b\\");
+        assert_eq!((both.graphics().kitty(), both.graphics().sixel()), (2, 1));
+        assert_eq!(both.graphics().total(), 3);
+    }
+
+    /// The kitty graphics *query* was the one probe of the startup set that
+    /// got neither an answer nor a diagnosis: `string_final` looked only at
+    /// `+q`/`$q`, which an APC never matches, so `note_unanswered` never saw
+    /// it and the timeout said nothing.
+    #[test]
+    fn the_kitty_graphics_query_is_classified() {
+        let mut t = SeqTracker::new();
+        let mut events = Vec::new();
+        for &b in b"\x1b_Gi=1,a=q;\x1b\\" {
+            events.push(t.step(b));
+        }
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                SeqEvent::Query(Query::Unanswerable(q)) if q.contains("_G")
+            )),
+            "the query must be named for the timeout note: {events:?}"
+        );
+        // A query carries no picture, so it is not counted as one.
+        assert!(t.graphics().is_empty());
+    }
+
+    /// A transmission is an instruction, not a question. Classifying one as
+    /// a query would put "the application queried the terminal" into the
+    /// next timeout of every application that draws.
+    #[test]
+    fn a_kitty_transmission_is_not_treated_as_a_query() {
+        let mut t = SeqTracker::new();
+        let mut events = Vec::new();
+        for &b in b"\x1b_Gf=24,a=T;QUJD\x1b\\" {
+            events.push(t.step(b));
+        }
+        assert!(
+            !events.iter().any(|e| matches!(e, SeqEvent::Query(_))),
+            "a transmit is not a question: {events:?}"
+        );
+        assert_eq!(t.graphics().kitty(), 1);
     }
 
     #[test]

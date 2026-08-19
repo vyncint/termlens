@@ -404,6 +404,24 @@ Rules:
    assertions read as ordinary predicates:
    `wait_until(|s| s.alternate_screen())`.
 
+   The same slot holds three **cumulative counters**, for behaviour that by
+   definition leaves the grid unchanged: `Screen::repaints` (completed DEC
+   2026 updates — repaints, not changes, so one input becoming four
+   repaints is catchable), `Screen::bells` (a `BEL` in ground state; the one
+   closing an `OSC` string is punctuation and the one inside a DCS-class
+   string is payload), and `Screen::graphics` (kitty and sixel payloads
+   transmitted, by protocol and total bytes). Monotonic on purpose: a test
+   takes a delta around an action rather than resetting a gauge. Counting a
+   graphics payload is not rendering it and claims nothing — DA1 goes on
+   declining both protocols, which is why an application that transmits one
+   anyway is worth catching.
+
+   All of it lives behind one `Arc` on `Screen`. `Screen` is embedded in
+   every `Error`, so its size is load-bearing: the counters alone pushed
+   `Result<T>` past clippy's `result_large_err` threshold, and the `Arc`
+   took `Screen` from 80 bytes to 40 while making a clone one refcount bump
+   instead of a field-by-field copy.
+
 The `insta` feature (default) re-exports `insta` and ships
 `assert_screen_snapshot!` so the snapshotting insta version can't drift
 from the one the macro targets.

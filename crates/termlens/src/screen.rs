@@ -82,6 +82,71 @@ pub enum MouseMode {
     AnyMotion,
 }
 
+/// Inline graphics payloads the application transmitted, as counted at one
+/// snapshot.
+///
+/// Read it from a snapshot via [`Screen::graphics`]. Counting is not
+/// rendering and not a claim of support: DA1 still declines both protocols,
+/// which is exactly why an application that emits them anyway is worth
+/// catching.
+///
+/// The assertion this exists for is as often the negative one — "this must
+/// render as text and **never** be transmitted as an image, so it looks the
+/// same in every terminal" — which is why [`is_empty`](Self::is_empty) is a
+/// method rather than something to spell out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GraphicsSeen {
+    kitty: u32,
+    sixel: u32,
+    bytes: u64,
+}
+
+impl GraphicsSeen {
+    /// Kitty graphics payloads (`APC G … ST`) seen so far.
+    #[must_use]
+    pub fn kitty(&self) -> u32 {
+        self.kitty
+    }
+
+    /// Sixel payloads (`DCS q … ST`) seen so far.
+    #[must_use]
+    pub fn sixel(&self) -> u32 {
+        self.sixel
+    }
+
+    /// Payloads of either protocol.
+    #[must_use]
+    pub fn total(&self) -> u32 {
+        self.kitty + self.sixel
+    }
+
+    /// True when the application has transmitted no inline graphics at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
+
+    /// Total payload bytes across both protocols: everything between the
+    /// introducer and the terminator, counted the same way for each.
+    ///
+    /// A size rather than the data itself: a test asserts that an image was
+    /// or was not sent, and how big it was — not what it depicted, which
+    /// nothing here can decode.
+    #[must_use]
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    pub(crate) fn record(&mut self, kitty: bool, bytes: u64) {
+        if kitty {
+            self.kitty += 1;
+        } else {
+            self.sixel += 1;
+        }
+        self.bytes += bytes;
+    }
+}
+
 /// What an application copied with `OSC 52`, as observed at one snapshot.
 ///
 /// Read it from a snapshot via [`Screen::clipboard`]. A toast on screen
@@ -129,6 +194,13 @@ impl Clipboard {
 /// Out-of-band terminal state captured with each snapshot. Deliberately
 /// invisible in the text rendering (existing snapshot files stay valid);
 /// exposed through the accessors on [`Screen`].
+///
+/// Held behind a single [`Arc`] on [`Screen`], for two reasons that pull the
+/// same way. `Screen` is embedded in every [`Error`](crate::Error), so its
+/// size is load-bearing — enough scalars here and `Result<T>` grows past
+/// what clippy's `result_large_err` will accept. And a `Screen` clone then
+/// bumps one refcount instead of copying every field, which matters because
+/// a clone happens on each wait evaluation.
 #[derive(Debug, Clone)]
 pub(crate) struct TermState {
     pub(crate) title: Arc<str>,
@@ -139,6 +211,14 @@ pub(crate) struct TermState {
     /// Behind an `Arc` deliberately: `Screen` is embedded in every
     /// `Error` and cloned on every wait, so its size is load-bearing.
     pub(crate) clipboard: Option<Arc<Clipboard>>,
+    /// Bells rung in ground state (a `BEL` terminating an OSC string is a
+    /// terminator, not a bell).
+    pub(crate) bells: u64,
+    /// Inline graphics payloads transmitted.
+    pub(crate) graphics: GraphicsSeen,
+    /// Completed synchronized updates. Filled in by the terminal rather
+    /// than the emulator, which does not own the frame count.
+    pub(crate) repaints: u64,
     /// Rows that have scrolled off the top, oldest first, as text.
     ///
     /// Text rather than cells, deliberately: a thousand rows of styled
@@ -157,6 +237,9 @@ impl Default for TermState {
             application_cursor: false,
             mouse: MouseMode::None,
             clipboard: None,
+            bells: 0,
+            graphics: GraphicsSeen::default(),
+            repaints: 0,
             scrollback: Arc::from([] as [Arc<str>; 0]),
         }
     }
@@ -230,7 +313,7 @@ pub struct Screen {
     cursor_col: u16,
     cursor_visible: bool,
     cells: Arc<[Cell]>,
-    state: TermState,
+    state: Arc<TermState>,
 }
 
 impl Screen {
@@ -251,8 +334,20 @@ impl Screen {
             cursor_col,
             cursor_visible,
             cells: cells.into(),
-            state,
+            state: Arc::new(state),
         }
+    }
+
+    /// Stamp the repaint count onto a freshly built snapshot.
+    ///
+    /// The count lives on the terminal, not the emulator: it is the same
+    /// counter `wait_frame`'s cursor is built on, and a second one in the
+    /// emulator could drift from it.
+    pub(crate) fn with_repaints(mut self, repaints: u64) -> Self {
+        // Called on a snapshot nobody else holds yet, so `make_mut` mutates
+        // in place rather than cloning.
+        Arc::make_mut(&mut self.state).repaints = repaints;
+        self
     }
 
     /// Number of columns (the screen's width).
@@ -352,6 +447,79 @@ impl Screen {
     #[must_use]
     pub fn clipboard(&self) -> Option<&Clipboard> {
         self.state.clipboard.as_deref()
+    }
+
+    /// How many times the application has **completed a repaint** — a DEC
+    /// 2026 synchronized update begun and ended — as of this observation.
+    ///
+    /// Monotonic, so the natural use is a delta around an action:
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// let before = t.screen().repaints();
+    /// t.scroll(0, 0, termlens::Scroll::Down)?;
+    /// let frame = t.wait_frame(|s| s.contains("row 2"))?;
+    /// // One wheel notch must not become five repaints.
+    /// assert_eq!(frame.repaints() - before, 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// **It counts repaints, not changes.** A Begin/End pair that altered no
+    /// cell still counts, exactly as [`wait_frame`](crate::Terminal::wait_frame)
+    /// treats it — and that is the property an amplification test depends
+    /// on. "One input produced four repaints" is invisible to any content
+    /// predicate, because every intermediate frame shows correct content.
+    /// Only the count sees it.
+    ///
+    /// Zero for an application that never emits synchronized updates; there
+    /// is nothing to count, not even its redraws.
+    #[must_use]
+    pub fn repaints(&self) -> u64 {
+        self.state.repaints
+    }
+
+    /// How many times the application has rung the bell (`BEL`, `0x07`) as
+    /// of this observation.
+    ///
+    /// A count rather than a flag, so "rang twice" is distinguishable from
+    /// "rang once", and monotonic like [`repaints`](Self::repaints) so a test
+    /// can take a delta around one action.
+    ///
+    /// The bell is often the *only* feedback a rejected input produces:
+    /// "pressing an invalid key does nothing" and "pressing an invalid key is
+    /// refused with a bell" are different behaviours, and without this they
+    /// are the same screen.
+    ///
+    /// Only a `BEL` in ground state counts. The one that terminates an
+    /// `OSC` string is punctuation, not a bell, and a `BEL` inside a
+    /// DCS-class string is payload.
+    #[must_use]
+    pub fn bells(&self) -> u64 {
+        self.state.bells
+    }
+
+    /// Inline graphics payloads the application has transmitted — kitty
+    /// (`APC G … ST`) and sixel (`DCS q … ST`) — as of this observation.
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// t.wait_until(|s| s.contains("diagram"))?;
+    /// // A diagram must render as box art in every terminal, so it must
+    /// // never go out as an image.
+    /// assert!(t.screen().graphics().is_empty());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Observing is not rendering, and not a claim of support: DA1 goes on
+    /// declining both protocols, which is precisely why an application that
+    /// transmits one anyway is worth catching.
+    #[must_use]
+    pub fn graphics(&self) -> GraphicsSeen {
+        self.state.graphics
     }
 
     /// The cell at `(row, col)`, or `None` when out of bounds.
@@ -1234,6 +1402,14 @@ mod tests {
             application_cursor: true,
             mouse: MouseMode::AnyMotion,
             clipboard: Some(Arc::new(Clipboard::new("c", Some("copied".into())))),
+            bells: 3,
+            graphics: {
+                let mut g = GraphicsSeen::default();
+                g.record(true, 120);
+                g.record(false, 40);
+                g
+            },
+            repaints: 9,
             scrollback: Arc::from([Arc::from("scrolled away")]),
         };
         let cells = vec![Cell::new("x".into(), Style::default(), false, false)];
@@ -1244,6 +1420,14 @@ mod tests {
         let clip = s.clipboard().expect("captured");
         assert_eq!((clip.targets(), clip.text()), ("c", Some("copied")));
         assert_eq!(s.scrollback_rows(), 1);
+        assert_eq!(s.bells(), 3);
+        assert_eq!(s.repaints(), 9);
+        assert_eq!(s.graphics().kitty(), 1);
+        assert_eq!(s.graphics().sixel(), 1);
+        assert_eq!(s.graphics().total(), 2);
+        assert_eq!(s.graphics().bytes(), 160);
+        assert!(!s.graphics().is_empty());
+        assert!(GraphicsSeen::default().is_empty());
         assert_eq!(s.scrollback_text(), "scrolled away");
         assert_eq!(s.full_text(), "scrolled away\nx");
         // Out-of-band state never leaks into the text format — including

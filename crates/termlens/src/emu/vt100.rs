@@ -169,6 +169,10 @@ impl Emulator for Vt100Emulator {
             application_cursor: screen.application_cursor(),
             mouse: convert_mouse(screen.mouse_protocol_mode()),
             clipboard: self.tracker.clipboard(),
+            bells: self.tracker.bells(),
+            graphics: self.tracker.graphics(),
+            // Filled in by the terminal, which owns the frame count.
+            repaints: 0,
             scrollback: self.history.iter().cloned().collect(),
         };
         Screen::from_parts(

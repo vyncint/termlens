@@ -64,9 +64,40 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- **`Screen::repaints`** — how many synchronized updates the application has
+  completed, as of this observation. It counts *repaints, not changes*, so a
+  Begin/End pair that drew nothing still counts, which is exactly the
+  property an amplification test needs: "one wheel notch produced four
+  repaints" is invisible to every content predicate, because each
+  intermediate frame shows correct content.
+- **`Screen::bells`** — how many times the application rang `BEL`. The bell
+  is often the only feedback a rejected input produces, so "an invalid key
+  does nothing" and "an invalid key is refused with a bell" used to be the
+  same screen. A count, not a flag, so twice differs from once; and only a
+  `BEL` in ground state counts, since the one terminating an `OSC` string is
+  punctuation and one inside a DCS-class string is payload.
+- **`Screen::graphics`** and **`GraphicsSeen`** — kitty (`APC G … ST`) and
+  sixel (`DCS q … ST`) payloads transmitted, by protocol, with total bytes.
+  The assertion this exists for is as often the negative one —
+  `assert!(s.graphics().is_empty())`, "this must render as text in every
+  terminal and never go out as an image" — so `is_empty` is a method rather
+  than something to spell out. Observing is not rendering and claims
+  nothing: DA1 still declines both protocols.
+- **The kitty graphics query is diagnosed.** `APC _G…a=q…ST` was swallowed
+  whole — no answer *and* no mention in the timeout note, alone among the
+  startup probes, because `string_final` inspected only `+q`/`$q` and an APC
+  matches neither. An application blocked on it now gets the same one-line
+  diagnosis `^[[?u` and `^[P+q…` already got. Only an explicit `a=q` counts
+  as a question: a transmission is an instruction, and treating one as a
+  query would put "the application queried the terminal" into the next
+  timeout of every application that draws.
 - **`Error::Write`**, carrying the screen at the moment of the failed
   write, the way `Error::Timeout` and `Error::Eof` already do.
   `Error::screen()` returns it.
+- **`Screen` is 40 bytes instead of 80**, with all out-of-band state behind
+  one `Arc`. A `Screen` is embedded in every `Error`, so this shrinks every
+  `Result` in the crate, and a clone — taken on each wait evaluation — is
+  now one refcount bump rather than a field-by-field copy.
 
 ### Documented
 
@@ -111,13 +142,6 @@ whose gates all passed.*
   diagnostics set.
 
 ### Documented
-
-- **What a large grid costs**, on `TerminalBuilder::size`: a snapshot holds
-  one entry per cell and is rebuilt on every state change, so cost is
-  O(cells) and shape-independent, while repeat reads of an unchanged screen
-  are cached and free. The table gives release *and* debug figures, because
-  `cargo test` builds unoptimized by default and the two differ by 16-29x —
-  the debug column is the one most suites actually see.
 
 - **The crate-level docs describe 0.4, not 0.2.** The docs.rs landing page
   never mentioned `wait_frame`, retained scrollback, per-call deadlines or
