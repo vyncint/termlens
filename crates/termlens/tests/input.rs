@@ -206,10 +206,11 @@ fn buttons_modifiers_drag_and_horizontal_wheel_reach_the_wire() -> termlens::Res
         .args([
             "-c",
             concat!(
-                r"stty -icanon -echo; printf '\033[?1003h\033[?1006h'; printf READY; ",
-                // 78 bytes: 20 (right press+release) + 20 (ctrl+left)
-                // + 10 (wheel left) + 28 (drag press+motion+release).
-                r#"wire=$(head -c 78 | tr '\033' 'E'); printf '|%s|' "$wire"; read guard"#
+                // `min 0 time 20` rather than an exact byte count: the drag
+                // reports one motion per cell crossed, so the length depends
+                // on the path.
+                r"stty -icanon -echo min 0 time 20; printf '\033[?1003h\033[?1006h'; printf READY; ",
+                r#"wire=$(dd bs=1 count=200 2>/dev/null | tr '\033' 'E'); printf '|%s|' "$wire"; read guard"#
             ),
         ])
         .spawn("/bin/sh")?;
@@ -230,12 +231,85 @@ fn buttons_modifiers_drag_and_horizontal_wheel_reach_the_wire() -> termlens::Res
         "[<16;4;2M",
         "[<16;4;2m", // ctrl + left
         "[<66;6;6M", // horizontal wheel
+        // Drag (2,2) -> (6,3): press, one motion per crossed cell, release.
         "[<0;3;3M",
+        "[<32;4;3M",
+        "[<32;5;4M",
+        "[<32;6;4M",
         "[<32;7;4M",
-        "[<0;7;4m", // drag: press, motion, release
+        "[<0;7;4m",
     ] {
         assert!(text.contains(expected), "missing {expected} in:\n{text}");
     }
+    Ok(())
+}
+
+/// A drag used to teleport: one motion report at the destination, however
+/// many cells it crossed. Invisible to an application that only asks "where
+/// did it start, where is it now", and wrong for every application that does
+/// something *along* the path.
+#[test]
+fn a_drag_reports_one_motion_per_cell_crossed() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .size(200, 24)
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"stty -icanon -echo min 0 time 20; printf '\033[?1002h\033[?1006h'; printf READY; ",
+                r#"wire=$(dd bs=1 count=300 2>/dev/null | tr '\033' 'E'); printf '|%s|' "$wire"; read guard"#
+            ),
+        ])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("READY"))?;
+
+    // Seven cells crossed, from column 5 to column 12 on row 4.
+    t.drag(termlens::MouseButton::Left, (5, 4), (12, 4))?;
+    t.wait_until(|s| s.row_text(0).contains("|"))?;
+    let text = t.screen().row_text(0);
+
+    // One motion at each intervening column, 1-based on the wire.
+    for col in 7..=13 {
+        assert!(
+            text.contains(&format!("[<32;{col};5M")),
+            "missing motion at column {col} in:\n{text}"
+        );
+    }
+    assert_eq!(
+        text.matches("[<32;").count(),
+        7,
+        "seven cells crossed, seven motion reports:\n{text}"
+    );
+    // The press and release still bracket it, at the endpoints.
+    assert!(text.contains("[<0;6;5M"), "{text}");
+    assert!(text.contains("[<0;13;5m"), "{text}");
+    Ok(())
+}
+
+/// The mode-aware refusals are untouched: under plain `?1000` the
+/// application asked not to hear about motion, so it hears none.
+#[test]
+fn press_release_tracking_still_gets_no_motion_at_all() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .size(200, 24)
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"stty -icanon -echo min 0 time 20; printf '\033[?1000h\033[?1006h'; printf READY; ",
+                r#"wire=$(dd bs=1 count=100 2>/dev/null | tr '\033' 'E'); printf '|%s|' "$wire"; read guard"#
+            ),
+        ])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("READY"))?;
+    t.drag(termlens::MouseButton::Left, (5, 4), (12, 4))?;
+    t.wait_until(|s| s.row_text(0).contains("|"))?;
+    let text = t.screen().row_text(0);
+    assert!(!text.contains("[<32;"), "no motion under ?1000:\n{text}");
+    assert!(
+        text.contains("[<0;6;5M") && text.contains("[<0;13;5m"),
+        "{text}"
+    );
     Ok(())
 }
 

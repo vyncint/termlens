@@ -23,6 +23,15 @@ listed under a **Changed** or **Removed** heading.
   therefore an error on one CI runner and silently discarded on the other.
   Every sender now checks for a closed terminal before writing, so the
   answer is the same everywhere and no keystroke is lost quietly.
+- **`drag` reports one motion per cell crossed**, on a straight interpolated
+  path, instead of a single report at the destination. Seven cells crossed
+  used to produce one motion event. Invisible to an application that only
+  asks "where did it start, where is it now" — which is why it went unnoticed
+  — and wrong for every application that does something *along* the path: a
+  drawing surface painting each crossed cell, a selection highlighting
+  incrementally, a drag that must cross a pane edge to register. The
+  mode-aware refusals are unchanged: `?1000` still hears no motion at all,
+  and X10 is still a typed error.
 - **A mouse action at a departed child names the child.** `click`, `drag`
   and `scroll` check liveness *before* the mouse-tracking mode, because a
   child that has exited necessarily never enabled tracking either — so the

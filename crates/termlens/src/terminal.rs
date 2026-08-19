@@ -1274,6 +1274,36 @@ fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The cells a straight drag crosses, from just after `from` through `to`.
+///
+/// Bresenham-free on purpose: stepping the long axis one cell at a time and
+/// scaling the short axis to it is exact for the endpoints, monotone, and
+/// visits every intervening column (or row, whichever spans further) exactly
+/// once — which is the property an application acting on the path depends on.
+/// `from` itself is excluded, because the press already reported it.
+fn cells_between(from: (u16, u16), to: (u16, u16)) -> Vec<(u16, u16)> {
+    let (from_col, from_row) = (i32::from(from.0), i32::from(from.1));
+    let (to_col, to_row) = (i32::from(to.0), i32::from(to.1));
+    let d_col = to_col - from_col;
+    let d_row = to_row - from_row;
+    let steps = d_col.abs().max(d_row.abs());
+    if steps == 0 {
+        // A drag that goes nowhere still reports the motion it was asked
+        // for, at the one cell involved.
+        return vec![to];
+    }
+    (1..=steps)
+        .map(|step| {
+            // Round to nearest so the short axis turns over mid-run rather
+            // than at the end, which is what a straight line looks like.
+            let col = from_col + (d_col * step + d_col.signum() * steps / 2) / steps;
+            let row = from_row + (d_row * step + d_row.signum() * steps / 2) / steps;
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            (col as u16, row as u16)
+        })
+        .collect()
+}
+
 /// `cells * per_cell` for `TIOCGWINSZ`, saturating, and 0 when no cell size
 /// was declared — the value a real terminal reports when it has no pixel
 /// geometry.
@@ -1696,11 +1726,19 @@ impl Terminal {
         self.write_input(&bytes, "a mouse click")
     }
 
-    /// Drag from one cell to another: press, motion, release.
+    /// Drag from one cell to another: press, a motion report **per cell
+    /// crossed**, release.
+    ///
+    /// The path is a straight line, interpolated on both axes for a diagonal
+    /// drag. A real pointer's exact path is not reproducible and does not
+    /// need to be; what matters is that every intervening cell is reported,
+    /// because an application may act on the path and not just its ends — a
+    /// drawing surface painting each crossed cell, a selection highlighting
+    /// incrementally, a drag that has to cross a pane edge to register.
     ///
     /// What actually reaches the application depends on what it asked
     /// for, as always. Under button-event or any-event tracking
-    /// (`?1002`/`?1003`) the motion report is included; under plain
+    /// (`?1002`/`?1003`) the motion reports are included; under plain
     /// `?1000` the application asked not to hear about motion, so it
     /// receives the press and release alone — the endpoints, which is
     /// what selection handling usually needs. Under X10 (`?9`) there is
@@ -1735,15 +1773,21 @@ impl Terminal {
             MouseMode::PressRelease => false,
             MouseMode::ButtonMotion | MouseMode::AnyMotion => true,
         };
-        let (from_col, from_row) = from;
-        let (to_col, to_row) = to;
-
-        let mut bytes = self.mouse_report(&modes, chord.code(), from_col, from_row, true)?;
+        let mut bytes = self.mouse_report(&modes, chord.code(), from.0, from.1, true)?;
         if report_motion {
-            // A motion report is the button code plus 32.
-            bytes.extend(self.mouse_report(&modes, chord.code() + 32, to_col, to_row, true)?);
+            // One motion report per cell crossed, which is what a terminal
+            // sends. A single report at the destination is invisible to an
+            // application that only asks "where did it start, where is it
+            // now" — and wrong for every application that does something
+            // *along* the path: a drawing surface painting each crossed
+            // cell, a selection highlighting incrementally, a drag that has
+            // to cross a pane edge to register. A motion report is the
+            // button code plus 32.
+            for (col, row) in cells_between(from, to) {
+                bytes.extend(self.mouse_report(&modes, chord.code() + 32, col, row, true)?);
+            }
         }
-        bytes.extend(self.mouse_report(&modes, chord.code(), to_col, to_row, false)?);
+        bytes.extend(self.mouse_report(&modes, chord.code(), to.0, to.1, false)?);
         self.write_input(&bytes, "a mouse drag")
     }
 
@@ -2533,5 +2577,61 @@ impl Drop for Terminal {
                 .take(),
         );
         drop(self.master.take());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cells_between;
+
+    #[test]
+    fn a_horizontal_drag_visits_every_column() {
+        assert_eq!(
+            cells_between((5, 4), (9, 4)),
+            vec![(6, 4), (7, 4), (8, 4), (9, 4)]
+        );
+    }
+
+    #[test]
+    fn a_backwards_drag_steps_backwards() {
+        assert_eq!(cells_between((9, 4), (6, 4)), vec![(8, 4), (7, 4), (6, 4)]);
+    }
+
+    #[test]
+    fn a_vertical_drag_visits_every_row() {
+        assert_eq!(cells_between((3, 1), (3, 4)), vec![(3, 2), (3, 3), (3, 4)]);
+    }
+
+    /// A diagonal interpolates both axes, and the short axis turns over
+    /// mid-run rather than all at the end — a straight line, not an L.
+    #[test]
+    fn a_diagonal_drag_interpolates_both_axes() {
+        assert_eq!(
+            cells_between((0, 0), (4, 2)),
+            vec![(1, 1), (2, 1), (3, 2), (4, 2)]
+        );
+        // Steps are driven by the longer axis, so no cell is visited twice.
+        let path = cells_between((0, 0), (8, 3));
+        assert_eq!(path.len(), 8);
+        assert_eq!(path.last(), Some(&(8, 3)));
+    }
+
+    #[test]
+    fn a_drag_that_goes_nowhere_still_reports_one_motion() {
+        assert_eq!(cells_between((7, 7), (7, 7)), vec![(7, 7)]);
+    }
+
+    /// The endpoints are exact — an off-by-one here would put a drop target
+    /// one cell away from where the test asked for it.
+    #[test]
+    fn interpolation_always_lands_on_the_destination() {
+        for to in [(1u16, 0u16), (0, 1), (37, 5), (5, 37), (200, 199)] {
+            let path = cells_between((0, 0), to);
+            assert_eq!(path.last(), Some(&to), "from (0,0) to {to:?}");
+            assert!(
+                !path.contains(&(0, 0)),
+                "the press already reported the origin"
+            );
+        }
     }
 }
