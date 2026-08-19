@@ -8,7 +8,7 @@ resolver = "2"
 members = ["crates/termlens", "fixtures/*"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 # Minimum supported Rust version. Checked by the `msrv` CI job, which reads
 # this field; bumping it is a minor (not patch) change per our SemVer policy.
@@ -22,7 +22,7 @@ repository = "https://github.com/vyncint/termlens"
 authors = ["Vyncint Ng <vyncint@icloud.com>"]
 
 [workspace.dependencies]
-termlens = { path = "crates/termlens", version = "0.4.1" }
+termlens = { path = "crates/termlens", version = "0.4.2" }
 
 portable-pty = "0.9"
 vt100 = "0.16"

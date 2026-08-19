@@ -9,12 +9,19 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
-## [0.4.1] - 2026-08-19
+## [0.4.2] - 2026-08-19
 
 The documentation set, brought up to what 0.4 actually does.
 
 Two statements were wrong and the rest understated the crate by a
 release or two. No library code changed.
+
+*0.4.1 was tagged for exactly this content and never published: its
+release run caught a latent race in this suite's own UTF-8 mouse test —
+padding written after a click could be read by the script's exit guard
+instead of by `head`, ending the child early so the next write failed
+with EIO. Fixed before publishing, so the version on crates.io is the one
+whose gates all passed.*
 
 ### Fixed
 
