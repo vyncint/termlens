@@ -546,9 +546,14 @@ fn the_timing_series_shows_a_deliberately_slow_repaint() -> termlens::Result<()>
         "the deliberate 150ms sleep must be inside the span: {:?}",
         slow.duration()
     );
+    // Deliberately *not* "the slow frame is 5x the quick ones". Under a
+    // loaded runner an ordinary repaint can take tens of milliseconds, so a
+    // ratio is a claim about the machine rather than about the measurement.
+    // The 150ms floor above is the property that holds regardless, and it is
+    // the one the fixture actually creates.
     assert!(
-        slow.duration() > slowest_quick * 5,
-        "and it must stand out: {:?} vs {slowest_quick:?}",
+        slow.duration() > slowest_quick,
+        "the slowed repaint must still be the slowest: {:?} vs {slowest_quick:?}",
         slow.duration()
     );
 

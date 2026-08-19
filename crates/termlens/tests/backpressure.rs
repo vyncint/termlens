@@ -11,12 +11,23 @@ use termlens::{Key, Terminal};
 
 /// Ask `n` cursor-position queries back to back, then read everything, and
 /// count the answers. Each DSR reply carries exactly one `R`.
+///
+/// The read *loops* rather than making one long `dd`. A single read ends at
+/// the first gap longer than its `VTIME`, and under a loaded runner the
+/// answers arrive in bursts with real gaps between them — so a one-shot read
+/// stops early and measures the machine instead of the harness. Stress found
+/// exactly that: 310 of 400 on a busy macOS runner, with nothing wrong on
+/// this side of the PTY.
 fn answered(n: usize) -> termlens::Result<usize> {
     let script = format!(
-        "stty -icanon -echo min 0 time 30; i=0; \
+        "stty -icanon -echo min 0 time 5; i=0; \
          while [ $i -lt {n} ]; do printf '\\033[6n'; i=$((i+1)); done; \
          printf ASKED; \
-         got=$(dd bs=1 count=100000 2>/dev/null | tr -cd 'R' | wc -c | tr -d ' '); \
+         got=0; tries=0; \
+         while [ $got -lt {n} ] && [ $tries -lt 40 ]; do \
+           chunk=$(dd bs=1 count=8192 2>/dev/null | tr -cd 'R' | wc -c | tr -d ' '); \
+           got=$((got+chunk)); tries=$((tries+1)); \
+         done; \
          printf ' GOT[%s] DONE' \"$got\"; read guard"
     );
     let mut t = Terminal::builder()
