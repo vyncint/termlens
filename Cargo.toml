@@ -28,6 +28,11 @@ portable-pty = "0.9"
 vt100 = "0.16"
 thiserror = "2"
 unicode-width = "0.2"
+# Needle matching folds both sides to NFC. Terminals draw NFC and NFD
+# identically, so without this a test author's needle silently misses text
+# the application happened to normalize the other way — a false negative
+# invisible in the terminal, in the failure output, and in the diff.
+unicode-normalization = "0.1"
 # Already in the tree transitively (portable-pty); used directly for one
 # kill(2) call behind Terminal::signal.
 libc = "0.2"

@@ -50,6 +50,18 @@ listed under a **Changed** or **Removed** heading.
   predicate — a transposed `.size()` turned a sub-second test into a wedged
   one with no hint of why. `resize` is held to the same limit.
 
+- **`Screen::contains` and `Screen::find` fold both sides to NFC**, so a
+  needle finds text the application normalized the other way. A terminal
+  draws `caf\u{e9}` and `cafe\u{301}` identically — and so do the failure
+  output and the diff, which is what made the mismatch a trap rather than a
+  limitation: an author types NFC (what editors produce) while text from a
+  filesystem path, a git author name or macOS input is frequently NFD.
+  Unconditional, and no escape hatch is needed because the raw form is never
+  taken away: `text`, `row_text`, `rect_text`, `cell` and `title` all still
+  return exactly the codepoints the application sent. One consequence worth
+  knowing: matching is grapheme-shaped, so on a screen showing `caf\u{e9}`,
+  `contains("cafe")` is now false — the screen does not show `cafe`.
+
 ### Added
 
 - **`Error::Write`**, carrying the screen at the moment of the failed

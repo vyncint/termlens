@@ -109,6 +109,54 @@ fn resize_reaches_the_child_as_sigwinch() -> termlens::Result<()> {
     Ok(())
 }
 
+/// Normalization folding against real vt100 output rather than a
+/// hand-built grid — one form on screen, the other in the needle, so the
+/// match can only come from folding.
+///
+/// The forms are spelled with explicit escapes, so this file's own encoding
+/// can never change the bytes. Before folding, the needle a test author
+/// would type — NFC, which is what editors produce — silently missed NFD
+/// text, and nothing about the miss was visible: not in the terminal, not
+/// in the failure output, not in a diff.
+#[test]
+fn a_needle_finds_text_in_the_other_normalization_form() -> termlens::Result<()> {
+    // "Tiếng" composed, and the same word decomposed.
+    let nfc = "Ti\u{1ebf}ng";
+    let nfd = "Tie\u{302}\u{301}ng";
+
+    for (on_screen, needle, label) in [
+        (nfd, nfc, "NFD screen, NFC needle"),
+        (nfc, nfd, "NFC screen, NFD needle"),
+    ] {
+        let mut t = Terminal::builder()
+            .size(40, 4)
+            .timeout(Duration::from_secs(10))
+            .args(["-c", &format!("printf '{on_screen} MARK'; read guard")])
+            .spawn("/bin/sh")?;
+        t.wait_until(|s| s.contains("MARK"))?;
+        let s = t.screen();
+
+        assert!(s.contains(needle), "{label}: folded match failed:\n{s}");
+        assert!(
+            s.contains(on_screen),
+            "{label}: exact match must still work"
+        );
+        assert_eq!(s.find(needle), Some((0, 0)), "{label}: real column");
+
+        // The grid keeps exactly what the application sent — an observation
+        // is not rewritten, so a test that means to assert on the form can.
+        assert!(s.row_text(0).contains(on_screen), "{label}: raw form kept");
+        assert!(
+            !s.row_text(0).contains(needle),
+            "{label}: the other form must NOT be in the grid"
+        );
+
+        t.send(Key::Enter)?;
+        assert!(t.wait_exit()?.success());
+    }
+    Ok(())
+}
+
 #[test]
 fn unicode_torture_renders_with_correct_widths() -> termlens::Result<()> {
     let mut t = spawn_fixture("unicode-torture")?;

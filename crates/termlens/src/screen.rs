@@ -8,6 +8,8 @@ use std::fmt;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
+use unicode_normalization::UnicodeNormalization;
+
 /// A terminal color, as reported by the emulator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Color {
@@ -461,9 +463,38 @@ impl Screen {
     /// The **visible screen only** — like every other query on this type.
     /// For content that may already have scrolled off, use
     /// [`full_text`](Self::full_text).
+    ///
+    /// # Normalization
+    ///
+    /// Both sides are folded to **NFC** before comparing, so a needle finds
+    /// text the application normalized the other way. A terminal draws
+    /// `caf\u{e9}` and `cafe\u{301}` identically, and so does the failure
+    /// output and the diff — which is what made the mismatch a trap rather
+    /// than a limitation. A test author types NFC (that is what editors
+    /// produce); text from a filesystem path, a git author name, or macOS
+    /// input is frequently NFD.
+    ///
+    /// Folding is unconditional here and needs no escape hatch, because the
+    /// raw form is never taken away: [`text`](Self::text),
+    /// [`row_text`](Self::row_text), [`rect_text`](Self::rect_text),
+    /// [`cell`](Self::cell) and [`title`](Self::title) all return exactly
+    /// the codepoints the application sent, so a test that means to assert
+    /// on normalization compares those directly. A snapshot is an
+    /// observation; only the search over it is forgiving.
+    ///
+    /// Note that this makes matching grapheme-shaped rather than
+    /// byte-shaped: on a screen showing `caf\u{e9}`, `contains("cafe")` is
+    /// **false**, because the screen does not show `cafe`.
+    ///
+    /// Text pulled out as a `String` and matched with `str` methods —
+    /// `full_text().contains(..)` — is byte-exact, since the comparison is
+    /// then `std`'s and not ours.
     #[must_use]
     pub fn contains(&self, needle: &str) -> bool {
-        self.text().contains(needle)
+        if self.is_ascii() && needle.is_ascii() {
+            return self.text().contains(needle);
+        }
+        self.nfc_text().contains(&nfc(needle))
     }
 
     /// Locate the first occurrence of `needle` scanning rows top to bottom;
@@ -477,16 +508,23 @@ impl Screen {
     ///
     /// Columns account for double-width characters: a match after a CJK
     /// character reports the real terminal column.
+    ///
+    /// Matching folds both sides to NFC, exactly as
+    /// [`contains`](Self::contains) does and for the same reasons — a needle
+    /// is found here precisely when `contains` is true. The reported column
+    /// is the real one: folding happens per cell, so the byte-to-column map
+    /// stays exact even where a composition shortened the text.
     #[must_use]
     pub fn find(&self, needle: &str) -> Option<(u16, u16)> {
         if needle.is_empty() {
             return Some((0, 0));
         }
+        let needle = &self.fold(needle);
         if !needle.contains('\n') {
             for row in 0..self.rows {
-                let text = self.row_text(row);
-                if let Some(byte_off) = text.find(needle) {
-                    return Some((row, self.col_of_byte(row, byte_off)?));
+                let (text, cols) = self.searchable_row(row);
+                if let Some(byte_off) = text.find(needle.as_str()) {
+                    return Some((row, cols.get(byte_off).copied()?));
                 }
             }
             return None;
@@ -498,13 +536,13 @@ impl Screen {
         let segments: Vec<&str> = needle.split('\n').collect();
         let extra = u16::try_from(segments.len() - 1).ok()?;
         for row in 0..self.rows.checked_sub(extra)? {
-            let first_line = self.row_text(row);
+            let (first_line, cols) = self.searchable_row(row);
             let first = first_line.trim_end();
             if !first.ends_with(segments[0]) {
                 continue;
             }
             let tail_matches = segments[1..].iter().enumerate().all(|(i, seg)| {
-                let line = self.row_text(row + 1 + i as u16);
+                let (line, _) = self.searchable_row(row + 1 + i as u16);
                 let line = line.trim_end();
                 if i as u16 == extra - 1 {
                     line.starts_with(seg) // last segment: prefix
@@ -521,7 +559,7 @@ impl Screen {
             return match segments.iter().position(|s| !s.is_empty()) {
                 Some(0) => {
                     let byte_off = first.len() - segments[0].len();
-                    Some((row, self.col_of_byte(row, byte_off)?))
+                    Some((row, cols.get(byte_off).copied()?))
                 }
                 Some(k) => Some((row + u16::try_from(k).ok()?, 0)),
                 None => Some((row + extra, 0)),
@@ -627,26 +665,73 @@ impl Screen {
         None
     }
 
-    /// Map a byte offset within `row_text(row)` back to the column of the
-    /// cell that contributed that byte (wide characters span two columns
-    /// but contribute their bytes once).
-    fn col_of_byte(&self, row: u16, byte_off: usize) -> Option<u16> {
-        let mut acc = 0usize;
-        for col in 0..self.cols {
-            let cell = self.cell(row, col)?;
-            let len = if cell.is_wide_continuation() {
-                0
-            } else if cell.contents().is_empty() {
-                1 // rendered as a space
-            } else {
-                cell.contents().len()
-            };
-            if len > 0 && byte_off < acc + len {
-                return Some(col);
-            }
-            acc += len;
+    /// True when every cell holds only ASCII, so normalization is the
+    /// identity and the search helpers can skip it. This is the shape of
+    /// virtually every screen, which is what keeps `contains` — evaluated
+    /// on every wait wake-up — as cheap as it was.
+    fn is_ascii(&self) -> bool {
+        self.cells.iter().all(|c| c.contents().is_ascii())
+    }
+
+    /// `needle` in the form the search helpers compare against.
+    fn fold(&self, needle: &str) -> String {
+        if self.is_ascii() && needle.is_ascii() {
+            needle.to_owned()
+        } else {
+            nfc(needle)
         }
-        None
+    }
+
+    /// The whole grid in searchable form: rows joined with `\n`, trailing
+    /// whitespace stripped per row, each row folded the same way
+    /// [`searchable_row`](Self::searchable_row) folds it — so `contains` and
+    /// `find` can never disagree about what matches.
+    fn nfc_text(&self) -> String {
+        let mut out = String::new();
+        for row in 0..self.rows {
+            if row > 0 {
+                out.push('\n');
+            }
+            let (line, _) = self.searchable_row(row);
+            out.push_str(line.trim_end());
+        }
+        out
+    }
+
+    /// One row in searchable form, plus the column that produced each byte.
+    ///
+    /// Folding is **per cell**, not over the joined string, and that is the
+    /// load-bearing detail: a cell holds a base character together with its
+    /// combining marks (vt100 appends them to the cell being written), so
+    /// folding cell by cell composes exactly what the terminal draws in one
+    /// cell and can never compose across a cell boundary. It also keeps the
+    /// byte-to-column map exact, which is what [`find`](Self::find) reports.
+    fn searchable_row(&self, row: u16) -> (String, Vec<u16>) {
+        let ascii = self.is_ascii();
+        let mut text = String::with_capacity(usize::from(self.cols));
+        let mut cols = Vec::with_capacity(usize::from(self.cols));
+        for col in 0..self.cols {
+            let Some(cell) = self.cell(row, col) else {
+                break;
+            };
+            if cell.is_wide_continuation() {
+                continue;
+            }
+            let before = text.len();
+            if cell.contents().is_empty() {
+                text.push(' ');
+            } else if ascii {
+                text.push_str(cell.contents());
+            } else {
+                text.extend(cell.contents().nfc());
+            }
+            cols.resize(text.len(), col);
+            debug_assert!(text.len() > before || cell.is_wide_continuation());
+        }
+        // One extra entry, so a match at the very end of the row maps to
+        // the last column instead of falling off the map.
+        cols.push(self.cols.saturating_sub(1));
+        (text, cols)
     }
 
     /// This screen rendered **with its styles**: the normal
@@ -668,6 +753,11 @@ impl Screen {
     pub fn with_styles(&self) -> ScreenWithStyles<'_> {
         ScreenWithStyles { screen: self }
     }
+}
+
+/// `s` folded to NFC.
+fn nfc(s: &str) -> String {
+    s.nfc().collect()
 }
 
 /// Clamp any range expression to `0..len`, as `(start, end)` exclusive.
@@ -835,6 +925,18 @@ mod tests {
             let mut row_cells: Vec<Cell> = Vec::new();
             if let Some(line) = lines.get(r) {
                 for ch in line.chars() {
+                    // A zero-width combining mark joins the cell it modifies,
+                    // which is what vt100 does: it appends combining
+                    // characters to the cell currently being written rather
+                    // than advancing. Modelling that here matters, because
+                    // needle folding is per cell.
+                    if ch.width().unwrap_or(1) == 0 {
+                        if let Some(last) = row_cells.last_mut() {
+                            let joined = format!("{}{ch}", last.contents());
+                            *last = Cell::new(joined, *last.style(), last.is_wide(), false);
+                            continue;
+                        }
+                    }
                     let wide = ch.width().unwrap_or(1) == 2;
                     let style = Style {
                         bold: ch == '*',
@@ -876,6 +978,54 @@ mod tests {
         assert!(s.contains("hello"));
         assert!(s.contains("hello\nworld"));
         assert!(!s.contains("hello world"));
+    }
+
+    /// The trap: NFC and NFD render identically, so a needle that misses
+    /// looks like content that is absent. Both directions, because the
+    /// author's needle and the application's output can each be either.
+    #[test]
+    fn needles_match_across_normalization_forms() {
+        let nfc = "caf\u{e9}";
+        let nfd = "cafe\u{301}";
+
+        let on_nfd = screen(10, 1, &[nfd]);
+        assert!(on_nfd.contains(nfc), "NFC needle must find NFD text");
+        assert!(on_nfd.contains(nfd));
+        assert_eq!(on_nfd.find(nfc), Some((0, 0)));
+        assert_eq!(on_nfd.find(nfd), Some((0, 0)));
+
+        let on_nfc = screen(10, 1, &[nfc]);
+        assert!(on_nfc.contains(nfd), "NFD needle must find NFC text");
+        assert!(on_nfc.contains(nfc));
+        assert_eq!(on_nfc.find(nfd), Some((0, 0)));
+
+        // The grid still holds what the application sent: an observation is
+        // not rewritten, and a test that means to assert on the form can.
+        assert_eq!(on_nfd.text(), nfd);
+        assert_eq!(on_nfc.text(), nfc);
+        assert_ne!(on_nfd.text(), on_nfc.text());
+    }
+
+    /// Matching is grapheme-shaped once folding applies: the screen shows
+    /// `caf\u{e9}`, so it does not show `cafe`.
+    #[test]
+    fn a_folded_match_does_not_split_a_composed_character() {
+        let on_nfd = screen(10, 1, &["cafe\u{301}"]);
+        assert!(!on_nfd.contains("cafe"), "the screen shows caf\u{e9}");
+        assert!(on_nfd.contains("caf"));
+    }
+
+    /// Columns must survive folding: NFD text is longer in bytes than its
+    /// NFC form, so a naive offset would land in the wrong cell.
+    #[test]
+    fn folded_matches_still_report_real_columns() {
+        // "e" + combining acute in cell 0, then a marker further along.
+        let s = screen(10, 1, &["e\u{301}xyMARK"]);
+        assert_eq!(s.find("MARK"), Some((0, 3)));
+        assert_eq!(s.find("x"), Some((0, 1)));
+        // Wide characters and folding together.
+        let wide = screen(10, 1, &["\u{6c49}e\u{301}Z"]);
+        assert_eq!(wide.find("Z"), Some((0, 3)));
     }
 
     #[test]
