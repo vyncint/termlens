@@ -9,6 +9,13 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-19
+
+The documentation set, brought up to what 0.4 actually does.
+
+Two statements were wrong and the rest understated the crate by a
+release or two. No library code changed.
+
 ### Fixed
 
 - **The README no longer contradicts itself about scrollback.** Its
