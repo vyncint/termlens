@@ -162,7 +162,15 @@ fn mouse_reports_follow_the_utf8_encoding() -> termlens::Result<()> {
             "-c",
             concat!(
                 r"stty -icanon -echo; printf '\033[?1000h\033[?1005h'; printf READY; ",
-                r"head -c 7 | od -An -tx1 | tr -d ' \n'; printf ' WIRE-EOF'; read guard"
+                r"head -c 7 | od -An -tx1 | tr -d ' \n'; printf ' WIRE-EOF'; ",
+                // A loop with a sentinel, not a bare `read guard`: the
+                // padding below is a separate write from the click, so
+                // whether head's buffered read swallows it or leaves it
+                // queued is a race. A bare guard loses that race — it
+                // consumes a padding newline, the shell exits, and the
+                // final write below hits a dead PTY with EIO. Only QUIT
+                // ends this script, so the padding cannot end it early.
+                r#"while read guard; do [ "$guard" = QUIT ] && exit 0; done"#
             ),
         ])
         .spawn("/bin/sh")?;
@@ -170,6 +178,10 @@ fn mouse_reports_follow_the_utf8_encoding() -> termlens::Result<()> {
 
     // Column 100 is 0x85 as a bare byte; UTF-8 must send c2 85.
     t.click(100, 3)?;
+    // Padding, so a regression to the 6-byte legacy form unblocks `head`
+    // and shows the wire instead of timing out. Seven of them because a
+    // correct click already supplied all seven bytes; these are only ever
+    // read when it did not.
     t.send_str("\n\n\n\n\n\n\n");
     t.wait_until(|s| s.contains("WIRE-EOF"))?;
 
@@ -178,7 +190,7 @@ fn mouse_reports_follow_the_utf8_encoding() -> termlens::Result<()> {
         wire.contains("1b5b4d20c28524"),
         "expected ESC [ M 0x20 c2 85 0x24 (UTF-8 column 100), got: {wire}"
     );
-    t.send_str("\n");
+    t.send_str("QUIT\n");
     assert!(t.wait_exit()?.success());
     Ok(())
 }
