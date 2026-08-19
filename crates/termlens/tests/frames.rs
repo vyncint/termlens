@@ -541,8 +541,14 @@ fn the_timing_series_shows_a_deliberately_slow_repaint() -> termlens::Result<()>
         torn.repaints(),
         "the series and the frame count agree on which repaint this was"
     );
+    // A tolerance, not a floor at exactly 150ms — and the reason is a real
+    // property of the measurement rather than slack for its own sake. Both
+    // ends are stamped when *we* consume the marker byte, so if the opening
+    // bytes reach the reader a fraction late while the End still arrives
+    // 150ms after the application's flush, the span measures marginally
+    // *under* the sleep. Stress caught it at 149.72ms — 276µs short.
     assert!(
-        slow.duration() >= Duration::from_millis(150),
+        slow.duration() >= Duration::from_millis(140),
         "the deliberate 150ms sleep must be inside the span: {:?}",
         slow.duration()
     );

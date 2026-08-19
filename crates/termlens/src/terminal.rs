@@ -73,6 +73,14 @@ const FRAME_TIMING_HISTORY: usize = 512;
 /// the other end experiences. It is not a render benchmark, and treating it as
 /// one will mislead you. What it is good for is a *trend*: the same
 /// application, the same fixture, a p99 that grew.
+///
+/// It is also, precisely, the span between **our observations** of the two
+/// markers rather than the application's own clock, and the two can differ by
+/// the read latency at either end. A repaint that slept 150ms inside its
+/// update has measured 149.72ms here — the opening bytes reached the reader a
+/// fraction late while the End still arrived 150ms after the application's
+/// flush. So compare spans with a tolerance; an exact expectation is a
+/// statement about scheduling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameTiming {
     index: u64,
