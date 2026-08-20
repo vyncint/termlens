@@ -53,11 +53,30 @@
 //!
 //! Input is mode-aware: [mouse clicks](Terminal::click),
 //! [pastes](Terminal::paste), modifier [chords](Chord), and cursor keys
-//! are encoded exactly as the application configured its terminal. And
-//! the terminal's out-of-band state — the window title, the
+//! are encoded exactly as the application configured its terminal — and a
+//! [drag](Terminal::drag) reports one motion per cell crossed, so an
+//! application that acts along the path sees the path. [Focus
+//! events](Terminal::focus_out) go the other way, reaching an application
+//! that enabled mode 1004 so the unfocused branch of a UI can be driven at
+//! all. The terminal's out-of-band state — the window title, the
 //! alternate-screen flag, the input modes, the last `OSC 52`
 //! [clipboard](Screen::clipboard) write — is readable from every
 //! [`Screen`] as plain accessors.
+//!
+//! Behaviour that leaves the screen **identical** is assertable too, which
+//! no content predicate can manage: [`repaints`](Screen::repaints) counts
+//! completed frames (so "one input became four repaints" is catchable),
+//! [`bells`](Screen::bells) counts `BEL`, and
+//! [`graphics`](Screen::graphics) counts the inline images an application
+//! transmitted — often to assert that it transmitted *none*.
+//! [`frame_timings`](Terminal::frame_timings) adds what each repaint cost,
+//! so a suite can hold a performance line as well as a correctness one.
+//!
+//! Needles are matched by what the terminal draws rather than by how it is
+//! spelled: [`contains`](Screen::contains) and [`find`](Screen::find) fold
+//! both sides to NFC, so a needle typed in an editor finds text an
+//! application normalized the other way. The grid keeps exactly the
+//! codepoints the application sent.
 //!
 //! With the default `insta` feature, snapshot-test whole screens:
 //!

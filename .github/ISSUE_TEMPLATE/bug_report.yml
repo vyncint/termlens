@@ -6,7 +6,7 @@ body:
     id: version
     attributes:
       label: termlens version
-      placeholder: "0.4.2 (or git SHA)"
+      placeholder: "0.5.0 (or git SHA)"
     validations:
       required: true
 

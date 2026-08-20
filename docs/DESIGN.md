@@ -465,7 +465,8 @@ Rules:
    input modes (bracketed paste, application cursor, mouse tracking) are
    captured with every snapshot and read through plain accessors —
    `Screen::title`, `Screen::alternate_screen`, `Screen::bracketed_paste`,
-   `Screen::application_cursor`, `Screen::mouse_mode`. Keeping them out of
+   `Screen::application_cursor`, `Screen::mouse_mode`,
+   `Screen::focus_events`, `Screen::clipboard`. Keeping them out of
    the rendering means existing snapshot files stay valid, and state
    assertions read as ordinary predicates:
    `wait_until(|s| s.alternate_screen())`.
@@ -589,6 +590,21 @@ encoding the application enabled (`?9/?1000/?1002/?1003`, SGR `?1006`),
 `click`/`scroll` encode to match, and no tracking enabled is a typed
 error — never bytes the application would misparse as keys.
 
+A **drag reports one motion per cell crossed**, interpolated on a straight
+line and on both axes for a diagonal. A single report at the destination is
+invisible to an application that only asks where a gesture started and where
+it is now — which is why it went unnoticed — and wrong for every application
+that acts *along* the path: a drawing surface painting each crossed cell, a
+selection highlighting incrementally, a drag that must cross a pane edge to
+register. A real pointer's exact path is not reproducible and does not need
+to be; every intervening cell being reported is the property that matters.
+
+**Focus events** (`ESC [ I` / `ESC [ O`) follow the same mode-aware contract
+as the mouse: sent only when the application enabled mode 1004, refused with
+a typed error when it did not. Without a way to deliver one, the unfocused
+branch of a UI is not merely unasserted — it is unreachable, since no input
+exists that can enter it.
+
 `Key::encode` documents the xterm *default-mode* sequences (CSI arrows,
 SS3 F1–F4, CSI-tilde function keys, DEL for Backspace). `send` is
 mode-aware: cursor keys switch to their `ESC O _` application forms while
@@ -597,5 +613,14 @@ reports match the tracking mode/encoding the application enabled — the
 emulator knows every one of these modes, and the input path consults it,
 so the bytes always match what the application configured its "terminal"
 to send. The one thing no encoding can fix is the wire itself: `Esc`
-immediately followed by another key is byte-identical to an Alt chord;
-the documented idiom is to wait for the Esc's visible effect first.
+immediately followed by another key is byte-identical to an Alt chord.
+Where the `Esc` has a visible effect, waiting for it resolves the
+ambiguity. Where it has none — leaving a text field's insert mode often
+changes nothing — `send_after(delay, key)` puts the two writes in separate
+reads instead. The delay is a named argument rather than a hidden constant,
+and `send(Key::Esc)` carries no default separation: most suites send `Esc`
+with nothing behind it, and a hidden sleep would slow all of them for a
+hazard they do not have while making the tests that need it work for a
+reason invisible at the call site. It is a heuristic either way — it works
+by making the application's read boundary fall between two writes, and a
+slow enough poll loop can still merge them.

@@ -31,7 +31,7 @@ let mut t = Terminal::builder()
 t.wait_until(|screen| screen.contains("Ready"))?;
 insta::assert_snapshot!(t.screen()); // snapshot the rendered grid
 
-t.send(Key::Char('q'));
+t.send(Key::Char('q'))?;
 assert!(t.wait_exit()?.success());
 ```
 
@@ -40,7 +40,7 @@ it continuously through a vt100 emulator into an immutable screen grid;
 waits are all deadline-bounded, and a timeout error embeds the full
 screen dump — so a CI log alone shows what the app was displaying.
 
-Two things worth pointing at beyond the basics. If your app brackets its
+Three things worth pointing at beyond the basics. If your app brackets its
 repaints in DEC 2026 synchronized updates (crossterm's
 `BeginSynchronizedUpdate`), `wait_frame` evaluates predicates only on
 complete frames and hands back the one it matched — never a torn screen,
@@ -52,6 +52,12 @@ which is what stops a test asserting "the password field is masked" from
 passing against an app that printed the secret in clear — the two are
 identical text.
 
+And behaviour that leaves the screen *identical* is assertable, which no
+content predicate can manage: a repaint that drew nothing, a bell on a
+rejected key, an inline image. Every `Screen` carries the counters, so
+"one wheel notch became four repaints" is a test, and so is "this diagram
+must render as box art and never go out as a Kitty image".
+
 The part I'm proudest of is the flake story. CI runs the whole suite 100
 times on Linux **and** macOS before anything merges to the wait paths.
 That gate caught, among other things, a genuine macOS kernel race where
@@ -60,12 +66,14 @@ pty* because device numbers recycle instantly — termlens serializes pty
 lifecycle edges behind a process-wide lock so your parallel tests don't
 hit it.
 
-Honest limitations (v0.4): Unix only for now (portable-pty supports
+Honest limitations (v0.5): Unix only for now (portable-pty supports
 ConPTY, so Windows is planned); scrollback is retained but bounded, text
 only, and not reflowed on resize; `wait_frame` needs the app to opt into
-DEC 2026; and a few questions (kitty `CSI ? u`, `XTGETTCAP`, `OSC 52`
-*reads*) are deliberately left unanswered rather than guessed — an app
-blocked on one is named in the next timeout instead of hanging silently.
+DEC 2026; graphics are observed and offered but never rendered, so what an
+image *depicted* is not assertable; and a few questions (kitty `CSI ? u`,
+DECRQSS, `OSC 52` *reads*) are deliberately left unanswered rather than
+guessed — an app blocked on one is named in the next timeout instead of
+hanging silently.
 
 - crates.io: https://crates.io/crates/termlens (`cargo add termlens --dev`)
 - GitHub: https://github.com/vyncint/termlens

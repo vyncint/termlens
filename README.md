@@ -35,7 +35,7 @@ fn quits_from_the_main_screen() -> termlens::Result<()> {
     insta::assert_snapshot!(t.screen());   // snapshot the rendered grid
     // …or t.screen().with_styles() to catch style-only regressions too
 
-    t.send(Key::Char('q'));
+    t.send(Key::Char('q'))?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }
@@ -61,10 +61,10 @@ flowchart TB
   test["your test<br/>drive · wait · assert"]
   subgraph proc["your test process · cargo test"]
     subgraph tt["termlens"]
-      api["Terminal<br/>send · click · drag · paste · signal · resize · wait_until / wait_frame / wait_idle / wait_exit"]
+      api["Terminal<br/>send · click · drag · paste · focus · signal · resize · wait_until / wait_frame / wait_idle / wait_exit"]
       reader["reader thread<br/>drains continuously — output is never lost between waits"]
       emu["VT emulator<br/>vt100 behind a small internal trait, swappable"]
-      screen["Screen<br/>immutable grid snapshots · cells · cursor · styles"]
+      screen["Screen<br/>immutable grid snapshots · cells · cursor · styles · modes · repaints · bells · images"]
     end
   end
   subgraph kernel["kernel"]
@@ -88,20 +88,34 @@ flowchart TB
 The reader thread drains the PTY into the emulator *continuously* — the
 kernel buffer can't fill up and stall your app, and no output is lost
 between assertions. It also **answers the queries real terminals
-answer** (cursor position, device attributes, window size, background
-color), so capability-probing apps run instead of hanging — and anything
-left unanswered is named inside the next timeout error.
+answer** — cursor position, device attributes, window size, background
+colour, `DECRQM` mode probes, and terminfo capabilities via `XTGETTCAP` —
+so capability-probing apps run instead of hanging, and anything left
+unanswered is named inside the next timeout error. Every answer is
+truthful or absent: nothing is claimed that the emulator cannot render.
 
 Input is **mode-aware**: mouse clicks and scrolls, pastes, modifier
 chords, and cursor keys are encoded exactly as the application
 configured its terminal (SGR mouse, bracketed paste, DECCKM) — because
-the emulator knows which modes the app enabled. The same knowledge is
+the emulator knows which modes the app enabled. A `drag` reports one
+motion **per cell crossed**, so an application that paints along the path
+sees the path. The same knowledge is
 readable from every `Screen`: the window title, the alternate-screen
 flag, the input modes and the last `OSC 52` clipboard write are plain
 accessors, so "did the app enter the alt screen?" and "did it copy the
 right text?" are assertions, not inferences. Focus events go the other way:
 `focus_out()` reaches an application that enabled mode 1004, so the
 unfocused branch of a UI can be driven at all.
+
+**Behaviour that leaves the screen identical is still assertable.** A
+repaint that drew nothing, a bell on a rejected key, an inline image — none
+of these change a single cell, so no content predicate can see them. Every
+`Screen` carries the counters instead: `repaints()` (completed DEC 2026
+updates, so *one input became four repaints* is catchable), `bells()`, and
+`graphics()` for kitty and sixel payloads — where the assertion is as often
+the negative one, "this must render as text in every terminal and never go
+out as an image". `frame_timings()` adds the cost of each repaint, so a
+suite can hold a performance line as well as a correctness one.
 
 **Scrollback is retained** (1000 rows by default), so an application that
 hands finished output *back* to the terminal — a pager, a log view, a TUI
@@ -137,6 +151,12 @@ design. termlens's position:
   `blink`, `conceal` and `strikethrough` alongside the usual attributes, so
   a test asserting that a password field is masked fails against an
   application that prints the secret in clear — the two are identical text.
+- **Needles are matched by what the terminal draws, not by how it is
+  spelled.** `contains` and `find` fold both sides to NFC, so a needle typed
+  in an editor still finds text an application normalized the other way —
+  `caf\u{e9}` and `cafe\u{301}` render identically, and so does the failure
+  output, which made the mismatch a trap rather than a limitation. The grid
+  itself keeps exactly the codepoints the application sent.
 - **`wait_frame` gives exact frame boundaries** for apps that bracket
   repaints in DEC 2026 synchronized updates (crossterm's
   `BeginSynchronizedUpdate`/`EndSynchronizedUpdate`): the predicate only
@@ -164,7 +184,7 @@ design. termlens's position:
   [stress workflow](.github/workflows/stress.yml) on Linux and macOS —
   wait/timing changes don't merge without surviving it.
 
-## Known limitations (v0.4)
+## Known limitations (v0.5)
 
 - Scrollback is **bounded** (1000 rows by default), **text only** — a
   scrolled-off row has no styles and no cell addressing — and is **not
@@ -174,10 +194,22 @@ design. termlens's position:
   synchronized updates, and only the last 8 completed frames are retained;
   everything else waits with `wait_until`, under the three rules in
   [docs/DESIGN.md](docs/DESIGN.md) §2.
-- Some questions stay deliberately unanswered — kitty's `CSI ? u`,
-  `XTGETTCAP`, DECRQSS, `OSC 52` *reads* — because a guessed reply is worse
-  than none. An application blocked on one is **named in the next timeout**
-  rather than left to hang unexplained.
+- Some questions stay deliberately unanswered — kitty's `CSI ? u`, DECRQSS,
+  DA3, `OSC 12`, `OSC 52` *reads*, and the non-pixel `CSI … t` reports —
+  because a guessed reply is worse than none. An application blocked on one
+  is **named in the next timeout** rather than left to hang unexplained.
+- **Graphics are observed, not rendered.** termlens counts kitty and sixel
+  payloads and can tell an application that either is available
+  (`graphics()`, `cell_size()`), but it draws no pixels: what a payload
+  *depicted* is not assertable. Both are opt-in, so by default an
+  application that probes is truthfully told there is no graphics support.
+- **A reply the terminal's own input queue cannot hold may not arrive.**
+  termlens no longer drops answers of its own accord, but the tty input
+  queue is small (~1 KB on macOS, ~4 KB on Linux), so an application that
+  asks thousands of questions without reading has to read as it asks — as
+  it would against a real terminal. On Linux the kernel discards silently,
+  so that loss is undetectable and goes unreported; macOS blocks instead,
+  where it is counted and named.
 - Unix only for now (Linux + macOS in CI). The PTY layer (`portable-pty`)
   supports ConPTY, so Windows is planned, not designed out.
 - A child that writes and exits within its first milliseconds can lose

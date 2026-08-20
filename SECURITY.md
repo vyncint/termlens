@@ -32,10 +32,19 @@ can reach is bounded, and a hostile child can at worst waste its own test's
 time budget. The reader uses a fixed 8 KiB buffer; every wait is
 deadline-bounded; retained scrollback is capped at the configured length
 (1000 rows by default, `scrollback(0)` to disable) and held as text rather
-than cells; at most 8 completed frames are retained for `wait_frame`; a
-captured `OSC 52` payload is dropped past 64 KiB; queued query replies stop
-at a fixed depth; and the set of distinct unanswered queries kept for
-diagnostics is capped, with the remainder counted.
+than cells; at most 8 completed frames and 512 frame timings are retained; a
+captured `OSC 52` payload is dropped past 64 KiB; **undelivered query replies
+are capped at 1 MiB** and discarded past it, counted and named in the next
+wait's error; the capture of a DCS-class header is fixed at 128 bytes; and the
+set of distinct unanswered queries kept for diagnostics is capped, with the
+remainder counted.
+
+The reply cap is a byte bound rather than a queue depth on purpose: a depth
+bounds the wrong thing. Two earlier versions counted queue slots and both
+shorted a well-behaved application asking a legitimate batch of startup
+probes, while a byte bound leaves the queue itself unbounded — so the drain
+can never block on it, which is what keeps a hostile child from deadlocking
+the harness rather than merely slowing its own test.
 
 ## Supported versions
 

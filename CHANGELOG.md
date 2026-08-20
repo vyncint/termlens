@@ -198,6 +198,19 @@ listed under a **Changed** or **Removed** heading.
 
 ### Documented
 
+- **The README, crate docs and design notes describe 0.5.** The README's
+  headline example now propagates the `Result` that `send` returns — it is the
+  first code anyone copies — its limitations section drops `XTGETTCAP` (0.5
+  answers it) and gains the two bounds this release introduced: graphics are
+  observed and offered but never rendered, and a reply the terminal's own
+  input queue cannot hold may not arrive, undetectably so on Linux. The
+  docs.rs landing page and `docs/DESIGN.md` §6 gained the observability
+  counters, focus events, per-cell drag motion and `send_after`.
+- **`SECURITY.md`'s resource bounds match the code again.** The reply queue is
+  a 1 MiB byte cap rather than "a fixed depth", and the note now says why a
+  depth bounds the wrong thing: two earlier versions counted slots and both
+  shorted a well-behaved application, while a byte bound leaves the queue
+  unbounded so the drain can never block on it.
 - **What a large grid costs**, on `TerminalBuilder::size`: a snapshot holds
   one entry per cell and is rebuilt on every state change, so the cost is
   O(cells) and shape-independent, while repeat reads of an unchanged screen
