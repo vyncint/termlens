@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "form-echo"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "crossterm",
 ]
@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "hello-tui"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "crossterm",
 ]
@@ -352,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "resize-echo"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "crossterm",
 ]
@@ -498,7 +498,7 @@ dependencies = [
 
 [[package]]
 name = "termlens"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "insta",
@@ -588,7 +588,7 @@ checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "unicode-torture"
-version = "0.4.2"
+version = "0.5.0"
 
 [[package]]
 name = "unicode-width"

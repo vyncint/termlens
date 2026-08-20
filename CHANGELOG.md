@@ -9,6 +9,21 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-20
+
+What the harness could not observe, could not reach, and quietly got wrong.
+
+Seventeen issues, every one verified against the published 0.4.2 before a
+line was written — four by reproductions that contradicted the report, and
+one of those by a reproduction that contradicted *me*. Three themes:
+behaviour a test could not see at all (repaints, bells, images, focus),
+applications that could not be driven down a path they probe for first, and
+accessors that answered confidently where they had nothing to say.
+
+Two API changes are breaking, both in the direction of honesty:
+`send`/`send_str`/`paste` return `Result`, and `ExitStatus::code` returns
+`Option`.
+
 ### Changed
 
 - **`send`, `send_str` and `paste` return `Result<()>`** and no longer
