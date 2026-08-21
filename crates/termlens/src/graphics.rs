@@ -870,14 +870,21 @@ impl GraphicsBuilder {
         self.format = GraphicsFormat::Sixel;
     }
 
-    /// Add one escape's worth of wire cost and image data. `complete` is
-    /// false when the capture bound cut this chunk short — the counts stay
-    /// exact either way, and the data is dropped entirely rather than kept
-    /// as a prefix that would decode into a plausible-looking wrong picture.
-    pub(crate) fn chunk(&mut self, bytes: u64, data: &[u8], complete: bool) {
+    /// Add one escape's worth of wire cost and image data.
+    ///
+    /// `complete` is false when the capture bound cut this chunk short, and
+    /// `cap` bounds the payload as a whole — a kitty transmission arrives as
+    /// one escape per 4096 bytes, so a bound applied per escape would let a
+    /// thousand-chunk image retain a thousand times the budget.
+    ///
+    /// The counts stay exact either way; past the bound the data is dropped
+    /// entirely rather than kept as a prefix that would decode into a
+    /// plausible-looking wrong picture.
+    pub(crate) fn chunk(&mut self, bytes: u64, data: &[u8], complete: bool, cap: usize) {
         self.chunks += 1;
         self.bytes += bytes;
-        if complete && !self.dropped {
+        let fits = self.data.len().saturating_add(data.len()) <= cap;
+        if complete && fits && !self.dropped {
             self.data.extend_from_slice(data);
         } else {
             self.dropped = true;
@@ -963,7 +970,7 @@ mod tests {
     fn kitty_payload(control: &[u8], data: &[u8]) -> GraphicsPayload {
         let mut builder = GraphicsBuilder::default();
         builder.kitty(control);
-        builder.chunk(data.len() as u64, data, true);
+        builder.chunk(data.len() as u64, data, true, usize::MAX);
         builder.finish().expect("a payload")
     }
 
@@ -1007,8 +1014,8 @@ mod tests {
     fn chunks_join_into_one_payload() {
         let mut builder = GraphicsBuilder::default();
         builder.kitty(b"a=T,f=32,s=2,v=1,m=1");
-        builder.chunk(20, b"AAAA", true);
-        builder.chunk(10, b"BBBB", true);
+        builder.chunk(20, b"AAAA", true, usize::MAX);
+        builder.chunk(10, b"BBBB", true, usize::MAX);
         let payload = builder.finish().expect("a payload");
         assert_eq!(payload.chunks(), 2);
         assert_eq!(payload.bytes(), 30);
@@ -1019,7 +1026,7 @@ mod tests {
     fn a_payload_past_the_bound_is_counted_and_not_kept() {
         let mut builder = GraphicsBuilder::default();
         builder.kitty(b"a=T,f=32,s=2,v=1");
-        builder.chunk(64, b"AAAABBBB", false);
+        builder.chunk(64, b"AAAABBBB", false, usize::MAX);
         let payload = builder.finish().expect("a payload");
         assert_eq!(payload.bytes(), 64, "the cost is still known");
         assert_eq!(payload.data(), None, "and the bytes are not kept");
@@ -1029,7 +1036,7 @@ mod tests {
     fn a_sixel_reads_its_size_off_its_raster_attributes() {
         let mut builder = GraphicsBuilder::default();
         builder.sixel();
-        builder.chunk(30, b"\"1;1;18;12#0;2;100;100;100~", true);
+        builder.chunk(30, b"\"1;1;18;12#0;2;100;100;100~", true, usize::MAX);
         let payload = builder.finish().expect("a payload");
         assert_eq!(payload.protocol(), GraphicsProtocol::Sixel);
         assert_eq!(payload.size(), Some((18, 12)));
@@ -1040,7 +1047,7 @@ mod tests {
     fn a_sixel_that_declares_no_size_says_so_rather_than_guessing() {
         let mut builder = GraphicsBuilder::default();
         builder.sixel();
-        builder.chunk(10, b"#0;2;100;100;100~~~", true);
+        builder.chunk(10, b"#0;2;100;100;100~~~", true, usize::MAX);
         assert_eq!(builder.finish().expect("a payload").size(), None);
     }
 
@@ -1098,7 +1105,7 @@ mod tests {
 
         let mut builder = GraphicsBuilder::default();
         builder.kitty(b"a=T,f=32,s=2,v=1");
-        builder.chunk(64, b"AAAABBBB", false);
+        builder.chunk(64, b"AAAABBBB", false, usize::MAX);
         let dropped = builder.finish().expect("a payload");
         assert_eq!(dropped.decode(), Err(DecodeError::NotCaptured));
     }
@@ -1110,7 +1117,7 @@ mod tests {
         // band, so a run of four fills the whole thing.
         let mut builder = GraphicsBuilder::default();
         builder.sixel();
-        builder.chunk(40, b"\"1;1;4;6#0;2;100;100;100!4~-", true);
+        builder.chunk(40, b"\"1;1;4;6#0;2;100;100;100!4~-", true, usize::MAX);
         let bitmap = builder
             .finish()
             .expect("a payload")
@@ -1131,7 +1138,7 @@ mod tests {
         // never written, and sixel has no alpha to say so with.
         let mut builder = GraphicsBuilder::default();
         builder.sixel();
-        builder.chunk(30, b"\"1;1;1;6#0;2;0;100;0@-", true);
+        builder.chunk(30, b"\"1;1;1;6#0;2;0;100;0@-", true, usize::MAX);
         let bitmap = builder
             .finish()
             .expect("a payload")
@@ -1148,7 +1155,12 @@ mod tests {
         // over the first band's second column.
         let mut builder = GraphicsBuilder::default();
         builder.sixel();
-        builder.chunk(60, b"\"1;1;2;12#0;2;100;0;0~~$#1;2;0;0;100?~-#0??-", true);
+        builder.chunk(
+            60,
+            b"\"1;1;2;12#0;2;100;0;0~~$#1;2;0;0;100?~-#0??-",
+            true,
+            usize::MAX,
+        );
         let bitmap = builder
             .finish()
             .expect("a payload")
@@ -1165,7 +1177,7 @@ mod tests {
     fn a_sixel_without_raster_attributes_takes_its_size_from_its_data() {
         let mut builder = GraphicsBuilder::default();
         builder.sixel();
-        builder.chunk(20, b"#0;2;100;100;100!3~-", true);
+        builder.chunk(20, b"#0;2;100;100;100!3~-", true, usize::MAX);
         let bitmap = builder
             .finish()
             .expect("a payload")
@@ -1194,7 +1206,7 @@ mod tests {
     fn hls_colours_are_refused_rather_than_converted() {
         let mut builder = GraphicsBuilder::default();
         builder.sixel();
-        builder.chunk(30, b"\"1;1;1;6#0;1;120;50;100~-", true);
+        builder.chunk(30, b"\"1;1;1;6#0;1;120;50;100~-", true, usize::MAX);
         assert!(matches!(
             builder.finish().expect("a payload").decode(),
             Err(DecodeError::Unsupported(_))

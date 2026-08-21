@@ -652,8 +652,12 @@ impl SeqTracker {
                 // reported a 4.9 KB chart as two pictures.
                 self.building.kitty(keys);
                 let at = self.dcs_payload_start();
-                self.building
-                    .chunk(self.dcs_data_len, &self.dcs_body[at..], self.dcs_body_full);
+                self.building.chunk(
+                    self.dcs_data_len,
+                    &self.dcs_body[at..],
+                    self.dcs_body_full,
+                    self.capture,
+                );
                 if key_is(keys, b"m", b"1") {
                     return SeqEvent::None;
                 }
@@ -682,8 +686,12 @@ impl SeqTracker {
         if self.dcs_introducer == b'P' && self.dcs_final == b'q' && self.dcs_intermediate == 0 {
             self.building.sixel();
             let at = self.dcs_payload_start();
-            self.building
-                .chunk(self.dcs_data_len, &self.dcs_body[at..], self.dcs_body_full);
+            self.building.chunk(
+                self.dcs_data_len,
+                &self.dcs_body[at..],
+                self.dcs_body_full,
+                self.capture,
+            );
             return match self.building.finish() {
                 Some(payload) => {
                     self.counts.record(&payload);
@@ -956,6 +964,38 @@ mod tests {
         assert_eq!(fed(b"\x1bPq\x07\x07\x1b\\").bells(), 0);
         // A bell after a sequence closes still counts.
         assert_eq!(fed(b"\x1b]0;t\x07\x07").bells(), 1);
+    }
+
+    /// The capture bound is a bound on the *payload*, not on each escape.
+    ///
+    /// kitty sends one escape per 4096 bytes, so a bound applied per escape
+    /// would let a thousand-chunk image retain a thousand times the budget —
+    /// which is the whole of what the knob is for.
+    #[test]
+    fn the_capture_bound_holds_across_a_chunked_transmission() {
+        let mut tracker = SeqTracker::new(40);
+        // Ten chunks of eight data bytes: every escape fits the bound
+        // comfortably, and the ten together do not.
+        let mut wire: Vec<u8> = b"\x1b_Ga=T,f=32,s=4,v=4,m=1;AAAAAAAA\x1b\\".to_vec();
+        for _ in 0..8 {
+            wire.extend_from_slice(b"\x1b_Gm=1;BBBBBBBB\x1b\\");
+        }
+        wire.extend_from_slice(b"\x1b_Gm=0;CCCCCCCC\x1b\\");
+
+        let mut seen = None;
+        for &byte in &wire {
+            if let SeqEvent::Graphics(payload) = tracker.step(byte) {
+                seen = Some(*payload);
+            }
+        }
+        let payload = seen.expect("a payload");
+        assert_eq!(payload.chunks(), 10);
+        assert_eq!(
+            payload.data(),
+            None,
+            "80 bytes must not be kept under a 40-byte bound"
+        );
+        assert_eq!(tracker.graphics().kitty, 1, "and it is still one image");
     }
 
     /// Every payload a feed produced, in order.
