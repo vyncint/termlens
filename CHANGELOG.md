@@ -9,6 +9,8 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-21
+
 What an application *drew*, as against how many bytes it spent drawing it.
 
 Inline graphics were observable only as a count and a size: an image had

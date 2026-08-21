@@ -205,7 +205,7 @@ design. termlens's position:
   [stress workflow](.github/workflows/stress.yml) on Linux and macOS —
   wait/timing changes don't merge without surviving it.
 
-## Known limitations (v0.5)
+## Known limitations (v0.6)
 
 - Scrollback is **bounded** (1000 rows by default), **text only** — a
   scrolled-off row has no styles and no cell addressing — and is **not

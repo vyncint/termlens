@@ -66,14 +66,15 @@ pty* because device numbers recycle instantly — termlens serializes pty
 lifecycle edges behind a process-wide lock so your parallel tests don't
 hit it.
 
-Honest limitations (v0.5): Unix only for now (portable-pty supports
+Honest limitations (v0.6): Unix only for now (portable-pty supports
 ConPTY, so Windows is planned); scrollback is retained but bounded, text
 only, and not reflowed on resize; `wait_frame` needs the app to opt into
-DEC 2026; graphics are observed and offered but never rendered, so what an
-image *depicted* is not assertable; and a few questions (kitty `CSI ? u`,
-DECRQSS, `OSC 52` *reads*) are deliberately left unanswered rather than
-guessed — an app blocked on one is named in the next timeout instead of
-hanging silently.
+DEC 2026; inline graphics are captured and decodable but still never
+rendered, so an image never reaches the screen grid and how a picture sits
+over the text under it is not assertable; and a few questions (kitty
+`CSI ? u`, DECRQSS, `OSC 52` *reads*) are deliberately left unanswered
+rather than guessed — an app blocked on one is named in the next timeout
+instead of hanging silently.
 
 - crates.io: https://crates.io/crates/termlens (`cargo add termlens --dev`)
 - GitHub: https://github.com/vyncint/termlens
