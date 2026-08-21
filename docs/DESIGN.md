@@ -483,6 +483,45 @@ Rules:
    declining both protocols, which is why an application that transmits one
    anyway is worth catching.
 
+   Those counters count **images**, which is not the same as counting
+   escapes, and the difference is not a detail. The kitty protocol caps a
+   payload at 4096 bytes and continues with `m=1`, so every image of
+   consequence arrives in several escapes and the continuations carry no
+   control block at all; and `a=d` deletes an image rather than sending one.
+   Counted per escape, a 4.9 KB chart read as two pictures and a teardown
+   read as a third — so "how many images did this frame send?", the question
+   that distinguishes a diffing painter from one that re-sends the year,
+   could not be asked. `GraphicsBuilder` joins the chunks and classifies the
+   action; `deletes` is counted separately, because an application that
+   takes down what it drew and one that draws twice as much are opposite
+   behaviours.
+
+   The payloads themselves land on the same slot, as `GraphicsSeen::payloads`.
+   This is the position `OSC 52` already takes and for the same reason: a
+   transmission is not a question, the only other evidence is the
+   application's own output, and the payload is usually the behaviour under
+   test. What each one states — format, compression, id, declared pixel size,
+   declared cell extent — is parsed from the control block; *where* it landed
+   is the one fact that lives in the grid instead, so the emulator stamps the
+   cursor position at the terminator. That is why `process` now feeds the
+   parser in pieces: the tracker runs a byte ahead of the grid, and a
+   placement read before the grid caught up would be the position from before
+   the whole read. Neither protocol's escape moves the cursor, so the position
+   after the terminator is the image's top-left corner.
+
+   Decoding sits behind the `decode` feature and runs on demand, never as the
+   bytes arrive: a suite that only asks whether an image went out should pay
+   neither the inflate nor the dependency (zlib, for kitty's `o=z`). It is
+   still not rendering — a `Bitmap` is handed to the test and never
+   composited onto the grid, so nothing termlens reports about the screen
+   changes because an image was decoded. Retention is bounded like scrollback
+   (4 MiB and 512 payloads by default, `TerminalBuilder::capture_graphics`),
+   and a payload past the bound reports `None` data and refuses to decode
+   with `DecodeError::NotCaptured` rather than handing back a prefix that
+   would decode into a plausible-looking wrong picture. `f=100` (PNG) is
+   refused for the same reason a guessed query reply is: termlens carries no
+   image codec, and inventing one answer is worse than naming the gap.
+
    Per-frame **cost** is the one observation that does not fit a snapshot: a
    `Screen` is an instant, and a performance line is a series. So
    `Terminal::frame_timings` keeps one `FrameTiming` per repaint — the span

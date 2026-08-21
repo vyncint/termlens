@@ -17,6 +17,9 @@ cargo add termlens --dev
 cargo add insta --dev    # used by the snapshot assertions below
 ```
 
+Add `--features decode` if you test an application that draws inline images
+and want to assert on the pixels it transmitted.
+
 ## Example
 
 ```rust
@@ -117,6 +120,24 @@ the negative one, "this must render as text in every terminal and never go
 out as an image". `frame_timings()` adds the cost of each repaint, so a
 suite can hold a performance line as well as a correctness one.
 
+**And an image is more than a byte count.** `graphics().payloads()` hands
+back the transmissions themselves — where each was placed, the size and
+cell extent it declared, its format and id — so an application that lays
+out in characters and draws in pixels can be held to keeping the two in
+step. Images are counted as *images*: a transmission split across the kitty
+protocol's 4096-byte chunks is one, and a delete is counted apart, under
+`deletes()`, because it carries no picture. With the `decode` feature a
+payload decodes into a `Bitmap`, so the assertion can finally be about the
+picture:
+
+```rust
+let seen = screen.graphics();
+let image = seen.last().expect("the chart went out as an image");
+assert_eq!(image.cells(), Some((106, 7)));       // on the cells reserved
+assert_eq!(image.at(), (4, 5));                  // at the grid's origin
+assert_eq!(image.decode()?.pixel(9, 9), Some([0x39, 0xd3, 0x53, 0xff]));
+```
+
 **Scrollback is retained** (1000 rows by default), so an application that
 hands finished output *back* to the terminal — a pager, a log view, a TUI
 that commits completed blocks into native scrollback and keeps a small
@@ -198,11 +219,17 @@ design. termlens's position:
   DA3, `OSC 12`, `OSC 52` *reads*, and the non-pixel `CSI … t` reports —
   because a guessed reply is worse than none. An application blocked on one
   is **named in the next timeout** rather than left to hang unexplained.
-- **Graphics are observed, not rendered.** termlens counts kitty and sixel
-  payloads and can tell an application that either is available
-  (`graphics()`, `cell_size()`), but it draws no pixels: what a payload
-  *depicted* is not assertable. Both are opt-in, so by default an
-  application that probes is truthfully told there is no graphics support.
+- **Graphics are captured, not rendered.** termlens can tell an application
+  that kitty or sixel is available (`graphics()`, `cell_size()`), collect
+  what it then transmits, and — with the `decode` feature — decode a payload
+  into pixels. It still draws none: an image never reaches the screen grid,
+  so what a picture looks like *composited over the text under it* is not
+  assertable, and `f=100` (PNG) payloads are reported unsupported rather
+  than decoded, since termlens carries no image codec. Retention is bounded
+  (4 MiB by default, `capture_graphics`); past it a payload is counted and
+  described but its bytes are dropped, and it says so rather than decoding a
+  prefix of itself. Support stays opt-in, so by default an application that
+  probes is truthfully told there is none.
 - **A reply the terminal's own input queue cannot hold may not arrive.**
   termlens no longer drops answers of its own accord, but the tty input
   queue is small (~1 KB on macOS, ~4 KB on Linux), so an application that

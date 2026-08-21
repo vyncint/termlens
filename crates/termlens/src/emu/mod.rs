@@ -11,6 +11,8 @@ mod seq;
 mod shadow;
 mod vt100;
 
+#[cfg(feature = "decode")]
+pub(crate) use self::seq::decode_base64;
 pub(crate) use self::seq::Query;
 pub(crate) use self::vt100::Vt100Emulator;
 

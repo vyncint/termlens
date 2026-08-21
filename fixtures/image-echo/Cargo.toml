@@ -1,0 +1,16 @@
+[package]
+name = "image-echo"
+description = "termlens fixture: transmits a known inline image over kitty or sixel"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+miniz_oxide.workspace = true
+
+[lints]
+workspace = true

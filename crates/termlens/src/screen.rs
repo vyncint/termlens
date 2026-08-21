@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 use unicode_normalization::UnicodeNormalization;
 
+use crate::graphics::GraphicsSeen;
+
 /// A terminal color, as reported by the emulator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Color {
@@ -80,71 +82,6 @@ pub enum MouseMode {
     /// Any-event tracking (`CSI ?1003 h`): presses, releases, and all
     /// motion.
     AnyMotion,
-}
-
-/// Inline graphics payloads the application transmitted, as counted at one
-/// snapshot.
-///
-/// Read it from a snapshot via [`Screen::graphics`]. Counting is not
-/// rendering and not a claim of support: DA1 still declines both protocols,
-/// which is exactly why an application that emits them anyway is worth
-/// catching.
-///
-/// The assertion this exists for is as often the negative one — "this must
-/// render as text and **never** be transmitted as an image, so it looks the
-/// same in every terminal" — which is why [`is_empty`](Self::is_empty) is a
-/// method rather than something to spell out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct GraphicsSeen {
-    kitty: u32,
-    sixel: u32,
-    bytes: u64,
-}
-
-impl GraphicsSeen {
-    /// Kitty graphics payloads (`APC G … ST`) seen so far.
-    #[must_use]
-    pub fn kitty(&self) -> u32 {
-        self.kitty
-    }
-
-    /// Sixel payloads (`DCS q … ST`) seen so far.
-    #[must_use]
-    pub fn sixel(&self) -> u32 {
-        self.sixel
-    }
-
-    /// Payloads of either protocol.
-    #[must_use]
-    pub fn total(&self) -> u32 {
-        self.kitty + self.sixel
-    }
-
-    /// True when the application has transmitted no inline graphics at all.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.total() == 0
-    }
-
-    /// Total payload bytes across both protocols: everything between the
-    /// introducer and the terminator, counted the same way for each.
-    ///
-    /// A size rather than the data itself: a test asserts that an image was
-    /// or was not sent, and how big it was — not what it depicted, which
-    /// nothing here can decode.
-    #[must_use]
-    pub fn bytes(&self) -> u64 {
-        self.bytes
-    }
-
-    pub(crate) fn record(&mut self, kitty: bool, bytes: u64) {
-        if kitty {
-            self.kitty += 1;
-        } else {
-            self.sixel += 1;
-        }
-        self.bytes += bytes;
-    }
 }
 
 /// What an application copied with `OSC 52`, as observed at one snapshot.
@@ -530,9 +467,13 @@ impl Screen {
     /// Observing is not rendering, and not a claim of support: DA1 goes on
     /// declining both protocols, which is precisely why an application that
     /// transmits one anyway is worth catching.
+    ///
+    /// The payloads themselves — placement, declared size, format, and with
+    /// the `decode` feature the pixels — are on
+    /// [`GraphicsSeen::payloads`](crate::GraphicsSeen::payloads).
     #[must_use]
     pub fn graphics(&self) -> GraphicsSeen {
-        self.state.graphics
+        self.state.graphics.clone()
     }
 
     /// The cell at `(row, col)`, or `None` when out of bounds.
@@ -1417,12 +1358,7 @@ mod tests {
             clipboard: Some(Arc::new(Clipboard::new("c", Some("copied".into())))),
             bells: 3,
             focus_events: true,
-            graphics: {
-                let mut g = GraphicsSeen::default();
-                g.record(true, 120);
-                g.record(false, 40);
-                g
-            },
+            graphics: GraphicsSeen::for_test(1, 1, 2, 160),
             repaints: 9,
             scrollback: Arc::from([Arc::from("scrolled away")]),
         };
@@ -1440,6 +1376,7 @@ mod tests {
         assert_eq!(s.graphics().kitty(), 1);
         assert_eq!(s.graphics().sixel(), 1);
         assert_eq!(s.graphics().total(), 2);
+        assert_eq!(s.graphics().deletes(), 2);
         assert_eq!(s.graphics().bytes(), 160);
         assert!(!s.graphics().is_empty());
         assert!(GraphicsSeen::default().is_empty());

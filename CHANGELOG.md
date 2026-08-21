@@ -9,6 +9,59 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+What an application *drew*, as against how many bytes it spent drawing it.
+
+Inline graphics were observable only as a count and a size: an image had
+gone out, and it had been about so big. Three things were wrong with that,
+and the first two were wrong rather than merely thin — the count was of
+escapes, not of images, so the kitty protocol's own 4096-byte chunking
+inflated it and a delete posed as a transmission.
+
+### Added
+
+- **`GraphicsSeen::payloads` — the transmissions themselves.** Each
+  `GraphicsPayload` carries its protocol, action, format, compression,
+  image id, the pixel size and cell extent the application declared, the
+  bytes it cost, the chunks it took, and the data itself. Placement is the
+  one fact that lives in the grid rather than in the payload, so `at()`
+  reports the cursor position at the terminator — the image's top-left
+  corner for both protocols. An application that lays out in characters and
+  draws in pixels can now be held to keeping the two in step, which is a
+  failure nothing on screen shows: a picture that slides out from under its
+  own labels leaves every cell exactly as it was.
+- **`GraphicsSeen::deletes`**, counting kitty `a=d` — images taken *off*
+  the screen — apart from images transmitted.
+- **The `decode` feature: `GraphicsPayload::decode` and `Bitmap`.** Kitty
+  `f=24`/`f=32`, zlib'd or not, and the sixel data stream decode into
+  pixels, so an assertion can be about the picture rather than about its
+  size. Off by default: it is the one thing here needing a dependency of
+  its own (zlib), and every other fact about a payload stays free. Refusals
+  name their reason — `f=100` (PNG) is unsupported rather than guessed, a
+  delete carries no image, and a payload past the capture bound says so
+  instead of decoding a prefix of itself into a plausible wrong picture.
+- **`TerminalBuilder::capture_graphics`**, the retention budget: 4 MiB by
+  default, `0` to keep counts and drop every byte. Bounded like scrollback,
+  and the counters stay exact whatever the bound.
+- **The `image-echo` fixture**, which transmits a known image over kitty
+  (compressed, plain, and chunked), over sixel, and with a delete after it.
+
+### Fixed
+
+- **A chunked kitty transmission is one image, not one per escape.** The
+  protocol caps a payload at 4096 bytes and continues with `m=1`, so a
+  4.9 KB chart counted as two images and the continuations — which carry no
+  control block — counted as pictures nothing could be said about. The
+  chunks are joined before anything is counted.
+- **A kitty delete is no longer counted as an image transmitted.** `a=d`
+  carries no picture. Every byte of it is still counted in `bytes()`: a
+  delete is traffic.
+
+### Changed
+
+- **`GraphicsSeen` is `Clone` rather than `Copy`**, since it now carries the
+  payload list. Existing code that reads a counter is unaffected; code that
+  copied the value into two bindings needs a `clone`.
+
 ## [0.5.0] - 2026-08-20
 
 What the harness could not observe, could not reach, and quietly got wrong.

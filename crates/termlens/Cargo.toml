@@ -19,6 +19,12 @@ default = ["insta"]
 # Snapshot-testing glue: re-exports `insta` and provides
 # `assert_screen_snapshot!`. Disable if you bring your own snapshot tool.
 insta = ["dep:insta"]
+# Decoding inline graphics payloads into pixels: `GraphicsPayload::decode`
+# and `Bitmap`. Off by default because it is the one thing here that needs a
+# dependency of its own (zlib, for kitty's `o=z`), and a suite that only asks
+# whether an image went out should not pay for it. Every other fact about a
+# payload — placement, declared size, format, id — is free and always on.
+decode = ["dep:miniz_oxide"]
 
 [dependencies]
 portable-pty.workspace = true
@@ -26,6 +32,7 @@ vt100.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true
 insta = { workspace = true, optional = true }
+miniz_oxide = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

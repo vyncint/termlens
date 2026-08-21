@@ -93,14 +93,20 @@
 
 mod emu;
 mod error;
+mod graphics;
 mod keys;
 mod screen;
 mod terminal;
 mod wait;
 
 pub use error::{Error, Result};
+#[cfg(feature = "decode")]
+pub use graphics::{Bitmap, DecodeError};
+pub use graphics::{
+    GraphicsAction, GraphicsFormat, GraphicsPayload, GraphicsProtocol, GraphicsSeen,
+};
 pub use keys::{Chord, Input, Key};
-pub use screen::{Cell, Clipboard, Color, GraphicsSeen, MouseMode, Screen, Style};
+pub use screen::{Cell, Clipboard, Color, MouseMode, Screen, Style};
 #[cfg(unix)]
 pub use terminal::Signal;
 pub use terminal::{

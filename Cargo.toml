@@ -36,6 +36,9 @@ unicode-normalization = "0.1"
 # Already in the tree transitively (portable-pty); used directly for one
 # kill(2) call behind Terminal::signal.
 libc = "0.2"
+# zlib, for the `decode` feature: kitty transmits `o=z` compressed, so an
+# image cannot be read back off the wire without inflating it first.
+miniz_oxide = "0.9"
 
 # Dev / fixture dependencies.
 insta = "1.48"

@@ -129,6 +129,8 @@ impl FrameTiming {
 /// string rather than a grid of cells.
 const DEFAULT_SCROLLBACK: usize = 1000;
 
+use crate::graphics::DEFAULT_CAPTURE;
+
 /// Reply bytes that may be waiting for the writer thread before the drain
 /// starts discarding query replies.
 ///
@@ -862,6 +864,7 @@ pub struct TerminalBuilder {
     scrollback: usize,
     cell_size: Option<(u16, u16)>,
     graphics: Graphics,
+    capture_graphics: usize,
 }
 
 impl Default for TerminalBuilder {
@@ -880,6 +883,7 @@ impl Default for TerminalBuilder {
             scrollback: DEFAULT_SCROLLBACK,
             cell_size: None,
             graphics: Graphics::None,
+            capture_graphics: DEFAULT_CAPTURE,
         }
     }
 }
@@ -1016,6 +1020,25 @@ impl TerminalBuilder {
     #[must_use]
     pub fn scrollback(mut self, rows: usize) -> Self {
         self.scrollback = rows;
+        self
+    }
+
+    /// How many bytes of inline graphics payload to keep for inspection.
+    ///
+    /// [`GraphicsSeen::payloads`](crate::GraphicsSeen::payloads) hands back
+    /// the images an application transmitted — where each was placed, how
+    /// big it declared itself, and with the `decode` feature what it
+    /// depicted. Keeping them costs memory, so the newest are kept within
+    /// this budget and older ones are dropped; a single payload larger than
+    /// the whole budget is counted but not kept, and says so rather than
+    /// decoding a prefix of itself into a plausible wrong picture.
+    ///
+    /// The default is 4 MiB. `0` keeps no data at all — the counters and
+    /// every declared fact stay exact, which is all a test that only asks
+    /// "did an image go out?" ever reads.
+    #[must_use]
+    pub fn capture_graphics(mut self, bytes: usize) -> Self {
+        self.capture_graphics = bytes;
         self
     }
 
@@ -1220,7 +1243,12 @@ impl TerminalBuilder {
         // memory bound instead of on a queue-slot count.
         let queued_bytes = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(Monitor::new(EmuState::new(
-            Box::new(Vt100Emulator::new(self.rows, self.cols, self.scrollback)),
+            Box::new(Vt100Emulator::new(
+                self.rows,
+                self.cols,
+                self.scrollback,
+                self.capture_graphics,
+            )),
             Responder {
                 respond: self.answer_queries,
                 background: self.background,

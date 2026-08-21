@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use super::seq::{SeqEvent, SeqTracker};
 use super::shadow::AttrShadow;
 use super::{Emulator, FrameSpan, InputModes, ModeState, MouseEncoding, Processed, Stop};
+use crate::graphics::{GraphicsPayload, GraphicsSeen, HISTORY};
 use crate::screen::{Cell, Color, MouseMode, Screen, Style, TermState};
 
 pub(crate) struct Vt100Emulator {
@@ -32,6 +33,14 @@ pub(crate) struct Vt100Emulator {
     /// Rows of vt100's own scrollback already copied into `history`, so a
     /// read that scrolled nothing costs one length check.
     captured: usize,
+    /// Inline graphics payloads, oldest first, behind an `Arc` so a
+    /// snapshot costs one refcount rather than a copy of every image.
+    graphics: Arc<Vec<GraphicsPayload>>,
+    /// Payload bytes currently retained, so eviction is a subtraction
+    /// rather than a walk.
+    graphics_bytes: usize,
+    /// The retention budget, from `TerminalBuilder::capture_graphics`.
+    capture: usize,
 }
 
 impl Vt100Emulator {
@@ -49,15 +58,54 @@ impl Vt100Emulator {
         }
     }
 
-    pub(crate) fn new(rows: u16, cols: u16, scrollback_len: usize) -> Self {
+    pub(crate) fn new(rows: u16, cols: u16, scrollback_len: usize, capture: usize) -> Self {
         Self {
             parser: ::vt100::Parser::new(rows, cols, scrollback_len),
-            tracker: SeqTracker::new(),
+            tracker: SeqTracker::new(capture),
             shadow: AttrShadow::new(rows, cols),
             scrollback_len,
             frame_started: None,
             history: VecDeque::new(),
             captured: 0,
+            graphics: Arc::new(Vec::new()),
+            graphics_bytes: 0,
+            capture,
+        }
+    }
+
+    /// Hand the grid the bytes the tracker has already scanned.
+    ///
+    /// The tracker runs a byte ahead of the parser so it can stop the read
+    /// at a frame end or a query; everything else is fed in bulk. Splitting
+    /// the feed is what lets a graphics payload be stamped with the cursor
+    /// position as of its terminator rather than as of the whole read.
+    fn feed(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.parser.process(bytes);
+        self.shadow.feed(bytes);
+        self.capture_scrolled_rows();
+    }
+
+    /// File a completed payload, stamped with where it landed.
+    ///
+    /// Neither protocol's escape moves the cursor, so the position once the
+    /// terminator has been consumed *is* the image's top-left corner — the
+    /// one fact about an image that lives in the grid rather than in the
+    /// payload, and the one an application gets wrong when a picture drifts
+    /// out from under its own labels.
+    fn record_graphics(&mut self, mut payload: GraphicsPayload) {
+        payload.place(self.parser.screen().cursor_position());
+        let kept = payload.data().map_or(0, <[u8]>::len);
+        let log = Arc::make_mut(&mut self.graphics);
+        log.push(payload);
+        self.graphics_bytes += kept;
+        // Evict oldest-first, on both bounds. A snapshot already taken keeps
+        // its own view: it holds an `Arc` to the vector as it stood.
+        while log.len() > HISTORY || (self.graphics_bytes > self.capture && log.len() > 1) {
+            let dropped = log.remove(0);
+            self.graphics_bytes -= dropped.data().map_or(0, <[u8]>::len);
         }
     }
 
@@ -133,10 +181,20 @@ impl Vt100Emulator {
 
 impl Emulator for Vt100Emulator {
     fn process(&mut self, bytes: &[u8]) -> Processed {
+        // How much of this segment the grid has already been given. Only a
+        // graphics payload moves it mid-segment; everything else is fed in
+        // one go, exactly as before.
+        let mut fed = 0;
         for (i, &byte) in bytes.iter().enumerate() {
             let stop = match self.tracker.step(byte) {
                 SeqEvent::SyncEnd => Some(Stop::FrameComplete(self.close_frame())),
                 SeqEvent::Query(query) => Some(Stop::Query(query)),
+                SeqEvent::Graphics(payload) => {
+                    self.feed(&bytes[fed..=i]);
+                    fed = i + 1;
+                    self.record_graphics(*payload);
+                    None
+                }
                 SeqEvent::None => None,
                 SeqEvent::SyncBegin => {
                     // Stamped here, at the byte that opened the update,
@@ -148,18 +206,14 @@ impl Emulator for Vt100Emulator {
                 }
             };
             if let Some(stop) = stop {
-                self.parser.process(&bytes[..=i]);
-                self.shadow.feed(&bytes[..=i]);
-                self.capture_scrolled_rows();
+                self.feed(&bytes[fed..=i]);
                 return Processed {
                     consumed: i + 1,
                     stop: Some(stop),
                 };
             }
         }
-        self.parser.process(bytes);
-        self.shadow.feed(bytes);
-        self.capture_scrolled_rows();
+        self.feed(&bytes[fed..]);
         Processed {
             consumed: bytes.len(),
             stop: None,
@@ -198,7 +252,7 @@ impl Emulator for Vt100Emulator {
             clipboard: self.tracker.clipboard(),
             bells: self.tracker.bells(),
             focus_events: self.tracker.focus_events(),
-            graphics: self.tracker.graphics(),
+            graphics: GraphicsSeen::new(self.tracker.graphics(), Arc::clone(&self.graphics)),
             // Filled in by the terminal, which owns the frame count.
             repaints: 0,
             scrollback: self.history.iter().cloned().collect(),
@@ -357,7 +411,7 @@ mod tests {
     }
 
     fn emu_with(bytes: &[u8]) -> Vt100Emulator {
-        let mut emu = Vt100Emulator::new(4, 10, 0);
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE);
         feed_all(&mut emu, bytes);
         emu
     }
@@ -480,7 +534,7 @@ mod tests {
 
     #[test]
     fn mid_sequence_tracks_partial_escape() {
-        let mut emu = Vt100Emulator::new(4, 10, 0);
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE);
         feed_all(&mut emu, b"text\x1b[3");
         assert!(emu.mid_sequence());
         feed_all(&mut emu, b"1m");
@@ -489,7 +543,7 @@ mod tests {
 
     #[test]
     fn process_stops_at_the_end_of_a_synchronized_update() {
-        let mut emu = Vt100Emulator::new(4, 10, 0);
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE);
         let stream = b"\x1b[?2026hframe1\x1b[?2026lnext";
 
         let first = emu.process(stream);
@@ -514,7 +568,7 @@ mod tests {
 
     #[test]
     fn in_sync_update_is_true_between_bsu_and_esu() {
-        let mut emu = Vt100Emulator::new(4, 10, 0);
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE);
         feed_all(&mut emu, b"\x1b[?2026hpartial");
         assert!(emu.in_sync_update());
         assert!(!emu.mid_sequence()); // the escape itself is finished
@@ -546,7 +600,7 @@ mod tests {
 
     /// Feed a stream into an emulator with `scrollback` rows of history.
     fn emu_with_history(scrollback: usize, bytes: &[u8]) -> Vt100Emulator {
-        let mut emu = Vt100Emulator::new(4, 10, scrollback);
+        let mut emu = Vt100Emulator::new(4, 10, scrollback, crate::graphics::DEFAULT_CAPTURE);
         feed_all(&mut emu, bytes);
         emu
     }
@@ -571,7 +625,7 @@ mod tests {
     fn history_is_bounded_and_drops_its_oldest_rows() {
         // Ten rows, each ending in a newline, on a 4-row screen: seven
         // scroll off (row1..row7) and the cap of 3 keeps the newest three.
-        let mut emu = Vt100Emulator::new(4, 10, 3);
+        let mut emu = Vt100Emulator::new(4, 10, 3, crate::graphics::DEFAULT_CAPTURE);
         for n in 1..=10 {
             feed_all(&mut emu, format!("row{n}\r\n").as_bytes());
         }
@@ -589,7 +643,7 @@ mod tests {
         // The rebuild path: once at the cap vt100's length stops changing,
         // so a naive "did the length grow?" check would freeze the history
         // at its first full window.
-        let mut emu = Vt100Emulator::new(4, 10, 2);
+        let mut emu = Vt100Emulator::new(4, 10, 2, crate::graphics::DEFAULT_CAPTURE);
         feed_all(&mut emu, b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\n");
         assert_eq!(emu.snapshot().scrollback_text(), "b\nc");
         feed_all(&mut emu, b"g\r\nh\r\n");
@@ -622,7 +676,7 @@ mod tests {
     #[test]
     fn history_rows_keep_the_width_they_were_captured_at() {
         // Documented limit: resize does not reflow.
-        let mut emu = Vt100Emulator::new(2, 10, 100);
+        let mut emu = Vt100Emulator::new(2, 10, 100, crate::graphics::DEFAULT_CAPTURE);
         feed_all(&mut emu, b"0123456789\r\nabcdefghij\r\nnext");
         assert_eq!(emu.snapshot().scrollback_text(), "0123456789");
         emu.set_size(2, 4);

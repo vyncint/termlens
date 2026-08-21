@@ -20,7 +20,8 @@
 
 use std::sync::Arc;
 
-use crate::screen::{Clipboard, GraphicsSeen};
+use crate::graphics::{GraphicsBuilder, GraphicsCounts, GraphicsPayload};
+use crate::screen::Clipboard;
 
 /// OSC strings are captured whole (titles must not truncate), but bounded:
 /// a buggy or hostile stream must not grow memory without limit. No real
@@ -33,7 +34,7 @@ const OSC_CAPTURE_MAX: usize = 64 * 1024;
 /// a partially decoded clipboard would be indistinguishable from a
 /// correct one, and a test asserting on it would pass while proving
 /// nothing.
-fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
     fn value(b: u8) -> Option<u32> {
         match b {
             b'A'..=b'Z' => Some(u32::from(b - b'A')),
@@ -112,6 +113,10 @@ pub(crate) enum SeqEvent {
     SyncEnd,
     /// The application asked the terminal a question.
     Query(Query),
+    /// An inline graphics payload completed. Carried out of the tracker
+    /// rather than stored in it because the placement — where the cursor
+    /// stood — is a fact about the grid, which only the emulator holds.
+    Graphics(Box<GraphicsPayload>),
 }
 
 /// A terminal query the application issued. The tracker classifies;
@@ -184,6 +189,15 @@ fn kitty_key(control: &[u8], key: &[u8]) -> Option<u32> {
         .and_then(|digits| digits.parse().ok())
 }
 
+/// Whether a kitty control block sets `key` to exactly `value`.
+fn key_is(control: &[u8], key: &[u8], value: &[u8]) -> bool {
+    control.split(|&b| b == b',').any(|pair| {
+        pair.strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix(b"="))
+            == Some(value)
+    })
+}
+
 /// Render a captured escape sequence printably (`ESC` becomes `^[`).
 fn printable(bytes: &[u8]) -> String {
     let mut out = String::new();
@@ -243,8 +257,15 @@ pub(crate) struct SeqTracker {
     /// terminator and one inside a DCS-class string is payload; neither is
     /// a bell, and both are handled by the state machine rather than here.
     bells: u64,
-    /// Inline graphics payloads transmitted.
-    graphics: GraphicsSeen,
+    /// Inline graphics transmitted, counted as images rather than as
+    /// escapes: [`GraphicsBuilder`] joins a chunked kitty transmission
+    /// before either is incremented.
+    counts: GraphicsCounts,
+    /// The payload being assembled, if a kitty transmission is mid-chunk.
+    building: GraphicsBuilder,
+    /// How many payload bytes may be kept for inspection. Counting is
+    /// unaffected by it; only the data is dropped.
+    capture: usize,
     /// Printable characters written since the current frame began. Reset by
     /// the Begin, read by the End — so it measures what one repaint drew,
     /// which is the other half of "did this repaint get more expensive?".
@@ -275,10 +296,16 @@ pub(crate) struct SeqTracker {
     /// which is what an application already has to handle.
     dcs_head: [u8; 128],
     dcs_head_len: u8,
+    /// Every byte of the current DCS-class string, up to the capture bound —
+    /// the image data itself, which the 128-byte head deliberately is not.
+    /// Kept only while the bound allows; `dcs_body_full` says whether it is
+    /// the whole payload or the start of one.
+    dcs_body: Vec<u8>,
+    dcs_body_full: bool,
 }
 
 impl SeqTracker {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(capture: usize) -> Self {
         Self {
             state: State::Ground,
             utf8_remaining: 0,
@@ -300,7 +327,9 @@ impl SeqTracker {
             title: Arc::from(""),
             clipboard: None,
             bells: 0,
-            graphics: GraphicsSeen::default(),
+            counts: GraphicsCounts::default(),
+            building: GraphicsBuilder::default(),
+            capture,
             frame_printable: 0,
             focus_events: false,
             dcs_introducer: 0,
@@ -309,6 +338,8 @@ impl SeqTracker {
             dcs_data_len: 0,
             dcs_head: [0; 128],
             dcs_head_len: 0,
+            dcs_body: Vec::new(),
+            dcs_body_full: true,
         }
     }
 
@@ -345,9 +376,9 @@ impl SeqTracker {
         self.bells
     }
 
-    /// Inline graphics payloads transmitted so far.
-    pub(crate) fn graphics(&self) -> GraphicsSeen {
-        self.graphics
+    /// Inline graphics counted so far.
+    pub(crate) fn graphics(&self) -> GraphicsCounts {
+        self.counts
     }
 
     /// True while the application has focus reporting (mode 1004) enabled.
@@ -367,6 +398,8 @@ impl SeqTracker {
         self.dcs_intermediate = 0;
         self.dcs_data_len = 0;
         self.dcs_head_len = 0;
+        self.dcs_body.clear();
+        self.dcs_body_full = true;
     }
 
     fn reset_csi_scanner(&mut self) {
@@ -603,25 +636,41 @@ impl SeqTracker {
                 }
             }
         }
-        // An APC opening with `G` is the kitty graphics protocol.
-        if self.dcs_introducer == b'_' && self.dcs_head.first() == Some(&b'G') {
-            let control = self.dcs_control_block();
-            // Count the payload either way: "did this go out as an image?"
-            // and, more often, "did it *not*?" are the assertions, and a
-            // query carries no picture but is still traffic worth seeing.
-            let is_query = control.windows(3).any(|w| w == b"a=q");
+        // An APC opening with `G` is the kitty graphics protocol — or a
+        // continuation of one, which carries `m=` and nothing else.
+        if self.dcs_introducer == b'_'
+            && (self.dcs_head.first() == Some(&b'G') || self.building.in_progress())
+        {
+            let control = self.dcs_control_block().to_vec();
+            // The control block is `G` followed by the comma-separated keys.
+            let keys = control.strip_prefix(b"G").unwrap_or(&control);
+            let is_query = keys.split(|&b| b == b',').any(|pair| pair == b"a=q");
             if !is_query {
-                self.graphics.record(true, self.dcs_data_len);
-                return SeqEvent::None;
+                // One image, however many escapes it took. `m=1` says
+                // another follows; the transmission is not an image until
+                // one arrives without it, and counting each escape instead
+                // reported a 4.9 KB chart as two pictures.
+                self.building.kitty(keys);
+                let at = self.dcs_payload_start();
+                self.building
+                    .chunk(self.dcs_data_len, &self.dcs_body[at..], self.dcs_body_full);
+                if key_is(keys, b"m", b"1") {
+                    return SeqEvent::None;
+                }
+                return match self.building.finish() {
+                    Some(payload) => {
+                        self.counts.record(&payload);
+                        SeqEvent::Graphics(Box::new(payload))
+                    }
+                    None => SeqEvent::None,
+                };
             }
             // Only an explicit `a=q` is a question. A transmission is an
             // instruction, and classifying one as a query would put "the
             // application queried the terminal" into the next timeout of
             // every application that draws — a false diagnosis, and a loud
             // one.
-            // The control block is `G` followed by the comma-separated
-            // keys, so the keys start one byte in.
-            let id = kitty_key(&control[1..], b"i=");
+            let id = kitty_key(keys, b"i=");
             return SeqEvent::Query(Query::KittyGraphics {
                 id,
                 shape: self.seq_printable(),
@@ -631,8 +680,17 @@ impl SeqTracker {
         // intermediate is the whole distinction from the two DCS questions
         // below, which reach the same `q` final through `+` and `$`.
         if self.dcs_introducer == b'P' && self.dcs_final == b'q' && self.dcs_intermediate == 0 {
-            self.graphics.record(false, self.dcs_data_len);
-            return SeqEvent::None;
+            self.building.sixel();
+            let at = self.dcs_payload_start();
+            self.building
+                .chunk(self.dcs_data_len, &self.dcs_body[at..], self.dcs_body_full);
+            return match self.building.finish() {
+                Some(payload) => {
+                    self.counts.record(&payload);
+                    SeqEvent::Graphics(Box::new(payload))
+                }
+                None => SeqEvent::None,
+            };
         }
         // XTGETTCAP (`ESC P + q <hex names> ST`). The names are needed to
         // answer, so they come out of the header capture rather than the
@@ -656,6 +714,24 @@ impl SeqTracker {
             return SeqEvent::Query(Query::Unanswerable(self.seq_printable()));
         }
         SeqEvent::None
+    }
+
+    /// The image data inside the captured body: for kitty everything after
+    /// the `;` that closes the control block, and for sixel everything after
+    /// the final byte that closes the DCS header. The protocol's own framing
+    /// is metadata, already parsed; what is left is what a decoder wants.
+    fn dcs_payload_start(&self) -> usize {
+        let separator = if self.dcs_introducer == b'_' {
+            b';'
+        } else {
+            self.dcs_final
+        };
+        self.dcs_body.iter().position(|&b| b == separator).map_or(
+            // No separator: a control-only escape — a delete, or a
+            // placement of something transmitted earlier — with no data.
+            self.dcs_body.len(),
+            |at| at + 1,
+        )
     }
 
     /// The captured head of a DCS-class payload, cut at the first `;`.
@@ -692,6 +768,15 @@ impl SeqTracker {
         if usize::from(self.dcs_head_len) < self.dcs_head.len() {
             self.dcs_head[usize::from(self.dcs_head_len)] = b;
             self.dcs_head_len += 1;
+        }
+        // The body is what a decoder needs and the head is not: 128 bytes
+        // holds a control block, never an image. Bounded, and the flag says
+        // which of the two this is, so a truncated payload is reported as
+        // uncaptured rather than decoded into a plausible wrong picture.
+        if self.dcs_body.len() < self.capture {
+            self.dcs_body.push(b);
+        } else {
+            self.dcs_body_full = false;
         }
     }
 
@@ -845,9 +930,10 @@ impl SeqTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graphics::GraphicsFormat;
 
     fn fed(bytes: &[u8]) -> SeqTracker {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         t.feed(bytes);
         t
     }
@@ -872,33 +958,111 @@ mod tests {
         assert_eq!(fed(b"\x1b]0;t\x07\x07").bells(), 1);
     }
 
+    /// Every payload a feed produced, in order.
+    fn payloads(bytes: &[u8]) -> Vec<GraphicsPayload> {
+        let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut out = Vec::new();
+        for &byte in bytes {
+            if let SeqEvent::Graphics(payload) = tracker.step(byte) {
+                out.push(*payload);
+            }
+        }
+        out
+    }
+
     /// Kitty and sixel payloads, and the two DCS *questions* that share
     /// sixel's `q` final byte and must not be counted as pictures.
     #[test]
     fn graphics_payloads_are_counted_by_protocol() {
         let kitty = fed(b"\x1b_Gf=24,s=1,v=1,a=T;AAAABBBB\x1b\\");
-        assert_eq!(kitty.graphics().kitty(), 1);
-        assert_eq!(kitty.graphics().sixel(), 0);
+        assert_eq!(kitty.graphics().kitty, 1);
+        assert_eq!(kitty.graphics().sixel, 0);
         // Everything between the introducer and the terminator.
-        assert_eq!(kitty.graphics().bytes(), 26);
-        assert_eq!(fed(b"\x1bPq~~\x1b\\").graphics().bytes(), 3, "q~~");
+        assert_eq!(kitty.graphics().bytes, 26);
+        assert_eq!(fed(b"\x1bPq~~\x1b\\").graphics().bytes, 3, "q~~");
 
         let sixel = fed(b"\x1bPq#0;2;0;0;0#0~~-~~\x1b\\");
-        assert_eq!(sixel.graphics().sixel(), 1);
-        assert_eq!(sixel.graphics().kitty(), 0);
+        assert_eq!(sixel.graphics().sixel, 1);
+        assert_eq!(sixel.graphics().kitty, 0);
 
         // Sixel with parameters before the `q`.
-        assert_eq!(fed(b"\x1bP0;1;0q~~\x1b\\").graphics().sixel(), 1);
+        assert_eq!(fed(b"\x1bP0;1;0q~~\x1b\\").graphics().sixel, 1);
 
         // Neither of these is a picture: both reach `q` through an
         // intermediate byte, which is the whole distinction.
-        assert!(fed(b"\x1bP+q544e\x1b\\").graphics().is_empty(), "XTGETTCAP");
-        assert!(fed(b"\x1bP$qm\x1b\\").graphics().is_empty(), "DECRQSS");
+        let termcap = fed(b"\x1bP+q544e\x1b\\").graphics();
+        assert_eq!((termcap.kitty, termcap.sixel), (0, 0), "XTGETTCAP");
+        let decrqss = fed(b"\x1bP$qm\x1b\\").graphics();
+        assert_eq!((decrqss.kitty, decrqss.sixel), (0, 0), "DECRQSS");
 
         // Two of each accumulate.
         let both = fed(b"\x1b_Ga=T;AA\x1b\\\x1bPq~\x1b\\\x1b_Ga=T;BB\x1b\\");
-        assert_eq!((both.graphics().kitty(), both.graphics().sixel()), (2, 1));
-        assert_eq!(both.graphics().total(), 3);
+        assert_eq!((both.graphics().kitty, both.graphics().sixel), (2, 1));
+    }
+
+    /// The protocol caps a payload at 4096 bytes and continues with `m=1`,
+    /// so every image of consequence arrives in several escapes. Counting
+    /// each of them reported one 4.9 KB chart as two pictures — and the
+    /// second "picture" had no control block, so nothing could be said
+    /// about it either.
+    #[test]
+    fn a_chunked_kitty_transmission_is_one_image() {
+        let wire = b"\x1b_Ga=T,f=32,s=2,v=2,i=1,m=1;AAAA\x1b\\                     \x1b_Gm=1;BBBB\x1b\\\x1b_Gm=0;CCCC\x1b\\";
+        let counts = fed(wire).graphics();
+        assert_eq!(counts.kitty, 1, "one image, three escapes");
+
+        let payloads = payloads(wire);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].chunks(), 3);
+        assert_eq!(payloads[0].data(), Some(&b"AAAABBBBCCCC"[..]));
+        // The facts come off the first escape; the continuations carry none.
+        assert_eq!(payloads[0].size(), Some((2, 2)));
+        assert_eq!(payloads[0].id(), Some(1));
+        // And the cost is the whole transmission, not the last escape.
+        assert_eq!(counts.bytes, payloads[0].bytes());
+    }
+
+    /// A delete takes an image *off* the screen. Counting it as one
+    /// transmitted made an application that tears down what it drew
+    /// indistinguishable from one that drew twice as much.
+    #[test]
+    fn a_delete_is_counted_apart_from_the_images() {
+        let counts = fed(b"\x1b_Ga=T,f=32,s=1,v=1;AA\x1b\\\x1b_Ga=d,d=I,i=1,q=2\x1b\\").graphics();
+        assert_eq!(counts.kitty, 1, "one image");
+        assert_eq!(counts.deletes, 1, "and one teardown");
+        // The wire cost of both is still counted: a delete is traffic.
+        assert!(counts.bytes > 22);
+    }
+
+    /// A payload past the capture bound keeps every count and drops the
+    /// data, rather than handing back a prefix that would decode into a
+    /// plausible-looking wrong picture.
+    #[test]
+    fn a_payload_past_the_capture_bound_is_counted_and_not_kept() {
+        let mut tracker = SeqTracker::new(8);
+        let mut seen = None;
+        for &byte in b"\x1b_Ga=T,f=32,s=4,v=4;AAAABBBBCCCCDDDD\x1b\\" {
+            if let SeqEvent::Graphics(payload) = tracker.step(byte) {
+                seen = Some(*payload);
+            }
+        }
+        let payload = seen.expect("a payload");
+        assert_eq!(payload.data(), None, "not kept");
+        assert_eq!(payload.size(), Some((4, 4)), "but still described");
+        assert_eq!(tracker.graphics().kitty, 1, "and still counted");
+    }
+
+    /// The control block is metadata; the data is what a decoder wants.
+    #[test]
+    fn a_payload_carries_the_data_and_not_the_framing() {
+        let kitty = payloads(b"\x1b_Ga=T,f=24,s=1,v=1;QUJD\x1b\\");
+        assert_eq!(kitty[0].data(), Some(&b"QUJD"[..]));
+        assert_eq!(kitty[0].format(), GraphicsFormat::Rgb);
+
+        // Sixel's header ends at the `q`; everything after it is the image.
+        let sixel = payloads(b"\x1bP0;1;0q\"1;1;2;6#0;2;100;0;0~~\x1b\\");
+        assert_eq!(sixel[0].data(), Some(&b"\"1;1;2;6#0;2;100;0;0~~"[..]));
+        assert_eq!(sixel[0].size(), Some((2, 6)));
     }
 
     /// The kitty graphics *query* was the one probe of the startup set that
@@ -907,7 +1071,7 @@ mod tests {
     /// it and the timeout said nothing.
     #[test]
     fn the_kitty_graphics_query_is_classified() {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         let mut events = Vec::new();
         for &b in b"\x1b_Gi=1,a=q;\x1b\\" {
             events.push(t.step(b));
@@ -922,7 +1086,7 @@ mod tests {
              timeout note: {events:?}"
         );
         // A query carries no picture, so it is not counted as one.
-        assert!(t.graphics().is_empty());
+        assert_eq!(t.graphics().kitty, 0);
     }
 
     /// A transmission is an instruction, not a question. Classifying one as
@@ -930,7 +1094,7 @@ mod tests {
     /// next timeout of every application that draws.
     #[test]
     fn a_kitty_transmission_is_not_treated_as_a_query() {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         let mut events = Vec::new();
         for &b in b"\x1b_Gf=24,a=T;QUJD\x1b\\" {
             events.push(t.step(b));
@@ -939,7 +1103,7 @@ mod tests {
             !events.iter().any(|e| matches!(e, SeqEvent::Query(_))),
             "a transmit is not a question: {events:?}"
         );
-        assert_eq!(t.graphics().kitty(), 1);
+        assert_eq!(t.graphics().kitty, 1);
     }
 
     #[test]
@@ -949,7 +1113,7 @@ mod tests {
 
     #[test]
     fn split_csi_is_mid_sequence_until_final_byte() {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         t.feed(b"\x1b[3");
         assert!(t.mid_sequence());
         t.feed(b"1");
@@ -999,7 +1163,7 @@ mod tests {
 
     #[test]
     fn sync_update_events_fire_on_2026_set_and_reset() {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         let events: Vec<SeqEvent> = b"\x1b[?2026h".iter().map(|&b| t.step(b)).collect();
         assert_eq!(*events.last().unwrap(), SeqEvent::SyncBegin);
         assert!(t.in_sync_update());
@@ -1010,17 +1174,17 @@ mod tests {
 
     #[test]
     fn sync_2026_is_recognized_anywhere_in_a_multi_mode_list() {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         t.feed(b"\x1b[?2026;25h");
         assert!(t.in_sync_update());
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         t.feed(b"\x1b[?25;2026h");
         assert!(t.in_sync_update());
     }
 
     #[test]
     fn lookalike_sequences_do_not_toggle_sync() {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         t.feed(b"\x1b[2026h"); // not private (no '?')
         assert!(!t.in_sync_update());
         t.feed(b"\x1b[?2026m"); // wrong final byte
@@ -1107,7 +1271,7 @@ mod tests {
 
     #[test]
     fn a_clipboard_read_is_a_query_not_a_write() {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         let events: Vec<SeqEvent> = b"\x1b]52;c;?\x07".iter().map(|&b| t.step(b)).collect();
         assert!(matches!(
             events.last(),
@@ -1121,19 +1285,19 @@ mod tests {
         // Applications reset terminal modes defensively at startup and on
         // crash, and such a reset string contains `?2026l`. It must not end
         // a frame that never began.
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         let events: Vec<SeqEvent> = b"\x1b[?2026l".iter().map(|&b| t.step(b)).collect();
         assert!(!events.contains(&SeqEvent::SyncEnd));
         assert!(!t.in_sync_update());
 
         // Taken verbatim from a real crash handler.
         let reset = b"\x1b[?2026l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?2004l\x1b[?1049l";
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         let events: Vec<SeqEvent> = reset.iter().map(|&b| t.step(b)).collect();
         assert!(!events.contains(&SeqEvent::SyncEnd));
 
         // And the End of a real frame still ends it, once only.
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         let events: Vec<SeqEvent> = b"\x1b[?2026h\x1b[?2026l\x1b[?2026l"
             .iter()
             .map(|&b| t.step(b))
@@ -1146,7 +1310,7 @@ mod tests {
 
     #[test]
     fn sync_survives_an_aborted_csi_inside_the_update() {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         t.feed(b"\x1b[?2026h\x1b[31\x18"); // CAN aborts the SGR, not the frame
         assert!(t.in_sync_update());
         t.feed(b"\x1b[?2026l");
@@ -1154,7 +1318,7 @@ mod tests {
     }
 
     fn queries_of(bytes: &[u8]) -> Vec<Query> {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         bytes
             .iter()
             .filter_map(|&b| match t.step(b) {
@@ -1307,7 +1471,7 @@ mod tests {
 
     #[test]
     fn osc_0_and_2_set_the_title_via_bel_or_st() {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         assert_eq!(&*t.title(), "");
         t.feed(b"\x1b]2;hello world\x07");
         assert_eq!(&*t.title(), "hello world");
@@ -1317,7 +1481,7 @@ mod tests {
 
     #[test]
     fn titles_longer_than_the_diagnostic_capture_are_kept_whole() {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         let title = "t".repeat(80); // seq_buf truncates at 24; titles must not
         t.feed(format!("\x1b]2;{title}\x07").as_bytes());
         assert_eq!(&*t.title(), title.as_str());
@@ -1325,7 +1489,7 @@ mod tests {
 
     #[test]
     fn title_survives_chunked_delivery() {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         t.feed(b"\x1b]2;split");
         t.feed(b" title\x07");
         assert_eq!(&*t.title(), "split title");
@@ -1333,14 +1497,14 @@ mod tests {
 
     #[test]
     fn title_keeps_embedded_semicolons() {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         t.feed(b"\x1b]0;a;b;c\x07");
         assert_eq!(&*t.title(), "a;b;c");
     }
 
     #[test]
     fn icon_only_and_aborted_titles_do_not_change_the_title() {
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         t.feed(b"\x1b]2;kept\x07");
         t.feed(b"\x1b]1;icon only\x07"); // OSC 1: icon name, not the title
         assert_eq!(&*t.title(), "kept");
@@ -1355,7 +1519,7 @@ mod tests {
     #[test]
     fn split_utf8_is_mid_sequence() {
         let bytes = "汉".as_bytes(); // 3 bytes
-        let mut t = SeqTracker::new();
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         t.feed(&bytes[..1]);
         assert!(t.mid_sequence());
         t.feed(&bytes[1..2]);
