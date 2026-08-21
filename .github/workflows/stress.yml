@@ -2,13 +2,30 @@
 #
 # A flaky test harness is worse than none — this workflow is the credibility
 # gate. Run it before every release and whenever wait/timing code changes.
+#
+# The 100 are split across SHARDS machines rather than run end to end on one.
+# Three things follow, and only the last one is a cost:
+#
+#   * 100 independent trials are 100 independent trials however they are
+#     distributed, so the odds of catching a flake are unchanged;
+#   * the shards land on different runners, so a race that only loses on a
+#     slow machine gets several rolls at a slow machine instead of one —
+#     which is coverage a single-runner loop cannot buy at any depth;
+#   * a shard is shallower, so a fault that needs a *long* run on one machine
+#     to appear — a leaked descriptor, an unreaped child, a pty device number
+#     that only recycles under pressure — has less room to accumulate.
+#
+# That last point is why the shards are five deep-ish rather than ten shallow
+# ones: twenty iterations still stacks a few hundred pty lifecycles onto one
+# machine, and five is also the most macOS jobs a free plan will run at once,
+# so ten shards would queue into two waves and finish later than five.
 name: stress
 
 on:
   workflow_dispatch:
     inputs:
       iterations:
-        description: Number of full-suite iterations
+        description: Full-suite iterations per OS, split across the shards
         required: false
         default: "100"
   schedule:
@@ -25,13 +42,19 @@ concurrency:
 
 jobs:
   stress:
-    name: stress (${{ matrix.os }})
+    name: stress (${{ matrix.os }} ${{ matrix.shard }}/5)
     strategy:
+      # Never cancel a sibling: which OS and which shard a flake landed on is
+      # most of the diagnosis, and a cancelled shard reports nothing.
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        shard: [1, 2, 3, 4, 5]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    # A shard is twenty iterations, which is minutes. Generous, but no longer
+    # two hours: a shard that hangs should say so while the run is still worth
+    # watching.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -40,15 +63,24 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # One cache for every shard rather than ten near-identical ones:
+          # they build the same tree, and the default key is per-job.
+          shared-key: stress
       - name: Build test binaries once
         run: cargo build --workspace --release --all-targets # bins too: fixture binaries must exist before iteration 1
       - name: Run the suite repeatedly
         env:
           ITERS: ${{ inputs.iterations || '100' }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: "5"
         run: |
-          for i in $(seq "$ITERS"); do
-            echo "::group::iteration ${i}/${ITERS}"
+          # Rounded up, so the shards together always run at least ITERS.
+          per=$(( (ITERS + SHARDS - 1) / SHARDS ))
+          echo "shard ${SHARD}/${SHARDS}: ${per} iterations of ${ITERS}"
+          for i in $(seq "$per"); do
+            echo "::group::shard ${SHARD}/${SHARDS} iteration ${i}/${per}"
             cargo test --workspace --release -- --test-threads=4 \
-              || { echo "::error::suite flaked on iteration ${i}/${ITERS}"; exit 1; }
+              || { echo "::error::suite flaked on shard ${SHARD}/${SHARDS}, iteration ${i}/${per}"; exit 1; }
             echo "::endgroup::"
           done
