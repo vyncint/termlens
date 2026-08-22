@@ -9,6 +9,26 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`spawn` no longer fails when the machine is briefly out of PTY devices.**
+  On macOS a PTY is torn down with `revoke()` and its device recycled, and a
+  suite asking for devices faster than the kernel returns them gets `ENXIO` —
+  "Device not configured", which reads like a broken machine and is really a
+  queue. `cargo test` runs one test per core by default, so this is what a
+  sixteen-core Mac does with any suite of this shape; the failure was not
+  exotic, it was Tuesday. `openpty` is now retried for about 1.6 seconds
+  before giving up, **releasing the PTY lifecycle lock between attempts** —
+  that lock is the one a teardown also takes, so waiting under it would have
+  blocked the only work capable of freeing a device.
+
+  Found by the stress workflow the first time it ran the suite at sixteen
+  threads, on macOS; Linux had run the same suite twenty-five times over
+  without noticing. `tests/concurrency.rs` now applies the same pressure on
+  purpose — two dozen terminals at once, and eight rounds of open-and-recycle
+  — so it is reproducible rather than a matter of which shard drew the short
+  straw.
+
 ## [0.6.0] - 2026-08-21
 
 What an application *drew*, as against how many bytes it spent drawing it.

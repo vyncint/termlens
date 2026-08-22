@@ -16,7 +16,7 @@ use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 
 use crate::emu::{Emulator, InputModes, MouseEncoding, Query, Stop, Vt100Emulator};
 use crate::error::{Error, Result};
@@ -189,6 +189,55 @@ static PTY_LIFECYCLE: Mutex<()> = Mutex::new(());
 
 fn pty_lifecycle_guard() -> std::sync::MutexGuard<'static, ()> {
     PTY_LIFECYCLE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Attempts to open a PTY before giving up, and the step between them. The
+/// ceiling is the sum, about 1.6s — long enough to outlast a burst of
+/// teardowns, short enough that a genuinely broken environment still reports
+/// promptly.
+const PTY_OPEN_ATTEMPTS: u32 = 12;
+const PTY_OPEN_BACKOFF: Duration = Duration::from_millis(25);
+
+/// Open a PTY, handing back the lifecycle lock for the caller to hold through
+/// spawn.
+///
+/// Retried, because on macOS `openpty` is not merely racy but transiently
+/// **exhausted**. Devices are torn down with `revoke()` and recycled, and a
+/// suite running one test per core — which is what `cargo test` does by
+/// default, so sixteen on a sixteen-core machine — can ask for a device faster
+/// than the kernel gives them back. The failure is `ENXIO`, "Device not
+/// configured", which reads like a broken machine and is really a queue.
+/// Found by the stress workflow at sixteen threads on macOS, where Linux ran
+/// the same suite twenty-five times over without noticing.
+///
+/// **The lock is released between attempts, and that is the point.** It is the
+/// same lock a teardown takes, so waiting for a device while holding it would
+/// block the only work that can produce one — the retry would be guaranteed to
+/// fail exactly when it was needed.
+///
+/// Every failure is retried rather than only the ones that look transient:
+/// classifying an `anyhow` error by its text is guesswork, a permanent fault
+/// still reports its own message at the end, and the cost of being wrong is
+/// under two seconds on a spawn that was going to fail anyway.
+fn open_pty(size: PtySize) -> Result<(PtyPair, std::sync::MutexGuard<'static, ()>)> {
+    let pty = native_pty_system();
+    let mut last = String::new();
+    for attempt in 0..PTY_OPEN_ATTEMPTS {
+        let lifecycle = pty_lifecycle_guard();
+        match pty.openpty(size) {
+            Ok(pair) => return Ok((pair, lifecycle)),
+            Err(error) => {
+                drop(lifecycle);
+                last = error.to_string();
+                if attempt + 1 < PTY_OPEN_ATTEMPTS {
+                    thread::sleep(PTY_OPEN_BACKOFF * (attempt + 1));
+                }
+            }
+        }
+    }
+    Err(Error::Pty(format!(
+        "openpty failed after {PTY_OPEN_ATTEMPTS} attempts: {last}"
+    )))
 }
 
 /// The PTY writer, shared between `Terminal` (typed input) and the reader
@@ -1184,22 +1233,18 @@ impl TerminalBuilder {
         // diagnostic about something else.
         self.validate(&command_desc, program)?;
 
-        // Hold the lifecycle lock across openpty → spawn → slave close, so
+        // The lifecycle lock is held across openpty → spawn → slave close, so
         // no concurrent Terminal teardown can revoke our fresh PTY device.
-        let lifecycle = pty_lifecycle_guard();
-
-        let pty = native_pty_system();
-        let pair = pty
-            .openpty(PtySize {
-                rows: self.rows,
-                cols: self.cols,
-                // So TIOCGWINSZ agrees with the escape replies instead of
-                // contradicting them. Zero when no cell size was declared,
-                // which is what a real terminal reports when it has none.
-                pixel_width: pixel_span(self.cols, self.cell_size.map(|(w, _)| w)),
-                pixel_height: pixel_span(self.rows, self.cell_size.map(|(_, h)| h)),
-            })
-            .map_err(|e| Error::Pty(format!("openpty failed: {e}")))?;
+        // `open_pty` takes it, retries under it, and hands it back still held.
+        let (pair, lifecycle) = open_pty(PtySize {
+            rows: self.rows,
+            cols: self.cols,
+            // So TIOCGWINSZ agrees with the escape replies instead of
+            // contradicting them. Zero when no cell size was declared,
+            // which is what a real terminal reports when it has none.
+            pixel_width: pixel_span(self.cols, self.cell_size.map(|(w, _)| w)),
+            pixel_height: pixel_span(self.rows, self.cell_size.map(|(_, h)| h)),
+        })?;
 
         let mut cmd = CommandBuilder::new(program);
         cmd.args(&self.args);
