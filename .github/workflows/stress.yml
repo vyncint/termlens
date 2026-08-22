@@ -19,6 +19,23 @@
 # ones: twenty iterations still stacks a few hundred pty lifecycles onto one
 # machine, and five is also the most macOS jobs a free plan will run at once,
 # so ten shards would queue into two waves and finish later than five.
+#
+# The shards do not run the same thing five times. Each takes a different
+# `--test-threads`, because concurrency is the axis this suite's faults live
+# on and running one point on it five times only samples that point harder:
+#
+#   * 1 thread is the *fast* end, not the safe one. Nothing contends, so every
+#     child starts and exits as quickly as the machine can manage — which is
+#     the shape of the instant-exit teardown race, where a program that writes
+#     and dies inside a millisecond outruns the reader attaching to it.
+#   * 16 threads is the crowded end: sixteen ptys opening and being revoked at
+#     once is what surfaced the macOS device-recycling race, and it is also
+#     the closest this workflow gets to the descriptor and process pressure a
+#     deeper shard used to build up.
+#   * 2, 4 and 8 are the middle, where most real suites actually run.
+#
+# The thread count is in the job name and in the failure, so a flake arrives
+# already half-diagnosed: at 1 it is a speed race, at 16 a contention one.
 name: stress
 
 on:
@@ -42,14 +59,30 @@ concurrency:
 
 jobs:
   stress:
-    name: stress (${{ matrix.os }} ${{ matrix.shard }}/5)
+    name: stress (${{ matrix.os }}, ${{ matrix.threads }} threads)
     strategy:
-      # Never cancel a sibling: which OS and which shard a flake landed on is
-      # most of the diagnosis, and a cancelled shard reports nothing.
+      # Never cancel a sibling: which OS and which concurrency a flake landed
+      # on is most of the diagnosis, and a cancelled shard reports nothing.
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        shard: [1, 2, 3, 4, 5]
+        threads: [1, 2, 4, 8, 16]
+        # Balanced by wall time rather than by count. Measured on this suite:
+        # a serial iteration costs 43s against 16s at four threads and 14s at
+        # sixteen, so an even split would leave four machines idle while the
+        # serial one finished, and the whole point of sharding was the clock.
+        # The weights are percentages of `iterations` and sum to 100.
+        include:
+          - threads: 1
+            weight: 10
+          - threads: 2
+            weight: 15
+          - threads: 4
+            weight: 25
+          - threads: 8
+            weight: 25
+          - threads: 16
+            weight: 25
     runs-on: ${{ matrix.os }}
     # A shard is twenty iterations, which is minutes. Generous, but no longer
     # two hours: a shard that hangs should say so while the run is still worth
@@ -72,15 +105,17 @@ jobs:
       - name: Run the suite repeatedly
         env:
           ITERS: ${{ inputs.iterations || '100' }}
-          SHARD: ${{ matrix.shard }}
-          SHARDS: "5"
+          THREADS: ${{ matrix.threads }}
+          WEIGHT: ${{ matrix.weight }}
         run: |
-          # Rounded up, so the shards together always run at least ITERS.
-          per=$(( (ITERS + SHARDS - 1) / SHARDS ))
-          echo "shard ${SHARD}/${SHARDS}: ${per} iterations of ${ITERS}"
+          per=$(( WEIGHT * ITERS / 100 ))
+          # A tiny `iterations` must still run this shard at all, or a quick
+          # ten-iteration check would silently skip the serial one.
+          if [ "$per" -lt 1 ]; then per=1; fi
+          echo "${THREADS} thread(s): ${per} iterations of ${ITERS}"
           for i in $(seq "$per"); do
-            echo "::group::shard ${SHARD}/${SHARDS} iteration ${i}/${per}"
-            cargo test --workspace --release -- --test-threads=4 \
-              || { echo "::error::suite flaked on shard ${SHARD}/${SHARDS}, iteration ${i}/${per}"; exit 1; }
+            echo "::group::${THREADS} threads, iteration ${i}/${per}"
+            cargo test --workspace --release -- --test-threads="$THREADS" \
+              || { echo "::error::suite flaked at ${THREADS} thread(s), iteration ${i}/${per}"; exit 1; }
             echo "::endgroup::"
           done
