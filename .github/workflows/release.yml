@@ -125,6 +125,7 @@ jobs:
   # Needs a PAT with `contents: write` on termlens-demo, stored as
   # TESTING_REPO_DISPATCH_TOKEN. Without it the job says so and exits clean.
   notify-testing-repo:
+    name: notify-testing-repo
     needs: publish
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
