@@ -12,3 +12,4 @@ rules:
       - ci.yml
       - stress.yml
       - release.yml
+      - install.yml
