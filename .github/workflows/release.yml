@@ -110,3 +110,39 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             --verify-tag
+
+  # Tell the repository that tests this tool against a real subject that a
+  # new version exists, so the deep run happens now rather than at its next
+  # scheduled tick.
+  #
+  # Best-effort by design. The testing repositories all resolve "latest" from
+  # crates.io on a schedule of their own, so a dispatch that never arrives --
+  # an expired token, a release cut by hand, a fork without the secret --
+  # costs latency and nothing else. That is why this job never fails the
+  # release: a published crate is published whether or not the notification
+  # landed.
+  #
+  # Needs a PAT with `contents: write` on termlens-demo, stored as
+  # TESTING_REPO_DISPATCH_TOKEN. Without it the job says so and exits clean.
+  notify-testing-repo:
+    needs: publish
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Dispatch to termlens-demo
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.TESTING_REPO_DISPATCH_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::notice::TESTING_REPO_DISPATCH_TOKEN is not set; termlens-demo will pick this up on its own schedule instead"
+            exit 0
+          fi
+          gh api repos/vyncint/termlens-demo/dispatches \
+            -f event_type=tool-published \
+            -F "client_payload[version]=${TAG#v}" \
+            && echo "dispatched tool-published to termlens-demo" \
+            || echo "::warning::could not dispatch to termlens-demo; it will pick this up on its own schedule"
