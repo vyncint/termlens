@@ -3,6 +3,13 @@
 Thanks for your interest! This document covers everything you need to get a
 change from your editor into `main`.
 
+> **These four projects share one contributor pattern** — the same commit
+> rules, the same DCO, the same AI policy, the same CI and release shape:
+> [termlens](https://github.com/vyncint/termlens),
+> [mossaic](https://github.com/vyncint/mossaic),
+> [launchbound](https://github.com/vyncint/launchbound),
+> [reconverge](https://github.com/vyncint/reconverge). Learn it once.
+
 ## 1. Dev setup
 
 ```sh
@@ -47,8 +54,9 @@ cargo insta review            # inspect and accept/reject each diff
 ## 4. Commit conventions
 
 We use [Conventional Commits](https://www.conventionalcommits.org/):
-`feat:`, `fix:`, `docs:`, `test:`, `ci:`, `chore:`, `refactor:` — scope
-optional (`feat(screen): …`). Subject line: imperative mood, ≤ 72 characters.
+`feat:`, `fix:`, `docs:`, `test:`, `ci:`, `chore:`, `refactor:`, `perf:` —
+scope optional (`feat(screen): …`). Subject line: imperative mood,
+≤ 72 characters.
 
 ## 5. Developer Certificate of Origin (DCO)
 
@@ -69,38 +77,68 @@ match the commit author email; CI enforces this on every commit in a PR.
 Forgot to sign off? `git commit --amend -s` for the last commit, or
 `git rebase --signoff main` for a whole branch, then force-push.
 
+One exception, and it is GitHub's rather than ours: a pull request
+**squash-merged through the web UI** has its author email rewritten by GitHub
+*after* the sign-off was written, so an exact match is impossible by
+construction. Such a commit must carry a sign-off, but is not matched against
+an author it did not choose. The commits that went into the PR were already
+checked, address and all, on the branch.
+
 ## 6. AI tooling policy
 
-You may use any AI tool to write code for this project — we do too. Two
-rules:
+**AI assistance is welcome here — use whatever helps.** Every one of these
+projects was built with it. There is an [AGENTS.md](AGENTS.md) briefing coding
+agents on the layout, the commands, and the house style.
 
-1. **You are the author of record** and take full responsibility for what you
-   submit, per the DCO.
-2. **Do not add AI co-author trailers, "Generated with" footers, or bot
-   identities to commits.** CI rejects them.
+**AI attribution is not welcome.** No `Co-Authored-By` trailer naming an
+assistant, model or vendor; no "Generated with …" footer; no robot emoji; no
+bot identity as author or committer. Whoever opens the pull request is the
+author of record, takes responsibility under the DCO, and the history should
+say so — a tool cannot certify the DCO, which is the whole point of it.
 
-Contributions authored *by* an autonomous account (bot committer/author) are
-not accepted.
+This is enforced, not requested: `commit-policy.yml` runs
+[`check-no-ai-attribution.sh`](.github/scripts/check-no-ai-attribution.sh) and
+[`check-dco.sh`](.github/scripts/check-dco.sh) over every commit in a pull
+request. Run them yourself first — both take a range:
+
+```sh
+.github/scripts/check-dco.sh main..HEAD
+.github/scripts/check-no-ai-attribution.sh main..HEAD
+```
+
+If a check fails, rewrite the message rather than arguing with it:
+
+```sh
+git commit --amend            # the last commit
+git rebase -i main            # several, marking each `reword`
+git push --force-with-lease
+```
+
+`.claude/settings.json` turns co-author trailers off for agents that read
+repository settings. That is a courtesy; the check in CI is the boundary.
+Contributions authored *by* an autonomous account are not accepted.
 
 ## 7. PR flow
 
-- Branch from `main`; name branches `feat/…`, `fix/…`, `docs/…`, etc.
+- Branch from `main`; name branches `feat/…`, `fix/…`, `docs/…`, `ci/…`.
 - PRs are **squash-merged** — keep the PR title in Conventional Commit form,
-  since it becomes the commit subject on `main`. Branches are deleted on
-  merge.
-- Required checks: `required-green` (fmt, clippy, tests on Ubuntu + macOS,
-  MSRV, docs, cargo-deny, zizmor) and `commit-policy` (DCO + attribution
-  policy). All must pass before merge.
-- **Contributing from a fork?** Two things are normal. First, on your
-  first PR the workflows wait for a maintainer to approve them (GitHub's
-  standard first-time-contributor safeguard — nothing you did wrong).
-  Second, when `commit-policy` fails on a fork PR it **cannot post its
-  explanatory comment** (fork PRs run with a read-only token); the job
-  log carries the full explanation instead, including the exact
-  offending commit and the command that fixes it.
+  since it becomes the commit subject on `main`. Branches are deleted on merge.
+- Required checks: `required-green` (fmt, clippy, tests on Ubuntu + macOS, MSRV, docs, cargo-deny, zizmor), plus `commit-policy` (DCO + attribution). All
+  must pass before merge; direct pushes to `main` are blocked by a ruleset.
+- **Every change lands with a test, and the test must be able to fail.** If
+  you add a guard, break it once and watch it go red before you commit.
+- **Say what you did not do.** A PR that lists what it left out and why is
+  worth more than one implying completeness. An honest gap is cheap; a false
+  claim is expensive.
+- **Contributing from a fork?** Two things are normal. On your first PR the
+  workflows wait for a maintainer to approve them — GitHub's standard
+  first-time-contributor safeguard, nothing you did wrong. And when
+  `commit-policy` fails on a fork PR it cannot post its explanatory comment
+  (fork PRs get a read-only token); the job log carries the full explanation,
+  including the offending commit and the command that fixes it.
 - Review: expect actionable review within a few days. Small, focused PRs get
-  reviewed faster than large ones. Update `CHANGELOG.md` under
-  `[Unreleased]` for any user-facing change.
+  reviewed faster. Update `CHANGELOG.md` under `[Unreleased]` for any
+  user-facing change.
 
 ## 8. Release process
 
