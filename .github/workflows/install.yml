@@ -1,0 +1,182 @@
+# What crates.io actually serves, used the way a consumer uses it.
+#
+# CI tests the working tree and `cargo publish` checks that the archive builds.
+# Neither answers the question this one asks: does `cargo add termlens` work
+# for somebody who has only cargo and an empty project? Three failures live in
+# that gap and nowhere else.
+#
+#   * A file the build needs that never made it into the archive. The
+#     repository still compiles; the package does not, and no test here can
+#     see it because every test here has the repository.
+#   * A **fresh dependency resolution**. Our CI resolves against the committed
+#     lockfile; a consumer does not, so a dependency's own release can break
+#     the published crate days after it was published with nothing changed
+#     here. That is why this runs weekly and not only at publish.
+#   * A feature that resolves in this workspace and nowhere else. `decode` is
+#     off by default and pulls a dependency of its own, which makes it exactly
+#     the shape of thing that works until someone outside tries it.
+#
+# The consumer is a real crate in an empty directory, and the test it runs is
+# a real PTY — which is the whole product, so nothing else would do. Nothing
+# here checks this repository out: the version and the feature list come from
+# the registry, because the registry is what a consumer gets.
+name: install
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to verify (default: the newest published)"
+        required: false
+  schedule:
+    - cron: "37 7 * * 1" # Mondays, after the stress run
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-${{ github.event.release.tag_name || inputs.version || 'latest' }}
+  cancel-in-progress: false
+
+jobs:
+  consume:
+    name: consume (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Ask the registry what was published
+        id: crate
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          WANTED: ${{ inputs.version }}
+        run: |
+          api="https://crates.io/api/v1/crates/termlens"
+          agent="termlens-install-check (github actions)"
+          version="${WANTED:-${TAG#v}}"
+          if [ -z "$version" ]; then
+            version=$(curl -sSf -H "User-Agent: $agent" "$api" | jq -r .crate.max_stable_version)
+          fi
+
+          # The release event fires the moment the publish job finishes, and
+          # the index can trail it by seconds. Wait rather than fail: a flaky
+          # gate teaches people to ignore it.
+          for attempt in $(seq 30); do
+            body=$(curl -sS -H "User-Agent: $agent" "$api/$version") || body=""
+            if [ "$(printf '%s' "$body" | jq -r '.version.num // empty')" = "$version" ]; then
+              break
+            fi
+            echo "waiting for $version to appear on crates.io (${attempt}/30)"
+            sleep 10
+          done
+
+          num=$(printf '%s' "$body" | jq -r '.version.num // empty')
+          if [ "$num" != "$version" ]; then
+            echo "::error::$version never appeared on crates.io"
+            exit 1
+          fi
+          if [ "$(printf '%s' "$body" | jq -r .version.yanked)" != "false" ]; then
+            echo "::error::$version is yanked"
+            exit 1
+          fi
+
+          # The features the registry advertises, which is what a consumer can
+          # actually ask for — a feature renamed at the last moment would be
+          # invisible to every test in this repository.
+          features=$(printf '%s' "$body" | jq -r '.version.features | keys | join(",")')
+          for wanted in decode insta; do
+            case ",$features," in
+              *",$wanted,"*) ;;
+              *) echo "::error::the published $version has no '$wanted' feature (it has: $features)"; exit 1 ;;
+            esac
+          done
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "verifying termlens $version, features: $features"
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - name: Build a consumer against it
+        env:
+          VERSION: ${{ steps.crate.outputs.version }}
+        run: |
+          cd "$RUNNER_TEMP"
+          cargo new --lib consumer --edition 2021 --vcs none
+          cd consumer
+          # Exactly what the README tells a reader to type, plus the feature
+          # that carries the decoder.
+          cargo add termlens@"=$VERSION" --dev --features decode
+
+          mkdir -p tests
+          cat > tests/published.rs <<'RUST'
+          //! The published crate, from an empty project: a real PTY, a real
+          //! screen, and the decoder behind the `decode` feature.
+          use std::time::Duration;
+
+          use termlens::{Key, Terminal};
+
+          fn sh(script: &str) -> termlens::Result<Terminal> {
+              Terminal::builder()
+                  .size(40, 10)
+                  .env_clear()
+                  .timeout(Duration::from_secs(30))
+                  .arg("-c")
+                  .arg(script)
+                  .spawn("/bin/sh")
+          }
+
+          #[test]
+          fn it_drives_a_real_pty_and_renders_a_screen() -> termlens::Result<()> {
+              // `read` holds the child open until the assertion is done: a
+              // program that writes and exits inside a millisecond can lose
+              // its output to the pty teardown, which the crate's own docs
+              // warn about.
+              let mut t = sh("printf 'hello from the registry\\n'; read _")?;
+              t.wait_until(|s| s.contains("hello from the registry"))?;
+              assert!(!t.screen().alternate_screen());
+              assert_eq!(t.screen().find("hello"), Some((0, 0)));
+
+              t.send(Key::Enter)?;
+              assert!(t.wait_exit()?.success());
+              Ok(())
+          }
+
+          #[test]
+          fn the_decode_feature_reaches_the_pixels() -> termlens::Result<()> {
+              // One opaque red pixel over the kitty protocol: `/wAA/w==` is
+              // base64 for RGBA ff 00 00 ff. Support is declined by default
+              // and the payload is captured anyway, which is the behaviour
+              // worth having — an application that transmits an image nobody
+              // offered it is exactly what a test wants to catch.
+              let mut t = sh(
+                  "printf '\\033_Ga=T,f=32,s=1,v=1;/wAA/w==\\033\\\\'; printf 'sent\\n'; read _",
+              )?;
+              t.wait_until(|s| s.contains("sent"))?;
+
+              let screen = t.screen();
+              let seen = screen.graphics();
+              assert_eq!(seen.kitty(), 1, "{seen:?}");
+              let bitmap = seen
+                  .last()
+                  .expect("a payload")
+                  .decode()
+                  .expect("the decode feature is compiled in");
+              assert_eq!((bitmap.width(), bitmap.height()), (1, 1));
+              assert_eq!(bitmap.pixel(0, 0), Some([0xff, 0x00, 0x00, 0xff]));
+
+              t.send(Key::Enter)?;
+              assert!(t.wait_exit()?.success());
+              Ok(())
+          }
+          RUST
+
+          echo "--- the consumer's manifest ---"
+          cat Cargo.toml
+          echo "--- what it resolved to ---"
+          cargo tree --depth 1 --edges normal,dev
+          cargo test --test published -- --nocapture
