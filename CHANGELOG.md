@@ -9,6 +9,13 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The crate's doctests build with default features disabled.** The bundled
+  snapshot macro example is compiled only when its `insta` feature exists,
+  and CI now runs `cargo test --workspace --no-default-features` so this
+  supported configuration cannot silently rot again.
+
 ## [0.6.1] - 2026-08-23
 
 ### Fixed
