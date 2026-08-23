@@ -8,7 +8,7 @@ resolver = "2"
 members = ["crates/termlens", "fixtures/*"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 # Minimum supported Rust version. Checked by the `msrv` CI job, which reads
 # this field; bumping it is a minor (not patch) change per our SemVer policy.

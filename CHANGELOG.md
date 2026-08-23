@@ -9,6 +9,8 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-23
+
 ### Fixed
 
 - **`spawn` no longer fails when the machine is briefly out of PTY devices.**
