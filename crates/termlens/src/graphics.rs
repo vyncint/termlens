@@ -114,7 +114,7 @@ pub enum GraphicsFormat {
     /// kitty `f=32`: four bytes a pixel.
     Rgba,
     /// kitty `f=100`: a PNG file. Decoding one is out of scope — termlens
-    /// carries no image codec — so [`GraphicsPayload::decode`] reports it
+    /// carries no image codec — so `GraphicsPayload::decode` reports it
     /// as unsupported rather than guessing.
     Png,
     /// The sixel data stream itself.
@@ -226,7 +226,7 @@ impl GraphicsPayload {
     /// `s=`/`v=`, or a sixel's raster attributes.
     ///
     /// `None` when nothing declared one, which for sixel means the size is
-    /// implicit in the data; [`decode`](Self::decode) computes it there.
+    /// implicit in the data; `GraphicsPayload::decode` computes it there.
     #[must_use]
     pub fn size(&self) -> Option<(u32, u32)> {
         self.size
