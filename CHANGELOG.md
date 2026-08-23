@@ -11,6 +11,15 @@ listed under a **Changed** or **Removed** heading.
 
 ### Fixed
 
+- **The crate's doctests build with default features disabled.** The bundled
+  snapshot macro example is compiled only when its `insta` feature exists,
+  and CI now runs `cargo test --workspace --no-default-features` so this
+  supported configuration cannot silently rot again.
+
+## [0.6.1] - 2026-08-23
+
+### Fixed
+
 - **`spawn` no longer fails when the machine is briefly out of PTY devices.**
   On macOS a PTY is torn down with `revoke()` and its device recycled, and a
   suite asking for devices faster than the kernel returns them gets `ENXIO` —

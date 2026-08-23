@@ -2714,7 +2714,7 @@ impl Terminal {
     /// belongs to the child until it has been reaped
     /// ([`wait_exit`](Self::wait_exit) or `Drop`) — after that the OS may
     /// reuse it, so don't deliver signals to a stored pid yourself;
-    /// [`signal`](Self::signal) has that guard built in.
+    /// `Terminal::signal` has that guard built in.
     #[must_use]
     pub fn pid(&self) -> Option<u32> {
         self.child.process_id()

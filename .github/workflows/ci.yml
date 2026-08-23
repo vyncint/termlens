@@ -106,6 +106,7 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo doc --no-deps
       - run: cargo doc --no-deps --all-features
 
   deny:
