@@ -145,3 +145,31 @@ fn strikethrough_and_blink_appear_in_the_styled_rendering() -> termlens::Result<
     assert!(t.wait_exit()?.success());
     Ok(())
 }
+
+#[test]
+fn dim_and_italic_appear_without_shadow_collisions() -> termlens::Result<()> {
+    let mut t = sh(concat!(
+        r"printf '\033[2mfaint\033[0m ",
+        r"\033[3mslanted\033[0m\n'; read guard"
+    ))?;
+    t.wait_until(|s| s.contains("slanted") && s.cursor() == (1, 0, true))?;
+    let s = t.screen();
+
+    let faint = s.find("faint").expect("dim run");
+    let dim = *s.cell(faint.0, faint.1).unwrap().style();
+    assert!(dim.dim && !dim.italic);
+
+    let slanted = s.find("slanted").expect("italic run");
+    let italic = *s.cell(slanted.0, slanted.1).unwrap().style();
+    assert!(italic.italic && !italic.dim && !italic.conceal);
+
+    // These words deliberately do not name the attributes, so the style
+    // rendering cannot satisfy either assertion with visible text alone.
+    let styled = s.with_styles().to_string();
+    assert!(styled.contains("0: 0-4 dim"), "{styled}");
+    assert!(styled.contains("6-12 italic"), "{styled}");
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
