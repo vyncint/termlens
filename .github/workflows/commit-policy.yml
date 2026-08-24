@@ -62,7 +62,14 @@ jobs:
       - name: DCO sign-off
         env:
           RANGE: ${{ steps.range.outputs.range }}
-        run: .github/scripts/check-dco.sh "$RANGE"
+          # On a push to main, the tip is the commit GitHub composed by
+          # squash-merging a pull request. Naming it lets the check tell that
+          # one commit apart from anything else with a web-flow committer, so
+          # a message GitHub wrote without the trailers it squashed does not
+          # fail a pull request that was, in fact, signed off. Empty on
+          # pull_request runs, where nothing is exempt.
+          COMPOSED: ${{ github.event_name == 'push' && github.event.after || '' }}
+        run: .github/scripts/check-dco.sh "$RANGE" "$COMPOSED"
 
       - name: No AI attribution
         # Run even when the DCO step failed, so one run reports everything.

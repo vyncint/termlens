@@ -107,8 +107,11 @@ Real-world findings the pipeline caught (working exactly as designed):
   isn't verified on the account — see §2.2). `check-dco.sh` now exempts
   GitHub web-flow merge commits from the email match (a sign-off must
   still be present; the underlying PR commits were already fully checked).
-  The one red `commit-policy` run on `main` from before that fix is
-  expected history, not an unresolved failure.
+  The two red `commit-policy` runs on `main` — one from before that fix,
+  one on `471df02` (#158, whose branch carried a merge commit, so GitHub
+  composed a squash message with no trailers at all) — are expected
+  history, not unresolved failures. Both commits are immutable; the check
+  was corrected forward instead.
 
 ## 2. Manual steps for you
 
@@ -234,6 +237,13 @@ announcements are still in flight, with the draft in
     construction; a sign-off must still be present, and the real commits
     were already checked by the required PR run. Found live on the first
     squash merge; the brief's DCO design predates this GitHub behavior.
+    Extended after #158: GitHub also *drops* the squashed commits' trailers
+    when the branch contained a merge commit, so "a sign-off must still be
+    present" is not something a contributor can guarantee. The workflow now
+    names the tip of the push (`github.event.after`) as the composed commit,
+    and that one commit — subject ending `(#123)`, web-flow committer, no
+    sign-off — is exempted with a `::notice::`. Nothing else is: a commit
+    can only be that tip by way of a pull request the strict check passed.
 13. **Stress workflow prebuilds `--all-targets`** (not `--tests`) and the
     fixture tests carry 30s deadlines — the first stress run proved that
     compiling fixture bins mid-iteration on a cold 2-vCPU runner blows a

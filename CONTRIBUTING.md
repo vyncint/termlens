@@ -84,6 +84,22 @@ construction. Such a commit must carry a sign-off, but is not matched against
 an author it did not choose. The commits that went into the PR were already
 checked, address and all, on the branch.
 
+GitHub also *writes* that message, and it drops the trailers of the commits it
+squashed whenever the branch contained a merge commit — pressing **Update
+branch** is enough to cause it. The merge then lands on main carrying no
+sign-off, and main is linear and non-fast-forward, so it cannot be repaired.
+The check therefore exempts exactly one commit — the tip of a push to main,
+which can only get there through a pull request that was already checked
+strictly. **Keep your branch up to date by rebasing, not merging:**
+
+```sh
+git fetch origin && git rebase origin/main
+git push --force-with-lease
+```
+
+That also matches what main requires: linear history, so a merge commit on
+your branch is only ever going to be squashed away.
+
 ## 6. AI tooling policy
 
 **AI assistance is welcome here — use whatever helps.** Every one of these

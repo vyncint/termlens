@@ -6,18 +6,35 @@
 # (the repo is squash-merge only, so there should be none anyway).
 #
 # Usage:
-#   .github/scripts/check-dco.sh <base>..<head>
+#   .github/scripts/check-dco.sh <base>..<head> [composed-sha]
 #   .github/scripts/check-dco.sh <sha>          # single commit and ancestors
+#
+# The optional second argument names the one commit GitHub may have just
+# composed itself by squash-merging a pull request — the tip of a push to
+# main. See the web-flow block below for why that commit is treated
+# differently, and why naming it explicitly is what keeps the check honest.
 #
 # tests: exercise locally on a scratch branch before trusting it in CI —
 #   git checkout -b scratch/dco
 #   git commit --allow-empty -m "test: signed"  -s
 #   git commit --allow-empty -m "test: unsigned"
 #   .github/scripts/check-dco.sh main..HEAD   # must fail on the 2nd commit
+#   # and the composed-squash path, which must pass only when named:
+#   git -c user.email=noreply@github.com commit --allow-empty \
+#       -m "test: composed (#1)"
+#   .github/scripts/check-dco.sh main..HEAD            # must fail
+#   .github/scripts/check-dco.sh main..HEAD "$(git rev-parse HEAD)"  # passes
 #   git checkout - && git branch -D scratch/dco
 set -euo pipefail
 
-range="${1:?usage: check-dco.sh <range>}"
+range="${1:?usage: check-dco.sh <range> [composed-sha]}"
+composed="${2:-}"
+# Resolve it once, so the comparison below is sha-to-sha rather than
+# text-to-text. Empty (pull_request runs) or unresolvable leaves it empty,
+# which exempts nothing.
+if [ -n "$composed" ]; then
+  composed="$(git rev-parse --verify --quiet "${composed}^{commit}" || true)"
+fi
 
 fail=0
 count=0
@@ -34,11 +51,37 @@ while IFS= read -r sha; do
   # resulting merge commit we require a sign-off to be present but skip
   # the email match.
   if [ "$committer_email" = "noreply@github.com" ]; then
-    if ! git log -1 --format='%B' "$sha" | grep -qi '^signed-off-by:'; then
-      echo "::error::Merge/squash commit ${sha} carries no Signed-off-by at all."
-      echo "  subject: $(git log -1 --format='%s' "$sha")"
-      fail=1
+    if git log -1 --format='%B' "$sha" | grep -qi '^signed-off-by:'; then
+      continue
     fi
+
+    # ...except that GitHub composes the squash message itself, and drops
+    # the trailers of the commits it squashed whenever the branch contained
+    # a merge commit — someone pressing "Update branch" is enough. A pull
+    # request in which every commit was signed off then lands on main
+    # carrying no sign-off at all, and it cannot be repaired: main is linear
+    # history, non-fast-forward, and the ruleset has no bypass actors. The
+    # branch is red forever over a policy that was, in fact, met.
+    #
+    # It was met verifiably: `commit-policy` is a required status check on
+    # main, main accepts nothing except through a pull request, and the
+    # pull_request run checks every commit strictly — sign-off email against
+    # author email. So exempt this commit, and only this commit: the tip of
+    # the push, named by the caller, subject ending in the "(#123)" GitHub
+    # appends. A contributor cannot forge their way in here, because they
+    # cannot be the tip of a push to main without a pull request first.
+    if [ -n "$composed" ] && [ "$sha" = "$composed" ] \
+       && git log -1 --format='%s' "$sha" | grep -Eq '\(#[0-9]+\)$'; then
+      echo "::notice::${sha} is a squash-merge whose message GitHub composed" \
+           "without the trailers of the commits it replaced. Those commits" \
+           "were checked on the pull request."
+      echo "  subject: $(git log -1 --format='%s' "$sha")"
+      continue
+    fi
+
+    echo "::error::Merge/squash commit ${sha} carries no Signed-off-by at all."
+    echo "  subject: $(git log -1 --format='%s' "$sha")"
+    fail=1
     continue
   fi
 
