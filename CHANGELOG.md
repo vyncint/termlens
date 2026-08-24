@@ -9,6 +9,12 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Added
+
+- **`TerminalBuilder::envs` sets several child environment variables from an
+  iterator of key-value pairs.** Values keep their iteration and builder-call
+  order, and remain explicit when `env_clear` disables inherited variables.
+
 ### Fixed
 
 - **The crate's doctests build with default features disabled.** The bundled

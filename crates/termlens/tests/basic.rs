@@ -9,7 +9,10 @@
 //! teardown (docs/DESIGN.md §2); keeping the child alive until the harness
 //! has seen the bytes makes these tests deterministic on every platform.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use termlens::{Error, Key, Terminal};
 
@@ -73,6 +76,36 @@ fn env_vars_reach_the_child() -> termlens::Result<()> {
 }
 
 #[test]
+fn envs_accepts_common_pair_iterators() {
+    let vec_vars = vec![(String::from("VEC_KEY"), String::from("vec-value"))];
+    let map_vars = HashMap::from([("MAP_KEY", "map-value")]);
+
+    let _ = Terminal::builder()
+        .envs([("ARRAY_KEY", "array-value")])
+        .envs(vec_vars)
+        .envs(map_vars)
+        .envs(std::env::vars().take(0));
+}
+
+#[test]
+fn envs_and_env_preserve_order_and_duplicates() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .env("VALUE", "env-first")
+        .envs([("VALUE", "envs-first"), ("SECOND", "two")])
+        .env("VALUE", "env-last")
+        .envs([("THIRD", "three"), ("VALUE", "envs-last")])
+        .args([
+            "-c",
+            r#"echo "value=$VALUE second=$SECOND third=$THIRD"; read guard"#,
+        ])
+        .spawn(SH)?;
+    t.wait_until(|s| s.contains("value=envs-last second=two third=three"))?;
+    t.send(Key::Enter)?;
+    t.wait_exit()?;
+    Ok(())
+}
+
+#[test]
 fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termlens::Result<()> {
     // Probe HOME, not PATH: shells synthesize a compiled-in default PATH
     // when none is inherited, so PATH can't distinguish "inherited" from
@@ -83,14 +116,15 @@ fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termlens::
         "test needs HOME in the parent env"
     );
     let mut t = Terminal::builder()
+        .envs([("KEPT_BEFORE", "yes")])
         .env_clear()
-        .env("KEPT", "yes")
+        .envs([("KEPT_AFTER", "also")])
         .args([
             "-c",
-            r#"echo "home=${HOME:-unset} term=$TERM kept=$KEPT"; read guard"#,
+            r#"echo "home=${HOME:-unset} term=$TERM before=$KEPT_BEFORE after=$KEPT_AFTER"; read guard"#,
         ])
         .spawn(SH)?;
-    t.wait_until(|s| s.contains("kept=yes"))?;
+    t.wait_until(|s| s.contains("before=yes after=also"))?;
     let screen = t.screen();
     assert!(
         screen.contains("home=unset"),

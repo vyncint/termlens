@@ -1008,13 +1008,35 @@ impl TerminalBuilder {
         self
     }
 
+    /// Set several environment variables for the child.
+    ///
+    /// Variables are applied in iteration order, so a later value for the
+    /// same key wins, including across calls to [`env`](Self::env). Entries
+    /// set here always reach the child, regardless of call order relative to
+    /// [`env_clear`](Self::env_clear).
+    #[must_use]
+    pub fn envs<I, K, V>(mut self, vars: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        self.envs.extend(
+            vars.into_iter()
+                .map(|(key, value)| (key.as_ref().to_os_string(), value.as_ref().to_os_string())),
+        );
+        self
+    }
+
     /// Don't inherit the parent process environment: the child sees only
-    /// variables set via [`env`](Self::env) (plus the default `TERM`, see
-    /// [`spawn`](Self::spawn)). Strict control keeps tests hermetic — a
-    /// developer's exotic `LS_COLORS` should never change a snapshot.
+    /// variables set via [`env`](Self::env) or [`envs`](Self::envs) (plus the
+    /// default `TERM`, see [`spawn`](Self::spawn)). Strict control keeps tests
+    /// hermetic — a developer's exotic `LS_COLORS` should never change a
+    /// snapshot.
     ///
     /// Note this differs from `std::process::Command::env_clear`, which also
-    /// discards explicitly set variables; here `env()` entries survive.
+    /// discards explicitly set variables; here `env()` and `envs()` entries
+    /// survive.
     #[must_use]
     pub fn env_clear(mut self) -> Self {
         self.env_clear = true;
