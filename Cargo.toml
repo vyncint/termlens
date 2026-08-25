@@ -22,7 +22,6 @@ repository = "https://github.com/vyncint/termlens"
 authors = ["Vyncint Ng <vyncint@icloud.com>"]
 
 [workspace.dependencies]
-termlens = { path = "crates/termlens", version = "0.6.0" }
 
 portable-pty = "0.9"
 vt100 = "0.16"
