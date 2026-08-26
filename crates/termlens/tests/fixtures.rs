@@ -57,6 +57,7 @@ fn form_echo_round_trips_typed_input_and_special_keys() -> termlens::Result<()> 
         (Key::End, "last: end"),
         (Key::PageUp, "last: pageup"),
         (Key::PageDown, "last: pagedown"),
+        (Key::Insert, "last: insert"),
         (Key::Delete, "last: delete"),
         (Key::BackTab, "last: backtab"),
         (Key::F(1), "last: f:1"),

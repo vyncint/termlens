@@ -15,6 +15,69 @@ listed under a **Changed** or **Removed** heading.
   iterator of key-value pairs.** Values keep their iteration and builder-call
   order, and remain explicit when `env_clear` disables inherited variables.
 
+- **`Screen::links` reports the `OSC 8` hyperlinks an application emitted.**
+  A hyperlink changes no cell — its label renders exactly as unlinked text
+  would — so the URL existed nowhere a test could reach, and an assertion
+  that a TUI linked an issue, a file or a doc page **passed identically
+  against an application that emitted no link at all, or linked the wrong
+  target**. Captured rather than answered, on the same grounds as the
+  `OSC 52` clipboard: the only evidence otherwise available is the
+  application's own visible output, which proves the code path ran and
+  nothing about where it points.
+
+  Each span reports its `uri`, its `id` (spans sharing one are one logical
+  link), the `label` it wrapped, and whether the application ever `closed`
+  it — an unterminated link is a real defect, because in a real terminal
+  every character written afterwards joins it. Two bounds keep the capture
+  honest: the log holds the most recent 64 spans and evicts oldest-first, so
+  a TUI that redraws its links every frame still reports the current
+  frame's; and a label past the capture bound is reported as *unknown*
+  rather than as a prefix, since a prefix of the wrong length is a wrong
+  answer.
+
+- **`Screen::cursor_shape` and `Screen::cursor_blink` report `DECSCUSR`.**
+  A screen where the application asked for a bar and one where it never
+  asked used to be the same `Screen`. The shape is load-bearing behaviour
+  rather than decoration — a modal editor switches to a bar for insert and
+  back to a block for normal, and "the mode indicator says INSERT" and "the
+  terminal was actually put into insert" are different claims. It also makes
+  the *restore* assertable, which is the half that ships broken: a program
+  that changes the cursor and never changes it back leaves the user's
+  terminal wrong after exit, the same class of defect `alternate_screen()`
+  already catches.
+
+  Shape and blink are one `DECSCUSR` parameter but two facts, so they are
+  reported apart. `CursorShape::Default` — the application never sent the
+  escape — is a third state and is reported as itself rather than folded
+  into `Block`.
+
+- **`Key::Insert`**, encoding `ESC [ 2 ~`, and chording like its
+  neighbours (`Key::Insert.shift()` → `ESC [ 2 ; 2 ~`). It was the `2`
+  missing from a navigation run that already had `3`, `5` and `6`, so an
+  application binding Insert could not be tested without hand-writing the
+  escape.
+
+### Changed
+
+- **`Key` and `Signal` are now `#[non_exhaustive]`.** This is breaking for
+  downstream code that `match`es either without a wildcard arm; adding a
+  `_ => …` fixes it, and equality and construction are unaffected.
+
+  Worth doing now rather than later. Adding a variant to an exhaustive
+  public enum is itself a breaking change, so every future key and every
+  future signal would have cost a version of its own — `Key` has no F13+ and
+  no keypad, and `Signal` carries seven of POSIX's thirty, missing
+  `SIGWINCH` and `SIGCONT`, which are exactly what a terminal application
+  reacts to. Both types are *constructed* far more often than matched
+  (`t.send(Key::Enter)`, `t.signal(Signal::Int)`), so the cost falls almost
+  entirely on the crate and not on its users. `#[non_exhaustive]` is
+  breaking to add, which makes the cheapest moment the earliest one.
+
+  `Color` is deliberately left exhaustive. Default, palette index and 24-bit
+  RGB is the whole terminal colour model — there is no fourth variant
+  waiting — and `Color` is the one enum here that downstream code really
+  does match on.
+
 ### Fixed
 
 - **The crate's doctests build with default features disabled.** The bundled

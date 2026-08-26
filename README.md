@@ -104,9 +104,15 @@ the emulator knows which modes the app enabled. A `drag` reports one
 motion **per cell crossed**, so an application that paints along the path
 sees the path. The same knowledge is
 readable from every `Screen`: the window title, the alternate-screen
-flag, the input modes and the last `OSC 52` clipboard write are plain
-accessors, so "did the app enter the alt screen?" and "did it copy the
-right text?" are assertions, not inferences. Focus events go the other way:
+flag, the input modes, the last `OSC 52` clipboard write, the cursor
+shape the app asked for with `DECSCUSR`, and the `OSC 8` hyperlinks it
+emitted are plain accessors, so "did the app enter the alt screen?",
+"did it copy the right text?", "did it put the terminal into insert
+mode — and put it back?" and "did it link the right URL?" are
+assertions, not inferences. The last two matter because neither changes
+a cell: a hyperlink's label renders as ordinary text with its URL
+nowhere on the screen, so before `links()` a test asserting a link
+passed identically against an application that emitted none. Focus events go the other way:
 `focus_out()` reaches an application that enabled mode 1004, so the
 unfocused branch of a UI can be driven at all.
 

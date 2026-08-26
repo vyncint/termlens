@@ -60,8 +60,14 @@
 //! that enabled mode 1004 so the unfocused branch of a UI can be driven at
 //! all. The terminal's out-of-band state — the window title, the
 //! alternate-screen flag, the input modes, the last `OSC 52`
-//! [clipboard](Screen::clipboard) write — is readable from every
-//! [`Screen`] as plain accessors.
+//! [clipboard](Screen::clipboard) write, the
+//! [cursor shape](Screen::cursor_shape) the application asked for, and the
+//! `OSC 8` [hyperlinks](Screen::links) it emitted — is readable from every
+//! [`Screen`] as plain accessors. Both of those last two leave the grid
+//! identical: a bar cursor and a block cursor draw the same cells, and a
+//! hyperlink's label renders as ordinary text with its URL nowhere on the
+//! screen, so a test asserting a link used to pass against an application
+//! that emitted none.
 //!
 //! Behaviour that leaves the screen **identical** is assertable too, which
 //! no content predicate can manage: [`repaints`](Screen::repaints) counts
@@ -109,7 +115,7 @@ pub use graphics::{
     GraphicsAction, GraphicsFormat, GraphicsPayload, GraphicsProtocol, GraphicsSeen,
 };
 pub use keys::{Chord, Input, Key};
-pub use screen::{Cell, Clipboard, Color, MouseMode, Screen, Style};
+pub use screen::{Cell, Clipboard, Color, CursorShape, Link, MouseMode, Screen, Style};
 #[cfg(unix)]
 pub use terminal::Signal;
 pub use terminal::{

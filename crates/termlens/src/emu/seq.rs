@@ -21,12 +21,29 @@
 use std::sync::Arc;
 
 use crate::graphics::{GraphicsBuilder, GraphicsCounts, GraphicsPayload};
-use crate::screen::Clipboard;
+use crate::screen::{Clipboard, Link};
 
 /// OSC strings are captured whole (titles must not truncate), but bounded:
 /// a buggy or hostile stream must not grow memory without limit. No real
 /// title comes anywhere near this.
 const OSC_CAPTURE_MAX: usize = 64 * 1024;
+
+/// How many `OSC 8` spans to keep, oldest evicted.
+///
+/// Bounded rather than unbounded because a TUI redraws: an application that
+/// links five things every frame would otherwise grow this forever. Sixty-four
+/// holds many screens' worth of links, so the current frame's are always
+/// present, which is what a test asserts on.
+const LINK_HISTORY: usize = 64;
+
+/// How many label bytes one span may accumulate.
+///
+/// This is the bound that stops an *unterminated* link from bleeding into the
+/// rest of the stream: without it, one missing `OSC 8 ; ; ST` makes every
+/// byte the application writes afterwards part of one label. Past it the
+/// label is reported as unknown rather than as a prefix — a prefix of the
+/// wrong length is still a wrong answer.
+const LINK_LABEL_MAX: usize = 4 * 1024;
 
 /// Decode standard base64 (`OSC 52` payloads). `None` for anything that is
 /// not valid: an out-of-alphabet byte, a bad length, or padding in the
@@ -253,6 +270,19 @@ pub(crate) struct SeqTracker {
     title: Arc<str>,
     /// The most recent `OSC 52` clipboard write, decoded.
     clipboard: Option<Arc<Clipboard>>,
+    /// `OSC 8` spans seen, oldest first. A span is pushed when it *opens* —
+    /// the URI is known then, and a test waiting for a link should not have
+    /// to wait for the application to close it — and completed in place when
+    /// it closes.
+    links: Arc<Vec<Link>>,
+    /// Label bytes of the span currently open. Held outside `links` so the
+    /// shared vector is touched twice per span (open, close) rather than
+    /// once per character written.
+    link_label: Vec<u8>,
+    /// True while a span is open, so printable bytes know where to go.
+    link_open: bool,
+    /// Set when the open span's label passed [`LINK_LABEL_MAX`].
+    link_label_truncated: bool,
     /// Bells rung in ground state. A `BEL` closing an OSC string is a
     /// terminator and one inside a DCS-class string is payload; neither is
     /// a bell, and both are handled by the state machine rather than here.
@@ -274,6 +304,12 @@ pub(crate) struct SeqTracker {
     /// Tracked here because vt100 does not model 1004 at all — the same
     /// reason the window title is tracked here.
     focus_events: bool,
+    /// The raw `DECSCUSR` parameter the application last asked for, or
+    /// `None` while it has never asked. Kept as the parameter rather than
+    /// as a decoded shape so the one place that knows what `5` means is
+    /// the accessor on `Screen`, and "never asked" stays distinguishable
+    /// from every value it could have asked for.
+    cursor_style: Option<u8>,
     /// Which introducer opened the current DCS-class string: `P` (DCS),
     /// `X` (SOS), `^` (PM) or `_` (APC). Sixel and kitty graphics differ
     /// only by this, so consuming all four alike — which is all the tracker
@@ -326,12 +362,17 @@ impl SeqTracker {
             osc_truncated: false,
             title: Arc::from(""),
             clipboard: None,
+            links: Arc::new(Vec::new()),
+            link_label: Vec::new(),
+            link_open: false,
+            link_label_truncated: false,
             bells: 0,
             counts: GraphicsCounts::default(),
             building: GraphicsBuilder::default(),
             capture,
             frame_printable: 0,
             focus_events: false,
+            cursor_style: None,
             dcs_introducer: 0,
             dcs_final: 0,
             dcs_intermediate: 0,
@@ -376,6 +417,54 @@ impl SeqTracker {
         self.bells
     }
 
+    /// The `OSC 8` hyperlinks seen so far, oldest first.
+    pub(crate) fn links(&self) -> Arc<Vec<Link>> {
+        Arc::clone(&self.links)
+    }
+
+    /// Begin an `OSC 8` span. Any span still open is closed first: a new
+    /// URI supersedes the current one in a real terminal, so treating it as
+    /// nested would attribute the new label to the old target.
+    fn open_link(&mut self, params: &[u8], uri: &[u8]) {
+        self.close_link();
+        // `id=` is the one standard parameter; the list is `:`-separated.
+        let id = params
+            .split(|&b| b == b':')
+            .find_map(|pair| pair.strip_prefix(b"id="))
+            .map(|value| String::from_utf8_lossy(value).into_owned());
+        let uri = String::from_utf8_lossy(uri).into_owned();
+        let links = Arc::make_mut(&mut self.links);
+        links.push(Link::open(&uri, id.as_deref()));
+        while links.len() > LINK_HISTORY {
+            links.remove(0);
+        }
+        self.link_open = true;
+        self.link_label.clear();
+        self.link_label_truncated = false;
+    }
+
+    /// Close the open `OSC 8` span, if any, recording the text it wrapped.
+    fn close_link(&mut self) {
+        if !self.link_open {
+            return;
+        }
+        self.link_open = false;
+        let raw = std::mem::take(&mut self.link_label);
+        let label = if self.link_label_truncated {
+            None
+        } else {
+            // Invalid UTF-8 is refused rather than replaced: a label with
+            // U+FFFD in it is not the text the user sees.
+            String::from_utf8(raw).ok()
+        };
+        self.link_label_truncated = false;
+        // The open span is the newest, and eviction only ever drops the
+        // oldest, so the one to complete is the last.
+        if let Some(link) = Arc::make_mut(&mut self.links).last_mut() {
+            link.close(label);
+        }
+    }
+
     /// Inline graphics counted so far.
     pub(crate) fn graphics(&self) -> GraphicsCounts {
         self.counts
@@ -384,6 +473,11 @@ impl SeqTracker {
     /// True while the application has focus reporting (mode 1004) enabled.
     pub(crate) fn focus_events(&self) -> bool {
         self.focus_events
+    }
+
+    /// The raw `DECSCUSR` parameter last requested, `None` if never.
+    pub(crate) fn cursor_style(&self) -> Option<u8> {
+        self.cursor_style
     }
 
     /// Printable characters written since the current frame began, cleared
@@ -462,10 +556,11 @@ impl SeqTracker {
                 self.csi_has_digits = true;
             }
             b';' => self.end_csi_param(),
-            // `$` is the intermediate of the DECRQM request (`CSI ? n $ p`);
-            // recording it keeps the sequence classifiable instead of
-            // discarding it as unrecognized.
-            b'$' => self.csi_intermediate = b'$',
+            // `$` is the intermediate of the DECRQM request (`CSI ? n $ p`)
+            // and `SP` of DECSCUSR (`CSI Ps SP q`); recording them keeps
+            // those sequences classifiable instead of discarding them as
+            // unrecognized.
+            b'$' | b' ' => self.csi_intermediate = b,
             // Sub-parameters or other intermediates: none of the sequences
             // we recognize use them.
             _ => self.csi_invalid = true,
@@ -496,6 +591,34 @@ impl SeqTracker {
                 (_, b'p' | b'y') => SeqEvent::Query(Query::Unanswerable(self.seq_printable())),
                 _ => SeqEvent::None,
             };
+        }
+
+        // DECSCUSR (`CSI Ps SP q`): the shape of the cursor, and whether it
+        // blinks. vt100 models neither, so a modal editor switching to a bar
+        // for insert mode is invisible without this — as is the program that
+        // switches and never switches back, which leaves the user's terminal
+        // wrong after exit.
+        //
+        // Also reached by the other `SP`-intermediate sequences (SL, SR).
+        // They are not ours to act on, and returning here keeps them out of
+        // the plain-CSI table below, which assumes no intermediate — exactly
+        // as they were kept out by `csi_invalid` before `SP` was accepted.
+        if self.csi_intermediate == b' ' {
+            if b == b'q' && self.csi_prefix == 0 && self.csi_param_count <= 1 {
+                // An omitted parameter means 0. Values above 6 are undefined
+                // and xterm ignores them; so do we, leaving the last style
+                // the application actually asked for rather than inventing
+                // one it did not.
+                let ps = if self.csi_param_count == 0 {
+                    0
+                } else {
+                    self.csi_first_param
+                };
+                if let Ok(style @ 0..=6) = u8::try_from(ps) {
+                    self.cursor_style = Some(style);
+                }
+            }
+            return SeqEvent::None;
         }
 
         // DEC private mode 1004 (focus reporting). vt100 does not model it,
@@ -609,6 +732,38 @@ impl SeqTracker {
                         .or_else(|| content.strip_prefix(b"2;"))
                     {
                         self.title = Arc::from(String::from_utf8_lossy(title));
+                    } else if let Some(rest) = content.strip_prefix(b"8;") {
+                        // `OSC 8 ; params ; URI` opens a hyperlink span and
+                        // `OSC 8 ; ; ` closes it. Captured rather than
+                        // answered, exactly as OSC 52 is below: the label
+                        // renders as ordinary text, so the URL exists
+                        // nowhere else and "did it link the right place?"
+                        // is otherwise unanswerable.
+                        //
+                        // Parameters cannot contain `;`, so the first one
+                        // ends them and everything after is the URI —
+                        // which may itself contain `;` in a query string.
+                        // No separator at all is malformed, and a malformed
+                        // sequence is not a close: silently ending the span
+                        // would attribute the text after it to nothing.
+                        if let Some(sep) = rest.iter().position(|&b| b == b';') {
+                            // A truncated OSC cannot be acted on in either
+                            // direction: the URI we hold is a prefix, and
+                            // opening a span on it would record a link the
+                            // application never emitted.
+                            if !self.osc_truncated {
+                                // Owned before the call: both helpers take
+                                // `&mut self`, and these slices point into
+                                // `osc_buf`, which is part of it.
+                                let params = rest[..sep].to_vec();
+                                let uri = rest[sep + 1..].to_vec();
+                                if uri.is_empty() {
+                                    self.close_link();
+                                } else {
+                                    self.open_link(&params, &uri);
+                                }
+                            }
+                        }
                     } else if let Some(rest) = content.strip_prefix(b"52;") {
                         // OSC 52 write: `targets ; base64`. The reads were
                         // classified above, so anything here is a write.
@@ -827,6 +982,17 @@ impl SeqTracker {
                     // printable.
                     if self.utf8_remaining == 0 && b >= 0x20 && b != 0x7f {
                         self.frame_printable = self.frame_printable.saturating_add(1);
+                    }
+                    // Text written inside an `OSC 8` span is that link's
+                    // label. Bytes rather than characters, so a multi-byte
+                    // grapheme survives the split — continuation bytes are
+                    // all >= 0x80 and pass the same test.
+                    if self.link_open && b >= 0x20 && b != 0x7f {
+                        if self.link_label.len() < LINK_LABEL_MAX {
+                            self.link_label.push(b);
+                        } else {
+                            self.link_label_truncated = true;
+                        }
                     }
                     self.track_utf8(b);
                     State::Ground
@@ -1144,6 +1310,216 @@ mod tests {
             "a transmit is not a question: {events:?}"
         );
         assert_eq!(t.graphics().kitty, 1);
+    }
+
+    /// The links a fed tracker holds, as `(uri, id, label, closed)`.
+    fn links(bytes: &[u8]) -> Vec<(String, Option<String>, Option<String>, bool)> {
+        fed(bytes)
+            .links()
+            .iter()
+            .map(|l| {
+                (
+                    l.uri().to_string(),
+                    l.id().map(str::to_string),
+                    l.label().map(str::to_string),
+                    l.closed(),
+                )
+            })
+            .collect()
+    }
+
+    /// The reproduction from the issue: the label renders as ordinary text
+    /// and the URL has to be somewhere a test can reach.
+    #[test]
+    fn an_osc8_span_records_its_uri_and_the_text_it_wrapped() {
+        let seen = links(b"see \x1b]8;;https://example.invalid/a\x1b\\docs\x1b]8;;\x1b\\ here");
+        assert_eq!(
+            seen,
+            vec![(
+                "https://example.invalid/a".to_string(),
+                None,
+                Some("docs".to_string()),
+                true
+            )]
+        );
+    }
+
+    #[test]
+    fn a_bel_terminated_span_and_a_multibyte_label_both_survive() {
+        // BEL is the other legal OSC terminator, and the one `printf` in a
+        // shell reaches for.
+        let seen = links("\x1b]8;;http://x/\x07café\x1b]8;;\x07".as_bytes());
+        assert_eq!(seen[0].2, Some("café".to_string()));
+        assert!(seen[0].3);
+    }
+
+    #[test]
+    fn the_id_parameter_is_kept_so_multi_span_links_can_be_grouped() {
+        let seen = links(
+            b"\x1b]8;id=42:x=y;http://x/\x1b\\one\x1b]8;;\x1b\\               \x1b]8;id=42;http://x/\x1b\\two\x1b]8;;\x1b\\",
+        );
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].1.as_deref(), Some("42"));
+        assert_eq!(seen[1].1.as_deref(), Some("42"));
+        assert_eq!(seen[0].2.as_deref(), Some("one"));
+        assert_eq!(seen[1].2.as_deref(), Some("two"));
+    }
+
+    /// A URI with a query string contains `;` of its own. Splitting on the
+    /// last separator, or on all of them, truncates the target silently —
+    /// which is precisely the wrong-URL failure this feature exists to catch.
+    #[test]
+    fn only_the_first_separator_ends_the_parameters() {
+        let seen = links(b"\x1b]8;;http://x/?a=1;b=2\x1b\\t\x1b]8;;\x1b\\");
+        assert_eq!(seen[0].0, "http://x/?a=1;b=2");
+    }
+
+    /// An unterminated span is a real defect — in a real terminal every
+    /// character after it joins the link — so it is reported rather than
+    /// dropped, and its label is bounded rather than allowed to swallow the
+    /// stream.
+    #[test]
+    fn an_unterminated_span_is_reported_open_and_cannot_bleed() {
+        let mut bytes = b"\x1b]8;;http://x/\x1b\\".to_vec();
+        bytes.extend(std::iter::repeat_n(b'z', LINK_LABEL_MAX + 100));
+        let seen = links(&bytes);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "http://x/");
+        assert!(!seen[0].3, "the application never closed it");
+        // Still open, so there is no final label — and the bound means the
+        // captured bytes are a prefix, which is not an answer either.
+        assert_eq!(seen[0].2, None);
+    }
+
+    #[test]
+    fn a_label_past_the_bound_is_unknown_rather_than_a_prefix() {
+        let mut bytes = b"\x1b]8;;http://x/\x1b\\".to_vec();
+        bytes.extend(std::iter::repeat_n(b'z', LINK_LABEL_MAX + 1));
+        bytes.extend_from_slice(b"\x1b]8;;\x1b\\");
+        let seen = links(&bytes);
+        assert!(seen[0].3, "closed");
+        assert_eq!(
+            seen[0].2, None,
+            "a prefix of the wrong length is a wrong answer"
+        );
+    }
+
+    /// A real terminal replaces the current target rather than nesting, so a
+    /// second open closes the first — otherwise the second label would be
+    /// attributed to the first URI.
+    #[test]
+    fn a_new_span_supersedes_one_left_open() {
+        let seen = links(b"\x1b]8;;http://a/\x1b\\one\x1b]8;;http://b/\x1b\\two\x1b]8;;\x1b\\");
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            (seen[0].0.as_str(), seen[0].2.as_deref()),
+            ("http://a/", Some("one"))
+        );
+        assert_eq!(
+            (seen[1].0.as_str(), seen[1].2.as_deref()),
+            ("http://b/", Some("two"))
+        );
+    }
+
+    /// A URI past the OSC capture bound is a *prefix*, and opening a span on
+    /// a prefix records a link pointing somewhere the application never
+    /// named — the wrong-URL failure this feature exists to catch, only
+    /// manufactured by termlens rather than by the program under test.
+    /// Refused outright, exactly as a truncated `OSC 52` payload is.
+    #[test]
+    fn an_osc8_past_the_capture_bound_is_refused_rather_than_truncated() {
+        let mut bytes = b"\x1b]8;;http://x/".to_vec();
+        bytes.extend(std::iter::repeat_n(b'a', OSC_CAPTURE_MAX));
+        bytes.extend_from_slice(b"\x1b\\label\x1b]8;;\x1b\\");
+        assert!(
+            links(&bytes).is_empty(),
+            "a truncated URI must not become a link"
+        );
+    }
+
+    #[test]
+    fn a_malformed_osc8_neither_opens_nor_closes() {
+        // No second `;` at all: not a link, and not a close either —
+        // silently closing would attribute what follows to nothing.
+        let seen = links(b"\x1b]8;http://x/\x1b\\t");
+        assert!(seen.is_empty());
+        // An open, then a malformed one, then text: the text still belongs
+        // to the span that is actually open.
+        let seen = links(b"\x1b]8;;http://x/\x1b\\a\x1b]8;junk\x1b\\b\x1b]8;;\x1b\\");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].2.as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn control_characters_are_not_part_of_a_label() {
+        // A newline moves the cursor; it does not spell anything.
+        let seen = links(b"\x1b]8;;http://x/\x1b\\a\r\nb\x1b]8;;\x1b\\");
+        assert_eq!(seen[0].2.as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn the_link_log_is_bounded_and_evicts_the_oldest() {
+        let mut bytes = Vec::new();
+        for n in 0..LINK_HISTORY + 10 {
+            bytes
+                .extend_from_slice(format!("\x1b]8;;http://x/{n}\x1b\\l\x1b]8;;\x1b\\").as_bytes());
+        }
+        let seen = links(&bytes);
+        assert_eq!(seen.len(), LINK_HISTORY);
+        // Oldest evicted, newest kept.
+        assert_eq!(seen[0].0, "http://x/10");
+        assert_eq!(
+            seen[LINK_HISTORY - 1].0,
+            format!("http://x/{}", LINK_HISTORY + 9)
+        );
+    }
+
+    #[test]
+    fn an_application_that_emits_no_links_reports_none() {
+        assert!(links(b"plain text\x1b]0;title\x07").is_empty());
+    }
+
+    #[test]
+    fn decscusr_records_the_parameter_the_application_asked_for() {
+        // Never asked is its own state, and not the same as any value.
+        assert_eq!(fed(b"hello").cursor_style(), None);
+        for ps in 0u8..=6 {
+            let bytes = format!("\x1b[{ps} q");
+            assert_eq!(
+                fed(bytes.as_bytes()).cursor_style(),
+                Some(ps),
+                "DECSCUSR {ps} was not recorded"
+            );
+        }
+        // An omitted parameter is 0 (a blinking block), per xterm.
+        assert_eq!(fed(b"\x1b[ q").cursor_style(), Some(0));
+        // The last one wins, which is what makes a restore assertable.
+        assert_eq!(fed(b"\x1b[5 q\x1b[2 q").cursor_style(), Some(2));
+    }
+
+    #[test]
+    fn an_undefined_or_misshapen_decscusr_leaves_the_last_known_style() {
+        // 7+ is undefined; xterm ignores it, and inventing a shape here
+        // would report one the application never asked for.
+        assert_eq!(fed(b"\x1b[5 q\x1b[7 q").cursor_style(), Some(5));
+        assert_eq!(fed(b"\x1b[7 q").cursor_style(), None);
+        // A private prefix or a second parameter makes it a different
+        // sequence, not a DECSCUSR with extra decoration.
+        assert_eq!(fed(b"\x1b[?5 q").cursor_style(), None);
+        assert_eq!(fed(b"\x1b[5;2 q").cursor_style(), None);
+    }
+
+    /// `SP` is the intermediate of DECSCUSR *and* of SL/SR (`CSI Ps SP @`
+    /// / `A`), which scroll the screen sideways. Accepting the intermediate
+    /// must not turn those into a cursor style, nor let them fall through
+    /// into the query table below, which assumes no intermediate.
+    #[test]
+    fn the_other_space_intermediate_sequences_are_not_cursor_styles() {
+        for seq in [&b"\x1b[2 @"[..], b"\x1b[2 A", b"\x1b[1 t"] {
+            let mut t = fed(seq);
+            assert_eq!(t.cursor_style(), None, "{seq:?} set a cursor style");
+            assert_eq!(t.step(b'x'), SeqEvent::None);
+        }
     }
 
     #[test]

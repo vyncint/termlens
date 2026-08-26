@@ -466,10 +466,38 @@ Rules:
    captured with every snapshot and read through plain accessors —
    `Screen::title`, `Screen::alternate_screen`, `Screen::bracketed_paste`,
    `Screen::application_cursor`, `Screen::mouse_mode`,
-   `Screen::focus_events`, `Screen::clipboard`. Keeping them out of
+   `Screen::focus_events`, `Screen::clipboard`, `Screen::cursor_shape`,
+   `Screen::cursor_blink`, `Screen::links`. Keeping them out of
    the rendering means existing snapshot files stay valid, and state
    assertions read as ordinary predicates:
    `wait_until(|s| s.alternate_screen())`.
+
+   Two of those are the terminal holding a fact **on the application's
+   behalf**, in the same sense the alternate-screen flag is. `DECSCUSR`
+   (`CSI Ps SP q`) sets the cursor's shape — a bar for insert, a block for
+   normal — and the parameter carries the blink rate along with it, so the
+   two are reported apart: they are one parameter and two facts, and a test
+   usually wants only one. "Never asked" is a third state and is reported as
+   itself: a terminal's default usually *is* a block, but a program that
+   stopped emitting the escape is not a program that asked for one. This is
+   also what makes the *restore* assertable, which is the half that ships
+   broken — a program that switches the cursor and never switches back
+   leaves the user's terminal wrong after exit, exactly as one that never
+   leaves the alternate screen does.
+
+   `OSC 8` hyperlinks are **captured**, on the same grounds as `OSC 52`
+   below: a link changes no cell, its label renders as ordinary text, and
+   the URL therefore exists nowhere a content predicate can reach. A test
+   asserting that a TUI linked an issue or a file passes identically against
+   one that emitted no link, or linked the wrong target. `Screen::links`
+   reports each span with its URI, its `id=` (so spans that are one logical
+   link can be grouped) and the text it wrapped. Two bounds keep it honest
+   rather than merely bounded: the span log evicts oldest-first, so an
+   application that redraws its links every frame still reports the current
+   frame's; and a label that runs past the capture bound is reported as
+   *unknown* rather than as a prefix, since a prefix of the wrong length is
+   a wrong answer. A span the application never closed is reported open —
+   in a real terminal every character written afterwards joins it.
 
    The same slot holds three **cumulative counters**, for behaviour that by
    definition leaves the grid unchanged: `Screen::repaints` (completed DEC

@@ -13,6 +13,15 @@ use unicode_normalization::UnicodeNormalization;
 use crate::graphics::GraphicsSeen;
 
 /// A terminal color, as reported by the emulator.
+///
+/// Deliberately *not* `#[non_exhaustive]`, unlike [`Key`](crate::Key) and
+/// [`Signal`](crate::Signal). The terminal colour model is closed —
+/// default, a palette index, or 24-bit RGB, which is also exactly what
+/// every VT emulator reports — so there is no fourth variant waiting to be
+/// added, and `Color` is the one enum here that downstream code really
+/// does `match` on. Leaving it exhaustive keeps those matches complete;
+/// equality (`cell.style().fg == Color::Indexed(1)`) is unaffected either
+/// way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Color {
     /// The terminal's default foreground/background.
@@ -84,6 +93,40 @@ pub enum MouseMode {
     AnyMotion,
 }
 
+/// The shape of the cursor an application asked its terminal for with
+/// `DECSCUSR` (`CSI Ps SP q`).
+///
+/// Read it from a snapshot via [`Screen::cursor_shape`], and whether it
+/// blinks via [`Screen::cursor_blink`] — one parameter carries both, but
+/// they are two facts and a test usually wants only one of them.
+///
+/// The shape is load-bearing behaviour rather than decoration: a modal
+/// editor switches to a bar for insert and back to a block for normal, and
+/// "the mode indicator says INSERT" and "the terminal was actually put into
+/// insert" are different claims. It also makes the *restore* assertable — a
+/// program that changes the cursor and never changes it back leaves the
+/// user's terminal wrong after exit, the same class of defect
+/// [`Screen::alternate_screen`] already catches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum CursorShape {
+    /// The application never sent `DECSCUSR`, so the cursor is whatever the
+    /// terminal draws by default.
+    ///
+    /// Deliberately not folded into [`Block`](CursorShape::Block): a
+    /// terminal's default usually *is* a block, but "never asked" and
+    /// "asked for a block" are different claims about the program, and only
+    /// one of them survives a refactor that drops the escape.
+    #[default]
+    Default,
+    /// A filled block — `DECSCUSR` 0 and 1 (blinking) or 2 (steady).
+    Block,
+    /// An underline — `DECSCUSR` 3 (blinking) or 4 (steady).
+    Underline,
+    /// A vertical bar — `DECSCUSR` 5 (blinking) or 6 (steady).
+    Bar,
+}
+
 /// What an application copied with `OSC 52`, as observed at one snapshot.
 ///
 /// Read it from a snapshot via [`Screen::clipboard`]. A toast on screen
@@ -128,6 +171,88 @@ impl Clipboard {
     }
 }
 
+/// A hyperlink an application emitted with `OSC 8`, as observed at one
+/// snapshot.
+///
+/// Read them from a snapshot via [`Screen::links`]. A hyperlink changes no
+/// cell — the label is drawn exactly as unlinked text would be — so without
+/// this a test asserting that a TUI linked an issue, a file or a doc page
+/// **passes identically against an application that emitted no link at all,
+/// or linked the wrong URL**. That is the failure
+/// [`Screen::clipboard`] exists to prevent for `OSC 52`, in the same shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    uri: Arc<str>,
+    id: Option<Arc<str>>,
+    label: Option<Arc<str>>,
+    closed: bool,
+}
+
+impl Link {
+    pub(crate) fn open(uri: &str, id: Option<&str>) -> Self {
+        Self {
+            uri: Arc::from(uri),
+            id: id.map(Arc::from),
+            label: None,
+            closed: false,
+        }
+    }
+
+    pub(crate) fn close(&mut self, label: Option<String>) {
+        self.label = label.map(Arc::from);
+        self.closed = true;
+    }
+
+    /// The URI the application linked to, as it wrote it.
+    ///
+    /// Bytes that are not valid UTF-8 are replaced rather than refused: an
+    /// `OSC 8` target is percent-encoded ASCII by construction, so a URI
+    /// that is not text is already malformed, and a replacement character
+    /// makes it compare unequal to whatever the test expected — which is
+    /// the right outcome — while still showing what arrived.
+    #[must_use]
+    pub fn uri(&self) -> &str {
+        &self.uri
+    }
+
+    /// The `id=` parameter, if the application gave one.
+    ///
+    /// Spans sharing an id are one logical link — the way a terminal knows
+    /// that a path broken across two lines highlights as a single target —
+    /// so grouping by this is how a multi-span link is asserted as one.
+    #[must_use]
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    /// The text the link wrapped: what a reader sees and clicks.
+    ///
+    /// `None` means the label is not knowable, which is two situations that
+    /// [`closed`](Self::closed) tells apart: the span is still open and has
+    /// no final text yet, or the application wrote more while it was open
+    /// than termlens keeps, so what was captured is a prefix and returning
+    /// it as *the* label would be a lie. `Some("")` is a real link around
+    /// no text at all.
+    ///
+    /// Control characters are not part of a label: a newline inside a span
+    /// moves the cursor, it does not spell anything.
+    #[must_use]
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    /// Whether the application closed the span (`OSC 8 ; ; ST`).
+    ///
+    /// False is worth asserting against. A link left open is not a
+    /// cosmetic slip: in a real terminal every character written afterwards
+    /// joins it, so a whole screen becomes clickable and points at the
+    /// wrong place.
+    #[must_use]
+    pub fn closed(&self) -> bool {
+        self.closed
+    }
+}
+
 /// Out-of-band terminal state captured with each snapshot. Deliberately
 /// invisible in the text rendering (existing snapshot files stay valid);
 /// exposed through the accessors on [`Screen`].
@@ -153,6 +278,13 @@ pub(crate) struct TermState {
     pub(crate) bells: u64,
     /// Whether the application enabled focus reporting (mode 1004).
     pub(crate) focus_events: bool,
+    /// The raw `DECSCUSR` parameter last requested; `None` until the
+    /// application asks. One `Option<u8>` rather than a shape and a blink
+    /// flag, because the parameter is what the application actually said.
+    pub(crate) cursor_style: Option<u8>,
+    /// `OSC 8` hyperlinks emitted, oldest first, behind an `Arc` so a
+    /// snapshot costs one refcount rather than a copy of every link.
+    pub(crate) links: Arc<Vec<Link>>,
     /// Inline graphics payloads transmitted.
     pub(crate) graphics: GraphicsSeen,
     /// Completed synchronized updates. Filled in by the terminal rather
@@ -178,6 +310,8 @@ impl Default for TermState {
             clipboard: None,
             bells: 0,
             focus_events: false,
+            cursor_style: None,
+            links: Arc::new(Vec::new()),
             graphics: GraphicsSeen::default(),
             repaints: 0,
             scrollback: Arc::from([] as [Arc<str>; 0]),
@@ -315,6 +449,77 @@ impl Screen {
     #[must_use]
     pub fn cursor(&self) -> (u16, u16, bool) {
         (self.cursor_row, self.cursor_col, self.cursor_visible)
+    }
+
+    /// The cursor shape the application asked for with `DECSCUSR`
+    /// (`CSI Ps SP q`), or [`CursorShape::Default`] while it has never
+    /// asked — which is a real state, and not the same as asking for a
+    /// block.
+    ///
+    /// Like all out-of-band state this is invisible in the
+    /// [`Display`](fmt::Display) rendering, so assert on it directly:
+    ///
+    /// ```text
+    /// t.wait_until(|s| s.cursor_shape() == CursorShape::Bar)?;   // insert mode
+    /// t.send(Key::Esc)?;
+    /// t.wait_until(|s| s.cursor_shape() == CursorShape::Block)?; // and back
+    /// ```
+    #[must_use]
+    pub fn cursor_shape(&self) -> CursorShape {
+        match self.state.cursor_style {
+            None => CursorShape::Default,
+            Some(0..=2) => CursorShape::Block,
+            Some(3..=4) => CursorShape::Underline,
+            Some(5..=6) => CursorShape::Bar,
+            // The tracker only ever stores 0..=6; anything else would be a
+            // value it declined to interpret, and guessing a shape here is
+            // the one thing this accessor must not do.
+            Some(_) => CursorShape::Default,
+        }
+    }
+
+    /// Whether the cursor the application asked for blinks.
+    ///
+    /// `None` while [`cursor_shape`](Self::cursor_shape) is
+    /// [`CursorShape::Default`]: the application never said, and the
+    /// terminal's own default rate is not ours to claim. Shape and blink
+    /// travel in one `DECSCUSR` parameter but are two independent facts —
+    /// an editor that wants a steady bar and gets a blinking one has a real
+    /// bug, and it is invisible in the grid.
+    #[must_use]
+    pub fn cursor_blink(&self) -> Option<bool> {
+        match self.state.cursor_style {
+            Some(0 | 1 | 3 | 5) => Some(true),
+            Some(2 | 4 | 6) => Some(false),
+            _ => None,
+        }
+    }
+
+    /// The `OSC 8` hyperlinks the application emitted, oldest first.
+    ///
+    /// A hyperlink leaves the grid identical, so this is the only place the
+    /// URL exists — the label renders as ordinary text and
+    /// [`row_text`](Self::row_text) never sees the target:
+    ///
+    /// ```text
+    /// $ printf 'see \033]8;;https://example.invalid/a\033\\docs\033]8;;\033\\ here\n'
+    /// s.row_text(0)                      == "see docs here"
+    /// s.links()[0].label()               == Some("docs")
+    /// s.links()[0].uri()                 == "https://example.invalid/a"
+    /// ```
+    ///
+    /// One entry per span *emitted*, not per distinct target: an
+    /// application that redraws its links on every repaint appends them
+    /// again each time. The log is bounded at the most recent 64 spans and
+    /// evicts oldest-first, so the current frame's links are always present
+    /// and an application that leaks links cannot grow this without limit.
+    /// Assert with `.iter().any(…)` rather than on the length.
+    ///
+    /// Like all out-of-band state, links are invisible in the
+    /// [`Display`](fmt::Display) rendering.
+    #[must_use]
+    pub fn links(&self) -> &[Link] {
+        &self.state.links
     }
 
     /// The window title, as the application most recently set it (`OSC 0`
@@ -1339,6 +1544,51 @@ mod tests {
         assert_eq!(format!("{s}"), "size: 10x2  cursor: 1,2\nhi\n");
     }
 
+    /// The whole point of `TermState` is that it is invisible in the text
+    /// rendering, so a release adding a fact to it cannot invalidate a
+    /// checked-in snapshot. Asserted exactly, on two screens that differ in
+    /// nothing else — the integration test cannot make this claim, because
+    /// driving a shell to the second state also echoes a newline.
+    #[test]
+    fn the_cursor_shape_is_invisible_in_the_rendering() {
+        let render = |cursor_style| {
+            let state = TermState {
+                cursor_style,
+                ..TermState::default()
+            };
+            let cells = vec![Cell::new("x".into(), Style::default(), false, false)];
+            Screen::from_parts(1, 1, 0, 0, true, cells, state).to_string()
+        };
+        let plain = render(None);
+        for ps in 0u8..=6 {
+            assert_eq!(
+                render(Some(ps)),
+                plain,
+                "DECSCUSR {ps} changed the rendering"
+            );
+        }
+        // The same claim for the other fact this release captures.
+        let linked = TermState {
+            links: Arc::new(vec![Link::open("https://example.invalid/a", Some("7"))]),
+            ..TermState::default()
+        };
+        let cells = vec![Cell::new("x".into(), Style::default(), false, false)];
+        assert_eq!(
+            Screen::from_parts(1, 1, 0, 0, true, cells, linked).to_string(),
+            plain,
+            "a hyperlink changed the rendering"
+        );
+        // …and the fact itself is still there to assert on.
+        let state = TermState {
+            cursor_style: Some(5),
+            ..TermState::default()
+        };
+        let cells = vec![Cell::new("x".into(), Style::default(), false, false)];
+        let s = Screen::from_parts(1, 1, 0, 0, true, cells, state);
+        assert_eq!(s.cursor_shape(), CursorShape::Bar);
+        assert_eq!(s.cursor_blink(), Some(true));
+    }
+
     #[test]
     fn state_accessors_report_the_captured_state_and_stay_out_of_display() {
         let default = screen(4, 1, &["x"]);
@@ -1348,6 +1598,9 @@ mod tests {
         assert!(!default.application_cursor());
         assert_eq!(default.mouse_mode(), MouseMode::None);
         assert!(default.clipboard().is_none());
+        assert_eq!(default.cursor_shape(), CursorShape::Default);
+        assert_eq!(default.cursor_blink(), None);
+        assert!(default.links().is_empty());
 
         let state = TermState {
             title: Arc::from("my app"),
@@ -1358,6 +1611,12 @@ mod tests {
             clipboard: Some(Arc::new(Clipboard::new("c", Some("copied".into())))),
             bells: 3,
             focus_events: true,
+            cursor_style: Some(6),
+            links: Arc::new(vec![{
+                let mut l = Link::open("https://example.invalid/a", Some("7"));
+                l.close(Some("docs".into()));
+                l
+            }]),
             graphics: GraphicsSeen::for_test(1, 1, 2, 160),
             repaints: 9,
             scrollback: Arc::from([Arc::from("scrolled away")]),
@@ -1371,6 +1630,15 @@ mod tests {
         assert_eq!((clip.targets(), clip.text()), ("c", Some("copied")));
         assert_eq!(s.scrollback_rows(), 1);
         assert_eq!(s.bells(), 3);
+        // 6 is a steady bar: the shape and the blink are read apart.
+        assert_eq!(s.cursor_shape(), CursorShape::Bar);
+        assert_eq!(s.cursor_blink(), Some(false));
+        let link = &s.links()[0];
+        assert_eq!(link.uri(), "https://example.invalid/a");
+        assert_eq!(
+            (link.id(), link.label(), link.closed()),
+            (Some("7"), Some("docs"), true)
+        );
         assert!(s.focus_events());
         assert_eq!(s.repaints(), 9);
         assert_eq!(s.graphics().kitty(), 1);

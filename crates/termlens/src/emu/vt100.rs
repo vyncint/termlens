@@ -252,6 +252,8 @@ impl Emulator for Vt100Emulator {
             clipboard: self.tracker.clipboard(),
             bells: self.tracker.bells(),
             focus_events: self.tracker.focus_events(),
+            cursor_style: self.tracker.cursor_style(),
+            links: self.tracker.links(),
             graphics: GraphicsSeen::new(self.tracker.graphics(), Arc::clone(&self.graphics)),
             // Filled in by the terminal, which owns the frame count.
             repaints: 0,

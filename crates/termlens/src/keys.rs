@@ -11,7 +11,42 @@
 /// A key press to send to the terminal.
 ///
 /// Encodings follow xterm defaults; see [`Key::encode`].
+///
+/// Marked `#[non_exhaustive]`: the keyboard is open-ended — F13+, the
+/// keypad and the media keys are all absent today — and a `Key` is
+/// something tests *construct* (`t.send(Key::Enter)`) far more often than
+/// they match on, so the attribute costs downstream code a `_ =>` arm in
+/// the rare match and buys every future key a place to land without a
+/// major release. The cost lands on `match`, which needs a wildcard arm even
+/// when it already names every variant that exists today:
+///
+/// ```compile_fail
+/// # use termlens::Key;
+/// fn arity(k: Key) -> u8 {
+///     match k {
+///         Key::Char(_) | Key::Ctrl(_) | Key::Alt(_) | Key::F(_) => 0,
+///         Key::Enter | Key::Esc | Key::Tab | Key::BackTab | Key::Backspace => 1,
+///         Key::Insert | Key::Delete | Key::Up | Key::Down | Key::Left => 2,
+///         Key::Right | Key::Home | Key::End | Key::PageUp | Key::PageDown => 3,
+///     }
+/// }
+/// ```
+///
+/// One `_` arm is the whole cost, and constructing is unaffected:
+///
+/// ```
+/// # use termlens::Key;
+/// fn arity(k: Key) -> u8 {
+///     match k {
+///         Key::Enter => 1,
+///         _ => 0,
+///     }
+/// }
+/// assert_eq!(arity(Key::Enter), 1);
+/// assert_eq!(arity(Key::Insert), 0);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Key {
     /// A literal character, sent as its UTF-8 bytes.
     Char(char),
@@ -44,6 +79,8 @@ pub enum Key {
     BackTab,
     /// Backspace. Sends DEL (`0x7F`), xterm's default erase byte.
     Backspace,
+    /// Insert (`ESC [ 2 ~`).
+    Insert,
     /// Forward delete (`ESC [ 3 ~`).
     Delete,
     /// Up arrow (`ESC [ A`).
@@ -97,6 +134,7 @@ impl Key {
             Key::Tab => vec![b'\t'],
             Key::BackTab => b"\x1b[Z".to_vec(),
             Key::Backspace => vec![0x7f],
+            Key::Insert => b"\x1b[2~".to_vec(),
             Key::Delete => b"\x1b[3~".to_vec(),
             Key::Up => b"\x1b[A".to_vec(),
             Key::Down => b"\x1b[B".to_vec(),
@@ -206,7 +244,7 @@ pub struct Chord {
 
 impl Key {
     /// A `Ctrl` chord over this special key (arrows, Home/End,
-    /// PageUp/Down, Delete, F1–F12).
+    /// PageUp/Down, Insert, Delete, F1–F12).
     ///
     /// # Panics
     ///
@@ -308,6 +346,7 @@ fn chord_base(key: Key) -> Option<ChordBase> {
         Key::Home => ChordBase::Letter('H'),
         Key::End => ChordBase::Letter('F'),
         Key::F(n @ 1..=4) => ChordBase::Letter(['P', 'Q', 'R', 'S'][usize::from(n) - 1]),
+        Key::Insert => ChordBase::Tilde(2),
         Key::Delete => ChordBase::Tilde(3),
         Key::PageUp => ChordBase::Tilde(5),
         Key::PageDown => ChordBase::Tilde(6),
@@ -366,6 +405,7 @@ mod tests {
             (Key::Tab, b"\t"),
             (Key::BackTab, b"\x1b[Z"),
             (Key::Backspace, b"\x7f"),
+            (Key::Insert, b"\x1b[2~"),
             (Key::Delete, b"\x1b[3~"),
             (Key::Up, b"\x1b[A"),
             (Key::Down, b"\x1b[B"),
@@ -413,6 +453,7 @@ mod tests {
             (Key::Home.ctrl(), b"\x1b[1;5H"),
             (Key::End.ctrl().shift(), b"\x1b[1;6F"),
             (Key::PageDown.alt(), b"\x1b[6;3~"),
+            (Key::Insert.shift(), b"\x1b[2;2~"),
             (Key::Delete.ctrl(), b"\x1b[3;5~"),
             (Key::F(1).ctrl(), b"\x1b[1;5P"),
             (Key::F(5).ctrl().shift(), b"\x1b[15;6~"),

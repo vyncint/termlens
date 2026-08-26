@@ -430,8 +430,32 @@ fn no_mouse_tracking() -> Error {
 /// mode the line discipline turns it into `SIGINT`), while
 /// `signal(Signal::Int)` delivers the signal directly via `kill(2)`,
 /// bypassing the terminal entirely.
+///
+/// Marked `#[non_exhaustive]`: these seven are the graceful-shutdown set,
+/// not the signal set — POSIX has around thirty, and `SIGWINCH`,
+/// `SIGCONT`, `SIGTSTP` and `SIGPIPE` are all things a terminal
+/// application reacts to. Like [`Key`](crate::Key), a `Signal` is
+/// constructed rather than matched, so the attribute leaves room for those
+/// without spending a major version on each. Naming every variant is
+/// therefore still not exhaustive:
+///
+/// ```compile_fail
+/// # use termlens::Signal;
+/// fn number(s: Signal) -> u8 {
+///     match s {
+///         Signal::Int => 2,
+///         Signal::Quit => 3,
+///         Signal::Kill => 9,
+///         Signal::Term => 15,
+///         Signal::Hup => 1,
+///         Signal::Usr1 => 10,
+///         Signal::Usr2 => 12,
+///     }
+/// }
+/// ```
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Signal {
     /// `SIGINT` — interactive interrupt (what Ctrl-C means).
     Int,

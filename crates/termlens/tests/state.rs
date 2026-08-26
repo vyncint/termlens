@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use termlens::{Key, MouseMode, Terminal};
+use termlens::{CursorShape, Key, MouseMode, Screen, Terminal};
 
 /// One script walks the whole state surface: set everything, assert, then
 /// unwind everything and assert the way back.
@@ -53,6 +53,103 @@ fn screen_reports_title_alternate_screen_and_input_modes() -> termlens::Result<(
 }
 
 /// The tracking mode the app enabled is reported by name, not collapsed.
+/// `DECSCUSR` leaves the grid identical, so without an accessor a screen
+/// where the application asked for a bar and one where it never asked are
+/// the same `Screen`. The script walks all three states an editor moves
+/// through: never asked, switched, switched back.
+#[test]
+fn screen_reports_the_cursor_shape_the_application_asked_for() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"printf 'ready'; read _; ",
+                // DECSCUSR 5: a blinking bar, the insert-mode cursor.
+                r"printf '\033[5 q'; printf ' insert'; read _; ",
+                // DECSCUSR 2: a steady block, the way back.
+                r"printf '\033[2 q'; printf ' normal'; read _",
+            ),
+        ])
+        .spawn("sh")?;
+
+    // Never asked. Distinct from a block, which is what most terminals
+    // happen to draw by default — the point is that the program did not say.
+    t.wait_until(|s| s.contains("ready"))?;
+    let before = t.screen();
+    assert_eq!(before.cursor_shape(), CursorShape::Default);
+    assert_eq!(before.cursor_blink(), None);
+
+    t.send(Key::Enter)?;
+    t.wait_until(|s| {
+        s.contains("insert")
+            && s.cursor_shape() == CursorShape::Bar
+            && s.cursor_blink() == Some(true)
+    })?;
+
+    // The restore, which is the half that ships broken.
+    t.send(Key::Enter)?;
+    t.wait_until(|s| {
+        s.contains("normal")
+            && s.cursor_shape() == CursorShape::Block
+            && s.cursor_blink() == Some(false)
+    })?;
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+
+    // After exit is where this matters: a program that switches the cursor
+    // and never switches back leaves the user's terminal wrong, and the
+    // final screen is the evidence.
+    let after = t.screen();
+    assert_eq!(after.cursor_shape(), CursorShape::Block);
+    assert_eq!(after.cursor_blink(), Some(false));
+    Ok(())
+}
+
+/// The failure the issue is built on, stated as the comparison it is: two
+/// applications whose grids are byte-identical, one of which linked and one
+/// of which did not. Before `Screen::links` no assertion could tell them
+/// apart, so a test for "it linked the docs" passed against the one that
+/// emitted nothing.
+#[test]
+fn an_osc8_hyperlink_is_observable_and_a_missing_one_is_not() -> termlens::Result<()> {
+    fn run(script: &str) -> termlens::Result<Screen> {
+        let mut t = Terminal::builder()
+            .timeout(Duration::from_secs(10))
+            .args(["-c", script])
+            .spawn("sh")?;
+        t.wait_until(|s| s.contains("see docs here"))?;
+        let screen = t.screen();
+        assert!(t.wait_exit()?.success());
+        Ok(screen)
+    }
+
+    let linked =
+        run(r"printf 'see \033]8;;https://example.invalid/a\033\\docs\033]8;;\033\\ here\n'")?;
+    let plain = run(r"printf 'see docs here\n'")?;
+
+    // The grids agree exactly — this was never a rendering bug, and the URL
+    // must not leak into the cells.
+    assert_eq!(linked.text(), plain.text());
+    assert_eq!(linked.row_text(0).trim_end(), "see docs here");
+    assert!(!linked.text().contains("example.invalid"));
+
+    // And now they are distinguishable.
+    assert!(plain.links().is_empty());
+    let link = &linked.links()[0];
+    assert_eq!(linked.links().len(), 1);
+    assert_eq!(link.uri(), "https://example.invalid/a");
+    assert_eq!(link.label(), Some("docs"));
+    assert!(link.closed());
+    assert_eq!(link.id(), None);
+
+    // A wrong target fails a test the right one passes, which is the whole
+    // point of capturing it.
+    assert_ne!(link.uri(), "https://example.invalid/b");
+    Ok(())
+}
+
 #[test]
 fn mouse_mode_reports_the_exact_tracking_mode() -> termlens::Result<()> {
     let mut t = Terminal::builder()

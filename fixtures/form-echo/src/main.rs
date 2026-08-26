@@ -92,6 +92,7 @@ fn describe(key: &KeyEvent) -> String {
         KeyCode::Tab => "tab".into(),
         KeyCode::BackTab => "backtab".into(),
         KeyCode::Backspace => "backspace".into(),
+        KeyCode::Insert => "insert".into(),
         KeyCode::Delete => "delete".into(),
         KeyCode::Up => "up".into(),
         KeyCode::Down => "down".into(),
