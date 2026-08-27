@@ -150,6 +150,58 @@ fn an_osc8_hyperlink_is_observable_and_a_missing_one_is_not() -> termlens::Resul
     Ok(())
 }
 
+/// A `Screen` is an immutable snapshot, and the link log is the first piece
+/// of out-of-band state that is *mutated in place* after it is recorded — a
+/// span is pushed when it opens and completed when it closes. So the
+/// copy-on-write has to hold: a snapshot taken mid-span must go on reporting
+/// the span as open, with no label, however the stream continues.
+///
+/// The emulator relies on this for the graphics log too, where it is only
+/// asserted in a comment.
+#[test]
+fn a_snapshot_keeps_its_own_view_of_the_links() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                // Open a span and leave it open across the pause.
+                r"printf '\033]8;;http://a/\033\\LABEL one\n'; read _; ",
+                // Close it, then open a second one.
+                r"printf '\033]8;;\033\\\033]8;;http://b/\033\\X two\n'; read _",
+            ),
+        ])
+        .spawn("sh")?;
+
+    t.wait_until(|s| s.contains("one"))?;
+    let early = t.screen();
+    assert_eq!(early.links().len(), 1);
+    assert!(
+        !early.links()[0].closed(),
+        "the span is open at this instant"
+    );
+    assert_eq!(early.links()[0].label(), None, "and has no final label yet");
+
+    t.send(Key::Enter)?;
+    t.wait_until(|s| s.contains("two") && s.links().len() == 2)?;
+    let later = t.screen();
+    assert!(later.links()[0].closed());
+    assert_eq!(later.links()[0].uri(), "http://a/");
+    assert_eq!(later.links()[1].uri(), "http://b/");
+
+    // The whole point: the earlier snapshot did not move.
+    assert_eq!(early.links().len(), 1, "an earlier snapshot grew a link");
+    assert!(
+        !early.links()[0].closed(),
+        "an earlier snapshot saw the span close after the fact"
+    );
+    assert_eq!(early.links()[0].label(), None);
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 #[test]
 fn mouse_mode_reports_the_exact_tracking_mode() -> termlens::Result<()> {
     let mut t = Terminal::builder()
