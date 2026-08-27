@@ -2003,7 +2003,11 @@ impl Terminal {
         self.send(key)
     }
 
-    /// Send a string literally (UTF-8 bytes, no key mapping, no newline).
+    /// Send a string literally as UTF-8 bytes, with no key mapping or appended
+    /// newline. Any `\n` already in `s` is sent as LF (`0x0A`), unlike
+    /// [`crate::Key::Enter`], which sends the CR (`\r`) a terminal produces for Enter.
+    /// Use [`paste`](Self::paste) when you want terminal-style line-break
+    /// handling.
     ///
     /// # Errors
     ///
