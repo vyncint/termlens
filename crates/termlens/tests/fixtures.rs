@@ -172,6 +172,21 @@ fn unicode_torture_renders_with_correct_widths() -> termlens::Result<()> {
     // 1 + 3×2 + 1 = 8, " vs " is 4: |abc| starts at column 19.
     assert_eq!(screen.find("|abc|"), Some((5, 19)));
     assert_eq!(screen.find("|一二三|"), Some((5, 7)));
+
+    let wide = screen.cell(5, 8).expect("CJK cell is on screen");
+    assert_eq!(wide.contents(), "一");
+    assert!(wide.is_wide());
+    assert!(!wide.is_wide_continuation());
+
+    let continuation = screen.cell(5, 9).expect("wide continuation is on screen");
+    assert!(continuation.is_wide_continuation());
+    assert!(!continuation.is_wide());
+    assert!(continuation.contents().is_empty());
+
+    let ascii = screen.cell(5, 20).expect("ASCII cell is on screen");
+    assert!(!ascii.is_wide());
+    assert!(!ascii.is_wide_continuation());
+
     insta::assert_snapshot!(screen);
 
     // Release the fixture's stdin guard now that everything is asserted.
