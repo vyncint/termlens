@@ -61,6 +61,11 @@ pub enum Error {
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// A terminal size argument is invalid and was rejected before anything
+    /// was spawned or sent to the child.
+    #[error("invalid terminal size: {0}")]
+    Size(String),
+
     /// Typed input or control the child cannot receive — e.g. a mouse
     /// click while the application never enabled mouse tracking (sending
     /// it anyway would feed the app bytes it would misparse as garbage

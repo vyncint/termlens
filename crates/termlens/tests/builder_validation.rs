@@ -78,7 +78,7 @@ fn a_zero_dimension_is_rejected_before_it_reaches_the_emulator() {
             .args(["-c", "read x"])
             .spawn("/bin/sh")
             .expect_err("a terminal cannot have a zero dimension");
-        assert!(matches!(err, Error::Input(_)), "{cols}x{rows}: got {err}");
+        assert!(matches!(err, Error::Size(_)), "{cols}x{rows}: got {err}");
         assert!(
             err.to_string().contains(&format!("{cols}x{rows}")),
             "the offending size belongs in the message: {err}"
@@ -99,7 +99,7 @@ fn resize_to_zero_is_refused_without_touching_the_pty_or_the_grid() -> termlens:
         let err = t
             .resize(cols, rows)
             .expect_err("a terminal cannot have a zero dimension");
-        assert!(matches!(err, Error::Input(_)), "{cols}x{rows}: got {err}");
+        assert!(matches!(err, Error::Size(_)), "{cols}x{rows}: got {err}");
     }
 
     // The grid is untouched and the terminal still works.
@@ -143,6 +143,7 @@ fn an_implausible_size_is_refused_with_the_limit_named() {
             .args(["-c", "true"])
             .spawn("/bin/sh")
             .expect_err("a terminal this large is refused");
+        assert!(matches!(err, Error::Size(_)), "{cols}x{rows}: got {err}");
         let msg = err.to_string();
         assert!(
             msg.contains("1000"),
@@ -168,6 +169,7 @@ fn the_limit_is_inclusive_and_resize_honours_it() -> termlens::Result<()> {
     assert_eq!(t.screen().size(), (1000, 1000));
 
     let err = t.resize(1001, 1000).expect_err("past the limit");
+    assert!(matches!(err, Error::Size(_)), "{err}");
     assert!(err.to_string().contains("1000"), "{err}");
     // Refused without disturbing the grid, like the zero case.
     assert_eq!(t.screen().size(), (1000, 1000));

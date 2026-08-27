@@ -1643,13 +1643,13 @@ fn pixel_span(cells: u16, per_cell: Option<u16>) -> u16 {
 /// the problem. A named error at the call site is the whole fix.
 fn check_size(cols: u16, rows: u16) -> Result<()> {
     if cols == 0 || rows == 0 {
-        return Err(Error::Input(format!(
+        return Err(Error::Size(format!(
             "a terminal needs at least one column and one row, got {cols}x{rows} \
              (columns x rows)"
         )));
     }
     if cols > MAX_DIMENSION || rows > MAX_DIMENSION {
-        return Err(Error::Input(format!(
+        return Err(Error::Size(format!(
             "{cols}x{rows} (columns x rows) is past the {MAX_DIMENSION}-per-axis \
              limit; a snapshot costs one entry per cell, so a grid this large \
              makes every wait slow enough to look like a hang"
