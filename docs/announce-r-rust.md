@@ -58,6 +58,15 @@ rejected key, an inline image. Every `Screen` carries the counters, so
 "one wheel notch became four repaints" is a test, and so is "this diagram
 must render as box art and never go out as a Kitty image".
 
+The same idea covers two things a modern TUI does that render as ordinary
+text. An `OSC 8` hyperlink puts its URL nowhere on the screen, so a test
+asserting your app linked the right issue used to pass just as happily
+against one that emitted no link at all — `links()` reports each span with
+its target and the text it wrapped. And `cursor_shape()` reports what the
+app asked `DECSCUSR` for, so "the indicator says INSERT" and "the terminal
+was actually put into insert" stop being the same assertion — and a program
+that switches the cursor and forgets to switch it back is catchable.
+
 The part I'm proudest of is the flake story. CI runs the whole suite 100
 times on Linux **and** macOS before anything merges to the wait paths.
 That gate caught, among other things, a genuine macOS kernel race where
@@ -66,12 +75,14 @@ pty* because device numbers recycle instantly — termlens serializes pty
 lifecycle edges behind a process-wide lock so your parallel tests don't
 hit it.
 
-Honest limitations (v0.6): Unix only for now (portable-pty supports
+Honest limitations (v0.7): Unix only for now (portable-pty supports
 ConPTY, so Windows is planned); scrollback is retained but bounded, text
 only, and not reflowed on resize; `wait_frame` needs the app to opt into
 DEC 2026; inline graphics are captured and decodable but still never
 rendered, so an image never reaches the screen grid and how a picture sits
-over the text under it is not assertable; and a few questions (kitty
+over the text under it is not assertable; hyperlinks are captured but not
+attributed to cells, so which cells sit inside a span is not assertable;
+and a few questions (kitty
 `CSI ? u`, DECRQSS, `OSC 52` *reads*) are deliberately left unanswered
 rather than guessed — an app blocked on one is named in the next timeout
 instead of hanging silently.

@@ -3,8 +3,8 @@
 > **Status: historical record of the v0.1 build.** Everything below describes
 > the project as it stood on 2026-08-09 and is kept as the record of that
 > work, not as a description of termlens today. Since then the repository has
-> been made public, the crate has been published, and the API has grown
-> through 0.2 to 0.5 — `CHANGELOG.md` says what each release changed,
+> been made public, the crate has been published, and the API has grown a
+> great deal — `CHANGELOG.md` says what each release changed,
 > and `README.md` plus `docs/DESIGN.md` describe the current design. The
 > go-public checklist in §3 has its outcome recorded beneath it.
 
