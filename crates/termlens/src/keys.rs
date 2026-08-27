@@ -359,9 +359,18 @@ fn chord_base(key: Key) -> Option<ChordBase> {
 }
 
 /// SGR (1006) mouse report. `press = false` is the release form.
+///
+/// Coordinates are 1-based on the wire. The `+ 1` is done in `u32` so a
+/// caller that somehow skips the grid check cannot wrap `u16::MAX` to
+/// column/row 0 in release builds.
 pub(crate) fn mouse_sgr(button: u8, col: u16, row: u16, press: bool) -> Vec<u8> {
     let suffix = if press { 'M' } else { 'm' };
-    format!("\x1b[<{button};{};{}{suffix}", col + 1, row + 1).into_bytes()
+    format!(
+        "\x1b[<{button};{};{}{suffix}",
+        u32::from(col) + 1,
+        u32::from(row) + 1
+    )
+    .into_bytes()
 }
 
 /// Legacy (X10/normal) mouse report: `ESC [ M Cb Cx Cy`, byte-valued.
@@ -489,6 +498,24 @@ mod tests {
         assert_eq!(mouse_sgr(64, 0, 0, true), b"\x1b[<64;1;1M");
         assert_eq!(mouse_legacy(0, 0, 0), b"\x1b[M\x20\x21\x21");
         assert_eq!(mouse_legacy(3, 9, 6,), b"\x1b[M\x23\x2a\x27");
+    }
+
+    /// `u16::MAX + 1` used to wrap to 0 in release and panic in debug.
+    /// The encoder must stay in range even if a caller skips the grid check.
+    #[test]
+    fn mouse_sgr_does_not_wrap_at_u16_max() {
+        let expected = format!(
+            "\x1b[<0;{};{}M",
+            u32::from(u16::MAX) + 1,
+            u32::from(u16::MAX) + 1
+        );
+        assert_eq!(mouse_sgr(0, u16::MAX, u16::MAX, true), expected.as_bytes());
+        let release = format!(
+            "\x1b[<0;{};{}m",
+            u32::from(u16::MAX) + 1,
+            u32::from(u16::MAX) + 1
+        );
+        assert_eq!(mouse_sgr(0, u16::MAX, u16::MAX, false), release.as_bytes());
     }
 
     #[test]

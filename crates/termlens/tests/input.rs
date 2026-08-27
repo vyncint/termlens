@@ -383,6 +383,57 @@ fn clicking_without_mouse_tracking_is_a_typed_error() {
     assert!(t.wait_exit().unwrap().success());
 }
 
+/// A real terminal cannot report a click outside its window. Off-grid
+/// coordinates used to encode and send anyway (and at `u16::MAX` the SGR
+/// path wrapped or panicked). Refuse with the position and the grid size
+/// at the time of the call — including after a shrink `resize`.
+#[test]
+fn mouse_events_outside_the_grid_are_refused() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .size(20, 5)
+        .timeout(Duration::from_secs(10))
+        .env_clear()
+        .spawn(util::fixture_bin("form-echo"))?;
+    t.wait_frame(|s| s.contains("form-echo ready"))?;
+
+    // Bottom-right cell is in bounds; one past each edge is not.
+    t.click(19, 4)?;
+    t.wait_frame(|s| s.contains("last: mouse:up:19,4"))?;
+
+    for (col, row) in [(20u16, 0), (0, 5), (20, 5), (9999, 9999)] {
+        let err = t.click(col, row).expect_err("off-grid click");
+        assert!(matches!(err, Error::Input(_)), "got: {err}");
+        let msg = err.to_string();
+        assert!(msg.contains(&format!("({col}, {row})")), "{msg}");
+        assert!(msg.contains("20x5"), "size at call time: {msg}");
+    }
+
+    let err = t.scroll(20, 0, Scroll::Up).expect_err("off-grid scroll");
+    assert!(matches!(err, Error::Input(_)), "got: {err}");
+    assert!(err.to_string().contains("20x5"), "{err}");
+
+    let err = t
+        .drag(termlens::MouseButton::Left, (0, 0), (20, 0))
+        .expect_err("off-grid drag endpoint");
+    assert!(matches!(err, Error::Input(_)), "got: {err}");
+    assert!(err.to_string().contains("(20, 0)"), "{err}");
+    assert!(err.to_string().contains("20x5"), "{err}");
+
+    // After a shrink, a coordinate that was valid earlier must name the
+    // *new* size — otherwise the error reads as a mystery.
+    t.resize(10, 3)?;
+    let err = t.click(19, 4).expect_err("pre-resize coordinate");
+    assert!(matches!(err, Error::Input(_)), "got: {err}");
+    let msg = err.to_string();
+    assert!(msg.contains("(19, 4)"), "{msg}");
+    assert!(msg.contains("10x3"), "post-resize size: {msg}");
+    assert!(!msg.contains("20x5"), "must not report the old size: {msg}");
+
+    t.send(Key::Esc)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// Both focus states, through crossterm's own event stream. Before this the
 /// unfocused branch of a UI was not merely unasserted, it was **unreachable**
 /// — no input existed that could enter it, so the code never ran.

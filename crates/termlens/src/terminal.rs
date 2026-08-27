@@ -423,6 +423,25 @@ fn no_mouse_tracking() -> Error {
     )
 }
 
+/// Refuse a mouse coordinate a real terminal cannot produce.
+///
+/// `cols`×`rows` is the grid **at the time of the call** — after a
+/// [`Terminal::resize`] that shrank the window, a coordinate that was
+/// in-bounds earlier is rejected against the new size, and the message
+/// says so rather than leaving the size implicit.
+fn check_mouse_in_grid(col: u16, row: u16, cols: u16, rows: u16) -> Result<()> {
+    if col < cols && row < rows {
+        return Ok(());
+    }
+    Err(Error::Input(format!(
+        "mouse at ({col}, {row}) is outside the {cols}x{rows} grid \
+         (columns x rows at the time of the call; valid cells are \
+         col 0..{}, row 0..{})",
+        cols.saturating_sub(1),
+        rows.saturating_sub(1),
+    )))
+}
+
 /// A POSIX signal for [`Terminal::signal`]: the graceful-shutdown set.
 ///
 /// Note the difference from typing: `send(Key::Ctrl('c'))` writes the
@@ -2107,8 +2126,9 @@ impl Terminal {
     /// reaped child is named as such instead of being reported as a
     /// missing tracking mode. Then [`Error::Input`] when the application
     /// has not enabled mouse tracking (feeding it mouse bytes anyway would
-    /// be misparsed as garbage keys), or when the position is
-    /// unrepresentable in the legacy encoding (columns/rows beyond 222).
+    /// be misparsed as garbage keys), when `(col, row)` is outside the
+    /// current grid, or when the position is unrepresentable in the legacy
+    /// encoding (columns/rows beyond 222).
     pub fn click(&mut self, col: u16, row: u16) -> Result<()> {
         self.click_with(MouseButton::Left, col, row)
     }
@@ -2142,6 +2162,8 @@ impl Terminal {
             MouseMode::Press => true,
             MouseMode::PressRelease | MouseMode::ButtonMotion | MouseMode::AnyMotion => false,
         };
+        let (cols, rows) = self.screen().size();
+        check_mouse_in_grid(col, row, cols, rows)?;
         let mut bytes = self.mouse_report(&modes, chord.code(), col, row, true)?;
         if !press_only {
             bytes.extend(self.mouse_report(&modes, chord.code(), col, row, false)?);
@@ -2172,9 +2194,13 @@ impl Terminal {
     ///
     /// [`Error::Write`] when the child is gone (checked first, as on
     /// [`click`](Self::click)), then [`Error::Input`] when no mouse
-    /// tracking is enabled, when the tracking mode is X10, or when a
-    /// position is unrepresentable in the encoding the application
-    /// selected.
+    /// tracking is enabled, when the tracking mode is X10, when either
+    /// endpoint is outside the current grid, or when a position is
+    /// unrepresentable in the encoding the application selected.
+    ///
+    /// Only the endpoints are checked against the grid. The interpolated
+    /// path stays between them on both axes, so an interior step cannot
+    /// leave the grid unless an endpoint already has.
     pub fn drag(
         &mut self,
         button: impl Into<MouseChord>,
@@ -2196,6 +2222,10 @@ impl Terminal {
             MouseMode::PressRelease => false,
             MouseMode::ButtonMotion | MouseMode::AnyMotion => true,
         };
+        let (cols, rows) = self.screen().size();
+        // Endpoints only — see the Errors section above.
+        check_mouse_in_grid(from.0, from.1, cols, rows)?;
+        check_mouse_in_grid(to.0, to.1, cols, rows)?;
         let mut bytes = self.mouse_report(&modes, chord.code(), from.0, from.1, true)?;
         if report_motion {
             // One motion report per cell crossed, which is what a terminal
@@ -2225,6 +2255,8 @@ impl Terminal {
         if modes.mouse == MouseMode::None {
             return Err(no_mouse_tracking());
         }
+        let (cols, rows) = self.screen().size();
+        check_mouse_in_grid(col, row, cols, rows)?;
         let button = match direction {
             Scroll::Up => 64,
             Scroll::Down => 65,
@@ -2994,7 +3026,25 @@ impl Drop for Terminal {
 
 #[cfg(test)]
 mod tests {
-    use super::cells_between;
+    use super::{cells_between, check_mouse_in_grid};
+    use crate::Error;
+
+    #[test]
+    fn mouse_in_grid_accepts_the_bottom_right_cell() {
+        assert!(check_mouse_in_grid(19, 4, 20, 5).is_ok());
+        assert!(check_mouse_in_grid(0, 0, 20, 5).is_ok());
+    }
+
+    #[test]
+    fn mouse_in_grid_refuses_one_past_each_edge() {
+        for (col, row) in [(20u16, 0), (0, 5), (20, 5), (u16::MAX, u16::MAX)] {
+            let err = check_mouse_in_grid(col, row, 20, 5).unwrap_err();
+            assert!(matches!(err, Error::Input(_)), "got: {err}");
+            let msg = err.to_string();
+            assert!(msg.contains(&format!("({col}, {row})")), "{msg}");
+            assert!(msg.contains("20x5"), "{msg}");
+        }
+    }
 
     #[test]
     fn a_horizontal_drag_visits_every_column() {

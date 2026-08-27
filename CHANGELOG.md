@@ -9,6 +9,17 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Mouse `click` / `click_with` / `drag` / `scroll` refuse coordinates
+  outside the current grid.** A real terminal cannot produce an off-window
+  mouse event; sending one was the same class of mistake as clicking with
+  no tracking enabled. The error names the position and the grid size at
+  the time of the call (so a post-`resize` rejection is obvious). `drag`
+  checks both endpoints only — the interpolated path cannot leave the
+  rectangle they span. Separately, the SGR encoder no longer wraps or
+  panics at `u16::MAX`: the 1-based `+ 1` is done in `u32`.
+
 ## [0.7.0] - 2026-08-27
 
 ### Added
