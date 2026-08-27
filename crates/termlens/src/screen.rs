@@ -464,6 +464,11 @@ impl Screen {
     /// t.send(Key::Esc)?;
     /// t.wait_until(|s| s.cursor_shape() == CursorShape::Block)?; // and back
     /// ```
+    ///
+    /// A hard reset (`RIS`, `ESC c`) returns this to
+    /// [`CursorShape::Default`] — a program that restores the cursor that
+    /// way really has handed the terminal back its own default, and
+    /// reporting the last `DECSCUSR` would claim otherwise.
     #[must_use]
     pub fn cursor_shape(&self) -> CursorShape {
         match self.state.cursor_style {

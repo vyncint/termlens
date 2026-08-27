@@ -211,7 +211,7 @@ design. termlens's position:
   [stress workflow](.github/workflows/stress.yml) on Linux and macOS —
   wait/timing changes don't merge without surviving it.
 
-## Known limitations (v0.6)
+## Known limitations (v0.7)
 
 - Scrollback is **bounded** (1000 rows by default), **text only** — a
   scrolled-off row has no styles and no cell addressing — and is **not
@@ -236,6 +236,19 @@ design. termlens's position:
   described but its bytes are dropped, and it says so rather than decoding a
   prefix of itself. Support stays opt-in, so by default an application that
   probes is truthfully told there is none.
+- **Hyperlinks are captured, not attributed to cells.** `links()` reports
+  every `OSC 8` span with its target, its `id`, and the text it wrapped, so
+  "did it link the right place?" is assertable — but a `Cell` does not carry
+  its link, so *which* cells sit inside a span is not, and a span whose label
+  was later overwritten is still reported, because this is a record of what
+  the application emitted rather than a property of the grid. Retention is
+  bounded to the most recent 64 spans, and a label longer than the capture
+  bound is reported as unknown rather than as a prefix.
+- **Out-of-band state is what the application last asked for, not what a
+  terminal would infer.** The cursor shape follows `DECSCUSR` and is cleared
+  by a hard reset (`RIS`); the window title is not, because in xterm the
+  title is a window property that `RIS` does not restore, and guessing either
+  way would be the same error. Nothing here models `DECSTR` (soft reset).
 - **A reply the terminal's own input queue cannot hold may not arrive.**
   termlens no longer drops answers of its own accord, but the tty input
   queue is small (~1 KB on macOS, ~4 KB on Linux), so an application that

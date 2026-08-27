@@ -485,6 +485,15 @@ Rules:
    leaves the user's terminal wrong after exit, exactly as one that never
    leaves the alternate screen does.
 
+   A hard reset (`RIS`, `ESC c`) returns the cursor shape to the terminal's
+   default and closes any open hyperlink span, because a real terminal's
+   power-on state holds neither. It deliberately does **not** clear the
+   title, the clipboard, the bell count or the link log: the first is a
+   window property `RIS` does not restore in xterm, and the rest are records
+   of what the application emitted rather than state the terminal still
+   holds. `DECSTR` (soft reset) is not modelled at all — the sequences it
+   touches are not ones tracked here.
+
    `OSC 8` hyperlinks are **captured**, on the same grounds as `OSC 52`
    below: a link changes no cell, its label renders as ordinary text, and
    the URL therefore exists nowhere a content predicate can reach. A test

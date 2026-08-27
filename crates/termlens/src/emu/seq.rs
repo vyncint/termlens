@@ -1016,7 +1016,29 @@ impl SeqTracker {
                 0x20..=0x2f => State::EscIntermediate,
                 ESC => State::Esc,
                 CAN | SUB => State::Ground,
-                // Final byte of a two-character sequence (ESC c, ESC 7, …).
+                // RIS (`ESC c`), the hard reset: the terminal returns to its
+                // power-on state, so the cursor is the terminal's default
+                // again and any open hyperlink span cannot survive.
+                //
+                // Reporting the last `DECSCUSR` after a reset would claim a
+                // fact the terminal does not hold — and it would do it in the
+                // one place that matters, since `printf '\033c'` is a way a
+                // program restores the cursor on exit, which is exactly what
+                // `cursor_shape` exists to let a test check.
+                //
+                // The window title is deliberately *not* cleared here. In
+                // xterm it is a window property rather than terminal state
+                // and RIS does not restore it; guessing either way would be
+                // the same error in the other direction. Same for the
+                // clipboard, the bell count and the link *log*, which are
+                // records of what the application emitted rather than state
+                // the terminal still holds.
+                b'c' => {
+                    self.cursor_style = None;
+                    self.close_link();
+                    State::Ground
+                }
+                // Final byte of a two-character sequence (ESC 7, ESC =, …).
                 _ => State::Ground,
             },
             State::EscIntermediate => match b {
@@ -1495,6 +1517,54 @@ mod tests {
         assert_eq!(fed(b"\x1b[ q").cursor_style(), Some(0));
         // The last one wins, which is what makes a restore assertable.
         assert_eq!(fed(b"\x1b[5 q\x1b[2 q").cursor_style(), Some(2));
+    }
+
+    /// RIS is a way a program restores the cursor on exit, so a stale
+    /// `DECSCUSR` after one would fail the very assertion `cursor_shape`
+    /// exists to support — and claim a shape the terminal no longer holds.
+    #[test]
+    fn a_hard_reset_returns_the_cursor_to_the_terminals_default() {
+        assert_eq!(fed(b"\x1b[5 q").cursor_style(), Some(5));
+        assert_eq!(fed(b"\x1b[5 q\x1bc").cursor_style(), None);
+        // …and a style set *after* the reset is still recorded.
+        assert_eq!(fed(b"\x1b[5 q\x1bc\x1b[2 q").cursor_style(), Some(2));
+    }
+
+    /// An open span cannot survive a hard reset, so it is closed with what
+    /// it had. The *log* is a record of what the application emitted and is
+    /// deliberately kept, like the bell count and the clipboard.
+    #[test]
+    fn a_hard_reset_closes_an_open_span_and_keeps_the_log() {
+        let seen = links(b"\x1b]8;;http://x/\x1b\\lab\x1bcafter");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "http://x/");
+        assert_eq!(
+            seen[0].2.as_deref(),
+            Some("lab"),
+            "the text before the reset"
+        );
+        assert!(seen[0].3, "closed by the reset");
+        // Text after the reset belongs to no span.
+        let seen = links(b"\x1b]8;;http://x/\x1b\\a\x1bcbbb");
+        assert_eq!(seen[0].2.as_deref(), Some("a"));
+    }
+
+    /// The two-character escapes that are *not* RIS must keep passing
+    /// through untouched — `ESC 7` (save cursor) is next to it in the table.
+    #[test]
+    fn other_two_character_escapes_do_not_reset_anything() {
+        for seq in [
+            &b"\x1b[5 q\x1b7"[..],
+            b"\x1b[5 q\x1b8",
+            b"\x1b[5 q\x1bD",
+            b"\x1b[5 q\x1bM",
+        ] {
+            assert_eq!(
+                fed(seq).cursor_style(),
+                Some(5),
+                "{seq:?} reset the cursor style"
+            );
+        }
     }
 
     #[test]
