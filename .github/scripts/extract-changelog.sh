@@ -9,12 +9,15 @@
 #
 # tests:
 #   .github/scripts/extract-changelog.sh Unreleased   # prints current section
+#
+# An empty [Unreleased] section is valid and prints nothing with exit status 0.
+# An empty numbered release section is an error, as is a missing section.
 set -euo pipefail
 
 version="${1:?usage: extract-changelog.sh <version|vX.Y.Z|Unreleased>}"
 version="${version#v}"
 
-out="$(awk -v ver="$version" '
+result="$(awk -v ver="$version" '
   # Section headers look like "## [0.1.0] - 2026-01-31" or "## [Unreleased]".
   /^## \[/ {
     if (found) exit
@@ -24,12 +27,26 @@ out="$(awk -v ver="$version" '
   END {
     start = 1; while (start <= n && lines[start] ~ /^[[:space:]]*$/) start++
     end = n;   while (end >= start && lines[end]   ~ /^[[:space:]]*$/) end--
+    if (!found) { print "__EXTRACT_CHANGELOG_MISSING__"; exit }
+    if (start > end) { print "__EXTRACT_CHANGELOG_EMPTY__"; exit }
+    print "__EXTRACT_CHANGELOG_CONTENT__"
     for (i = start; i <= end; i++) print lines[i]
   }
 ' CHANGELOG.md)"
 
-if [ -z "$out" ]; then
+case "$result" in
+__EXTRACT_CHANGELOG_MISSING__)
   echo "::error::No CHANGELOG.md section found for version '${version}'." >&2
   exit 1
-fi
-printf '%s\n' "$out"
+  ;;
+__EXTRACT_CHANGELOG_EMPTY__)
+  if [ "$version" != "Unreleased" ]; then
+    echo "::error::CHANGELOG.md section for version '${version}' is empty." >&2
+    exit 1
+  fi
+  ;;
+__EXTRACT_CHANGELOG_CONTENT__*)
+  out="${result#*$'\n'}"
+  printf '%s\n' "$out"
+  ;;
+esac
