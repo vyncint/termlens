@@ -35,9 +35,22 @@ deadline-bounded; retained scrollback is capped at the configured length
 than cells; at most 8 completed frames and 512 frame timings are retained; a
 captured `OSC 52` payload is dropped past 64 KiB; **undelivered query replies
 are capped at 1 MiB** and discarded past it, counted and named in the next
-wait's error; the capture of a DCS-class header is fixed at 128 bytes; and the
-set of distinct unanswered queries kept for diagnostics is capped, with the
-remainder counted.
+wait's error; the capture of a DCS-class header is fixed at 128 bytes; `OSC 8`
+hyperlinks are held to the most recent 64 spans with a 4 KiB label each; and
+the set of distinct unanswered queries kept for diagnostics is capped, with
+the remainder counted.
+
+**Decoding** is the one place where a child's bytes choose an allocation
+rather than merely filling one, so it has a ceiling of its own: no image is
+decoded above 4096x4096, sixel colour registers stop at 65536, and a
+compressed kitty payload is inflated only as far as its declared size needs.
+Without those, sizes the payload picks — kitty's `s=`/`v=`, sixel's raster
+attributes, its `!n` repeat count, its `#n` register index — set the
+allocation directly: `!4294967295~` is twelve bytes and a declared
+`65535x65535` about twenty, and either asks for tens of gigabytes. This was
+true of every release before 0.7.0; `GraphicsPayload::decode` sits behind the
+off-by-default `decode` feature and is only reached when a test calls it, so
+a suite that merely counts images was never exposed.
 
 The reply cap is a byte bound rather than a queue depth on purpose: a depth
 bounds the wrong thing. Two earlier versions counted queue slots and both

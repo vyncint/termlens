@@ -431,8 +431,11 @@ impl SeqTracker {
         let id = params
             .split(|&b| b == b':')
             .find_map(|pair| pair.strip_prefix(b"id="))
-            .map(|value| String::from_utf8_lossy(value).into_owned());
-        let uri = String::from_utf8_lossy(uri).into_owned();
+            .map(String::from_utf8_lossy);
+        // Borrowed where the bytes are valid UTF-8, which is the normal case:
+        // `Link::open` copies into an `Arc<str>` either way, so owning here
+        // first would allocate twice for one span.
+        let uri = String::from_utf8_lossy(uri);
         let links = Arc::make_mut(&mut self.links);
         links.push(Link::open(&uri, id.as_deref()));
         while links.len() > LINK_HISTORY {
@@ -976,18 +979,23 @@ impl SeqTracker {
                     if b == BEL && self.utf8_remaining == 0 {
                         self.bells = self.bells.saturating_add(1);
                     }
+                    // Anything that is not a C0 control or DEL. Named once
+                    // because the two readers below want the same test for
+                    // different reasons, and they must not drift apart: a
+                    // byte that counts as drawn is a byte a link wraps.
+                    let printable = b >= 0x20 && b != 0x7f;
                     // One per *character*: continuation bytes arrive while
                     // `utf8_remaining` is non-zero, so nothing is counted
                     // twice. Controls, the BEL just handled included, are not
                     // printable.
-                    if self.utf8_remaining == 0 && b >= 0x20 && b != 0x7f {
+                    if printable && self.utf8_remaining == 0 {
                         self.frame_printable = self.frame_printable.saturating_add(1);
                     }
                     // Text written inside an `OSC 8` span is that link's
-                    // label. Bytes rather than characters, so a multi-byte
-                    // grapheme survives the split — continuation bytes are
-                    // all >= 0x80 and pass the same test.
-                    if self.link_open && b >= 0x20 && b != 0x7f {
+                    // label. Bytes rather than characters here, so a
+                    // multi-byte grapheme survives the split — its
+                    // continuation bytes are all >= 0x80 and printable too.
+                    if printable && self.link_open {
                         if self.link_label.len() < LINK_LABEL_MAX {
                             self.link_label.push(b);
                         } else {
@@ -1590,6 +1598,122 @@ mod tests {
             assert_eq!(t.cursor_style(), None, "{seq:?} set a cursor style");
             assert_eq!(t.step(b'x'), SeqEvent::None);
         }
+    }
+
+    /// The tracker parses bytes a *child process* chooses, so every buffer
+    /// in it is a place a hostile or merely broken program could push on.
+    /// Each one is bounded in code; this is the test that says so out loud.
+    ///
+    /// Two phases, because they catch different things. Random bytes explore
+    /// the state machine and are the net for a panic — an index, a slice, an
+    /// arithmetic overflow — on input nobody thought about. They do *not*
+    /// reach any bound: a bound needs thousands of bytes pushed the same way
+    /// on purpose, which random bytes essentially never do. So the second
+    /// phase writes the shapes a hostile child would actually use.
+    ///
+    /// The peak assertions at the end are the point. Without them this test
+    /// would go on passing if the corpus stopped stressing the buffers, and
+    /// its bound checks would be decoration — which is what they were when
+    /// first written here, and what the mutation pass caught.
+    ///
+    /// Deterministic: the seed is the whole corpus, so a failure reproduces.
+    #[test]
+    fn hostile_input_cannot_panic_or_grow_a_buffer_past_its_bound() {
+        let capture = crate::graphics::DEFAULT_CAPTURE;
+        let mut tracker = SeqTracker::new(capture);
+        // (links, label, osc, dcs_body) high-water marks.
+        let mut peak = (0usize, 0usize, 0usize, 0usize);
+
+        fn observe(t: &SeqTracker, capture: usize, peak: &mut (usize, usize, usize, usize)) {
+            assert!(t.links.len() <= LINK_HISTORY, "link log overran");
+            assert!(t.link_label.len() <= LINK_LABEL_MAX, "label overran");
+            assert!(t.osc_buf.len() <= OSC_CAPTURE_MAX, "osc buffer overran");
+            assert!(t.dcs_body.len() <= capture, "dcs body overran");
+            assert!(usize::from(t.seq_len) <= t.seq_buf.len());
+            assert!(usize::from(t.dcs_head_len) <= t.dcs_head.len());
+            peak.0 = peak.0.max(t.links.len());
+            peak.1 = peak.1.max(t.link_label.len());
+            peak.2 = peak.2.max(t.osc_buf.len());
+            peak.3 = peak.3.max(t.dcs_body.len());
+        }
+
+        // Phase 1 — the panic net. xorshift64: a few lines, no dependency,
+        // reproducible. Weighted toward the introducers that actually drive
+        // the state machine; uniform noise would sit in Ground almost always.
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut rand = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        const PALETTE: &[u8] =
+            b"\x1b[]P_^X;:0123456789 qhlmc\\\x07\x18\x1a~?$8abzId=\xff\x80\xc3\n\r\t";
+        for _ in 0..400_000 {
+            tracker.step(PALETTE[(rand() as usize) % PALETTE.len()]);
+            observe(&tracker, capture, &mut peak);
+        }
+
+        // Phase 2 — the shapes a hostile child would use, each aimed at one
+        // buffer and overrunning it by a clear margin.
+        let feed = |bytes: &[u8], t: &mut SeqTracker, peak: &mut _| {
+            for &b in bytes {
+                t.step(b);
+                observe(t, capture, peak);
+            }
+        };
+        // (a) far more spans than the log holds.
+        for n in 0..LINK_HISTORY * 3 {
+            feed(
+                format!("\x1b]8;;http://x/{n}\x1b\\L\x1b]8;;\x1b\\").as_bytes(),
+                &mut tracker,
+                &mut peak,
+            );
+        }
+        // (b) one span whose label runs well past the bound.
+        feed(b"\x1b]8;;http://x/\x1b\\", &mut tracker, &mut peak);
+        feed(&vec![b'L'; LINK_LABEL_MAX * 2], &mut tracker, &mut peak);
+        feed(b"\x1b]8;;\x1b\\", &mut tracker, &mut peak);
+        // (c) one OSC longer than the capture bound.
+        feed(b"\x1b]0;", &mut tracker, &mut peak);
+        feed(&vec![b'T'; OSC_CAPTURE_MAX * 2], &mut tracker, &mut peak);
+        feed(b"\x07", &mut tracker, &mut peak);
+
+        // The corpus must actually have reached each bound, or every check
+        // above was inert.
+        assert_eq!(peak.0, LINK_HISTORY, "the link log was never filled");
+        assert_eq!(peak.1, LINK_LABEL_MAX, "the label bound was never reached");
+        assert_eq!(peak.2, OSC_CAPTURE_MAX, "the osc bound was never reached");
+
+        // And the accessors stay total on whatever state that left behind.
+        let _ = tracker.title();
+        let _ = tracker.clipboard();
+        let _ = tracker.links();
+        let _ = tracker.cursor_style();
+        let _ = tracker.graphics();
+    }
+
+    /// The same, on the grammar rather than the alphabet: well-formed
+    /// `OSC 8` spans interleaved with the sequences most likely to collide
+    /// with them, driven long enough to exercise eviction many times over.
+    #[test]
+    fn a_long_well_formed_stream_stays_bounded_and_consistent() {
+        let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        for n in 0..5_000u32 {
+            let chunk = format!(
+                "\x1b]8;id={n};http://example.invalid/{n}\x1b\\label{n}\x1b]8;;\x1b\\\
+                 \x1b]0;title{n}\x07\x1b[{} q text\r\n",
+                n % 7
+            );
+            tracker.feed(chunk.as_bytes());
+            assert!(tracker.links.len() <= LINK_HISTORY);
+        }
+        let links = tracker.links();
+        assert_eq!(links.len(), LINK_HISTORY, "the log fills and then holds");
+        // Oldest evicted, newest kept, every retained span complete.
+        assert!(links.iter().all(|l| l.closed() && l.label().is_some()));
+        assert_eq!(links[LINK_HISTORY - 1].uri(), "http://example.invalid/4999");
+        assert_eq!(links[LINK_HISTORY - 1].label(), Some("label4999"));
     }
 
     #[test]

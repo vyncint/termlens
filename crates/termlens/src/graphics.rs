@@ -318,17 +318,31 @@ impl GraphicsPayload {
         let (width, height) = self.size.ok_or(DecodeError::Malformed(
             "a kitty transmission without s= and v=",
         ))?;
-        let raw = crate::emu::decode_base64(data).ok_or(DecodeError::Malformed("bad base64"))?;
-        let raw = if self.compressed {
-            miniz_oxide::inflate::decompress_to_vec_zlib(&raw)
-                .map_err(|_| DecodeError::Malformed("zlib data that would not inflate"))?
-        } else {
-            raw
-        };
+        // The declared size is computed *before* the payload is touched,
+        // because it is what bounds the inflate below. The other way round —
+        // as this was — leaves `decompress_to_vec_zlib` free to allocate
+        // whatever the compressed bytes expand to, and zlib reaches about
+        // 1000:1, so a payload inside the capture bound could ask for
+        // gigabytes.
+        if width as usize > MAX_DECODED_WIDTH || height as usize > MAX_DECODED_HEIGHT {
+            return Err(DecodeError::TooLarge(
+                "a kitty transmission declaring more than 4096x4096",
+            ));
+        }
         let wanted = (width as usize)
             .checked_mul(height as usize)
             .and_then(|pixels| pixels.checked_mul(channels))
             .ok_or(DecodeError::Malformed("a declared size that overflows"))?;
+        let raw = crate::emu::decode_base64(data).ok_or(DecodeError::Malformed("bad base64"))?;
+        let raw = if self.compressed {
+            // Nothing past the declared size is ever read, so nothing past it
+            // needs inflating.
+            miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&raw, wanted).map_err(|_| {
+                DecodeError::Malformed("zlib data that would not inflate within the declared size")
+            })?
+        } else {
+            raw
+        };
         if raw.len() < wanted {
             return Err(DecodeError::Malformed(
                 "fewer bytes than the declared size needs",
@@ -426,6 +440,28 @@ impl Bitmap {
     }
 }
 
+/// The largest image [`GraphicsPayload::decode`] will build.
+///
+/// Every size in a payload is chosen by the program under test: kitty
+/// declares `s=`/`v=` and may arrive zlib-compressed, and sixel declares its
+/// raster attributes, names colour registers by index, and repeats a byte
+/// `!n` times. Each of those turns a handful of bytes into a request for
+/// tens of gigabytes if it is trusted — `!4294967295~` is twelve bytes, and
+/// a declared `65535x65535` is about twenty.
+///
+/// 4096x4096 is far beyond what any terminal can place, and 64 MiB of RGBA
+/// once built, so a real image is never refused by it.
+#[cfg(feature = "decode")]
+const MAX_DECODED_WIDTH: usize = 4096;
+/// See [`MAX_DECODED_WIDTH`].
+#[cfg(feature = "decode")]
+const MAX_DECODED_HEIGHT: usize = 4096;
+/// Colour registers a sixel may name. `#n` gives the index directly, so it
+/// is attacker-chosen; the common maximum is 256 and no terminal goes past
+/// this.
+#[cfg(feature = "decode")]
+const MAX_SIXEL_REGISTERS: usize = 65_536;
+
 /// Why a payload could not be decoded.
 #[cfg(feature = "decode")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,6 +478,10 @@ pub enum DecodeError {
     Unsupported(&'static str),
     /// The payload contradicts itself or the protocol.
     Malformed(&'static str),
+    /// The payload asks for more memory than termlens will spend on one
+    /// image. Not a judgement about the picture: it is a refusal to let a
+    /// size the program under test chose decide how much this allocates.
+    TooLarge(&'static str),
 }
 
 #[cfg(feature = "decode")]
@@ -456,6 +496,7 @@ impl fmt::Display for DecodeError {
             }
             DecodeError::Unsupported(what) => write!(f, "termlens does not decode {what}"),
             DecodeError::Malformed(what) => write!(f, "the payload carries {what}"),
+            DecodeError::TooLarge(what) => write!(f, "termlens will not decode {what}"),
         }
     }
 }
@@ -525,6 +566,11 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
                 at += 1;
                 let values = params(data, &mut at);
                 let index = values.first().copied().unwrap_or(0) as usize;
+                if index >= MAX_SIXEL_REGISTERS {
+                    return Err(DecodeError::TooLarge(
+                        "a sixel colour register index past 65536",
+                    ));
+                }
                 if index >= registers.len() {
                     registers.resize(index + 1, None);
                 }
@@ -559,7 +605,7 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
                         bits,
                         count,
                         registers.get(current).copied().flatten(),
-                    );
+                    )?;
                 }
             }
             0x3f..=0x7e => {
@@ -573,7 +619,7 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
                     bits,
                     1,
                     registers.get(current).copied().flatten(),
-                );
+                )?;
             }
             b'$' => {
                 at += 1;
@@ -598,12 +644,23 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
         bits: u8,
         count: usize,
         colour: Option<[u8; 4]>,
-    ) {
+    ) -> Result<(), DecodeError> {
         for _ in 0..count {
+            // Checked every step rather than once against `count`: `!n` gives
+            // a `u32`, and the cursor also carries over from earlier runs in
+            // the same band. Outside the colour branch because an undefined
+            // register still advances the cursor, so a huge repeat would
+            // otherwise spin four billion times painting nothing.
+            if *x >= MAX_DECODED_WIDTH {
+                return Err(DecodeError::TooLarge("a sixel wider than 4096 pixels"));
+            }
             if let Some(colour) = colour {
                 for bit in 0..6 {
                     if bits & (1 << bit) != 0 {
                         let y = band_top + bit;
+                        if y >= MAX_DECODED_HEIGHT {
+                            return Err(DecodeError::TooLarge("a sixel taller than 4096 pixels"));
+                        }
                         if rows.len() <= y {
                             rows.resize(y + 1, Vec::new());
                         }
@@ -618,12 +675,21 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
             *x += 1;
             *width_seen = (*width_seen).max(*x);
         }
+        Ok(())
     }
 
     let (width, height) = match declared {
         Some((width, height)) if width > 0 && height > 0 => (width, height),
         _ => (width_seen as u32, rows.len() as u32),
     };
+    // The declared raster attributes reach this allocation without the pixel
+    // data being touched at all, so a payload declaring 65535x65535 and
+    // painting nothing still asks for about 17 GB.
+    if width as usize > MAX_DECODED_WIDTH || height as usize > MAX_DECODED_HEIGHT {
+        return Err(DecodeError::TooLarge(
+            "a sixel declaring more than 4096x4096",
+        ));
+    }
     let mut pixels = Vec::with_capacity((width as usize).saturating_mul(height as usize));
     for y in 0..height as usize {
         for x in 0..width as usize {
@@ -1072,6 +1138,92 @@ mod tests {
         let payload = kitty_payload(b"a=T,f=24,s=1,v=1", data.as_bytes());
         let bitmap = payload.decode().expect("decodes");
         assert_eq!(bitmap.pixel(0, 0), Some([0x11, 0x22, 0x33, 0xff]));
+    }
+
+    #[cfg(feature = "decode")]
+    fn sixel_payload(data: &[u8]) -> GraphicsPayload {
+        let mut builder = GraphicsBuilder::default();
+        builder.sixel();
+        builder.chunk(data.len() as u64, data, true, usize::MAX);
+        builder.finish().expect("a payload")
+    }
+
+    /// Every size in a payload is chosen by the program under test, and each
+    /// of these turns a handful of bytes into a request for gigabytes if it
+    /// is trusted. All five were live before the ceiling went in.
+    ///
+    /// One table on purpose, so a sixth path cannot appear without a line
+    /// here saying what bounds it.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn a_payload_cannot_choose_how_much_memory_a_decode_spends() {
+        // A declared size no terminal could place, refused before any data
+        // is read.
+        assert!(
+            matches!(
+                kitty_payload(b"a=T,f=32,s=65535,v=65535", b"AAAA").decode(),
+                Err(DecodeError::TooLarge(_))
+            ),
+            "a 65535x65535 kitty transmission was not refused"
+        );
+
+        // A zlib bomb: four declared bytes, four mebibytes inside. The
+        // inflate is bounded by the declared size, so it never expands.
+        let bomb = miniz_oxide::deflate::compress_to_vec_zlib(&vec![0u8; 4 << 20], 9);
+        assert!(bomb.len() < 64 << 10, "the fixture is meant to be small");
+        assert!(
+            matches!(
+                kitty_payload(b"a=T,f=32,o=z,s=1,v=1", base64(&bomb).as_bytes()).decode(),
+                Err(DecodeError::Malformed(_))
+            ),
+            "a payload inflating past its declared size was not refused"
+        );
+
+        // A sixel naming a colour register far past any palette.
+        assert!(
+            matches!(
+                sixel_payload(b"#4000000000;2;100;100;100~").decode(),
+                Err(DecodeError::TooLarge(_))
+            ),
+            "a four-billion colour register was not refused"
+        );
+
+        // A sixel repeat count. Twelve bytes of input.
+        assert!(
+            matches!(
+                sixel_payload(b"#0;2;100;100;100!4294967295~").decode(),
+                Err(DecodeError::TooLarge(_))
+            ),
+            "a four-billion repeat was not refused"
+        );
+
+        // Raster attributes, which reach the final allocation without the
+        // pixel data being touched at all.
+        assert!(
+            matches!(
+                sixel_payload(b"\"1;1;65535;65535#0;2;100;100;100~").decode(),
+                Err(DecodeError::TooLarge(_))
+            ),
+            "a 65535x65535 declared sixel was not refused"
+        );
+    }
+
+    /// The ceiling must not refuse anything real: a terminal-sized image in
+    /// either protocol decodes exactly as before.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn an_ordinary_image_is_untouched_by_the_ceiling() {
+        let raw = vec![0x40u8; 64 * 32 * 4];
+        let bitmap = kitty_payload(b"a=T,f=32,s=64,v=32", base64(&raw).as_bytes())
+            .decode()
+            .expect("a 64x32 image still decodes");
+        assert_eq!((bitmap.width(), bitmap.height()), (64, 32));
+        assert_eq!(bitmap.pixel(63, 31), Some([0x40, 0x40, 0x40, 0x40]));
+
+        let sixel = sixel_payload(b"\"1;1;4;6#0;2;100;0;0~~~~")
+            .decode()
+            .expect("a small sixel still decodes");
+        assert_eq!((sixel.width(), sixel.height()), (4, 6));
     }
 
     #[cfg(feature = "decode")]

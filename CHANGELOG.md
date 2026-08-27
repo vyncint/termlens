@@ -78,6 +78,29 @@ listed under a **Changed** or **Removed** heading.
   waiting — and `Color` is the one enum here that downstream code really
   does match on.
 
+### Security
+
+- **A decoded image can no longer choose how much memory it allocates.**
+  `GraphicsPayload::decode` trusted four sizes that the program under test
+  writes: kitty's `s=`/`v=`, sixel's raster attributes, its `!n` repeat count
+  and its `#n` colour-register index. A compressed kitty payload was also
+  inflated with no output limit, and zlib reaches about 1000:1. Each turned a
+  handful of bytes into a request for tens of gigabytes — `!4294967295~` is
+  twelve bytes; a declared `65535x65535` is about twenty and asks for 17 GB
+  before the pixel data is touched at all.
+
+  Decoding is now bounded: no image above 4096x4096 (far beyond what a
+  terminal can place, and 64 MiB of RGBA once built), sixel colour registers
+  capped at 65536, and a compressed payload inflated only as far as its
+  declared size needs. Refusals are a new `DecodeError::TooLarge` rather than
+  a silent clamp — `DecodeError` is `#[non_exhaustive]`, so matching on it
+  already required a wildcard.
+
+  Present in every release before this one. It sits behind the off-by-default
+  `decode` feature and is reached only when a test calls `decode()`, so a
+  suite that merely counts images was never exposed. `SECURITY.md` now
+  enumerates these bounds with the rest.
+
 ### Fixed
 
 - **A hard reset (`RIS`, `ESC c`) returns the cursor shape to the terminal's

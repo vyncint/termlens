@@ -235,7 +235,10 @@ design. termlens's position:
   (4 MiB by default, `capture_graphics`); past it a payload is counted and
   described but its bytes are dropped, and it says so rather than decoding a
   prefix of itself. Support stays opt-in, so by default an application that
-  probes is truthfully told there is none.
+  probes is truthfully told there is none. Decoding also refuses anything
+  above 4096x4096: every size in a payload is chosen by the program under
+  test, and a sixel `!n` repeat or a declared `65535x65535` would otherwise
+  set the allocation directly.
 - **Hyperlinks are captured, not attributed to cells.** `links()` reports
   every `OSC 8` span with its target, its `id`, and the text it wrapped, so
   "did it link the right place?" is assertable — but a `Cell` does not carry
