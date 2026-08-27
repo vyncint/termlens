@@ -290,6 +290,16 @@ impl GraphicsPayload {
     ///
     /// Decoding is done here, on demand, and never as the bytes arrive: a
     /// test that only counts payloads should not pay for inflating them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DecodeError::NotCaptured`] when the payload exceeded the
+    /// capture bound, [`DecodeError::NoImage`] when the action carries no
+    /// image, and [`DecodeError::Unsupported`] when its format is not
+    /// supported. [`DecodeError::Malformed`] covers contradictory or invalid
+    /// payload data, including data that cannot be decoded within its declared
+    /// size. [`DecodeError::TooLarge`] covers declared dimensions or sixel
+    /// commands beyond the 4096-pixel and related safety limits.
     #[cfg(feature = "decode")]
     pub fn decode(&self) -> Result<Bitmap, DecodeError> {
         let data = self.data.as_deref().ok_or(DecodeError::NotCaptured)?;
