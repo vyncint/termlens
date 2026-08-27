@@ -252,6 +252,9 @@ design. termlens's position:
   by a hard reset (`RIS`); the window title is not, because in xterm the
   title is a window property that `RIS` does not restore, and guessing either
   way would be the same error. Nothing here models `DECSTR` (soft reset).
+- **Two SGR style attributes are not modeled.** Overline (`SGR 53`) and double
+  underline (`SGR 21`) do not reach [`Style`](https://docs.rs/termlens/latest/termlens/struct.Style.html),
+  so `with_styles()` cannot distinguish those attributes from a plain cell.
 - **A reply the terminal's own input queue cannot hold may not arrive.**
   termlens no longer drops answers of its own accord, but the tty input
   queue is small (~1 KB on macOS, ~4 KB on Linux), so an application that
