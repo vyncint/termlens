@@ -9,18 +9,6 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
-### Fixed
-
-- **A hard reset (`RIS`, `ESC c`) returns the cursor shape to the terminal's
-  default and closes any open `OSC 8` span.** `printf '\033c'` is one of the
-  ways a program hands the terminal back on exit, so reporting the last
-  `DECSCUSR` after one claimed a shape the terminal no longer held — and it
-  did so in exactly the case `cursor_shape` exists to check. The window
-  title, the clipboard, the bell count and the link *log* are deliberately
-  left alone: the title is a window property `RIS` does not restore in
-  xterm, and the rest are records of what the application emitted rather
-  than state the terminal still holds.
-
 ### Added
 
 - **`TerminalBuilder::envs` sets several child environment variables from an
@@ -91,6 +79,16 @@ listed under a **Changed** or **Removed** heading.
   does match on.
 
 ### Fixed
+
+- **A hard reset (`RIS`, `ESC c`) returns the cursor shape to the terminal's
+  default and closes any open `OSC 8` span.** `printf '\033c'` is one of the
+  ways a program hands the terminal back on exit, so reporting the last
+  `DECSCUSR` after one claimed a shape the terminal no longer held — and it
+  did so in exactly the case `cursor_shape` exists to check. The window
+  title, the clipboard, the bell count and the link *log* are deliberately
+  left alone: the title is a window property `RIS` does not restore in
+  xterm, and the rest are records of what the application emitted rather
+  than state the terminal still holds.
 
 - **The crate's doctests build with default features disabled.** The bundled
   snapshot macro example is compiled only when its `insta` feature exists,
