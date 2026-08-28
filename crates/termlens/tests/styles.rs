@@ -149,8 +149,8 @@ fn strikethrough_and_blink_appear_in_the_styled_rendering() -> termlens::Result<
 #[test]
 fn colon_form_rgb_colours_match_semicolon_form() -> termlens::Result<()> {
     let mut t = sh(concat!(
-        r"printf '\033[38;2;10;20;30mA\033[0m' ",
-        r"'\033[38:2::10:20:30mB\033[0m'; read guard"
+        r"printf '\033[38;2;10;20;30mA\033[0m\033[38:2::10:20:30mB\033[0m'; ",
+        "read guard"
     ))?;
     t.wait_until(|s| s.contains("AB"))?;
     let s = t.screen();
