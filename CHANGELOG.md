@@ -11,6 +11,10 @@ listed under a **Changed** or **Removed** heading.
 
 ### Fixed
 
+- **Colon-form SGR colours now reach cell styles.** `38:2::r:g:b`,
+  `38:2:r:g:b`, and indexed foreground and background colours are normalized
+  before the backend parses them, matching their semicolon-form equivalents.
+
 - **Mouse `click` / `click_with` / `drag` / `scroll` refuse coordinates
   outside the current grid.** A real terminal cannot produce an off-window
   mouse event; sending one was the same class of mistake as clicking with

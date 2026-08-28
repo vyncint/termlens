@@ -147,6 +147,31 @@ fn strikethrough_and_blink_appear_in_the_styled_rendering() -> termlens::Result<
 }
 
 #[test]
+fn colon_form_rgb_colours_match_semicolon_form() -> termlens::Result<()> {
+    let mut t = sh(concat!(
+        r"printf '\033[38;2;10;20;30mA\033[0m' ",
+        r"'\033[38:2::10:20:30mB\033[0m'; read guard"
+    ))?;
+    t.wait_until(|s| s.contains("AB"))?;
+    let s = t.screen();
+
+    let semicolon = s.find("A").expect("semicolon-form colour");
+    let colon = s.find("B").expect("colon-form colour");
+    assert_eq!(
+        s.cell(semicolon.0, semicolon.1).unwrap().style().fg,
+        termlens::Color::Rgb(10, 20, 30)
+    );
+    assert_eq!(
+        s.cell(colon.0, colon.1).unwrap().style().fg,
+        termlens::Color::Rgb(10, 20, 30)
+    );
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+#[test]
 fn dim_and_italic_appear_without_shadow_collisions() -> termlens::Result<()> {
     let mut t = sh(concat!(
         r"printf '\033[2mfaint\033[0m ",

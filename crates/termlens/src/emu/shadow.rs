@@ -57,6 +57,32 @@ enum State {
     Csi,
 }
 
+/// Rewrites colon-form extended colours into the semicolon form understood by
+/// `vt100`. Like [`AttrShadow`], it only holds a complete plain SGR and emits
+/// every other sequence unchanged.
+pub(super) struct ColorNormalizer {
+    state: State,
+    pending: Vec<u8>,
+}
+
+impl ColorNormalizer {
+    pub(super) fn new() -> Self {
+        Self {
+            state: State::Ground,
+            pending: Vec::new(),
+        }
+    }
+
+    pub(super) fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
+        rewrite_stream(
+            &mut self.state,
+            &mut self.pending,
+            bytes,
+            normalize_colon_colours,
+        )
+    }
+}
+
 /// A parallel `vt100::Parser` carrying blink, conceal and strikethrough.
 pub(super) struct AttrShadow {
     parser: ::vt100::Parser,
@@ -106,56 +132,111 @@ impl AttrShadow {
     /// over to the next call, so a sequence split across chunks is neither
     /// lost nor half-applied.
     fn rewrite_stream(&mut self, bytes: &[u8]) -> Vec<u8> {
-        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-        for &b in bytes {
-            // An ESC anywhere abandons whatever was being collected and
-            // starts a new sequence, so the held bytes were not an SGR.
-            if b == 0x1b {
-                out.append(&mut self.pending);
-                self.pending.push(b);
-                self.state = State::Esc;
-                continue;
-            }
-            match self.state {
-                State::Ground => out.push(b),
-                State::Esc => {
-                    self.pending.push(b);
-                    if b == b'[' {
-                        self.state = State::Csi;
-                    } else {
-                        out.append(&mut self.pending);
-                        self.state = State::Ground;
-                    }
+        rewrite_stream(&mut self.state, &mut self.pending, bytes, rewrite_sgr)
+    }
+}
+
+fn rewrite_stream(
+    state: &mut State,
+    pending: &mut Vec<u8>,
+    bytes: &[u8],
+    rewrite: fn(&[u8]) -> Option<Vec<u8>>,
+) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    for &b in bytes {
+        // An ESC anywhere abandons whatever was being collected and starts a
+        // new sequence, so the held bytes were not an SGR.
+        if b == 0x1b {
+            out.append(pending);
+            pending.push(b);
+            *state = State::Esc;
+            continue;
+        }
+        match state {
+            State::Ground => out.push(b),
+            State::Esc => {
+                pending.push(b);
+                if b == b'[' {
+                    *state = State::Csi;
+                } else {
+                    out.append(pending);
+                    *state = State::Ground;
                 }
-                State::Csi => {
-                    self.pending.push(b);
-                    match b {
-                        // Parameter and intermediate bytes: keep collecting.
-                        0x20..=0x3f => {}
-                        // Final byte: an SGR is rewritten, anything else
-                        // passes through.
-                        0x40..=0x7e => {
-                            let seq = std::mem::take(&mut self.pending);
-                            self.state = State::Ground;
-                            match (b == b'm').then(|| rewrite_sgr(&seq)).flatten() {
-                                Some(rewritten) => out.extend_from_slice(&rewritten),
-                                None => out.extend_from_slice(&seq),
-                            }
+            }
+            State::Csi => {
+                pending.push(b);
+                match b {
+                    // Parameter and intermediate bytes: keep collecting.
+                    0x20..=0x3f => {}
+                    // Final byte: an SGR is rewritten, anything else passes
+                    // through.
+                    0x40..=0x7e => {
+                        let seq = std::mem::take(pending);
+                        *state = State::Ground;
+                        match (b == b'm').then(|| rewrite(&seq)).flatten() {
+                            Some(rewritten) => out.extend_from_slice(&rewritten),
+                            None => out.extend_from_slice(&seq),
                         }
-                        // A control byte inside a CSI (CAN, SUB, …). vte
-                        // decides what that means; passing the bytes through
-                        // unchanged means the shadow cannot diverge, at the
-                        // cost of not rewriting this one sequence.
-                        _ => {
-                            out.append(&mut self.pending);
-                            self.state = State::Ground;
-                        }
+                    }
+                    // A control byte inside a CSI (CAN, SUB, …). vte decides
+                    // what that means; preserve it rather than guessing.
+                    _ => {
+                        out.append(pending);
+                        *state = State::Ground;
                     }
                 }
             }
         }
-        out
     }
+    out
+}
+
+fn normalize_colon_colours(seq: &[u8]) -> Option<Vec<u8>> {
+    let params = seq.get(2..seq.len().checked_sub(1)?)?;
+    if params
+        .iter()
+        .any(|b| !matches!(b, b'0'..=b'9' | b';' | b':'))
+    {
+        return None;
+    }
+    if !params.contains(&b':') {
+        return None;
+    }
+
+    let groups: Vec<&[u8]> = params.split(|&b| b == b';').collect();
+    let mut normalized = Vec::with_capacity(groups.len());
+    let mut changed = false;
+    for group in groups {
+        let parts: Vec<&[u8]> = group.split(|&b| b == b':').collect();
+        let replacement = match parts.as_slice() {
+            [first @ (b"38" | b"48"), b"2", b"", red, green, blue]
+            | [first @ (b"38" | b"48"), b"2", red, green, blue] => {
+                Some(vec![*first, b"2", *red, *green, *blue])
+            }
+            [first @ (b"38" | b"48"), b"5", index] => Some(vec![*first, b"5", *index]),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            normalized.extend(replacement.into_iter().map(<[u8]>::to_vec));
+            changed = true;
+        } else {
+            normalized.push(group.to_vec());
+        }
+    }
+    if !changed {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(seq.len());
+    out.extend_from_slice(b"\x1b[");
+    for (index, group) in normalized.iter().enumerate() {
+        if index > 0 {
+            out.push(b';');
+        }
+        out.extend_from_slice(group);
+    }
+    out.push(b'm');
+    Some(out)
 }
 
 /// Rewrite one complete `ESC [ … m` into the carrier form.

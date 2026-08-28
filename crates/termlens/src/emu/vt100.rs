@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::seq::{SeqEvent, SeqTracker};
-use super::shadow::AttrShadow;
+use super::shadow::{AttrShadow, ColorNormalizer};
 use super::{Emulator, FrameSpan, InputModes, ModeState, MouseEncoding, Processed, Stop};
 use crate::graphics::{GraphicsPayload, GraphicsSeen, HISTORY};
 use crate::screen::{Cell, Color, MouseMode, Screen, Style, TermState};
@@ -18,6 +18,7 @@ pub(crate) struct Vt100Emulator {
     /// `emu/shadow.rs` for why this is a second parser rather than
     /// hand-rolled attribute tracking.
     shadow: AttrShadow,
+    colors: ColorNormalizer,
     /// How many rows of history to retain (0 disables it entirely).
     scrollback_len: usize,
     /// When the current synchronized update began, stamped at the byte that
@@ -63,6 +64,7 @@ impl Vt100Emulator {
             parser: ::vt100::Parser::new(rows, cols, scrollback_len),
             tracker: SeqTracker::new(capture),
             shadow: AttrShadow::new(rows, cols),
+            colors: ColorNormalizer::new(),
             scrollback_len,
             frame_started: None,
             history: VecDeque::new(),
@@ -83,7 +85,8 @@ impl Vt100Emulator {
         if bytes.is_empty() {
             return;
         }
-        self.parser.process(bytes);
+        let normalized = self.colors.feed(bytes);
+        self.parser.process(&normalized);
         self.shadow.feed(bytes);
         self.capture_scrolled_rows();
     }
@@ -509,6 +512,30 @@ mod tests {
         let y = *s.cell(0, 1).unwrap().style();
         assert_eq!(y.fg, Color::Rgb(0, 8, 9));
         assert!(!y.conceal && !y.strikethrough);
+    }
+
+    #[test]
+    fn colon_form_rgb_colours_match_semicolon_form() {
+        let emu = emu_with(b"\x1b[38;2;10;20;30mA\x1b[0m\x1b[38:2::10:20:30mB");
+        let s = emu.snapshot();
+        assert_eq!(s.cell(0, 0).unwrap().style().fg, Color::Rgb(10, 20, 30));
+        assert_eq!(s.cell(0, 1).unwrap().style().fg, Color::Rgb(10, 20, 30));
+    }
+
+    #[test]
+    fn colon_form_colours_support_optional_colour_space_and_chunking() {
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE);
+        emu.feed(b"\x1b[38:2:10:");
+        emu.feed(b"20:30mA\x1b[48:5:196mB");
+        let s = emu.snapshot();
+
+        let foreground = s.cell(0, 0).unwrap().style();
+        assert_eq!(foreground.fg, Color::Rgb(10, 20, 30));
+        assert_eq!(foreground.bg, Color::Default);
+
+        let background = s.cell(0, 1).unwrap().style();
+        assert_eq!(background.fg, Color::Rgb(10, 20, 30));
+        assert_eq!(background.bg, Color::Indexed(196));
     }
 
     #[test]
