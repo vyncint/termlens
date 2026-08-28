@@ -338,6 +338,16 @@ mod tests {
         String::from_utf8_lossy(&out).replace('\x1b', "E")
     }
 
+    /// The primary rewriter's output, as a readable string.
+    fn normalized(bytes: &[u8]) -> String {
+        let mut state = State::Ground;
+        let mut pending = Vec::new();
+        let mut out = rewrite_stream(&mut state, &mut pending, bytes, normalize_colon_colours);
+        // Anything still held at the end of the stream is not a complete SGR.
+        out.append(&mut pending);
+        String::from_utf8_lossy(&out).replace('\x1b', "E")
+    }
+
     #[test]
     fn the_three_dropped_attributes_get_carriers() {
         assert_eq!(shadowed(b"\x1b[5mX"), "E[1mX"); // blink -> bold
@@ -404,6 +414,28 @@ mod tests {
         ] {
             assert_eq!(
                 shadowed(seq),
+                String::from_utf8_lossy(seq).replace('\x1b', "E"),
+                "sequence {:?} must pass through untouched",
+                String::from_utf8_lossy(seq)
+            );
+        }
+    }
+
+    #[test]
+    fn colon_colour_normalization_preserves_unrecognized_bytes() {
+        assert_eq!(normalized(b"\x1b[38:2::10:20:30m"), "E[38;2;10;20;30m");
+        assert_eq!(normalized(b"\x1b[38:5:196m"), "E[38;5;196m");
+        assert_eq!(normalized(b"\x1b[1;38:2::4:5:6;3m"), "E[1;38;2;4;5;6;3m");
+
+        for seq in [
+            &b"\x1b[4:3m"[..],
+            &b"\x1b[38:2::9m"[..],
+            &b"\x1b[38:2:1:10:20:30m"[..],
+            &b"\x1b[?25l"[..],
+            &b"\x1b]8;;http://x/\x1b\\"[..],
+        ] {
+            assert_eq!(
+                normalized(seq),
                 String::from_utf8_lossy(seq).replace('\x1b', "E"),
                 "sequence {:?} must pass through untouched",
                 String::from_utf8_lossy(seq)
