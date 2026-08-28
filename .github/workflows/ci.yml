@@ -41,6 +41,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --no-default-features --features decode -- -D warnings
 
   # CI runners have no TTY; termlens creates its own PTYs. This suite passing
   # headless is the proof of the crate's core value claim.
@@ -73,6 +75,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test --workspace --no-default-features
+      - run: cargo test --workspace --no-default-features --features decode
 
   msrv:
     name: msrv
