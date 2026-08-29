@@ -435,13 +435,23 @@ fn mouse_events_outside_the_grid_are_refused() -> termlens::Result<()> {
     assert!(err.to_string().contains("20x5"), "{err}");
 
     // After a shrink, a coordinate that was valid earlier must name the
-    // *new* size — otherwise the error reads as a mystery.
-    t.resize(10, 3)?;
+    // *new* size — otherwise the error reads as a mystery. Wide enough for
+    // the fixture's acknowledgement to fit on its row, and still excluding
+    // (19, 4) on both axes.
+    t.resize(18, 4)?;
+    // Wait for the application to have handled the SIGWINCH before sending
+    // it anything: a keystroke arriving in the same instant as the resize
+    // can be lost by crossterm's event reader — see `Terminal::resize`. The
+    // stress workflow found this at 8 threads on its first iteration, and it
+    // reproduced locally about one run in forty. `wait_frame` is the right
+    // wait: a resize advances the frame cursor, so only a frame drawn after
+    // it can satisfy this.
+    t.wait_frame(|s| s.contains("last: resize:18x4"))?;
     let err = t.click(19, 4).expect_err("pre-resize coordinate");
     assert!(matches!(err, Error::Input(_)), "got: {err}");
     let msg = err.to_string();
     assert!(msg.contains("(19, 4)"), "{msg}");
-    assert!(msg.contains("10x3"), "post-resize size: {msg}");
+    assert!(msg.contains("18x4"), "post-resize size: {msg}");
     assert!(!msg.contains("20x5"), "must not report the old size: {msg}");
 
     t.send(Key::Esc)?;

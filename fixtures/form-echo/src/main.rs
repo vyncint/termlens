@@ -221,7 +221,17 @@ fn main() -> io::Result<()> {
                 draw(&mut out, &app)?;
                 continue;
             }
-            _ => continue,
+            // Acknowledge a resize on the `last:` line, so a test that resizes
+            // can wait for the application to have handled the SIGWINCH before
+            // sending it anything else. Not decoration: a keystroke arriving
+            // in the same instant as the SIGWINCH can be lost by crossterm's
+            // event reader (see `Terminal::resize`), so a test with nothing
+            // to wait for between the two is a race.
+            Event::Resize(cols, rows) => {
+                app.last = format!("resize:{cols}x{rows}");
+                draw(&mut out, &app)?;
+                continue;
+            }
         };
         if key.kind != KeyEventKind::Press {
             continue;

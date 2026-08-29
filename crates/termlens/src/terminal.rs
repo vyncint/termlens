@@ -3107,6 +3107,23 @@ impl Terminal {
     /// advances the frame cursor, so only a frame completed *after* it can
     /// satisfy the wait. `docs/DESIGN.md` §2 shows the trap in full.
     ///
+    /// # Wait before typing
+    ///
+    /// Let the application acknowledge the resize before sending it anything.
+    /// A keystroke that reaches the application in the same instant as the
+    /// `SIGWINCH` can be **lost**: crossterm's event reader (0.29) returns
+    /// the `Resize` event as soon as its poll reports the signal, abandoning
+    /// the input readiness it was handed in the same poll — and that poll is
+    /// edge-triggered (mio registers with `EPOLLET` and `EV_CLEAR`), so a
+    /// byte already sitting in the queue is not offered again until *more*
+    /// input arrives. The application then blocks in `read()` with your
+    /// keystroke behind it. termlens found this in its own suite, where a
+    /// resize followed at once by `Esc` hung the fixture about one run in
+    /// forty. Wait for something the application draws in response to the
+    /// resize — [`wait_frame`](Self::wait_frame) where it emits synchronized
+    /// updates — and only then send. A real terminal has the same race; a
+    /// human's hands are simply slower than a test.
+    ///
     /// # History is not reflowed
     ///
     /// Rows already in scrollback keep the width they were captured at, and

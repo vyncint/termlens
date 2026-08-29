@@ -81,6 +81,16 @@ listed under a **Changed** or **Removed** heading.
   sort, are now ordered that way on purpose and the doc says so: a test
   asserting on `colours()[0]` has one answer.
 
+- **`resize` documents the resize-then-type trap.** A keystroke that reaches
+  a crossterm application in the same instant as the `SIGWINCH` can be lost:
+  its event reader returns the `Resize` as soon as the poll reports the
+  signal and abandons the input readiness delivered alongside, and the poll
+  is edge-triggered, so the byte is not offered again until more input
+  arrives. The stress workflow caught termlens's own suite doing exactly that
+  — a resize followed at once by `Esc` hung the fixture about one run in
+  forty. The test now waits for the application to acknowledge the resize,
+  which is the advice the doc gives.
+
 - **`resize` documents what happens to history.** Rows already in scrollback
   keep the width they were captured at and rows captured afterwards have the
   new width, so `full_text()` after a narrowing resize can hold both
