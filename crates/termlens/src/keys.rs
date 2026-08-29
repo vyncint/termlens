@@ -498,6 +498,11 @@ mod tests {
         assert_eq!(mouse_sgr(64, 0, 0, true), b"\x1b[<64;1;1M");
         assert_eq!(mouse_legacy(0, 0, 0), b"\x1b[M\x20\x21\x21");
         assert_eq!(mouse_legacy(3, 9, 6,), b"\x1b[M\x23\x2a\x27");
+        // Modifiers ride on the wheel's code exactly as on a button: +4
+        // shift, +8 alt, +16 ctrl. Ctrl-wheel-up is 64 + 16, in both forms.
+        assert_eq!(mouse_sgr(80, 0, 0, true), b"\x1b[<80;1;1M");
+        assert_eq!(mouse_sgr(69, 2, 3, true), b"\x1b[<69;3;4M"); // shift + wheel down
+        assert_eq!(mouse_legacy(80, 0, 0), b"\x1b[M\x70\x21\x21"); // 32 + 80
     }
 
     /// `u16::MAX + 1` used to wrap to 0 in release and panic in debug.

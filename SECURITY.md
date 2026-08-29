@@ -10,9 +10,13 @@ issues in escape-sequence handling) are treated as security issues.
 
 What the project does continuously, enforced by required CI on every change:
 
-- **No `unsafe` code** in the crate (`unsafe_code` lint, clippy
-  `-D warnings`). Escape sequences from the child are parsed by pure-Rust
-  code; nothing from the terminal stream is ever executed or evaluated.
+- **`unsafe` is confined to two audited FFI calls** — `dup(2)`, to open a
+  second writer on the PTY master for the responder thread, and `kill(2)`
+  behind `Terminal::signal` — each a single line with a `SAFETY` comment and
+  a local `#[allow]`; the `unsafe_code` lint is on, so any third block fails
+  clippy `-D warnings`. Neither touches memory the child can influence.
+  Everything on the parsing path is pure Rust: escape sequences from the
+  child are parsed, never executed or evaluated.
 - **Dependency policy** (`cargo-deny` job): RUSTSEC advisories, yanked
   crates, license allowlist, and crates.io-only sources — on every PR, with
   weekly grouped Dependabot updates and Dependabot alerts enabled.

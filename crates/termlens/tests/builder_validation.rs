@@ -111,6 +111,43 @@ fn resize_to_zero_is_refused_without_touching_the_pty_or_the_grid() -> termlens:
     Ok(())
 }
 
+/// `send` and `signal` refuse once the child is gone; `resize` used to
+/// succeed and report a geometry no application ever rendered at, with the
+/// dead child's last frame underneath it. Refused now, on the same evidence
+/// `send` uses — EOF, so nothing is left to receive the SIGWINCH.
+#[test]
+fn resize_after_the_child_exits_is_refused_like_send() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .size(20, 4)
+        .timeout(Duration::from_secs(10))
+        .args(["-c", "printf ready; read _"])
+        .spawn("/bin/sh")?;
+    t.wait_until(|s| s.contains("ready"))?;
+    t.send(termlens::Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    let before = t.screen();
+    assert_eq!(before.size(), (20, 4));
+
+    let err = t
+        .resize(60, 10)
+        .expect_err("nothing is left to receive a SIGWINCH");
+    assert!(matches!(err, Error::Write { .. }), "got: {err}");
+    let msg = err.to_string();
+    assert!(msg.contains("resize"), "{msg}");
+    assert!(msg.contains("the child is gone"), "{msg}");
+    // The final screen is untouched: still the size the child exited with,
+    // and the very same observation.
+    assert_eq!(t.screen().size(), (20, 4));
+    assert_eq!(
+        t.screen(),
+        before,
+        "a refused resize must not move the snapshot"
+    );
+    // A size that cannot work is still the size error, and is checked first.
+    assert!(matches!(t.resize(0, 10), Err(Error::Size(_))));
+    Ok(())
+}
+
 #[test]
 fn a_missing_program_still_reports_the_underlying_search_failure() {
     let err = Terminal::builder()

@@ -49,8 +49,9 @@ impl Default for App {
     }
 }
 
-/// Stable, greppable one-token description of a key event.
-/// Stable one-token description of a mouse event.
+/// Stable one-token description of a mouse event, with the same
+/// `ctrl+alt+shift+` prefix order keys use — so a modified wheel notch reads
+/// `mouse:ctrl+scrollup:3,2` and an unmodified one exactly as before.
 fn describe_mouse(mouse: &MouseEvent) -> Option<String> {
     let kind = match mouse.kind {
         MouseEventKind::Down(_) => "down",
@@ -59,9 +60,29 @@ fn describe_mouse(mouse: &MouseEvent) -> Option<String> {
         MouseEventKind::ScrollDown => "scrolldown",
         _ => return None,
     };
-    Some(format!("mouse:{kind}:{},{}", mouse.column, mouse.row))
+    let prefix = modifier_prefix(mouse.modifiers);
+    Some(format!(
+        "mouse:{prefix}{kind}:{},{}",
+        mouse.column, mouse.row
+    ))
 }
 
+/// `ctrl+alt+shift+`, for whichever of the three are held.
+fn modifier_prefix(modifiers: KeyModifiers) -> String {
+    let mut prefix = String::new();
+    for (on, name) in [
+        (modifiers.contains(KeyModifiers::CONTROL), "ctrl+"),
+        (modifiers.contains(KeyModifiers::ALT), "alt+"),
+        (modifiers.contains(KeyModifiers::SHIFT), "shift+"),
+    ] {
+        if on {
+            prefix.push_str(name);
+        }
+    }
+    prefix
+}
+
+/// Stable, greppable one-token description of a key event.
 fn describe(key: &KeyEvent) -> String {
     if let KeyCode::Char(c) = key.code {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -74,18 +95,11 @@ fn describe(key: &KeyEvent) -> String {
     }
     // Special keys: stable "ctrl+alt+shift+name" prefix order. BackTab
     // inherently carries SHIFT; keep its historical bare name.
-    let mut prefix = String::new();
-    if key.code != KeyCode::BackTab {
-        for (on, name) in [
-            (key.modifiers.contains(KeyModifiers::CONTROL), "ctrl+"),
-            (key.modifiers.contains(KeyModifiers::ALT), "alt+"),
-            (key.modifiers.contains(KeyModifiers::SHIFT), "shift+"),
-        ] {
-            if on {
-                prefix.push_str(name);
-            }
-        }
-    }
+    let prefix = if key.code == KeyCode::BackTab {
+        String::new()
+    } else {
+        modifier_prefix(key.modifiers)
+    };
     let name: String = match key.code {
         KeyCode::Enter => "enter".into(),
         KeyCode::Esc => "esc".into(),

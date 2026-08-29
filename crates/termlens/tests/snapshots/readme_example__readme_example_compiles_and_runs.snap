@@ -1,0 +1,11 @@
+---
+source: crates/termlens/tests/readme_example.rs
+expression: t.screen()
+---
+size: 80x24  cursor: hidden
+╭──────────────────────────────╮
+│ hello-tui                    │
+│                              │
+│ status: ready                │
+│ press q to quit              │
+╰──────────────────────────────╯

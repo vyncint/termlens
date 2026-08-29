@@ -42,6 +42,12 @@ pub(crate) struct Vt100Emulator {
     graphics_bytes: usize,
     /// The retention budget, from `TerminalBuilder::capture_graphics`.
     capture: usize,
+    /// Bytes rewritten on their way to the parsers and not yet handed over.
+    /// Empty except while a DEC Special Graphics set is invoked: a byte the
+    /// set redefines reaches the grid as the glyph it draws, so the stream
+    /// the parsers see is then no longer a sub-slice of the read. Kept
+    /// between calls only for its allocation.
+    staged: Vec<u8>,
 }
 
 impl Vt100Emulator {
@@ -72,6 +78,7 @@ impl Vt100Emulator {
             graphics: Arc::new(Vec::new()),
             graphics_bytes: 0,
             capture,
+            staged: Vec::new(),
         }
     }
 
@@ -89,6 +96,23 @@ impl Vt100Emulator {
         self.parser.process(&normalized);
         self.shadow.feed(bytes);
         self.capture_scrolled_rows();
+    }
+
+    /// Hand the grid everything staged so far followed by `tail`, in order.
+    ///
+    /// The common case — nothing was rewritten — feeds `tail` straight
+    /// through, so a stream that never designates a character set pays for
+    /// none of this.
+    fn feed_staged(&mut self, tail: &[u8]) {
+        if self.staged.is_empty() {
+            self.feed(tail);
+            return;
+        }
+        let mut staged = std::mem::take(&mut self.staged);
+        staged.extend_from_slice(tail);
+        self.feed(&staged);
+        staged.clear();
+        self.staged = staged;
     }
 
     /// File a completed payload, stamped with where it landed.
@@ -184,16 +208,26 @@ impl Vt100Emulator {
 
 impl Emulator for Vt100Emulator {
     fn process(&mut self, bytes: &[u8]) -> Processed {
-        // How much of this segment the grid has already been given. Only a
-        // graphics payload moves it mid-segment; everything else is fed in
-        // one go, exactly as before.
+        // How much of this segment the grid has already been given. A
+        // graphics payload moves it mid-segment, and so does a byte the
+        // invoked character set redefines: that byte is staged as the glyph
+        // it draws instead of being sliced through, and everything else is
+        // fed in one go, exactly as before.
         let mut fed = 0;
         for (i, &byte) in bytes.iter().enumerate() {
+            // Asked before the step, because whether this byte is a character
+            // at all depends on the state the tracker is in before it — and
+            // a designation's own final byte must not be drawn.
+            if let Some(glyph) = self.tracker.graphics_glyph(byte) {
+                self.staged.extend_from_slice(&bytes[fed..i]);
+                self.staged.extend_from_slice(glyph.as_bytes());
+                fed = i + 1;
+            }
             let stop = match self.tracker.step(byte) {
                 SeqEvent::SyncEnd => Some(Stop::FrameComplete(self.close_frame())),
                 SeqEvent::Query(query) => Some(Stop::Query(query)),
                 SeqEvent::Graphics(payload) => {
-                    self.feed(&bytes[fed..=i]);
+                    self.feed_staged(&bytes[fed..=i]);
                     fed = i + 1;
                     self.record_graphics(*payload);
                     None
@@ -209,14 +243,14 @@ impl Emulator for Vt100Emulator {
                 }
             };
             if let Some(stop) = stop {
-                self.feed(&bytes[fed..=i]);
+                self.feed_staged(&bytes[fed..=i]);
                 return Processed {
                     consumed: i + 1,
                     stop: Some(stop),
                 };
             }
         }
-        self.feed(&bytes[fed..]);
+        self.feed_staged(&bytes[fed..]);
         Processed {
             consumed: bytes.len(),
             stop: None,
@@ -555,6 +589,55 @@ mod tests {
         assert!(s.cell(0, 0).unwrap().style().strikethrough, "{s}");
     }
 
+    /// `ESC ( 0 l q q q k` is a box. Both parsers receive the translated
+    /// stream — the snapshot's correspondence check would fail otherwise.
+    #[test]
+    fn dec_special_graphics_reaches_the_grid_as_the_glyphs_it_draws() {
+        let emu = emu_with(b"\x1b(0lqqqk\x1b(B\r\nplain");
+        let s = emu.snapshot();
+        assert_eq!(
+            s.text(),
+            "\u{250c}\u{2500}\u{2500}\u{2500}\u{2510}\nplain\n\n"
+        );
+        assert_eq!(s.find("\u{2510}"), Some((0, 4)), "one cell per glyph");
+        assert!(!s.contains("lqqqk"));
+
+        // SO/SI with the set in G1, the vt100-terminfo shape.
+        let emu = emu_with(b"\x1b)0\x0elqk\x0f ok");
+        assert_eq!(
+            emu.snapshot().row_text(0).trim_end(),
+            "\u{250c}\u{2500}\u{2510} ok"
+        );
+    }
+
+    /// A style set inside the graphics set travels with the glyph, and the
+    /// attribute shadow stays in step: the rewrite happens before either
+    /// parser, so the two grids are still the same shape.
+    #[test]
+    fn a_styled_line_drawing_run_keeps_its_style_and_the_shadow_in_step() {
+        let emu = emu_with(b"\x1b(0\x1b[31;9mqq\x1b[0m\x1b(Bq");
+        let s = emu.snapshot();
+        assert_eq!(s.row_text(0).trim_end(), "\u{2500}\u{2500}q");
+        let drawn = *s.cell(0, 0).unwrap().style();
+        assert_eq!(drawn.fg, Color::Indexed(1));
+        assert!(drawn.strikethrough, "the shadow-carried attribute too");
+        assert_eq!(s.cell(0, 2).unwrap().style(), &Style::default());
+    }
+
+    /// A translated byte that also closes a frame, split across feeds: the
+    /// staged glyph must reach the grid before the stop is reported, and a
+    /// designation split across chunks must still apply.
+    #[test]
+    fn translation_survives_chunk_boundaries_and_frame_stops() {
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE);
+        feed_all(&mut emu, b"\x1b(");
+        feed_all(&mut emu, b"0\x1b[?2026hl");
+        feed_all(&mut emu, b"q\x1b[?2026lk");
+        let s = emu.snapshot();
+        assert_eq!(s.row_text(0).trim_end(), "\u{250c}\u{2500}\u{2510}");
+        assert!(!emu.in_sync_update());
+    }
+
     #[test]
     fn hidden_cursor_is_reported() {
         let emu = emu_with(b"\x1b[?25l");
@@ -704,7 +787,10 @@ mod tests {
 
     #[test]
     fn history_rows_keep_the_width_they_were_captured_at() {
-        // Documented limit: resize does not reflow.
+        // Documented decision (`Terminal::resize`): history is not reflowed
+        // and not discarded. Rows captured before a narrowing resize keep
+        // their width; rows captured after it have the new one; both sit in
+        // the same history.
         let mut emu = Vt100Emulator::new(2, 10, 100, crate::graphics::DEFAULT_CAPTURE);
         feed_all(&mut emu, b"0123456789\r\nabcdefghij\r\nnext");
         assert_eq!(emu.snapshot().scrollback_text(), "0123456789");
@@ -715,6 +801,17 @@ mod tests {
             "a captured row keeps its width; narrowing the screen must not \
              retroactively rewrite history"
         );
+        // Two more rows at the new width scroll off; the old row is still
+        // there, still ten wide, above the four-wide ones.
+        feed_all(&mut emu, b"\r\nwxyz\r\nlast");
+        let history = emu.snapshot().scrollback_text();
+        let rows: Vec<&str> = history.lines().collect();
+        assert_eq!(rows[0], "0123456789", "captured at 10 columns: {history}");
+        assert!(
+            rows[1..].iter().all(|row| row.chars().count() <= 4),
+            "captured at 4 columns: {history}"
+        );
+        assert!(rows.len() >= 3, "{history}");
     }
 
     #[test]

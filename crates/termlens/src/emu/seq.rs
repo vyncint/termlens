@@ -17,6 +17,17 @@
 //! expose: the **window title** (`OSC 0`/`OSC 2`), kept whole in its own
 //! buffer — the diagnostic capture below truncates at 24 bytes, real titles
 //! don't fit.
+//!
+//! And it holds the **character-set state** vt100 ignores: which glyph set
+//! `ESC ( Ps` / `ESC ) Ps` designated into G0 and G1, and which of the two
+//! `SI`/`SO` has invoked. That is what lets the emulator hand the grid the
+//! glyph a byte *draws* — `ESC ( 0 l q q q k` is `┌───┐`, not five letters —
+//! which is how ncurses draws every border (`smacs`/`rmacs` on an xterm
+//! terminfo are exactly `ESC ( 0` / `ESC ( B`). Only the DEC Special
+//! Graphics set is translated; every other designation reads as ASCII, and
+//! G2/G3 with their single shifts are not modelled. The tracker decides, the
+//! emulator rewrites: the bytes the parsers see are then a translated stream
+//! rather than a sub-slice of the read, which `emu/vt100.rs` stages.
 
 use std::sync::Arc;
 
@@ -97,6 +108,58 @@ pub(crate) fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// Which glyph set a G0/G1 designation currently names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Charset {
+    /// ASCII — and every national replacement set, which differ from it in
+    /// a handful of positions this crate does not model.
+    Ascii,
+    /// DEC Special Graphics (`ESC ( 0`): the line-drawing set.
+    DecSpecialGraphics,
+}
+
+/// The glyph a byte draws in DEC Special Graphics, where it differs from
+/// ASCII: the 32 bytes `0x5f..=0x7e`. Everything below `_` draws as itself.
+/// The mapping is xterm's, which is also what every terminfo `acsc` string
+/// is written against.
+fn dec_special_graphics(b: u8) -> Option<&'static str> {
+    Some(match b {
+        b'_' => " ",        // blank
+        b'`' => "\u{25c6}", // ◆ diamond
+        b'a' => "\u{2592}", // ▒ checkerboard
+        b'b' => "\u{2409}", // ␉ HT
+        b'c' => "\u{240c}", // ␌ FF
+        b'd' => "\u{240d}", // ␍ CR
+        b'e' => "\u{240a}", // ␊ LF
+        b'f' => "\u{b0}",   // ° degree
+        b'g' => "\u{b1}",   // ± plus-minus
+        b'h' => "\u{2424}", // ␤ NL
+        b'i' => "\u{240b}", // ␋ VT
+        b'j' => "\u{2518}", // ┘
+        b'k' => "\u{2510}", // ┐
+        b'l' => "\u{250c}", // ┌
+        b'm' => "\u{2514}", // └
+        b'n' => "\u{253c}", // ┼
+        b'o' => "\u{23ba}", // ⎺ scan line 1
+        b'p' => "\u{23bb}", // ⎻ scan line 3
+        b'q' => "\u{2500}", // ─ scan line 5
+        b'r' => "\u{23bc}", // ⎼ scan line 7
+        b's' => "\u{23bd}", // ⎽ scan line 9
+        b't' => "\u{251c}", // ├
+        b'u' => "\u{2524}", // ┤
+        b'v' => "\u{2534}", // ┴
+        b'w' => "\u{252c}", // ┬
+        b'x' => "\u{2502}", // │
+        b'y' => "\u{2264}", // ≤
+        b'z' => "\u{2265}", // ≥
+        b'{' => "\u{3c0}",  // π
+        b'|' => "\u{2260}", // ≠
+        b'}' => "\u{a3}",   // £
+        b'~' => "\u{b7}",   // · bullet
+        _ => return None,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,6 +373,16 @@ pub(crate) struct SeqTracker {
     /// the accessor on `Screen`, and "never asked" stays distinguishable
     /// from every value it could have asked for.
     cursor_style: Option<u8>,
+    /// The intermediate byte of the current `ESC <intermediate> <final>`
+    /// sequence — `(` or `)` for a G0/G1 designation — so the final byte
+    /// knows which set it designates. Zero once a second intermediate makes
+    /// it something else.
+    esc_intermediate: u8,
+    /// What `ESC ( Ps` and `ESC ) Ps` last designated into G0 and G1.
+    g0: Charset,
+    g1: Charset,
+    /// True after `SO` (`0x0e`) invoked G1; `SI` (`0x0f`) returns to G0.
+    shifted_out: bool,
     /// Which introducer opened the current DCS-class string: `P` (DCS),
     /// `X` (SOS), `^` (PM) or `_` (APC). Sixel and kitty graphics differ
     /// only by this, so consuming all four alike — which is all the tracker
@@ -373,6 +446,10 @@ impl SeqTracker {
             frame_printable: 0,
             focus_events: false,
             cursor_style: None,
+            esc_intermediate: 0,
+            g0: Charset::Ascii,
+            g1: Charset::Ascii,
+            shifted_out: false,
             dcs_introducer: 0,
             dcs_final: 0,
             dcs_intermediate: 0,
@@ -487,6 +564,43 @@ impl SeqTracker {
     /// for the next one.
     pub(crate) fn take_frame_printable(&mut self) -> u32 {
         std::mem::replace(&mut self.frame_printable, 0)
+    }
+
+    /// The glyph `b` draws in the invoked character set, when that set is
+    /// DEC Special Graphics and `b` is one of the bytes it redefines — or
+    /// `None` when the byte draws as itself, or is not a character at all.
+    ///
+    /// Consulted **before** the byte is stepped: whether a byte is a
+    /// character depends on the state the tracker is in before it, and the
+    /// designation's own final byte must not be translated.
+    pub(crate) fn graphics_glyph(&self, b: u8) -> Option<&'static str> {
+        if self.state != State::Ground {
+            return None;
+        }
+        let invoked = if self.shifted_out { self.g1 } else { self.g0 };
+        if invoked != Charset::DecSpecialGraphics {
+            return None;
+        }
+        dec_special_graphics(b)
+    }
+
+    /// Apply the final byte of an `ESC ( Ps` / `ESC ) Ps` designation.
+    ///
+    /// `0` is DEC Special Graphics. Everything else — `B` (ASCII), `A` (UK,
+    /// which differs from ASCII only at `#`), the alternate-ROM sets —
+    /// reads as ASCII: close enough for every one of them that guessing at
+    /// the odd position would be a worse answer than the plain one.
+    fn designate(&mut self, final_byte: u8) {
+        let set = if final_byte == b'0' {
+            Charset::DecSpecialGraphics
+        } else {
+            Charset::Ascii
+        };
+        match self.esc_intermediate {
+            b'(' => self.g0 = set,
+            b')' => self.g1 = set,
+            _ => {}
+        }
     }
 
     fn reset_dcs_scanner(&mut self, introducer: u8) {
@@ -965,6 +1079,8 @@ impl SeqTracker {
         const CAN: u8 = 0x18;
         const SUB: u8 = 0x1a;
         const BEL: u8 = 0x07;
+        const SO: u8 = 0x0e;
+        const SI: u8 = 0x0f;
 
         let mut event = SeqEvent::None;
         self.state = match self.state {
@@ -978,6 +1094,14 @@ impl SeqTracker {
                     // and both of those are other states.
                     if b == BEL && self.utf8_remaining == 0 {
                         self.bells = self.bells.saturating_add(1);
+                    }
+                    // Locking shifts: SO invokes G1, SI returns to G0. vt100
+                    // sees both bytes too and ignores them, so nothing else
+                    // has to be told.
+                    match b {
+                        SO => self.shifted_out = true,
+                        SI => self.shifted_out = false,
+                        _ => {}
                     }
                     // Anything that is not a C0 control or DEL. Named once
                     // because the two readers below want the same test for
@@ -995,11 +1119,20 @@ impl SeqTracker {
                     // label. Bytes rather than characters here, so a
                     // multi-byte grapheme survives the split — its
                     // continuation bytes are all >= 0x80 and printable too.
+                    // A byte the invoked character set redefines is recorded
+                    // as the glyph it draws: the label is what a reader sees
+                    // and clicks, and a reader sees `─`, not `q`.
                     if printable && self.link_open {
-                        if self.link_label.len() < LINK_LABEL_MAX {
-                            self.link_label.push(b);
-                        } else {
-                            self.link_label_truncated = true;
+                        let drawn: &[u8] = match self.graphics_glyph(b) {
+                            Some(glyph) => glyph.as_bytes(),
+                            None => std::slice::from_ref(&b),
+                        };
+                        for &drawn in drawn {
+                            if self.link_label.len() < LINK_LABEL_MAX {
+                                self.link_label.push(drawn);
+                            } else {
+                                self.link_label_truncated = true;
+                            }
                         }
                     }
                     self.track_utf8(b);
@@ -1021,12 +1154,16 @@ impl SeqTracker {
                     self.reset_dcs_scanner(b);
                     State::Dcs
                 }
-                0x20..=0x2f => State::EscIntermediate,
+                0x20..=0x2f => {
+                    self.esc_intermediate = b;
+                    State::EscIntermediate
+                }
                 ESC => State::Esc,
                 CAN | SUB => State::Ground,
                 // RIS (`ESC c`), the hard reset: the terminal returns to its
                 // power-on state, so the cursor is the terminal's default
-                // again and any open hyperlink span cannot survive.
+                // again, both character sets are ASCII with G0 invoked, and
+                // any open hyperlink span cannot survive.
                 //
                 // Reporting the last `DECSCUSR` after a reset would claim a
                 // fact the terminal does not hold — and it would do it in the
@@ -1043,6 +1180,9 @@ impl SeqTracker {
                 // the terminal still holds.
                 b'c' => {
                     self.cursor_style = None;
+                    self.g0 = Charset::Ascii;
+                    self.g1 = Charset::Ascii;
+                    self.shifted_out = false;
                     self.close_link();
                     State::Ground
                 }
@@ -1050,9 +1190,20 @@ impl SeqTracker {
                 _ => State::Ground,
             },
             State::EscIntermediate => match b {
-                0x20..=0x2f => State::EscIntermediate,
+                // A second intermediate makes this something other than a
+                // G0/G1 designation (`ESC % G` selects UTF-8, for one).
+                0x20..=0x2f => {
+                    self.esc_intermediate = 0;
+                    State::EscIntermediate
+                }
                 ESC => State::Esc,
                 CAN | SUB => State::Ground,
+                // The final byte: a designation, if the intermediate was `(`
+                // or `)`, and the end of the sequence either way.
+                0x30..=0x7e => {
+                    self.designate(b);
+                    State::Ground
+                }
                 _ => State::Ground,
             },
             State::Csi => match b {
@@ -1480,6 +1631,14 @@ mod tests {
         assert_eq!(seen[0].2.as_deref(), Some("ab"));
     }
 
+    /// The label is what a reader sees: a link wrapped around line drawing
+    /// records the glyphs, not the bytes that stood for them.
+    #[test]
+    fn a_label_drawn_in_the_graphics_set_records_the_glyphs() {
+        let seen = links(b"\x1b(0\x1b]8;;http://x/\x1b\\lqk\x1b]8;;\x1b\\\x1b(B");
+        assert_eq!(seen[0].2.as_deref(), Some("\u{250c}\u{2500}\u{2510}"));
+    }
+
     #[test]
     fn control_characters_are_not_part_of_a_label() {
         // A newline moves the cursor; it does not spell anything.
@@ -1714,6 +1873,106 @@ mod tests {
         assert!(links.iter().all(|l| l.closed() && l.label().is_some()));
         assert_eq!(links[LINK_HISTORY - 1].uri(), "http://example.invalid/4999");
         assert_eq!(links[LINK_HISTORY - 1].label(), Some("label4999"));
+    }
+
+    /// The glyphs a fed tracker would hand the grid for `text`, byte by
+    /// byte: the translation where one applies, the byte itself otherwise.
+    fn drawn(bytes: &[u8]) -> String {
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut out = String::new();
+        for &b in bytes {
+            match t.graphics_glyph(b) {
+                Some(glyph) => out.push_str(glyph),
+                None if t.state == State::Ground && (0x20..0x7f).contains(&b) => {
+                    out.push(b as char);
+                }
+                None => {}
+            }
+            t.step(b);
+        }
+        out
+    }
+
+    /// The reproduction from the issue, and the shape ncurses emits on an
+    /// xterm terminfo: designate into G0, draw, designate ASCII back.
+    #[test]
+    fn dec_special_graphics_in_g0_translates_the_bytes_it_redefines() {
+        assert_eq!(drawn(b"lqqqk"), "lqqqk", "ASCII until designated");
+        assert_eq!(
+            drawn(b"\x1b(0lqqqk\x1b(B"),
+            "\u{250c}\u{2500}\u{2500}\u{2500}\u{2510}"
+        );
+        // Back to ASCII after the redesignation, and the letters are letters.
+        assert_eq!(drawn(b"\x1b(0lq\x1b(Blq"), "\u{250c}\u{2500}lq");
+        // Bytes below `_` are the same in both sets.
+        assert_eq!(drawn(b"\x1b(0A1 +\x1b(B"), "A1 +");
+        // The designation's own final byte is never a glyph.
+        assert_eq!(drawn(b"\x1b(0\x1b(0"), "");
+    }
+
+    /// The vt100-terminfo shape: designate into G1 once, then SO/SI.
+    #[test]
+    fn shift_out_invokes_g1_and_shift_in_returns_to_g0() {
+        assert_eq!(drawn(b"\x1b)0lqk"), "lqk", "G1 designated but not invoked");
+        assert_eq!(
+            drawn(b"\x1b)0\x0elqk\x0flqk"),
+            "\u{250c}\u{2500}\u{2510}lqk"
+        );
+        // SO with an ASCII G1 changes nothing.
+        assert_eq!(drawn(b"\x0elqk"), "lqk");
+        // And G0 can be the graphics set while G1 is ASCII: SO turns it off.
+        assert_eq!(drawn(b"\x1b(0q\x0eq\x0fq"), "\u{2500}q\u{2500}");
+    }
+
+    #[test]
+    fn a_hard_reset_returns_both_sets_to_ascii() {
+        assert_eq!(drawn(b"\x1b(0\x1b)0\x0eq\x1bcq\x0fq"), "\u{2500}qq");
+    }
+
+    /// Only a byte in ground state is a character: the same bytes inside an
+    /// OSC title, a CSI parameter or a DCS payload must pass untouched.
+    #[test]
+    fn bytes_inside_sequences_are_never_translated() {
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        for &b in b"\x1b(0" {
+            t.step(b);
+        }
+        assert_eq!(t.graphics_glyph(b'q'), Some("\u{2500}"));
+        for &b in b"\x1b]0;lqqk" {
+            assert_eq!(t.graphics_glyph(b), None, "inside an OSC: {b:?}");
+            t.step(b);
+        }
+        t.step(0x07);
+        assert_eq!(&*t.title(), "lqqk", "the title keeps its letters");
+        for &b in b"\x1b[3" {
+            assert_eq!(t.graphics_glyph(b), None, "inside a CSI: {b:?}");
+            t.step(b);
+        }
+        t.step(b'm');
+        assert_eq!(t.graphics_glyph(b'x'), Some("\u{2502}"), "and ground again");
+    }
+
+    /// Other national sets and the alternate ROMs read as ASCII, and a second
+    /// intermediate is not a designation at all.
+    #[test]
+    fn other_designations_read_as_ascii() {
+        for seq in [&b"\x1b(A"[..], b"\x1b(B", b"\x1b(1", b"\x1b(2", b"\x1b(<"] {
+            let mut bytes = seq.to_vec();
+            bytes.push(b'q');
+            assert_eq!(drawn(&bytes), "q", "{seq:?}");
+        }
+        // `ESC ( 0` then `ESC % G` (select UTF-8): the second sequence has
+        // two intermediates and designates nothing, so G0 stays graphics.
+        assert_eq!(drawn(b"\x1b(0\x1b%Gq"), "\u{2500}");
+    }
+
+    #[test]
+    fn a_designation_split_across_feeds_still_applies() {
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        t.feed(b"\x1b(");
+        assert!(t.mid_sequence());
+        t.feed(b"0");
+        assert_eq!(t.graphics_glyph(b'l'), Some("\u{250c}"));
     }
 
     #[test]

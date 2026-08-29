@@ -202,7 +202,13 @@ screen dump** — a CI log alone answers "what was the app showing?".
 - `wait_until(pred)` — re-evaluates `pred` on a fresh snapshot whenever the
   reader delivers bytes (condvar notification), with a 50ms poll cap as a
   missed-wakeup backstop. Fails fast with `Error::Eof` the moment the PTY
-  closes while `pred` is false: more waiting can never succeed.
+  closes while `pred` is false: more waiting can never succeed. When rows
+  have scrolled into history, both errors say how many and point at
+  `full_text` — a content predicate cannot see them and neither can the
+  embedded screen, so text printed and then scrolled away in one burst
+  otherwise reads as text the application never printed. The note is
+  conditional on purpose: the predicate is an arbitrary closure, so the
+  wait cannot know what it was looking for, only what is true.
 - `wait_frame(pred)` — evaluates `pred` **only on complete frames**. The
   sequence tracker recognizes DEC private mode 2026 (`CSI ?2026 h/l`,
   including multi-mode lists); the reader splits each chunk at every
@@ -329,8 +335,8 @@ complete frames.
 
 Rule 1 has one non-obvious failure mode after `resize`. The emulated
 grid resizes immediately — but its *content* is still the old frame,
-merely clipped (or reflowed) to the new geometry, until the application
-handles SIGWINCH and repaints. Both halves of this predicate are true of
+merely clipped or padded to the new geometry (the backend reflows
+nothing), until the application handles SIGWINCH and repaints. Both halves of this predicate are true of
 the **stale** frame:
 
 ```rust
@@ -405,9 +411,15 @@ bound (free, within noise), 639ms on the re-read path.
 
 Two limits are documented rather than papered over: history is bounded, so
 a longer run drops its oldest rows; and resize does not reflow, so rows
-keep the width they were captured at. The alternate screen accumulates no
-history at all (vt100 gives the alternate grid none), which is what makes
-retention safe to default on for full-screen TUIs.
+keep the width they were captured at — a decision, recorded on
+`Terminal::resize`, not an omission. History is text with no record of
+which rows were soft-wrapped, so there is nothing to reflow from, and the
+other honest option, discarding history on resize, would cost a suite that
+exercises a responsive layout everything it had asserted on. Rows captured
+after a resize have the new width, so `full_text()` can hold both
+geometries, and says so where a caller meets it. The alternate screen
+accumulates no history at all (vt100 gives the alternate grid none), which
+is what makes retention safe to default on for full-screen TUIs.
 
 ## 3. Snapshot text format (spec)
 
@@ -458,6 +470,14 @@ Rules:
    `(none)`, so the snapshot itself records that styles were asserted.
    Wide-character continuation cells participate in spans like any other
    cell.
+
+   `Screen` itself compares as **the same observation** (`PartialEq`/`Eq`):
+   cells, cursor, size, and every piece of out-of-band state including the
+   cumulative counters. Two visually identical snapshots either side of a
+   bell are unequal, because they are different moments. The text format is
+   deliberately blind to all of that — so comparing `to_string()` output is
+   style-blind, and `with_styles()` is the rendering to compare for "looks
+   the same".
 
 6. **Out-of-band terminal state is not part of the text format.** The
    window title (tracked by termlens itself from `OSC 0`/`OSC 2` — the
@@ -601,6 +621,16 @@ But it is an implementation detail:
 - Known vt100 limits: no reflow of scrollback on resize, and cluster
   handling for exotic emoji is whatever vt100 does (pinned by the
   unicode-torture snapshot rather than promised).
+- vt100 has no character-set handling at all — `ESC ( 0` reaches
+  `unhandled_escape` and is dropped — so **DEC Special Graphics is
+  translated by termlens itself**. The sequence tracker holds the G0/G1
+  designations and the `SI`/`SO` shift, and the emulator asks it, byte by
+  byte and *before* stepping, whether the byte draws as a glyph; if so the
+  glyph is staged in place of the byte and the staged stream is what both
+  parsers receive. Rewriting before either parser is what keeps the primary
+  and the attribute shadow the same shape, exactly as the SGR rewrite does.
+  Scope is deliberately narrow and stated in the README: G0/G1 and the
+  locking shifts, one set translated, everything else read as ASCII.
 
 ### The attribute shadow
 
@@ -664,7 +694,12 @@ call order is a trap.
 Mouse input is **mode-aware**: the emulator knows which tracking mode and
 encoding the application enabled (`?9/?1000/?1002/?1003`, SGR `?1006`),
 `click`/`scroll` encode to match, and no tracking enabled is a typed
-error — never bytes the application would misparse as keys.
+error — never bytes the application would misparse as keys. Modifiers ride
+on the button code the same way for a button and a wheel notch (`+4` shift,
+`+8` alt, `+16` ctrl), so `MouseButton::Left.ctrl()` and `Scroll::Up.ctrl()`
+are one idiom; the wheel gets a chord type of its own (`ScrollChord`) so
+that a wheel direction cannot be handed to `click_with`, since a notch has
+no release and the two are different gestures on the wire.
 
 A **drag reports one motion per cell crossed**, interpolated on a straight
 line and on both axes for a diagonal. A single report at the destination is

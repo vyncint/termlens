@@ -9,7 +9,91 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Added
+
+- **DEC Special Graphics is translated, so an ncurses border reads as
+  `┌───┐` rather than `lqqqk`.** `ESC ( 0` selects the line-drawing set —
+  it is what `smacs`/`rmacs` are on an xterm terminfo, so it is how every
+  ncurses application and plenty that are not draw their frames — and the
+  bytes used to reach the grid untranslated. That put the crate's own
+  promise in the wrong: a user sees a box, and a test asserting a border was
+  right failed against an application that was correct, while a snapshot
+  that had blessed `lqqqk` went on passing after the border broke. The
+  `vt100` backend drops the designation entirely, so termlens tracks the
+  G0/G1 designations (`ESC ( Ps` / `ESC ) Ps`) and the `SO`/`SI` locking
+  shifts itself and hands both parsers the glyph a byte draws. Scope is
+  stated rather than implied: only the DEC Special Graphics set is
+  translated, other designations read as ASCII, G2/G3 and the single shifts
+  are not modelled, and a hard reset (`RIS`) returns both sets to ASCII.
+
+- **`Terminal::scroll_with`, with `Scroll::ctrl()` / `alt()` / `shift()`
+  and a `ScrollChord` type.** `Ctrl`-wheel is zoom and `Shift`-wheel is
+  horizontal scrolling in a large share of terminal applications, and
+  neither could be sent: `scroll` took a bare direction, so the binding most
+  likely to be wired to the wrong handler was the one with no coverage. The
+  modifier bits ride on the wheel's button code exactly as they do on a
+  click, and `scroll` is now the unmodified case of `scroll_with`, as
+  `click` is of `click_with`. The wheel gets a chord type of its own rather
+  than a wider `MouseChord`, so a wheel direction cannot be handed to
+  `click_with`: a notch has no release, and the type keeps that from being a
+  runtime surprise.
+
+- **`Screen` implements `PartialEq` and `Eq`.** It was the only public
+  value type without them, so "did anything change?" was written by
+  comparing `to_string()` renderings — which is text only, and so passes
+  two screens that differ in a highlight, a colour or a concealed field.
+  Equality means *the same observation*: cells, cursor, size, and every
+  piece of out-of-band state including the cumulative `repaints` and
+  `bells` counters, so two visually identical snapshots either side of a
+  bell compare unequal because they are different moments. The doc says
+  which comparison to reach for when "looks the same" is what is meant.
+
+- **A content wait that fails while rows have scrolled off says so.** The
+  most-copied line in these docs, `wait_until(|s| s.contains(..))`, reads
+  the visible grid, so text the application printed and then scrolled away
+  in the same burst can never satisfy it — and the screen embedded in the
+  timeout does not show the text either, so the failure read as "the app
+  never printed it". `Error::Timeout` and `Error::Eof` from `wait_until`
+  and `wait_frame` now say how many rows have scrolled off the top and
+  point at `Screen::full_text`. The note is conditional, because the wait
+  cannot know what an arbitrary closure was looking for; it is silent when
+  nothing has scrolled. `contains` and `find` document where they stop.
+
+### Changed
+
+- **`resize` is refused once the child has released the terminal**, with
+  the same `Error::Write` that `send` returns, naming the child and its exit
+  status. It used to succeed, and the snapshot then reported a geometry no
+  application ever rendered at with the dead child's last frame clipped
+  underneath it — the one operation on a departed child that silently
+  mutated observable state. The final screen stays readable at the size the
+  child exited with. A size that cannot work is still `Error::Size`, checked
+  first.
+
 ### Fixed
+
+- **`Bitmap::colours` is linear in the pixel count, and its order is
+  defined.** It counted distinct colours with a scan of the distinct set per
+  pixel — O(pixels × colours), 9 ms for 96x96 and extrapolating to seconds
+  for a screenshot, in a test suite, where a wait that takes seven seconds
+  looks like a hang. It now counts in one pass. Ties, which the old
+  implementation happened to order by first appearance through a stable
+  sort, are now ordered that way on purpose and the doc says so: a test
+  asserting on `colours()[0]` has one answer.
+
+- **`resize` documents what happens to history.** Rows already in scrollback
+  keep the width they were captured at and rows captured afterwards have the
+  new width, so `full_text()` after a narrowing resize can hold both
+  geometries. That was true before and said nowhere a caller would meet it;
+  it is now a recorded decision on `resize` and `scrollback_text`, with the
+  alternative — discarding history on resize — rejected in writing rather
+  than by omission.
+
+- **Doc comments on `TerminalBuilder::size`, `spawn` and `resize` name
+  `Error::Size`** for a rejected size, not `Error::Input`. The links
+  resolved, to the wrong variant, so following them gave a `match` arm that
+  never fires — and `Error` is `#[non_exhaustive]`, so a wildcard elsewhere
+  would have swallowed the mistake silently.
 
 - **Colon-form SGR colours now reach cell styles.** `38:2::r:g:b`,
   `38:2:r:g:b`, and indexed foreground and background colours are normalized
@@ -23,6 +107,16 @@ listed under a **Changed** or **Removed** heading.
   checks both endpoints only — the interpolated path cannot leave the
   rectangle they span. Separately, the SGR encoder no longer wraps or
   panics at `u16::MAX`: the 1-based `+ 1` is done in `u32`.
+
+### Security
+
+- **`SECURITY.md` no longer claims the crate has no `unsafe`.** It has two
+  blocks, both FFI and both present since the features they serve landed:
+  `dup(2)`, which opens the responder thread's writer on the PTY master, and
+  `kill(2)` behind `Terminal::signal`. Neither touches memory the child can
+  influence and the parsing path has none, which is the claim that matters;
+  the policy now says exactly that rather than something stronger and
+  false.
 
 ## [0.7.0] - 2026-08-27
 

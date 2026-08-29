@@ -301,9 +301,15 @@ pub enum Graphics {
     Kitty,
 }
 
-/// Scroll-wheel direction for [`Terminal::scroll`].
+/// Scroll-wheel direction for [`Terminal::scroll`] and
+/// [`Terminal::scroll_with`].
+///
+/// Add modifiers the same way [`MouseButton`] does — `Scroll::Up.ctrl()`
+/// for the zoom idiom, `Scroll::Down.shift()` where an application maps
+/// Shift-wheel to horizontal scrolling — and send the result with
+/// [`Terminal::scroll_with`].
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Scroll {
     /// Wheel up (away from the user).
     Up,
@@ -313,6 +319,97 @@ pub enum Scroll {
     Left,
     /// Horizontal wheel right.
     Right,
+}
+
+impl Scroll {
+    /// The xterm button code: the wheel is buttons 64–67.
+    fn code(self) -> u8 {
+        match self {
+            Scroll::Up => 64,
+            Scroll::Down => 65,
+            Scroll::Left => 66,
+            Scroll::Right => 67,
+        }
+    }
+
+    /// This wheel direction with `Ctrl` held — zoom, in most applications
+    /// that bind it.
+    #[must_use]
+    pub fn ctrl(self) -> ScrollChord {
+        ScrollChord::from(self).ctrl()
+    }
+
+    /// This wheel direction with `Alt` held.
+    #[must_use]
+    pub fn alt(self) -> ScrollChord {
+        ScrollChord::from(self).alt()
+    }
+
+    /// This wheel direction with `Shift` held — horizontal scrolling, in
+    /// most applications that bind it.
+    #[must_use]
+    pub fn shift(self) -> ScrollChord {
+        ScrollChord::from(self).shift()
+    }
+}
+
+/// A wheel direction plus modifier keys — `Scroll::Up.ctrl()`.
+///
+/// Mirrors [`MouseChord`] for the wheel; anything taking
+/// `impl Into<ScrollChord>` accepts a bare [`Scroll`] too. A type of its own
+/// rather than a wider `MouseChord`, so that `click_with` cannot be handed a
+/// wheel direction and `scroll_with` cannot be handed a button: the two are
+/// different gestures on the wire (a wheel notch has no release), and the
+/// type keeps that from being a runtime surprise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ScrollChord {
+    direction: Scroll,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+}
+
+impl From<Scroll> for ScrollChord {
+    fn from(direction: Scroll) -> Self {
+        Self {
+            direction,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        }
+    }
+}
+
+impl ScrollChord {
+    /// Add `Ctrl`.
+    #[must_use]
+    pub fn ctrl(mut self) -> Self {
+        self.ctrl = true;
+        self
+    }
+
+    /// Add `Alt`.
+    #[must_use]
+    pub fn alt(mut self) -> Self {
+        self.alt = true;
+        self
+    }
+
+    /// Add `Shift`.
+    #[must_use]
+    pub fn shift(mut self) -> Self {
+        self.shift = true;
+        self
+    }
+
+    /// The xterm button code: the wheel direction, plus 4 for shift, 8 for
+    /// alt and 16 for control — the same arithmetic a click uses.
+    fn code(self) -> u8 {
+        self.direction.code()
+            + 4 * u8::from(self.shift)
+            + 8 * u8::from(self.alt)
+            + 16 * u8::from(self.ctrl)
+    }
 }
 
 /// A mouse button, for [`Terminal::click_with`] and [`Terminal::drag`].
@@ -984,7 +1081,7 @@ impl TerminalBuilder {
     /// Terminal size as columns × rows. Defaults to 80×24.
     ///
     /// Both dimensions must be non-zero and at most **1000**;
-    /// [`spawn`](Self::spawn) rejects anything else with [`Error::Input`]
+    /// [`spawn`](Self::spawn) rejects anything else with [`Error::Size`]
     /// rather than letting the emulator meet a size no terminal can have,
     /// or one it can only serve slowly enough to look broken.
     ///
@@ -1282,9 +1379,9 @@ impl TerminalBuilder {
     /// [`Error::Spawn`] when the configuration cannot produce a runnable
     /// command (empty program name, missing
     /// [`current_dir`](Self::current_dir)) or the program cannot be
-    /// executed; [`Error::Input`] when the configured
-    /// [`size`](Self::size) has a zero dimension; [`Error::Pty`] when the
-    /// PTY cannot be opened.
+    /// executed; [`Error::Size`] when the configured
+    /// [`size`](Self::size) has a zero dimension or one past the
+    /// 1000-per-axis limit; [`Error::Pty`] when the PTY cannot be opened.
     pub fn spawn(self, program: impl AsRef<OsStr>) -> Result<Terminal> {
         let program = program.as_ref();
         let command_desc = std::iter::once(program)
@@ -1592,9 +1689,14 @@ fn encode_hex(bytes: &[u8]) -> String {
 /// visits every intervening column (or row, whichever spans further) exactly
 /// once — which is the property an application acting on the path depends on.
 /// `from` itself is excluded, because the press already reported it.
+///
+/// The arithmetic is `i64`. Every caller has already checked both endpoints
+/// against the grid, and the grid is capped at 1000 per axis, but
+/// `d * steps` at `u16::MAX` overflows an `i32` — and a helper should not
+/// depend on its callers for a bound it can hold itself.
 fn cells_between(from: (u16, u16), to: (u16, u16)) -> Vec<(u16, u16)> {
-    let (from_col, from_row) = (i32::from(from.0), i32::from(from.1));
-    let (to_col, to_row) = (i32::from(to.0), i32::from(to.1));
+    let (from_col, from_row) = (i64::from(from.0), i64::from(from.1));
+    let (to_col, to_row) = (i64::from(to.0), i64::from(to.1));
     let d_col = to_col - from_col;
     let d_row = to_row - from_row;
     let steps = d_col.abs().max(d_row.abs());
@@ -1667,6 +1769,31 @@ fn frames_phrase(n: u64) -> String {
         "1 complete frame".to_owned()
     } else {
         format!("{n} complete frames")
+    }
+}
+
+/// One-line note for a content wait that failed while history exists.
+///
+/// A predicate reads the visible grid, and so does the screen embedded in
+/// the error, so text the application printed and then scrolled away in the
+/// same burst reads as text it never printed — the most-copied line in the
+/// docs, `wait_until(|s| s.contains(..))`, has that failure mode built in.
+/// The note cannot know what the predicate was looking for, since it is an
+/// arbitrary closure, so it says only what is true — rows are off the top,
+/// and where they can be seen — and leaves the inference to the reader.
+/// Silent when nothing has scrolled, so an application that owns its
+/// viewport is never told about history it does not have.
+fn history_note(screen: &Screen) -> String {
+    match screen.scrollback_rows() {
+        0 => String::new(),
+        1 => " — note: 1 row has scrolled off the top and is not on this screen; if \
+              the text you are waiting for is in it, Screen::full_text() spans history"
+            .to_owned(),
+        rows => format!(
+            " — note: {rows} rows have scrolled off the top and are not on this \
+             screen; if the text you are waiting for is among them, \
+             Screen::full_text() spans history"
+        ),
     }
 }
 
@@ -2250,25 +2377,59 @@ impl Terminal {
 
     /// Scroll the wheel one notch at `(col, row)` (0-based).
     ///
+    /// The unmodified case of [`scroll_with`](Self::scroll_with), exactly as
+    /// [`click`](Self::click) is of [`click_with`](Self::click_with).
+    ///
     /// # Errors
     ///
     /// Same conditions as [`click`](Self::click).
     pub fn scroll(&mut self, col: u16, row: u16, direction: Scroll) -> Result<()> {
+        self.scroll_with(direction, col, row)
+    }
+
+    /// Scroll the wheel one notch at `(col, row)`, optionally with
+    /// modifiers.
+    ///
+    /// Takes a [`Scroll`] or a [`ScrollChord`], the same way
+    /// [`click_with`](Self::click_with) takes a [`MouseButton`] or a
+    /// [`MouseChord`] — and in the same argument order, gesture first:
+    ///
+    /// ```no_run
+    /// # use termlens::Scroll;
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// t.scroll_with(Scroll::Up.ctrl(), 10, 4)?;      // zoom in
+    /// t.scroll_with(Scroll::Down.shift(), 10, 4)?;   // horizontal scroll
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// `Ctrl`-wheel is zoom and `Shift`-wheel is horizontal scrolling in a
+    /// large share of terminal applications, and before this neither could
+    /// be sent at all — so the binding most likely to be wired to the wrong
+    /// handler was the one with no coverage. On the wire the modifiers ride
+    /// on the wheel's button code exactly as they do on a click: `+4`
+    /// shift, `+8` alt, `+16` ctrl.
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`click`](Self::click).
+    pub fn scroll_with(
+        &mut self,
+        direction: impl Into<ScrollChord>,
+        col: u16,
+        row: u16,
+    ) -> Result<()> {
         self.ensure_deliverable("a mouse scroll")?;
+        let chord = direction.into();
         let modes = self.input_modes();
         if modes.mouse == MouseMode::None {
             return Err(no_mouse_tracking());
         }
         let (cols, rows) = self.screen().size();
         check_mouse_in_grid(col, row, cols, rows)?;
-        let button = match direction {
-            Scroll::Up => 64,
-            Scroll::Down => 65,
-            Scroll::Left => 66,
-            Scroll::Right => 67,
-        };
         // Wheel events are presses only; there is no release.
-        let bytes = self.mouse_report(&modes, button, col, row, true)?;
+        let bytes = self.mouse_report(&modes, chord.code(), col, row, true)?;
         self.write_input(&bytes, "a mouse scroll")
     }
 
@@ -2485,7 +2646,7 @@ impl Terminal {
             }
             if state.eof {
                 return Some(Err(Error::Eof {
-                    waiting_for: format!("{WHAT}{}", state.query_note()),
+                    waiting_for: format!("{WHAT}{}{}", state.query_note(), history_note(&screen)),
                     screen,
                 }));
             }
@@ -2493,11 +2654,15 @@ impl Terminal {
         });
         match outcome {
             Ok(inner) => inner,
-            Err(Expired) => Err(Error::Timeout {
-                waiting_for: format!("{WHAT}{}", self.shared.lock().query_note()),
-                timeout,
-                screen: self.screen(),
-            }),
+            Err(Expired) => {
+                let screen = self.screen();
+                let note = self.shared.lock().query_note();
+                Err(Error::Timeout {
+                    waiting_for: format!("{WHAT}{note}{}", history_note(&screen)),
+                    timeout,
+                    screen,
+                })
+            }
         }
     }
 
@@ -2619,9 +2784,10 @@ impl Terminal {
                 }
             }
             if state.eof {
+                let screen = state.peek_snapshot();
                 return Some(Err(Error::Eof {
-                    waiting_for: format!("{WHAT}{}", state.query_note()),
-                    screen: state.peek_snapshot(),
+                    waiting_for: format!("{WHAT}{}{}", state.query_note(), history_note(&screen)),
+                    screen,
                 }));
             }
             None
@@ -2642,7 +2808,7 @@ impl Terminal {
                 let (frames, screen, note) = {
                     let mut guard = self.shared.lock();
                     let screen = guard.snapshot();
-                    let note = guard.query_note();
+                    let note = format!("{}{}", guard.query_note(), history_note(&screen));
                     (guard.frames_seen, screen, note)
                 };
                 let waiting_for = if frames > 0 && frames == cursor {
@@ -2941,13 +3107,38 @@ impl Terminal {
     /// advances the frame cursor, so only a frame completed *after* it can
     /// satisfy the wait. `docs/DESIGN.md` §2 shows the trap in full.
     ///
+    /// # History is not reflowed
+    ///
+    /// Rows already in scrollback keep the width they were captured at, and
+    /// rows that scroll off after the resize are captured at the new width,
+    /// so [`full_text`](Screen::full_text) after a narrowing resize can hold
+    /// both geometries. That is a decision rather than an omission. History
+    /// is text, with no record of which rows were soft-wrapped, so there is
+    /// nothing to reflow *from*; and discarding it on resize — the other
+    /// honest option — would make a suite that exercises a responsive layout
+    /// lose everything it had already asserted on. The visible grid is not
+    /// reflowed either: the backend clips or pads each row to the new width,
+    /// which is the stale-frame trap above.
+    ///
+    /// # After the child exits
+    ///
+    /// Refused, the same way [`send`](Self::send) is. Once the child has
+    /// released the terminal there is no process left to receive `SIGWINCH`
+    /// and nothing that could repaint, so a size the snapshot then reported
+    /// would be one no application ever rendered at, over the dead child's
+    /// last frame. The final screen stays readable at the size it exited
+    /// with.
+    ///
     /// # Errors
     ///
-    /// [`Error::Input`] if either dimension is zero (a terminal has at
-    /// least one row and one column), before the PTY or the grid is
-    /// touched; [`Error::Pty`] if the ioctl fails.
+    /// [`Error::Size`] if either dimension is zero (a terminal has at least
+    /// one row and one column) or past the 1000-per-axis limit, before the
+    /// PTY or the grid is touched; [`Error::Write`] when the child has
+    /// released the terminal, carrying the final screen; [`Error::Pty`] if
+    /// the ioctl fails.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         check_size(cols, rows)?;
+        self.ensure_deliverable("a resize")?;
         self.master
             .as_ref()
             .expect("master lives until drop")
@@ -3030,8 +3221,44 @@ impl Drop for Terminal {
 
 #[cfg(test)]
 mod tests {
-    use super::{cells_between, check_mouse_in_grid};
-    use crate::Error;
+    use std::sync::Arc;
+
+    use super::{cells_between, check_mouse_in_grid, history_note, Scroll, ScrollChord};
+    use crate::screen::{Cell, Style, TermState};
+    use crate::{Error, Screen};
+
+    /// The modifier bits ride on the wheel code exactly as on a button.
+    #[test]
+    fn wheel_chords_add_the_xterm_modifier_bits() {
+        assert_eq!(ScrollChord::from(Scroll::Up).code(), 64);
+        assert_eq!(Scroll::Down.shift().code(), 65 + 4);
+        assert_eq!(Scroll::Left.alt().code(), 66 + 8);
+        assert_eq!(Scroll::Up.ctrl().code(), 64 + 16);
+        assert_eq!(Scroll::Right.ctrl().alt().shift().code(), 67 + 28);
+    }
+
+    fn with_history(rows: usize) -> Screen {
+        let state = TermState {
+            scrollback: (0..rows)
+                .map(|n| Arc::from(format!("row {n}")))
+                .collect::<Vec<Arc<str>>>()
+                .into(),
+            ..TermState::default()
+        };
+        let cells = vec![Cell::new("x".into(), Style::default(), false, false)];
+        Screen::from_parts(1, 1, 0, 0, true, cells, state)
+    }
+
+    /// Silent without history, grammatical with it, and it names the remedy.
+    #[test]
+    fn the_history_note_speaks_only_when_rows_have_scrolled() {
+        assert_eq!(history_note(&with_history(0)), "");
+        let one = history_note(&with_history(1));
+        assert!(one.contains("1 row has scrolled off"), "{one}");
+        let many = history_note(&with_history(12));
+        assert!(many.contains("12 rows have scrolled off"), "{many}");
+        assert!(many.contains("Screen::full_text()"), "{many}");
+    }
 
     #[test]
     fn mouse_in_grid_accepts_the_bottom_right_cell() {

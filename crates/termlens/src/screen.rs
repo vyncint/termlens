@@ -263,7 +263,7 @@ impl Link {
 /// what clippy's `result_large_err` will accept. And a `Screen` clone then
 /// bumps one refcount instead of copying every field, which matters because
 /// a clone happens on each wait evaluation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TermState {
     pub(crate) title: Arc<str>,
     pub(crate) alternate_screen: bool,
@@ -379,7 +379,23 @@ impl Cell {
 /// whitespace stripped per line. Trailing blanks are *preserved* inside the
 /// grid itself, so coordinate queries like [`Screen::cell`] and
 /// [`Screen::find`] are unaffected by the trimming.
-#[derive(Clone)]
+///
+/// # Equality
+///
+/// `==` means **the same observation**: every cell, the cursor, the size,
+/// and all the out-of-band state — title, modes, clipboard, links,
+/// graphics, retained history, and the cumulative
+/// [`repaints`](Self::repaints) and [`bells`](Self::bells) counters — agree.
+/// That is deliberately stricter than "looks the same": two visually
+/// identical snapshots taken either side of a bell compare unequal, because
+/// they *are* different moments, and a test asking "did anything change?"
+/// usually wants to hear about the bell. For "looks the same", compare
+/// [`with_styles`](Self::with_styles) renderings, which cover text and
+/// style and nothing invisible. Comparing plain `to_string()` output is the
+/// trap to avoid: [`Display`](fmt::Display) is text only, so two screens
+/// that differ only in a highlight, a colour or a concealed field compare
+/// equal that way.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Screen {
     cols: u16,
     rows: u16,
@@ -756,6 +772,12 @@ impl Screen {
     /// Empty when nothing has scrolled. History is text only — a scrolled
     /// row has no [`Style`] and no [`cell`](Self::cell) addressing, which
     /// is what keeps a snapshot cheap enough to take on every wait.
+    ///
+    /// Each row keeps the width it was captured at. A
+    /// [`resize`](crate::Terminal::resize) does not reflow history, so
+    /// after a narrowing resize the rows captured before it are wider than
+    /// the rows captured after — see there for why that is the chosen
+    /// behaviour.
     #[must_use]
     pub fn scrollback_text(&self) -> String {
         let mut out = String::new();
@@ -794,7 +816,14 @@ impl Screen {
     ///
     /// The **visible screen only** — like every other query on this type.
     /// For content that may already have scrolled off, use
-    /// [`full_text`](Self::full_text).
+    /// [`full_text`](Self::full_text) (history and screen) or
+    /// [`scrollback_text`](Self::scrollback_text) (history alone). This is
+    /// the trap in the most-copied line in these docs: a
+    /// `wait_until(|s| s.contains("done"))` on text the application printed
+    /// and then scrolled away in the same burst can never succeed, and the
+    /// screen embedded in the timeout will not show the text either. The
+    /// timeout therefore says how many rows have scrolled off whenever any
+    /// have.
     ///
     /// # Normalization
     ///
@@ -831,6 +860,11 @@ impl Screen {
 
     /// Locate the first occurrence of `needle` scanning rows top to bottom;
     /// returns the `(row, col)` of its first character.
+    ///
+    /// The **visible screen only**, like [`contains`](Self::contains): a
+    /// needle that has scrolled into history is not found here, however
+    /// recently it left. [`full_text`](Self::full_text) spans history and
+    /// screen, [`scrollback_text`](Self::scrollback_text) the history alone.
     ///
     /// Needles containing `\n` match across consecutive rows with exactly
     /// the semantics of [`Screen::contains`] (trailing whitespace stripped
@@ -1540,6 +1574,53 @@ mod tests {
         assert!(
             rendered.ends_with("styles:\n0: 0-2 bg=#1e1e2e"),
             "{rendered}"
+        );
+    }
+
+    /// `==` is the same observation, counters included — stricter than the
+    /// text rendering, which is the trap the doc names.
+    #[test]
+    fn equality_is_the_same_observation_not_the_same_rendering() {
+        let a = screen(10, 2, &["hello"]);
+        assert_eq!(a, a.clone(), "a clone observes the same instant");
+        assert_eq!(a, screen(10, 2, &["hello"]), "built alike, equal");
+        assert_ne!(a, screen(10, 2, &["hullo"]));
+
+        // A bell changes no cell: the renderings agree, the screens do not.
+        let cells = vec![Cell::new("x".into(), Style::default(), false, false)];
+        let quiet = Screen::from_parts(1, 1, 0, 0, true, cells.clone(), TermState::default());
+        let rung = Screen::from_parts(
+            1,
+            1,
+            0,
+            0,
+            true,
+            cells,
+            TermState {
+                bells: 1,
+                ..TermState::default()
+            },
+        );
+        assert_eq!(quiet.to_string(), rung.to_string());
+        assert_ne!(quiet, rung);
+
+        // A style is invisible to `to_string()` and visible to `==` — and to
+        // the styled rendering, which is the comparison the doc points at.
+        let bold = vec![Cell::new(
+            "x".into(),
+            Style {
+                bold: true,
+                ..Style::default()
+            },
+            false,
+            false,
+        )];
+        let styled = Screen::from_parts(1, 1, 0, 0, true, bold, TermState::default());
+        assert_eq!(quiet.to_string(), styled.to_string());
+        assert_ne!(quiet, styled);
+        assert_ne!(
+            quiet.with_styles().to_string(),
+            styled.with_styles().to_string()
         );
     }
 

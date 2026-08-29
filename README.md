@@ -96,8 +96,12 @@ colour, `DECRQM` mode probes, and terminfo capabilities via `XTGETTCAP` —
 so capability-probing apps run instead of hanging, and anything left
 unanswered is named inside the next timeout error. Every answer is
 truthful or absent: nothing is claimed that the emulator cannot render.
+The grid holds what a user would *see*: DEC Special Graphics — the
+`ESC ( 0` line-drawing set every ncurses border is made of — is translated,
+so a frame reads as `┌───┐` rather than `lqqqk`.
 
-Input is **mode-aware**: mouse clicks and scrolls, pastes, modifier
+Input is **mode-aware**: mouse clicks and scrolls (with modifiers —
+`Ctrl`-wheel zoom is `scroll_with(Scroll::Up.ctrl(), ..)`), pastes, modifier
 chords, and cursor keys are encoded exactly as the application
 configured its terminal (SGR mouse, bracketed paste, DECCKM) — because
 the emulator knows which modes the app enabled. A `drag` reports one
@@ -148,7 +152,9 @@ assert_eq!(image.decode()?.pixel(9, 9), Some([0x39, 0xd3, 0x53, 0xff]));
 hands finished output *back* to the terminal — a pager, a log view, a TUI
 that commits completed blocks into native scrollback and keeps a small
 live region — stays testable. `full_text()` spans history and screen, so
-an assertion need not know which region a block currently sits in.
+an assertion need not know which region a block currently sits in — and
+`contains`/`find` read the visible grid alone, so when a wait fails while
+rows have scrolled off, the error says how many and points at `full_text`.
 
 Screens are immutable snapshots taken under the same
 lock the reader writes through, so every assertion sees a consistent
@@ -211,12 +217,19 @@ design. termlens's position:
   [stress workflow](.github/workflows/stress.yml) on Linux and macOS —
   wait/timing changes don't merge without surviving it.
 
-## Known limitations (v0.7)
+## Known limitations (v0.8)
 
 - Scrollback is **bounded** (1000 rows by default), **text only** — a
   scrolled-off row has no styles and no cell addressing — and is **not
-  reflowed** by a `resize`. The visible grid stays the fully-featured
-  surface.
+  reflowed** by a `resize`: rows keep the width they were captured at, by
+  decision (`Terminal::resize` says why). The visible grid stays the
+  fully-featured surface.
+- **Character sets: G0 and G1 only, and one set translated.** `ESC ( Ps` /
+  `ESC ) Ps` designations and the `SO`/`SI` locking shifts are modelled, and
+  the DEC Special Graphics set (`0`) is translated; every other designation —
+  the UK set, the alternate ROMs — reads as ASCII, and G2/G3 with their
+  single shifts are not modelled. `DECSC`/`DECRC` do not save or restore the
+  charset state.
 - `wait_frame` needs the application to bracket its repaints in DEC 2026
   synchronized updates, and only the last 8 completed frames are retained;
   everything else waits with `wait_until`, under the three rules in

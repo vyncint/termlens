@@ -436,17 +436,36 @@ impl Bitmap {
     ///
     /// The shape of most assertions about a chart: how many greens, and is
     /// the brightest one the one the palette names.
+    ///
+    /// **Ties are broken by first appearance**, in raster order (left to
+    /// right, top to bottom), so the result is fully determined by the image
+    /// and `colours()[0]` has one answer — a test harness must not hand back
+    /// a different order on a different run. Linear in the pixel count: a
+    /// 512x512 screenshot costs milliseconds, not the seconds a per-pixel
+    /// scan of the distinct set used to.
     #[must_use]
     pub fn colours(&self) -> Vec<([u8; 4], u32)> {
-        let mut seen: Vec<([u8; 4], u32)> = Vec::new();
-        for pixel in &self.pixels {
-            match seen.iter_mut().find(|(colour, _)| colour == pixel) {
-                Some((_, count)) => *count += 1,
-                None => seen.push((*pixel, 1)),
-            }
+        use std::collections::HashMap;
+
+        // One pass, remembering where each colour first appeared so that
+        // equal counts have an order the caller can rely on.
+        let mut counts: HashMap<[u8; 4], (u32, usize)> = HashMap::new();
+        for (index, pixel) in self.pixels.iter().enumerate() {
+            counts
+                .entry(*pixel)
+                .and_modify(|(count, _)| *count += 1)
+                .or_insert((1, index));
         }
-        seen.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
-        seen
+        let mut seen: Vec<([u8; 4], u32, usize)> = counts
+            .into_iter()
+            .map(|(colour, (count, first))| (colour, count, first))
+            .collect();
+        // Count descending, then first appearance: a total order, so the
+        // sort's own stability is not what the determinism rests on.
+        seen.sort_unstable_by_key(|&(_, count, first)| (std::cmp::Reverse(count), first));
+        seen.into_iter()
+            .map(|(colour, count, _)| (colour, count))
+            .collect()
     }
 }
 
@@ -1361,6 +1380,64 @@ mod tests {
         let colours = payload.decode().expect("decodes").colours();
         assert_eq!(colours[0], ([1, 2, 3, 255], 3));
         assert_eq!(colours[1], ([9, 9, 9, 255], 1));
+    }
+
+    /// Equal counts come out in the order the colours first appear, so the
+    /// answer is a property of the image rather than of a hash seed. Both
+    /// orders, so a test that happened to agree by luck is ruled out.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn colours_break_ties_by_first_appearance() {
+        let a = [1, 1, 1, 255];
+        let b = [2, 2, 2, 255];
+        let c = [3, 3, 3, 255];
+        let image = |pixels: &[[u8; 4]]| {
+            let raw: Vec<u8> = pixels.iter().flatten().copied().collect();
+            let data = base64(&raw);
+            kitty_payload(
+                format!("a=T,f=32,s={},v=1", pixels.len()).as_bytes(),
+                data.as_bytes(),
+            )
+            .decode()
+            .expect("decodes")
+            .colours()
+        };
+        assert_eq!(image(&[a, b, b, a, c]), vec![(a, 2), (b, 2), (c, 1)]);
+        assert_eq!(image(&[b, a, a, b, c]), vec![(b, 2), (a, 2), (c, 1)]);
+        // And the count still wins over appearance.
+        assert_eq!(image(&[a, b, b]), vec![(b, 2), (a, 1)]);
+    }
+
+    /// A 512x512 image with every pixel a distinct colour — the shape of a
+    /// photograph or a screenshot, and the one the issue extrapolated to
+    /// seven seconds under the old per-pixel scan. The time is not asserted
+    /// (a timing assertion is a flake waiting to happen); what is asserted
+    /// is that the answer is complete and in raster order, which the
+    /// quadratic version also got right, only slowly.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn colours_on_a_photograph_sized_image_completes() {
+        let side = 512u32;
+        let pixels = (side * side) as usize;
+        let mut raw = Vec::with_capacity(pixels * 4);
+        for i in 0..pixels {
+            // i < 2^24, so the RGB triple is unique per pixel.
+            raw.extend_from_slice(&[(i >> 16) as u8, (i >> 8) as u8, i as u8, 0xff]);
+        }
+        let data = base64(&raw);
+        let bitmap = kitty_payload(
+            format!("a=T,f=32,s={side},v={side}").as_bytes(),
+            data.as_bytes(),
+        )
+        .decode()
+        .expect("decodes");
+        let colours = bitmap.colours();
+        assert_eq!(colours.len(), pixels, "every pixel is its own colour");
+        assert!(colours.iter().all(|&(_, count)| count == 1));
+        // All tied at one, so the order is raster order.
+        assert_eq!(colours[0].0, [0, 0, 0, 0xff]);
+        assert_eq!(colours[1].0, [0, 0, 1, 0xff]);
+        assert_eq!(colours[pixels - 1].0, [3, 0xff, 0xff, 0xff]);
     }
 
     #[cfg(feature = "decode")]

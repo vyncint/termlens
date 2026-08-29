@@ -15,8 +15,31 @@ change from your editor into `main`.
 ```sh
 git clone https://github.com/vyncint/termlens
 cd termlens
-cargo test --workspace        # full suite: unit + integration + doctests
+cargo test --workspace --all-features   # the whole suite: unit + integration + doctests, `decode` included
 ```
+
+`--all-features` matters: `decode` is off by default, and without it sixteen
+tests never build. That is the `test` job. CI gates on more than the test
+job, and every gate is reproducible locally — run these before pushing and
+nothing in CI should surprise you:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+cargo clippy --workspace --all-targets --no-default-features --features decode -- -D warnings
+cargo test --workspace --no-default-features
+cargo test --workspace --no-default-features --features decode
+RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features
+cargo deny check                          # cargo install cargo-deny
+cargo +1.85 check --workspace --locked    # the MSRV: `rust-version` in Cargo.toml
+```
+
+The list is written out here rather than left as a pointer because a first
+PR that fails on `cargo fmt` after following the setup to the letter is an
+avoidable bad first experience. If it ever disagrees with
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml), the workflow is the
+source of truth and this list is the bug.
 
 The integration tests spawn real PTYs and small fixture apps from
 `fixtures/`; there is nothing to install beyond a Rust toolchain

@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use termlens::{Key, Terminal};
+use termlens::{Error, Key, Terminal};
 
 /// `sh` printing `count` numbered lines on a `rows`-row screen, then
 /// parking so the terminal stays alive.
@@ -133,6 +133,57 @@ fn history_is_observable_from_a_predicate() -> termlens::Result<()> {
     t.wait_until(|s| s.scrollback_text().contains("committed-block"))?;
     assert!(!t.screen().contains("committed-block"));
 
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// The most-copied line in the docs, on text that scrolled away in the same
+/// burst: the wait can never succeed, and the screen in the error does not
+/// show the text either — so it used to read as "the app never printed it".
+/// The error now says that rows are off the top, and where they can be seen.
+#[test]
+fn a_wait_on_scrolled_off_text_names_the_history_in_its_error() -> termlens::Result<()> {
+    let mut t = numbered(3, 10, 100)?;
+    t.wait_until(|s| s.contains("READY"))?;
+    let scrolled = t.screen().scrollback_rows();
+    assert!(scrolled > 1, "the setup must have scrolled: {}", t.screen());
+
+    // "line-1" is in history; `contains` reads the grid alone.
+    let err = t
+        .wait_until_for(|s| s.contains("line-1\n"), Duration::from_millis(300))
+        .expect_err("the text is in history, not on the grid");
+    assert!(matches!(err, Error::Timeout { .. }), "got: {err}");
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&format!("{scrolled} rows have scrolled off the top")),
+        "{msg}"
+    );
+    assert!(msg.contains("full_text"), "the remedy is named: {msg}");
+    // And the claim checks out against the very screen the error carries.
+    assert!(err.screen().unwrap().full_text().contains("line-1\n"));
+
+    // The EOF path carries the same note.
+    t.send(Key::Enter)?;
+    let err = t
+        .wait_until(|s| s.contains("line-1\n"))
+        .expect_err("the child has exited");
+    assert!(matches!(err, Error::Eof { .. }), "got: {err}");
+    assert!(err.to_string().contains("scrolled off the top"), "{err}");
+    Ok(())
+}
+
+/// No history, no note: an application that owns its viewport is never told
+/// about rows it does not have.
+#[test]
+fn a_wait_with_nothing_scrolled_carries_no_history_note() -> termlens::Result<()> {
+    let mut t = numbered(12, 3, 100)?;
+    t.wait_until(|s| s.contains("READY"))?;
+    assert_eq!(t.screen().scrollback_rows(), 0);
+    let err = t
+        .wait_until_for(|s| s.contains("absent"), Duration::from_millis(200))
+        .expect_err("never printed");
+    assert!(!err.to_string().contains("scrolled off"), "{err}");
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())

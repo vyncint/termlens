@@ -75,7 +75,7 @@ pty* because device numbers recycle instantly — termlens serializes pty
 lifecycle edges behind a process-wide lock so your parallel tests don't
 hit it.
 
-Honest limitations (v0.7): Unix only for now (portable-pty supports
+Honest limitations (v0.8): Unix only for now (portable-pty supports
 ConPTY, so Windows is planned); scrollback is retained but bounded, text
 only, and not reflowed on resize; `wait_frame` needs the app to opt into
 DEC 2026; inline graphics are captured and decodable but still never
