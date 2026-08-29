@@ -447,6 +447,28 @@ fn a_resize_stops_offering_frames_drawn_at_the_old_size() -> termlens::Result<()
     Ok(())
 }
 
+/// The repaint that answers a resize is offered to `wait_frame`, however fast
+/// the application is, and it is drawn into the resized grid. The frame
+/// cursor used to be taken *after* the SIGWINCH went out, so an acknowledging
+/// repaint that completed in that gap was counted as a pre-resize frame and
+/// never offered — found by the stress workflow at 16 threads, once in 25
+/// runs. The grid is now resized and the cursor taken before the signal,
+/// under one lock, so there is no gap for a frame to fall into.
+#[test]
+fn the_repaint_answering_a_resize_is_offered_to_wait_frame() -> termlens::Result<()> {
+    let mut t = spawn_form_echo()?;
+    t.wait_frame(|s| s.contains("form-echo ready"))?;
+    for (cols, rows) in [(60u16, 12u16), (40, 8), (100, 30)] {
+        t.resize(cols, rows)?;
+        let frame = t.wait_frame(|s| s.contains(&format!("last: resize:{cols}x{rows}")))?;
+        // Drawn into the resized grid, not clipped out of the old one.
+        assert_eq!(frame.size(), (cols, rows), "{frame}");
+    }
+    t.send(Key::Esc)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// `screen()` is the live grid even for an application that brackets
 /// every repaint — the tear is real, documented, and wanted for
 /// diagnosis. `wait_frame`'s return value is the frame-consistent read.

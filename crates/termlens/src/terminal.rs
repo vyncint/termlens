@@ -3156,25 +3156,42 @@ impl Terminal {
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         check_size(cols, rows)?;
         self.ensure_deliverable("a resize")?;
-        self.master
-            .as_ref()
-            .expect("master lives until drop")
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: pixel_span(cols, self.cell_size.map(|(w, _)| w)),
-                pixel_height: pixel_span(rows, self.cell_size.map(|(_, h)| h)),
-            })
-            .map_err(|e| Error::Pty(format!("resize failed: {e}")))?;
-        // A frame drawn at the old size cannot be the repaint that answers
-        // this resize, so it stops being offered — which is what makes the
-        // advice in the stale-frame trap above actually hold for
-        // `wait_frame`.
-        self.frame_cursor = self.shared.mutate(|state| {
+        let size = PtySize {
+            rows,
+            cols,
+            pixel_width: pixel_span(cols, self.cell_size.map(|(w, _)| w)),
+            pixel_height: pixel_span(rows, self.cell_size.map(|(_, h)| h)),
+        };
+        let master = self.master.as_ref().expect("master lives until drop");
+        // Grid first, then the kernel, and both under the state lock. The
+        // order carries two guarantees. A frame the application draws in
+        // answer to the SIGWINCH must land in a grid that already has the
+        // new size — otherwise it is rendered into the old geometry, clipped
+        // afterwards, and offered as the repaint that answered the resize.
+        // And the frame cursor must be taken before the signal can reach the
+        // application: with the ioctl first, a fast application's
+        // acknowledging repaint could complete, and be counted, in the gap
+        // before the cursor was read — so the one frame `wait_frame` had been
+        // promised sat behind the cursor and the wait timed out, while the
+        // live screen showed the repaint. The stress workflow found exactly
+        // that at 16 threads, once in 25 runs. Holding the lock across the
+        // ioctl closes the gap: no byte is processed between the two steps.
+        //
+        // The cursor is what makes the advice in the stale-frame trap above
+        // hold for `wait_frame`: a frame drawn at the old size cannot be the
+        // repaint that answers this resize, so it stops being offered.
+        let cursor = self.shared.mutate(|state| {
+            let (old_cols, old_rows) = state.peek_snapshot().size();
             state.emu.set_size(rows, cols);
+            if let Err(e) = master.resize(size) {
+                // The grid and the kernel must not disagree: undo the grid.
+                state.emu.set_size(old_rows, old_cols);
+                return Err(Error::Pty(format!("resize failed: {e}")));
+            }
             state.touch();
-            state.frames_seen
-        });
+            Ok(state.frames_seen)
+        })?;
+        self.frame_cursor = cursor;
         Ok(())
     }
 }

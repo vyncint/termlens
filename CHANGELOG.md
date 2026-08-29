@@ -81,6 +81,17 @@ listed under a **Changed** or **Removed** heading.
   sort, are now ordered that way on purpose and the doc says so: a test
   asserting on `colours()[0]` has one answer.
 
+- **`wait_frame` after `resize` could miss the repaint that answered it.**
+  `resize` sent the `SIGWINCH` first and took the frame cursor afterwards, so
+  a fast application's acknowledging repaint could complete in that gap, be
+  counted as a frame from *before* the resize, and never be offered — the
+  wait then timed out reporting that the application had not repainted,
+  while the live screen showed that it had. Found by the stress workflow at
+  16 threads, once in 25 runs. The grid is now resized and the cursor taken
+  before the signal goes out, under one lock, so a frame drawn in answer to
+  the resize is always newer than the cursor and always lands in a grid of
+  the new size.
+
 - **`resize` documents the resize-then-type trap.** A keystroke that reaches
   a crossterm application in the same instant as the `SIGWINCH` can be lost:
   its event reader returns the `Resize` as soon as the poll reports the
