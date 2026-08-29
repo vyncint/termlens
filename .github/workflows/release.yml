@@ -111,6 +111,16 @@ jobs:
             --notes-file "$RUNNER_TEMP/notes.md" \
             --verify-tag
 
+
+  # Releases created with GITHUB_TOKEN do not emit a release event that can
+  # start another workflow. Call the consumer check directly after publishing
+  # the GitHub release so every tag verifies what crates.io serves.
+  install:
+    name: verify published crate
+    needs: github-release
+    uses: ./.github/workflows/install.yml
+    with:
+      version: ${{ github.ref_name }}
   # Tell the repository that tests this tool against a real subject that a
   # new version exists, so the deep run happens now rather than at its next
   # scheduled tick.

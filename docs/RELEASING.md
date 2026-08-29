@@ -48,7 +48,9 @@ Pushing the tag runs `release.yml`, which:
 4. `cargo publish -p termlens` via Trusted Publishing (OIDC) — the
    repository stores no tokens,
 5. creates the GitHub Release with notes extracted from the CHANGELOG
-   section for that version (`.github/scripts/extract-changelog.sh`).
+   section for that version (`.github/scripts/extract-changelog.sh`), and
+6. runs the registry-consumer check against that published version on Linux
+   and macOS.
 
 ## If something fails mid-release
 

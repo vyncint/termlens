@@ -25,6 +25,12 @@ name: install
 on:
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      version:
+        description: "Version to verify (default: the release tag or newest published)"
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       version:
@@ -58,7 +64,11 @@ jobs:
         run: |
           api="https://crates.io/api/v1/crates/termlens"
           agent="termlens-install-check (github actions)"
-          version="${WANTED:-${TAG#v}}"
+          # A reusable caller has the release tag available, while a manual
+          # dispatch accepts either a tag or the crate version. Normalize both
+          # before querying crates.io.
+          version="${WANTED#v}"
+          version="${version:-${TAG#v}}"
           if [ -z "$version" ]; then
             version=$(curl -sSf -H "User-Agent: $agent" "$api" | jq -r .crate.max_stable_version)
           fi
