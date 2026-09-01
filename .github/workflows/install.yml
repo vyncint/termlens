@@ -36,8 +36,9 @@ on:
       version:
         description: "Version to verify (default: the newest published)"
         required: false
-  schedule:
-    - cron: "37 7 * * 1" # Mondays, after the stress run
+  # Scheduled runs are disabled. Uncomment the block below to restore them.
+  # schedule:
+  #   - cron: "37 7 * * 1" # Mondays, after the stress run
 
 permissions:
   contents: read
