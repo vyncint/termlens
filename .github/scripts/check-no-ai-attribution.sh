@@ -15,6 +15,17 @@
 #         actions@github.com emails
 #       - names containing claude/copilot/devin/aider/codex/gemini
 #
+# One carve-out, and only from the identity rules: a named dependency bot.
+# The policy exists so that a human is not displaced as the author of record,
+# and a dependency bump has no human author to displace — Dependabot is not an
+# assistant that helped somebody write something, it is the whole author. The
+# message rules still apply to its commits in full, so a bot cannot carry an
+# AI co-author trailer or a "Generated with" watermark in past this.
+#
+# It is a hygiene guard, not a security boundary: anyone can set an author
+# email locally. What stops a forged one is that it still has to survive
+# review and a merge, which is where attribution is actually judged.
+#
 # Usage:
 #   .github/scripts/check-no-ai-attribution.sh <base>..<head>
 #
@@ -24,6 +35,12 @@
 #   git commit --allow-empty -s -m "test: bad commit" \
 #     -m "Co-Authored-By: Example Bot <example[bot]@users.noreply.github.com>"
 #   .github/scripts/check-no-ai-attribution.sh main..HEAD  # must fail once
+#   # and the dependency-bot carve-out, which must pass on identity but still
+#   # fail on a watermark in the message:
+#   git -c user.name='dependabot[bot]' \
+#       -c user.email='49699333+dependabot[bot]@users.noreply.github.com' \
+#       commit --allow-empty -m "build(deps): bump x" -m "Signed-off-by: dependabot[bot] <support@github.com>"
+#   .github/scripts/check-no-ai-attribution.sh main..HEAD  # still just the one failure
 #   git checkout - && git branch -D scratch/attribution
 set -euo pipefail
 
@@ -41,6 +58,13 @@ msg_patterns=(
 # Identity patterns (ERE). Emails are lowercased before matching.
 email_pattern='(\[bot\]@users\.noreply\.github\.com$|@noreply\.anthropic\.com$|^actions@github\.com$)'
 name_pattern='\b(claude|copilot|devin|aider|codex|gemini)\b'
+
+# Automation identities exempt from the *identity* rules above (never from the
+# message rules). Anchored at both ends and matched against the whole
+# lowercased address: a substring rule here would be a hole a crafted local
+# part could walk through. Matched by name rather than by GitHub's numeric user
+# id, so the exemption survives an id change; add another bot by naming it.
+trusted_bot_emails='^([0-9]+\+)?(dependabot|dependabot-preview)\[bot\]@users\.noreply\.github\.com$'
 
 fail=0
 count=0
@@ -66,6 +90,11 @@ while IFS= read -r sha; do
     else
       name="$(git log -1 --format='%cn' "$sha")"
       email="$(git log -1 --format='%ce' "$sha")"
+    fi
+    # Skip the identity rules for a named dependency bot in this role. The
+    # message rules ran above and applied to this commit like any other.
+    if printf '%s\n' "$email" | tr '[:upper:]' '[:lower:]' | grep -Eq "$trusted_bot_emails"; then
+      continue
     fi
     if printf '%s\n' "$email" | tr '[:upper:]' '[:lower:]' | grep -Eq "$email_pattern"; then
       echo "::error::Commit ${sha} ${role} email '${email}' is a bot/vendor identity."

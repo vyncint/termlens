@@ -131,9 +131,10 @@ agents on the layout, the commands, and the house style.
 
 **AI attribution is not welcome.** No `Co-Authored-By` trailer naming an
 assistant, model or vendor; no "Generated with …" footer; no robot emoji; no
-bot identity as author or committer. Whoever opens the pull request is the
-author of record, takes responsibility under the DCO, and the history should
-say so — a tool cannot certify the DCO, which is the whole point of it.
+bot identity as author or committer, save the one carve-out below. Whoever
+opens the pull request is the author of record, takes responsibility under the
+DCO, and the history should say so — a tool cannot certify the DCO, which is
+the whole point of it.
 
 This is enforced, not requested: `commit-policy.yml` runs
 [`check-no-ai-attribution.sh`](.github/scripts/check-no-ai-attribution.sh) and
@@ -156,6 +157,15 @@ git push --force-with-lease
 `.claude/settings.json` turns co-author trailers off for agents that read
 repository settings. That is a courtesy; the check in CI is the boundary.
 Contributions authored *by* an autonomous account are not accepted.
+
+**One carve-out: a named dependency bot.** Dependabot is exempt from the
+*identity* half of the check and from nothing else. The rule exists so that a
+human is not displaced as the author of record, and a version bump has no
+human to displace — it is not somebody's work with the credit misassigned. The
+message rules still apply in full, so a bot cannot carry an AI co-author
+trailer, a "Generated with" footer or a robot emoji past the check either.
+Adding another bot means naming it in `check-no-ai-attribution.sh`: the
+allowlist is a list on purpose, so that widening it is a visible decision.
 
 ## 7. PR flow
 

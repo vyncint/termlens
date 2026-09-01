@@ -68,7 +68,8 @@ and says so in its CONTRIBUTING. Use whatever helps.
 
 - no `Co-Authored-By:` trailer naming an assistant, a model, or a vendor,
 - no "Generated with …" footer, no robot emoji,
-- no bot account as author or committer.
+- no bot account as author or committer — save a named dependency bot, which
+  is exempt from the identity rule only and still checked on its message.
 
 The human who opens the pull request is the author of record and takes
 responsibility for the change under the DCO. That is what the sign-off
