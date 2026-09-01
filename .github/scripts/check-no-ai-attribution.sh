@@ -15,7 +15,8 @@
 #         actions@github.com emails
 #       - names containing claude/copilot/devin/aider/codex/gemini
 #
-# One carve-out, and only from the identity rules: a named dependency bot.
+# One carve-out: a named dependency bot, from the identity rules and from a
+# co-author trailer naming itself (which GitHub writes into a squash message).
 # The policy exists so that a human is not displaced as the author of record,
 # and a dependency bump has no human author to displace — Dependabot is not an
 # assistant that helped somebody write something, it is the whole author. The
@@ -66,19 +67,31 @@ name_pattern='\b(claude|copilot|devin|aider|codex|gemini)\b'
 # id, so the exemption survives an id change; add another bot by naming it.
 trusted_bot_emails='^([0-9]+\+)?(dependabot|dependabot-preview)\[bot\]@users\.noreply\.github\.com$'
 
+# The same addresses as they appear inside a trailer. GitHub composes a
+# squash-merge message itself and appends a Co-authored-by naming the pull
+# request's author — so a Dependabot pull request that passed this check
+# lands on main carrying `Co-authored-by: dependabot[bot] <...>`, and `bot`
+# is in the vendor list above. The very commit the carve-out exists to permit
+# would fail, on main, after passing on the branch, and main cannot be
+# repaired. Such a trailer is dropped before the message rules are matched;
+# every other co-author trailer is matched exactly as before.
+trusted_bot_coauthor='^co-authored-by:[[:space:]]*[^<]*<([0-9]+\+)?(dependabot|dependabot-preview)\[bot\]@users\.noreply\.github\.com>[[:space:]]*$'
+
 fail=0
 count=0
 while IFS= read -r sha; do
   count=$((count + 1))
   msg="$(git log -1 --format='%B' "$sha")"
+  # Everything except a co-author trailer naming an allowlisted bot.
+  msg_scan="$(printf '%s\n' "$msg" | grep -viE "$trusted_bot_coauthor" || true)"
 
   for pat in "${msg_patterns[@]}"; do
-    if printf '%s\n' "$msg" | grep -Eiq "$pat"; then
+    if printf '%s\n' "$msg_scan" | grep -Eiq "$pat"; then
       echo "::error::Commit ${sha} message matches banned pattern: ${pat}"
       fail=1
     fi
   done
-  if printf '%s\n' "$msg" | grep -Fq '🤖'; then
+  if printf '%s\n' "$msg_scan" | grep -Fq '🤖'; then
     echo "::error::Commit ${sha} message contains a robot-emoji watermark."
     fail=1
   fi
