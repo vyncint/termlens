@@ -8,7 +8,15 @@
 //!
 //! Waits for the program to exit (up to the timeout) or, if it keeps
 //! running, for 300ms of output silence — then prints the screen.
+//!
+//! Exit code 0 means inspect ran and printed a screen; the trailer under
+//! the screen says what the program did — its exit status, or that it was
+//! still running at the deadline. Exit code 1 means inspect itself could
+//! not run: bad arguments, or a program that could not be spawned. A
+//! viewer, not a gate: the program's own status is reported, not
+//! propagated.
 
+use std::io::{self, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -57,17 +65,37 @@ fn main() -> ExitCode {
         }
     };
 
+    let mut out = String::new();
     match t.wait_exit() {
         Ok(status) => {
-            println!("{}", t.screen());
-            println!("--- exited: {status} ---");
+            out.push_str(&t.screen().to_string());
+            out.push_str(&format!("\n--- exited: {status} ---\n"));
         }
-        Err(_) => {
-            // Still running: settle on a quiet screen instead.
+        Err(termlens::Error::Timeout { .. }) => {
+            // Still running at the deadline: settle on a quiet screen instead.
             let _ = t.wait_idle(Duration::from_millis(300));
-            println!("{}", t.screen());
-            println!("--- still running (killed on exit) ---");
+            out.push_str(&t.screen().to_string());
+            out.push_str("\n--- still running at the deadline (killed on exit) ---\n");
         }
+        Err(e) => {
+            // Not "still running": the OS wait itself failed, and saying so
+            // is the difference between a slow program and a broken harness.
+            out.push_str(&t.screen().to_string());
+            out.push_str(&format!("\n--- waiting for the program failed: {e} ---\n"));
+        }
+    }
+    // One write, and a reader that closed early (`inspect … | head`) is a
+    // clean exit rather than a panic on a broken pipe (#223).
+    let mut stdout = io::stdout().lock();
+    if let Err(e) = stdout
+        .write_all(out.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        if e.kind() == io::ErrorKind::BrokenPipe {
+            return ExitCode::SUCCESS;
+        }
+        eprintln!("inspect: writing the screen failed: {e}");
+        return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
 }

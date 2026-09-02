@@ -64,3 +64,34 @@ fn inspect_runs_and_reports_cli_failures() {
         String::from_utf8_lossy(&missing_program.stderr)
     );
 }
+
+#[test]
+fn inspect_survives_a_reader_that_closes_early() {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    // 200x1000 cells is far more than a pipe holds, so once the read end is
+    // closed the write gets EPIPE — which println! turned into a panic and
+    // exit 101 (#223). A viewer piped into `head` must exit cleanly.
+    let bin = inspect_bin();
+    let mut child = Command::new(&bin)
+        .args(["--size", "200x1000", "sh", "-c", "yes | head -n 2000"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the inspect example");
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let mut first = [0u8; 16];
+    let _ = stdout.read(&mut first);
+    drop(stdout);
+    let status = child.wait().expect("inspect did not exit");
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("stderr is piped")
+        .read_to_string(&mut stderr)
+        .expect("stderr is readable");
+    assert!(!stderr.contains("panicked"), "inspect panicked:\n{stderr}");
+    assert_eq!(status.code(), Some(0), "stderr:\n{stderr}");
+}
