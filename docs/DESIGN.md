@@ -327,9 +327,15 @@ the PTY. Three rules make such waits deterministic:
    `wait_idle` first. That is a heuristic (silence ≠ proof of a finished
    render — see above), and it is the honest tool for the job.
 
-Applications that bracket repaints in DEC 2026 synchronized updates need
-none of this discipline: `wait_frame` evaluates predicates only on
-complete frames.
+4. **`wait_frame` removes the torn-frame race, not rule 1.** An
+   application that brackets its repaints in DEC 2026 synchronized updates
+   lets `wait_frame` evaluate predicates only on complete frames, so half a
+   row can never match — but a predicate true of frames you did not mean
+   returns one of them. `send(key)` then `wait_frame(|s| s.contains("MENU"))`
+   hands back the oldest not-yet-returned frame showing a menu, which can
+   be the one painted *before* the key. Name what the key changes, exactly
+   as rule 1 asks. The frame you get carries its own `repaints()`, so how
+   far behind the live screen it is can be checked rather than assumed.
 
 ### The resize stale-frame trap
 

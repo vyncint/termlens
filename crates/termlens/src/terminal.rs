@@ -650,8 +650,25 @@ impl ExitStatus {
         self.code
     }
 
-    /// The name of the signal that terminated the child, if it died from a
-    /// signal (e.g. `"Hangup"`, `"Killed: 9"`). `None` for a normal exit.
+    /// The signal that terminated the child, if it died from one, as the
+    /// host C library describes it — `strsignal(3)`. `None` for a normal
+    /// exit.
+    ///
+    /// The spelling is the platform's, not this crate's: `SIGTERM` reads
+    /// `"Terminated"` on glibc and `"Terminated: 15"` on macOS, `SIGKILL`
+    /// `"Killed"` and `"Killed: 9"`. A portable assertion therefore uses
+    /// `contains`, never `==`:
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().args(["-c", "sleep 30"]).spawn("sh")?;
+    /// t.signal(termlens::Signal::Term)?;
+    /// let status = t.wait_exit()?;
+    /// let signal = status.signal().expect("killed, not exited");
+    /// assert!(signal.contains("Terminated"), "status: {status}");
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// Distinguishing "the app exited 1" from "something killed the app" is
     /// the difference between a failing test and a failing test *harness* —
@@ -2245,8 +2262,23 @@ impl Terminal {
         self.write_input(bytes, what)
     }
 
-    /// Click the primary button at `(col, row)` (0-based, like
-    /// [`Screen::cell`]). Sends a press — and, when the application's
+    /// Click the primary button at `(col, row)` — **column first**, 0-based:
+    /// the geometry order of [`TerminalBuilder::size`] and [`Screen::size`],
+    /// and the reverse of the `(row, col)` that [`Screen::find`] and
+    /// [`Screen::cell`] use for cell addresses. The hand-off from a search
+    /// to a click is where the two orders meet, so write the swap out:
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// let s = t.screen();
+    /// let (row, col) = s.find("MENU").expect("the menu is on screen");
+    /// t.click(col, row)?; // find gives (row, col); click takes (col, row)
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Sends a press — and, when the application's
     /// tracking mode reports them, a release — encoded exactly as the
     /// tracking mode and encoding **the application enabled** (SGR 1006
     /// or the legacy byte form).
@@ -2596,11 +2628,12 @@ impl Terminal {
     ///    correctly. `wait_idle` will not declare idleness while an update
     ///    is open.
     ///
-    /// Applications that emit DEC 2026 synchronized updates need none of
-    /// this — [`wait_frame`](Self::wait_frame) sees only complete frames
-    /// and hands back the one it matched.
-    /// After a [`resize`](Self::resize), also see the stale-frame trap
-    /// documented there.
+    /// Applications that emit DEC 2026 synchronized updates get rule 3 for
+    /// free from [`wait_frame`](Self::wait_frame), which sees only complete
+    /// frames and hands back the one it matched — but not rule 1: a
+    /// predicate true of a frame you did not mean returns that frame
+    /// (`docs/DESIGN.md` §2, rule 4). After a [`resize`](Self::resize),
+    /// also see the stale-frame trap documented there.
     ///
     /// # Errors
     ///
@@ -2730,6 +2763,28 @@ impl Terminal {
     /// let frame = t.wait_frame(|screen| screen.contains("Frame ready"))?;
     /// assert!(frame.contains("Frame ready"));
     /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # }
+    /// ```
+    ///
+    /// A complete frame is not necessarily the frame that answers your
+    /// input. The cursor sits at the last frame *returned*, so after
+    /// `send(key)` a predicate that is also true of the pre-key screen gets
+    /// the pre-key frame, if that one was never returned — rule 4 of
+    /// `docs/DESIGN.md` §2. Name what the key changes:
+    ///
+    /// ```
+    /// # fn main() -> termlens::Result<()> {
+    /// let mut t = termlens::Terminal::builder()
+    ///     .timeout(std::time::Duration::from_secs(10))
+    ///     .args(["-c", r"printf '\033[?2026hcount 1\033[?2026l'; read k; printf '\033[?2026h count 2\033[?2026l'; read quit"])
+    ///     .spawn("sh")?;
+    /// t.wait_until(|s| s.contains("count 1"))?;
+    /// t.send(termlens::Key::Enter)?;                         // the app will paint "count 2"
+    /// let frame = t.wait_frame(|s| s.contains("count"))?;     // true of the pre-key frame too…
+    /// assert!(!frame.contains("count 2"));                    // …and that is the one you get
+    /// let frame = t.wait_frame(|s| s.contains("count 2"))?;   // what the key changed
+    /// assert!(frame.contains("count 2"));
+    /// # t.send(termlens::Key::Enter)?; t.wait_exit()?; Ok(())
     /// # }
     /// ```
     ///

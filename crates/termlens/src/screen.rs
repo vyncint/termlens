@@ -651,6 +651,11 @@ impl Screen {
     ///
     /// Zero for an application that never emits synchronized updates; there
     /// is nothing to count, not even its redraws.
+    ///
+    /// On a frame that [`wait_frame`](crate::Terminal::wait_frame) handed
+    /// back, this is also the staleness check: the frame's count against
+    /// `screen().repaints()` says how many repaints the live screen is
+    /// ahead of the one you are asserting on.
     #[must_use]
     pub fn repaints(&self) -> u64 {
         self.state.repaints
@@ -958,10 +963,17 @@ impl Screen {
     /// # Panics
     ///
     /// If either range runs backwards (`3..0`). Note the argument order:
-    /// this is the one API in the crate that takes **columns first**, to
-    /// match [`TerminalBuilder::size`](crate::TerminalBuilder::size), while
-    /// every cell address elsewhere is `(row, col)`. Swapping the two is
-    /// therefore the mistake to expect, and a swap can invert a range.
+    /// **columns first**, like every API here that speaks of terminal
+    /// geometry or a mouse position —
+    /// [`TerminalBuilder::size`](crate::TerminalBuilder::size),
+    /// [`Terminal::resize`](crate::Terminal::resize),
+    /// [`Terminal::click`](crate::Terminal::click) and its `click_with`,
+    /// `drag`, `scroll` and `scroll_with` siblings, and [`size`](Self::size).
+    /// Everything that addresses a cell in the grid is row-first:
+    /// [`cell`](Self::cell), [`row_text`](Self::row_text), and the
+    /// `(row, col)` that [`find`](Self::find), [`find_by`](Self::find_by)
+    /// and [`cursor`](Self::cursor) return. Swapping the two is therefore
+    /// the mistake to expect, and a swap can invert a range.
     ///
     /// A panic rather than an error, deliberately, and for the same reason
     /// `&slice[3..0]` panics: a backwards range is not a fact about the
