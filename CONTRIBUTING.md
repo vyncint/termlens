@@ -32,7 +32,7 @@ cargo test --workspace --no-default-features
 cargo test --workspace --no-default-features --features decode
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features
 cargo deny check                          # cargo install cargo-deny
-cargo +1.85 check --workspace --locked    # the MSRV: `rust-version` in Cargo.toml
+cargo +1.85 check --workspace --locked --all-targets    # the MSRV: `rust-version` in Cargo.toml
 ```
 
 The list is written out here rather than left as a pointer because a first

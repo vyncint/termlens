@@ -94,7 +94,24 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.msrv }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo check --workspace --locked
+      # rust-toolchain.toml pins stable so that fmt and clippy output is
+      # reproducible, and rustup honours that file over the `rustup default`
+      # the action above sets — so this job installed 1.85 and then ran
+      # stable (#213). RUSTUP_TOOLCHAIN outranks the file, and the assertion
+      # makes the no-op impossible to bring back quietly.
+      - name: Assert the MSRV toolchain is the one in use
+        env:
+          MSRV: ${{ steps.msrv.outputs.msrv }}
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.msrv }}
+        run: |
+          rustc -vV
+          rustc -vV | grep -q "^release: ${MSRV}" \
+            || { echo "::error::the msrv job is not running rustc ${MSRV}"; exit 1; }
+      # --all-targets: tests and examples compile against the same floor,
+      # so they are part of the claim. Passes at 1.85 today without a bump.
+      - run: cargo check --workspace --locked --all-targets
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.msrv }}
 
   docs:
     name: docs

@@ -2,7 +2,11 @@
 # rustfmt/clippy output is reproducible across machines.
 #
 # This is NOT the MSRV. The minimum supported Rust version is declared as
-# `rust-version` in Cargo.toml and verified by the `msrv` CI job.
+# `rust-version` in Cargo.toml and verified by the `msrv` CI job, which
+# runs `cargo check --workspace --locked --all-targets` with
+# `RUSTUP_TOOLCHAIN` set to that version — because rustup honours this file
+# over the toolchain the job installs, and without the override the job
+# checked stable for months (#213).
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]
