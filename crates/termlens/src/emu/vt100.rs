@@ -1,6 +1,7 @@
 //! The `vt100`-crate backend. Public types never leak from here: every
 //! snapshot converts vt100's grid into termlens's own [`Screen`].
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -92,9 +93,11 @@ impl Vt100Emulator {
         if bytes.is_empty() {
             return;
         }
-        let normalized = self.colors.feed(bytes);
+        // U+FFFD would be dropped on the way in — see `stand_in_for_replacement`.
+        let bytes = stand_in_for_replacement(bytes);
+        let normalized = self.colors.feed(&bytes);
         self.parser.process(&normalized);
-        self.shadow.feed(bytes);
+        self.shadow.feed(&bytes);
         self.capture_scrolled_rows();
     }
 
@@ -194,7 +197,8 @@ impl Vt100Emulator {
             screen.set_scrollback(len - i);
             let take = (len - i).min(usize::from(rows));
             for line in screen.rows(0, cols).take(take) {
-                self.history.push_back(Arc::from(line.trim_end()));
+                self.history
+                    .push_back(Arc::from(restore_replacement(line.trim_end()).as_ref()));
             }
             i += take;
         }
@@ -434,11 +438,53 @@ fn convert_cell(cell: &::vt100::Cell, shadow: Option<&::vt100::Cell>) -> Cell {
         strikethrough: shadow.is_some_and(::vt100::Cell::underline),
     };
     Cell::new(
-        cell.contents().to_owned(),
+        restore_replacement(cell.contents()).into_owned(),
         style,
         cell.is_wide(),
         cell.is_wide_continuation(),
     )
+}
+
+/// What the reader substitutes for a byte it could not decode (`utf8.rs`).
+const REPLACEMENT: &str = "\u{FFFD}";
+/// What the grid is fed in its place. vt100's `print` drops U+FFFD outright
+/// (0.16, `perform.rs`), so the replacement would vanish exactly as the
+/// invalid byte did (#217). U+FDD0 is a Unicode noncharacter — reserved for
+/// internal use like this, never for interchange, so no application has any
+/// business emitting one — and vt100 draws it as an ordinary width-1 cell.
+/// The snapshot puts U+FFFD back wherever it appears.
+const STAND_IN: &str = "\u{FDD0}";
+
+/// `bytes` with every encoded U+FFFD swapped for the stand-in, allocating
+/// only when there is one to swap. A stop never falls inside a character,
+/// so the three bytes always arrive in one feed.
+fn stand_in_for_replacement(bytes: &[u8]) -> Cow<'_, [u8]> {
+    let from = REPLACEMENT.as_bytes();
+    if !bytes.windows(from.len()).any(|window| window == from) {
+        return Cow::Borrowed(bytes);
+    }
+    let to = STAND_IN.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(from) {
+            out.extend_from_slice(to);
+            i += from.len();
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// Grid text as the snapshot reports it: the stand-in reads as U+FFFD again.
+fn restore_replacement(text: &str) -> Cow<'_, str> {
+    if text.contains(STAND_IN) {
+        Cow::Owned(text.replace(STAND_IN, REPLACEMENT))
+    } else {
+        Cow::Borrowed(text)
+    }
 }
 
 fn convert_color(color: ::vt100::Color) -> Color {
@@ -500,6 +546,31 @@ mod tests {
         let styled = screen.with_styles().to_string();
         assert!(styled.contains("0: 0-5 bg=#1e1e2e"), "{styled}");
         assert_eq!(screen.cell(0, 6).unwrap().style(), &Style::default());
+    }
+
+    #[test]
+    fn a_replacement_character_is_drawn_like_any_other() {
+        // The reader turns invalid UTF-8 into U+FFFD (#217); the grid has to
+        // show it, or the byte is as invisible as before.
+        let screen = emu_with("caf\u{FFFD} done".as_bytes()).snapshot();
+        assert_eq!(screen.row_text(0).trim_end(), "caf\u{FFFD} done");
+        assert_eq!(screen.cell(0, 3).unwrap().contents(), "\u{FFFD}");
+        assert_eq!(screen.find("done"), Some((0, 5)));
+
+        // Scrolled into history, it is still U+FFFD — never the stand-in.
+        let mut emu = Vt100Emulator::new(4, 10, 100, crate::graphics::DEFAULT_CAPTURE);
+        feed_all(
+            &mut emu,
+            "caf\u{FFFD} done\r\n1\r\n2\r\n3\r\n4\r\n5".as_bytes(),
+        );
+        let screen = emu.snapshot();
+        let history = screen.scrollback_text();
+        assert!(history.contains("caf\u{FFFD} done"), "{history:?}");
+        assert!(
+            !screen.full_text().contains(STAND_IN),
+            "{}",
+            screen.full_text()
+        );
     }
 
     #[test]

@@ -106,6 +106,7 @@ mod graphics;
 mod keys;
 mod screen;
 mod terminal;
+mod utf8;
 mod wait;
 
 pub use error::{Error, Result};

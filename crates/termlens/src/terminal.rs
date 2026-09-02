@@ -23,6 +23,7 @@ use crate::error::{Error, Result};
 use crate::keys::Input;
 use crate::keys::{mouse_legacy, mouse_sgr, mouse_utf8};
 use crate::screen::{MouseMode, Screen};
+use crate::utf8::Utf8Sanitizer;
 use crate::wait::{next_backoff, Expired, Monitor, INITIAL_BACKOFF, POLL_CAP};
 
 /// How long `wait_exit` keeps draining PTY output after the child has been
@@ -712,6 +713,11 @@ struct EmuState {
     last_activity: Instant,
     /// Set once the PTY read side reaches EOF; nothing more can arrive.
     eof: bool,
+    /// The reader is holding the incomplete tail of a multi-byte character
+    /// for the next read. The emulator never sees a partial character now
+    /// that decoding happens before it (#217), so this is what keeps
+    /// `wait_idle` from calling a stream that stopped mid-character silence.
+    utf8_pending: bool,
     /// Bumped on every state change (bytes, EOF, resize). Lets waiters skip
     /// re-evaluation on spurious wakes, and keys the snapshot cache.
     generation: u64,
@@ -791,6 +797,7 @@ impl EmuState {
             emu,
             last_activity: Instant::now(),
             eof: false,
+            utf8_pending: false,
             generation: 0,
             snapshot_cache: None,
             frames_seen: 0,
@@ -1892,124 +1899,143 @@ fn reader_loop(
     queued_bytes: &AtomicUsize,
 ) {
     let mut buf = [0u8; 8192];
+    // Invalid UTF-8 becomes U+FFFD here, once, so both parsers see the same
+    // valid stream and a stray byte holds its column instead of vanishing
+    // (#217). A character split across two reads is carried, not replaced.
+    let mut sanitizer = Utf8Sanitizer::default();
+    let mut at_eof = false;
     loop {
-        match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                // The emulator stops at each DEC 2026 frame end and at
-                // each query, so state read there (screen, cursor) is
-                // exact — even when the same chunk already carries the
-                // following bytes. Replies are BUILT under the state
-                // lock but WRITTEN after it is released; the state lock
-                // and the writer lock are never held together.
-                let replies = shared.mutate(|state| {
-                    // Counted before the chunk is processed, so a query
-                    // inside it is recorded against *this* read: output
-                    // batched into the same write as the probe must not
-                    // read as the application having moved past it.
-                    state.reads += 1;
-                    let mut replies: Vec<Vec<u8>> = Vec::new();
-                    let mut offset = 0;
-                    while offset < n {
-                        let processed = state.emu.process(&buf[offset..n]);
-                        offset += processed.consumed;
-                        match processed.stop {
-                            Some(Stop::FrameComplete(span)) => {
-                                state.frames_seen += 1;
-                                // Through `build_snapshot`, so a retained
-                                // frame carries the repaint count like every
-                                // other snapshot. Taking it straight from the
-                                // emulator left `Screen::repaints()` at zero
-                                // on exactly the screens `wait_frame` hands
-                                // back — the ones most likely to be asked.
-                                let frame = state.build_snapshot();
-                                if state.frames.len() == FRAME_HISTORY {
-                                    state.frames.pop_front();
-                                }
-                                state.frames.push_back((state.frames_seen, frame));
-                                // Timings outlive the frame ring: a
-                                // performance line is held over a run, not
-                                // over the last eight repaints.
-                                if state.timings.len() == FRAME_TIMING_HISTORY {
-                                    state.timings.pop_front();
-                                }
-                                state.timings.push_back(FrameTiming {
-                                    index: state.frames_seen,
-                                    duration: span.duration,
-                                    printable: span.printable,
-                                });
+        let chunk: Vec<u8> = match reader.read(&mut buf) {
+            Ok(0) => {
+                // Whatever the sanitizer still holds was never completed.
+                at_eof = true;
+                let tail = sanitizer.finish();
+                if tail.is_empty() {
+                    break;
+                }
+                tail
+            }
+            Ok(n) => sanitizer.feed(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            // Linux reports EIO on the master once the child side is gone;
+            // treat any hard error as end-of-stream.
+            Err(_) => break,
+        };
+        let utf8_pending = sanitizer.pending();
+        {
+            // The emulator stops at each DEC 2026 frame end and at
+            // each query, so state read there (screen, cursor) is
+            // exact — even when the same chunk already carries the
+            // following bytes. Replies are BUILT under the state
+            // lock but WRITTEN after it is released; the state lock
+            // and the writer lock are never held together.
+            let replies = shared.mutate(|state| {
+                // Counted before the chunk is processed, so a query
+                // inside it is recorded against *this* read: output
+                // batched into the same write as the probe must not
+                // read as the application having moved past it.
+                state.reads += 1;
+                let mut replies: Vec<Vec<u8>> = Vec::new();
+                let mut offset = 0;
+                while offset < chunk.len() {
+                    let processed = state.emu.process(&chunk[offset..]);
+                    offset += processed.consumed;
+                    match processed.stop {
+                        Some(Stop::FrameComplete(span)) => {
+                            state.frames_seen += 1;
+                            // Through `build_snapshot`, so a retained
+                            // frame carries the repaint count like every
+                            // other snapshot. Taking it straight from the
+                            // emulator left `Screen::repaints()` at zero
+                            // on exactly the screens `wait_frame` hands
+                            // back — the ones most likely to be asked.
+                            let frame = state.build_snapshot();
+                            if state.frames.len() == FRAME_HISTORY {
+                                state.frames.pop_front();
                             }
-                            Some(Stop::Query(query)) => {
-                                if let Some(reply) = state.answer(&query) {
-                                    replies.push(reply);
-                                }
+                            state.frames.push_back((state.frames_seen, frame));
+                            // Timings outlive the frame ring: a
+                            // performance line is held over a run, not
+                            // over the last eight repaints.
+                            if state.timings.len() == FRAME_TIMING_HISTORY {
+                                state.timings.pop_front();
                             }
-                            None => {}
+                            state.timings.push_back(FrameTiming {
+                                index: state.frames_seen,
+                                duration: span.duration,
+                                printable: span.printable,
+                            });
+                        }
+                        Some(Stop::Query(query)) => {
+                            if let Some(reply) = state.answer(&query) {
+                                replies.push(reply);
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                state.utf8_pending = utf8_pending;
+                state.touch();
+                replies
+            });
+            // One queue entry per *read*, not per reply. A single read
+            // can carry dozens of queries — a startup batch is a
+            // legitimate pattern — and enqueueing each answer separately
+            // made the reader outrun the writer, which issues one
+            // `write(2)` per entry. The queue then filled and answers
+            // were discarded although nothing was blocked: measured at
+            // 173 of 200 delivered back-to-back, and 200 of 200 with a
+            // millisecond between the queries. Batching is what removes
+            // that mismatch; ordering is unchanged, since the bytes are
+            // concatenated in the order they were built.
+            if !replies.is_empty() {
+                let batch: Vec<u8> = replies.concat();
+                let count = replies.len();
+                match replies_to {
+                    // Still without waiting. Now that a full queue means
+                    // 64 reads' worth of answers are already pending, it
+                    // really does mean the application has stopped
+                    // reading — and the drain must keep running
+                    // regardless, or the child blocks writing into a full
+                    // output buffer and the harness deadlocks itself.
+                    Some(tx) => {
+                        // Refuse only on the memory bound. The queue is
+                        // unbounded, so this hand-off cannot block and the
+                        // drain cannot stall — which is the constraint
+                        // that rules out backpressuring the reader.
+                        let size = batch.len();
+                        if queued_bytes.load(Ordering::Relaxed) + size > REPLY_QUEUE_BYTES {
+                            shared.mutate(|state| state.replies_dropped += count);
+                        } else {
+                            // Counted as pending *before* the hand-off, so
+                            // a wait that fails while the write is blocked
+                            // can say how many answers are stuck.
+                            pending.fetch_add(count, Ordering::Relaxed);
+                            queued_bytes.fetch_add(size, Ordering::Relaxed);
+                            let request = WriteRequest {
+                                bytes: batch,
+                                ack: None, // fire and forget: never wait
+                                replies: count,
+                            };
+                            if tx.send(request).is_err() {
+                                pending.fetch_sub(count, Ordering::Relaxed);
+                                queued_bytes.fetch_sub(size, Ordering::Relaxed);
+                            }
                         }
                     }
-                    state.touch();
-                    replies
-                });
-                // One queue entry per *read*, not per reply. A single read
-                // can carry dozens of queries — a startup batch is a
-                // legitimate pattern — and enqueueing each answer separately
-                // made the reader outrun the writer, which issues one
-                // `write(2)` per entry. The queue then filled and answers
-                // were discarded although nothing was blocked: measured at
-                // 173 of 200 delivered back-to-back, and 200 of 200 with a
-                // millisecond between the queries. Batching is what removes
-                // that mismatch; ordering is unchanged, since the bytes are
-                // concatenated in the order they were built.
-                if !replies.is_empty() {
-                    let batch: Vec<u8> = replies.concat();
-                    let count = replies.len();
-                    match replies_to {
-                        // Still without waiting. Now that a full queue means
-                        // 64 reads' worth of answers are already pending, it
-                        // really does mean the application has stopped
-                        // reading — and the drain must keep running
-                        // regardless, or the child blocks writing into a full
-                        // output buffer and the harness deadlocks itself.
-                        Some(tx) => {
-                            // Refuse only on the memory bound. The queue is
-                            // unbounded, so this hand-off cannot block and the
-                            // drain cannot stall — which is the constraint
-                            // that rules out backpressuring the reader.
-                            let size = batch.len();
-                            if queued_bytes.load(Ordering::Relaxed) + size > REPLY_QUEUE_BYTES {
-                                shared.mutate(|state| state.replies_dropped += count);
-                            } else {
-                                // Counted as pending *before* the hand-off, so
-                                // a wait that fails while the write is blocked
-                                // can say how many answers are stuck.
-                                pending.fetch_add(count, Ordering::Relaxed);
-                                queued_bytes.fetch_add(size, Ordering::Relaxed);
-                                let request = WriteRequest {
-                                    bytes: batch,
-                                    ack: None, // fire and forget: never wait
-                                    replies: count,
-                                };
-                                if tx.send(request).is_err() {
-                                    pending.fetch_sub(count, Ordering::Relaxed);
-                                    queued_bytes.fetch_sub(size, Ordering::Relaxed);
-                                }
-                            }
-                        }
-                        // No responder thread (no descriptor to duplicate):
-                        // write inline, as before.
-                        None => {
-                            let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
-                            if let Some(writer) = writer.as_mut() {
-                                let _ = writer.write_all(&batch).and_then(|()| writer.flush());
-                            }
+                    // No responder thread (no descriptor to duplicate):
+                    // write inline, as before.
+                    None => {
+                        let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
+                        if let Some(writer) = writer.as_mut() {
+                            let _ = writer.write_all(&batch).and_then(|()| writer.flush());
                         }
                     }
                 }
             }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            // Linux reports EIO on the master once the child side is gone;
-            // treat any hard error as end-of-stream.
-            Err(_) => break,
+        }
+        if at_eof {
+            break;
         }
     }
     shared.mutate(|state| {
@@ -3017,7 +3043,11 @@ impl Terminal {
                 return Ok(());
             }
             let elapsed = guard.last_activity.elapsed();
-            if elapsed >= quiet && !guard.emu.mid_sequence() && !guard.emu.in_sync_update() {
+            if elapsed >= quiet
+                && !guard.emu.mid_sequence()
+                && !guard.utf8_pending
+                && !guard.emu.in_sync_update()
+            {
                 return Ok(());
             }
 

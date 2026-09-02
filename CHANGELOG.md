@@ -41,6 +41,16 @@ listed under a **Changed** or **Removed** heading.
   which named neither the cause nor a way out. `spawn` now refuses it up
   front with an `Error::Spawn` that says `env_clear` removed `PATH` and
   offers both fixes: an absolute path, or `.env("PATH", …)`. (#222)
+- **A byte that is not UTF-8 shows as U+FFFD instead of vanishing.** The
+  backend drops both a byte it cannot decode and the U+FFFD its own parser
+  substitutes for one, so a Latin-1 `é` in a file name left no trace on the
+  grid and every column after it shifted left — a test asserting on the
+  column of what followed passed against the wrong screen. Bytes are now
+  decoded once on the reader thread: an invalid sequence becomes the
+  replacement character a terminal shows (carried through the backend as a
+  noncharacter it will draw, and restored in the snapshot), and a character
+  split across two reads is carried rather than replaced. `wait_idle` treats
+  a stream that stopped mid-character as not yet idle. (#217)
 - **A highlight over CJK or emoji is one span again.** A wide character's
   continuation column carried no style, so `with_styles()` rendered a bar
   over `ab汉cd` as two spans with a hole and `cell(row, col).style()` on
