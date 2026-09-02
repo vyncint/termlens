@@ -28,10 +28,14 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 cargo clippy --workspace --all-targets --no-default-features --features decode -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings    # default features: what `cargo add termlens --dev` gives you
 cargo test --workspace --no-default-features
 cargo test --workspace --no-default-features --features decode
+cargo test --workspace                                   # default features
+RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features
 cargo deny check                          # cargo install cargo-deny
+pipx run zizmor==1.29.0 --persona=pedantic .github/workflows/   # workflow audit; needs GH_TOKEN for the online checks
 cargo +1.85 check --workspace --locked --all-targets    # the MSRV: `rust-version` in Cargo.toml
 ```
 
@@ -39,7 +43,9 @@ The list is written out here rather than left as a pointer because a first
 PR that fails on `cargo fmt` after following the setup to the letter is an
 avoidable bad first experience. If it ever disagrees with
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml), the workflow is the
-source of truth and this list is the bug.
+source of truth and this list is the bug — and the `gates-listed` CI job
+(`.github/scripts/check-ci-gates-listed.sh`) fails when the two disagree,
+so the bug cannot sit here unnoticed again.
 
 The integration tests spawn real PTYs and small fixture apps from
 `fixtures/`; there is nothing to install beyond a Rust toolchain

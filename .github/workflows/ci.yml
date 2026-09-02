@@ -63,8 +63,19 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test --workspace --all-features
 
-  no-default-features:
-    name: no-default-features
+  # Every feature configuration a consumer can ask for. The default set is
+  # what `cargo add termlens --dev` produces, and until #226 no job ran it:
+  # `test` runs --all-features and this job ran only the two reduced sets.
+  # Additivity makes a gap there unlikely, not impossible, and the cell
+  # costs about ninety seconds.
+  #
+  # Priced and deferred, deliberately (#226): the default set on the macOS
+  # leg — a second full suite per PR for a fault class the stress workflow
+  # is better placed to find — and a --no-default-features consumer in
+  # install.yml, which would need the registry step there to stop assuming
+  # `decode`.
+  features:
+    name: features
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -73,9 +84,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
+          components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test --workspace --no-default-features
       - run: cargo test --workspace --no-default-features --features decode
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # CONTRIBUTING §1 promises that every gate above is reproducible locally
+  # and that the workflow is the source of truth when the two disagree. It
+  # disagreed twice before anyone noticed (#227); this is the check that
+  # makes the promise hold.
+  gates-listed:
+    name: gates-listed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: .github/scripts/check-ci-gates-listed.sh
 
   msrv:
     name: msrv
@@ -170,7 +197,7 @@ jobs:
   required-green:
     name: required-green
     if: always()
-    needs: [fmt, clippy, test, no-default-features, msrv, docs, deny, zizmor]
+    needs: [fmt, clippy, test, features, msrv, docs, deny, zizmor, gates-listed]
     runs-on: ubuntu-latest
     steps:
       - name: Verify every needed job succeeded
