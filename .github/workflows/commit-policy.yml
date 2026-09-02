@@ -47,6 +47,14 @@ jobs:
           AFTER: ${{ github.event.after }}
         run: |
           if [ "$EVENT" = "pull_request" ]; then
+            # Both ends must be readable here, or the range is not a range:
+            # a sha this checkout does not have made the scripts walk nothing
+            # and report OK on commits they never read (#214). The scripts
+            # now refuse that too; this names the missing commit first.
+            for sha in "$BASE" "$HEAD"; do
+              git cat-file -e "$sha" 2>/dev/null \
+                || { echo "::error::commit $sha is not in this checkout, so the range cannot be checked"; exit 1; }
+            done
             range="${BASE}..${HEAD}"
           elif [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
                || ! git cat-file -e "$BEFORE" 2>/dev/null; then

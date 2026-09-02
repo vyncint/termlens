@@ -43,6 +43,9 @@
 #       commit --allow-empty -m "build(deps): bump x" -m "Signed-off-by: dependabot[bot] <support@github.com>"
 #   .github/scripts/check-no-ai-attribution.sh main..HEAD  # still just the one failure
 #   git checkout - && git branch -D scratch/attribution
+#   # and a range git cannot read must FAIL, never report OK on nothing:
+#   .github/scripts/check-no-ai-attribution.sh main..deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+#   .github/scripts/check-no-ai-attribution.sh HEAD..HEAD
 set -euo pipefail
 
 range="${1:?usage: check-no-ai-attribution.sh <range>}"
@@ -76,6 +79,21 @@ trusted_bot_emails='^([0-9]+\+)?(dependabot|dependabot-preview)\[bot\]@users\.no
 # repaired. Such a trailer is dropped before the message rules are matched;
 # every other co-author trailer is matched exactly as before.
 trusted_bot_coauthor='^co-authored-by:[[:space:]]*[^<]*<([0-9]+\+)?(dependabot|dependabot-preview)\[bot\]@users\.noreply\.github\.com>[[:space:]]*$'
+
+# Read the range before walking it. A process substitution hides git's exit
+# status, so a range git could not resolve — a shallow clone with no base, an
+# event whose sha is gone, a typo — used to run the loop over nothing and
+# report OK on commits that were never read (termlens#214). Both halves are
+# errors: an unresolvable range, and a range with no commits in it.
+if ! shas="$(git rev-list "$range")"; then
+  echo "::error::check-no-ai-attribution: could not resolve the commit range '${range}' —" \
+       "refusing to report a pass on commits that were never read"
+  exit 1
+fi
+if [ -z "$shas" ]; then
+  echo "::error::check-no-ai-attribution: the range '${range}' resolved to no commits"
+  exit 1
+fi
 
 fail=0
 count=0
@@ -118,7 +136,7 @@ while IFS= read -r sha; do
       fail=1
     fi
   done
-done < <(git rev-list "$range")
+done <<<"$shas"
 
 echo "check-no-ai-attribution: inspected ${count} commit(s) in ${range}"
 if [ "$fail" -ne 0 ]; then

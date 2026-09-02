@@ -24,6 +24,9 @@
 #       -m "test: composed (#1)"
 #   .github/scripts/check-dco.sh main..HEAD            # must fail
 #   .github/scripts/check-dco.sh main..HEAD "$(git rev-parse HEAD)"  # passes
+#   # and a range git cannot read must FAIL, never report OK on nothing:
+#   .github/scripts/check-dco.sh main..deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+#   .github/scripts/check-dco.sh HEAD..HEAD
 #   git checkout - && git branch -D scratch/dco
 set -euo pipefail
 
@@ -34,6 +37,21 @@ composed="${2:-}"
 # which exempts nothing.
 if [ -n "$composed" ]; then
   composed="$(git rev-parse --verify --quiet "${composed}^{commit}" || true)"
+fi
+
+# Read the range before walking it. A process substitution hides git's exit
+# status, so a range git could not resolve — a shallow clone with no base, an
+# event whose sha is gone, a typo — used to run the loop over nothing and
+# report OK on commits that were never read (termlens#214). Both halves are
+# errors: an unresolvable range, and a range with no commits in it.
+if ! shas="$(git rev-list --no-merges "$range")"; then
+  echo "::error::check-dco: could not resolve the commit range '${range}' —" \
+       "refusing to report a pass on commits that were never read"
+  exit 1
+fi
+if [ -z "$shas" ]; then
+  echo "::error::check-dco: the range '${range}' resolved to no commits"
+  exit 1
 fi
 
 fail=0
@@ -97,7 +115,7 @@ while IFS= read -r sha; do
          "'git rebase --signoff' for a branch, then force-push."
     fail=1
   fi
-done < <(git rev-list --no-merges "$range")
+done <<<"$shas"
 
 echo "check-dco: inspected ${count} commit(s) in ${range}"
 if [ "$fail" -ne 0 ]; then
