@@ -9,6 +9,16 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`find` no longer matches the blank padding past the end of a row.** Its
+  single-row path searched the row padded out to the terminal width while
+  `contains` searched the trimmed text, so `find("Total: ")` was `Some` on
+  a screen whose row read `Total:` — against the invariant both rustdocs
+  state, that a needle is found precisely when `contains` is true. Both now
+  trim trailing whitespace per row first; the trim treats a drawn trailing
+  U+00A0/U+3000 as padding too, and both rustdocs say so. (#212)
+
 ## [0.8.0] - 2026-08-29
 
 ### Added

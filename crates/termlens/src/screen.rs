@@ -861,6 +861,12 @@ impl Screen {
     /// Text pulled out as a `String` and matched with `str` methods —
     /// `full_text().contains(..)` — is byte-exact, since the comparison is
     /// then `std`'s and not ours.
+    ///
+    /// Trailing whitespace is trimmed per row first, so the blank padding
+    /// past a row's last glyph is never matched — and neither is a trailing
+    /// U+00A0 or U+3000 the application drew, which the trim cannot tell
+    /// from padding. [`find`](Self::find) trims identically, so the two
+    /// never disagree; [`cell`](Self::cell) still reports the character.
     #[must_use]
     pub fn contains(&self, needle: &str) -> bool {
         if self.is_ascii() && needle.is_ascii() {
@@ -891,6 +897,13 @@ impl Screen {
     /// is found here precisely when `contains` is true. The reported column
     /// is the real one: folding happens per cell, so the byte-to-column map
     /// stays exact even where a composition shortened the text.
+    ///
+    /// Trailing whitespace is trimmed per row before either searches, so
+    /// the blank padding past a row's last glyph is never matched: on a
+    /// row reading `Total:`, `find("Total: ")` is `None`, as `contains`
+    /// says. The same trim treats a trailing U+00A0 or U+3000 the
+    /// application genuinely drew as padding — a decision, so that the two
+    /// searches agree; [`cell`](Self::cell) still reports the character.
     #[must_use]
     pub fn find(&self, needle: &str) -> Option<(u16, u16)> {
         if needle.is_empty() {
@@ -900,7 +913,11 @@ impl Screen {
         if !needle.contains('\n') {
             for row in 0..self.rows {
                 let (text, cols) = self.searchable_row(row);
-                if let Some(byte_off) = text.find(needle.as_str()) {
+                // Search the row as `contains` sees it — trailing whitespace
+                // trimmed — not the grid padded out to `cols`. The trimmed
+                // string is a prefix, so the byte-to-column map is unchanged
+                // and an interior space still matches (#212).
+                if let Some(byte_off) = text.trim_end().find(needle.as_str()) {
                     return Some((row, cols.get(byte_off).copied()?));
                 }
             }
@@ -1442,6 +1459,23 @@ mod tests {
         for needle in ["hello\nworld", "llo\nwor", "x\nworld", "\nagain"] {
             assert_eq!(s.find(needle).is_some(), s.contains(needle), "{needle:?}");
         }
+    }
+
+    #[test]
+    fn single_row_find_agrees_with_contains_about_trailing_padding() {
+        // `find` searched the row padded to the terminal width while
+        // `contains` searched the trimmed text (#212), so a needle ending in
+        // a space was found on a row where nothing followed the word.
+        let s = screen(10, 2, &["Total:", "a b"]);
+        for needle in [
+            "Total:", "Total: ", "Total:  ", " ", "   ", "otal: ", "a b", "a b ", "b ",
+        ] {
+            assert_eq!(s.find(needle).is_some(), s.contains(needle), "{needle:?}");
+        }
+        assert_eq!(s.find("Total:"), Some((0, 0)));
+        assert_eq!(s.find("Total: "), None);
+        assert_eq!(s.find("a b"), Some((1, 0))); // an interior space still matches
+        assert_eq!(s.find(" "), Some((1, 1))); // …and is the only space that does
     }
 
     #[test]
