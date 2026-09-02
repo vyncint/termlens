@@ -18,6 +18,12 @@ listed under a **Changed** or **Removed** heading.
   state, that a needle is found precisely when `contains` is true. Both now
   trim trailing whitespace per row first; the trim treats a drawn trailing
   U+00A0/U+3000 as padding too, and both rustdocs say so. (#212)
+- **A highlight over CJK or emoji is one span again.** A wide character's
+  continuation column carried no style, so `with_styles()` rendered a bar
+  over `ab汉cd` as two spans with a hole and `cell(row, col).style()` on
+  the second column reported `Default` — DESIGN §3 rule 5 and `find_by`'s
+  rustdoc both promised the opposite. The snapshot now gives the
+  continuation the leading cell's style, as a terminal paints it. (#218)
 
 ## [0.8.0] - 2026-08-29
 

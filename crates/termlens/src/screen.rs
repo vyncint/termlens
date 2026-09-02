@@ -1345,7 +1345,9 @@ mod tests {
                     };
                     row_cells.push(Cell::new(ch.to_string(), style, wide, false));
                     if wide {
-                        row_cells.push(Cell::new(String::new(), Style::default(), false, true));
+                        // As the emulator builds it: the continuation carries
+                        // the leading cell's style (#218).
+                        row_cells.push(Cell::new(String::new(), style, false, true));
                     }
                 }
             }

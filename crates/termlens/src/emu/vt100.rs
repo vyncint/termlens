@@ -260,7 +260,7 @@ impl Emulator for Vt100Emulator {
     fn snapshot(&self) -> Screen {
         let screen = self.parser.screen();
         let (rows, cols) = screen.size();
-        let mut cells = Vec::with_capacity(usize::from(rows) * usize::from(cols));
+        let mut cells: Vec<Cell> = Vec::with_capacity(usize::from(rows) * usize::from(cols));
         // The shadow grid is the same shape as the primary — vt100's
         // attributes never influence geometry, and the two streams differ
         // only by rewritten SGR — so cell (row, col) means the same in both.
@@ -273,10 +273,22 @@ impl Emulator for Vt100Emulator {
             for col in 0..cols {
                 // In-range lookups on vt100 are always Some; blank fallback
                 // keeps this total rather than panicking inside a snapshot.
-                cells.push(screen.cell(row, col).map_or_else(
+                let mut converted = screen.cell(row, col).map_or_else(
                     || Cell::new(String::new(), Style::default(), false, false),
                     |cell| convert_cell(cell, self.shadow.cell(row, col)),
-                ));
+                );
+                // A wide character's second column is painted in the leading
+                // cell's colours, so it carries the leading cell's style.
+                // vt100 leaves the placeholder unstyled, which split every
+                // highlight over CJK or emoji into two spans with a hole
+                // (#218) — the same shape as the shadow recovery: upstream
+                // drops it, the snapshot restores it.
+                if col > 0 && converted.is_wide_continuation() {
+                    if let Some(lead) = cells.last() {
+                        converted = Cell::new(String::new(), *lead.style(), false, true);
+                    }
+                }
+                cells.push(converted);
             }
         }
         let (cursor_row, cursor_col) = screen.cursor_position();
@@ -473,6 +485,21 @@ mod tests {
         assert_eq!(wide.contents(), "汉");
         assert!(screen.cell(0, 1).unwrap().is_wide_continuation());
         assert_eq!(screen.find("x"), Some((0, 2)));
+    }
+
+    #[test]
+    fn a_wide_characters_continuation_carries_the_leading_cells_style() {
+        // `ab汉cd` on one background: six columns, one span, no hole at the
+        // continuation column (#218).
+        let screen = emu_with(b"\x1b[48;2;30;30;46mab\xe6\xb1\x89cd\x1b[0m").snapshot();
+        let bg = Color::Rgb(30, 30, 46);
+        assert!(screen.cell(0, 3).unwrap().is_wide_continuation());
+        for col in 0..6 {
+            assert_eq!(screen.cell(0, col).unwrap().style().bg, bg, "col {col}");
+        }
+        let styled = screen.with_styles().to_string();
+        assert!(styled.contains("0: 0-5 bg=#1e1e2e"), "{styled}");
+        assert_eq!(screen.cell(0, 6).unwrap().style(), &Style::default());
     }
 
     #[test]

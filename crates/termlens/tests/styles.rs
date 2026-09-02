@@ -76,6 +76,27 @@ fn styled_screen_snapshot() -> termlens::Result<()> {
 /// renderings were identical in the grid — the one failure mode where a
 /// green test certifies the bug it was written to catch.
 #[test]
+fn a_highlight_over_a_wide_character_is_one_span() -> termlens::Result<()> {
+    // A wide character's continuation column used to snapshot unstyled, so
+    // a bar over CJK or emoji rendered as two spans with a hole (#218).
+    let mut t = sh(r"printf '\033[48;2;30;30;46mab汉cd\033[0m'; read guard")?;
+    t.wait_until(|s| s.contains("cd"))?;
+    let s = t.screen();
+    let bar = termlens::Color::Rgb(30, 30, 46);
+    let styled = s.with_styles().to_string();
+    assert!(styled.contains("0: 0-5 bg=#1e1e2e"), "{styled}");
+    assert_eq!(
+        s.cell(0, 3).unwrap().style().bg,
+        bar,
+        "the continuation column"
+    );
+    assert_eq!(s.find_by(|c| c.style().bg == bar), Some((0, 0)));
+    t.send(termlens::Key::Enter)?;
+    t.wait_exit()?;
+    Ok(())
+}
+
+#[test]
 fn a_masked_field_is_distinguishable_from_clear_text() -> termlens::Result<()> {
     // The cursor is pinned for the same reason, plus one specific to this
     // test: the styled comparison below asserts a *difference*, so an
