@@ -16,11 +16,12 @@ fn readme_example_compiles_and_runs() -> termlens::Result<()> {
         .timeout(Duration::from_secs(5))
         .spawn(util::fixture_bin("hello-tui"))?;
 
-    // The README waits on "Ready" and snapshots. The fixture's last byte is
-    // the bottom-right corner, so the corner is waited on as well — rule 2
-    // of `docs/DESIGN.md` §2: a whole-screen snapshot must wait on the last
+    // The same shape as the README's predicate: the status text AND the
+    // bottom-right corner, which is the fixture's last byte — rule 2 of
+    // `docs/DESIGN.md` §2: a whole-screen snapshot must wait on the last
     // thing the application paints, or it races the rest of the frame at a
-    // chunk boundary.
+    // chunk boundary. The README waited on the first marker alone until
+    // #216; a reviewer diffing the two should see no discrepancy in shape.
     t.wait_until(|screen| screen.contains("status: ready") && screen.contains("╯"))?;
     // The README's most distinctive line, compiled against the `insta` the
     // crate itself dev-depends on. A dev-dependency is present in every
