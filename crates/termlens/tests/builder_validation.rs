@@ -48,6 +48,31 @@ fn the_default_working_directory_is_the_test_process_s() -> termlens::Result<()>
 }
 
 #[test]
+fn a_bare_program_name_under_env_clear_is_refused_with_the_remedies() {
+    // env_clear drops PATH, and the PTY layer's only diagnostic for the bare
+    // name that then cannot resolve was "Unable to resolve the PATH" (#222).
+    let err = Terminal::builder().env_clear().spawn("sh").unwrap_err();
+    assert!(matches!(err, Error::Spawn { .. }), "{err}");
+    let msg = err.to_string();
+    for needed in ["`sh`", "env_clear", "PATH", "absolute path"] {
+        assert!(msg.contains(needed), "missing {needed:?} in: {msg}");
+    }
+    // Either remedy works: a PATH of the test's own…
+    let with_path = Terminal::builder()
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .args(["-c", "true"])
+        .spawn("sh");
+    assert!(with_path.is_ok(), "{:?}", with_path.err());
+    // …or an absolute path, which never needed one.
+    let absolute = Terminal::builder()
+        .env_clear()
+        .args(["-c", "true"])
+        .spawn("/bin/sh");
+    assert!(absolute.is_ok(), "{:?}", absolute.err());
+}
+
+#[test]
 fn a_missing_working_directory_fails_instead_of_running_elsewhere() {
     let missing = std::env::temp_dir().join("termlens-no-such-dir-xyz");
     assert!(!missing.is_dir(), "test precondition");

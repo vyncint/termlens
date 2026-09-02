@@ -1195,6 +1195,12 @@ impl TerminalBuilder {
     /// child still starts in the test process's directory unless
     /// [`current_dir`](Self::current_dir) says otherwise.
     ///
+    /// Clearing the environment removes `PATH` with everything else, so a
+    /// bare program name has nothing to resolve against. [`spawn`](Self::spawn)
+    /// refuses one with an [`Error::Spawn`] that names the two ways out — an
+    /// absolute path, or a `PATH` of your own via [`env`](Self::env) — rather
+    /// than letting the PTY layer report "Unable to resolve the PATH".
+    ///
     /// Note this differs from `std::process::Command::env_clear`, which also
     /// discards explicitly set variables; here `env()` and `envs()` entries
     /// survive.
@@ -1376,6 +1382,19 @@ impl TerminalBuilder {
         if program.is_empty() {
             return spawn_err("no program name given (the program argument was empty)".into());
         }
+        // env_clear removes PATH with everything else, and a bare name then
+        // has nothing to resolve against; the PTY layer's "Unable to resolve
+        // the PATH" named neither the cause nor a remedy (#222).
+        if self.env_clear
+            && !self.envs.iter().any(|(k, _)| k == "PATH")
+            && !program.to_string_lossy().contains('/')
+        {
+            return spawn_err(format!(
+                "`{}` is a bare program name and env_clear() removed PATH, so nothing can \
+                 resolve it — give an absolute path, or set a PATH with .env(\"PATH\", …)",
+                program.to_string_lossy()
+            ));
+        }
         check_size(self.cols, self.rows)?;
         // portable-pty filters the cwd through is_dir() and silently falls
         // back to the home directory. Sensible for a terminal emulator,
@@ -1408,8 +1427,9 @@ impl TerminalBuilder {
     ///
     /// [`Error::Spawn`] when the configuration cannot produce a runnable
     /// command (empty program name, missing
-    /// [`current_dir`](Self::current_dir)) or the program cannot be
-    /// executed; [`Error::Size`] when the configured
+    /// [`current_dir`](Self::current_dir), a bare program name under
+    /// [`env_clear`](Self::env_clear) with no `PATH` to resolve it) or the
+    /// program cannot be executed; [`Error::Size`] when the configured
     /// [`size`](Self::size) has a zero dimension or one past the
     /// 1000-per-axis limit; [`Error::Pty`] when the PTY cannot be opened.
     pub fn spawn(self, program: impl AsRef<OsStr>) -> Result<Terminal> {

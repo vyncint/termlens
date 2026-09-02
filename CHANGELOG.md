@@ -35,6 +35,12 @@ listed under a **Changed** or **Removed** heading.
   different shells. `SHELL=/bin/sh` is now pinned under `env_clear` the way
   `TERM` is, an explicit `.env("SHELL", …)` still wins, and a test asserts
   the whole environment rather than probing one name. (#221)
+- **A bare program name under `env_clear()` is refused with the remedies.**
+  Clearing the environment removes `PATH`, so `spawn("sh")` could not
+  resolve and failed with the PTY layer's "Unable to resolve the PATH",
+  which named neither the cause nor a way out. `spawn` now refuses it up
+  front with an `Error::Spawn` that says `env_clear` removed `PATH` and
+  offers both fixes: an absolute path, or `.env("PATH", …)`. (#222)
 - **A highlight over CJK or emoji is one span again.** A wide character's
   continuation column carried no style, so `with_styles()` rendered a bar
   over `ab汉cd` as two spans with a hole and `cell(row, col).style()` on
