@@ -43,9 +43,15 @@ pub struct Style {
     pub fg: Color,
     /// Background color.
     pub bg: Color,
-    /// Bold / increased intensity.
+    /// Bold / increased intensity (`SGR 1`).
+    ///
+    /// `bold` and `dim` are two fields over **one** intensity state: the
+    /// last of `SGR 1` and `SGR 2` written wins, so a cell never reports
+    /// both, and `ESC[1;2m` reads as dim only. `SGR 22` clears whichever
+    /// is set.
     pub bold: bool,
-    /// Dim / decreased intensity.
+    /// Dim / decreased intensity (`SGR 2`). Shares one intensity state with
+    /// [`bold`](Self::bold): last write wins, never both.
     pub dim: bool,
     /// Italic.
     pub italic: bool,

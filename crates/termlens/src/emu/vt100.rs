@@ -486,6 +486,22 @@ mod tests {
     }
 
     #[test]
+    fn bold_and_dim_are_one_intensity_state_and_the_last_write_wins() {
+        // Documented on `Style::bold` and `Style::dim` (#225): the backend
+        // keeps one intensity, so a cell never reports both, and SGR 22
+        // clears whichever is set.
+        let screen = emu_with(b"\x1b[1;2mA\x1b[0m\x1b[2;1mB\x1b[0m\x1b[1m\x1b[22mC").snapshot();
+        let style = |col| *screen.cell(0, col).unwrap().style();
+        assert!(!style(0).bold && style(0).dim, "ESC[1;2m: {:?}", style(0));
+        assert!(style(1).bold && !style(1).dim, "ESC[2;1m: {:?}", style(1));
+        assert!(
+            !style(2).bold && !style(2).dim,
+            "ESC[1m ESC[22m: {:?}",
+            style(2)
+        );
+    }
+
+    #[test]
     fn blink_conceal_and_strikethrough_reach_the_cells() {
         // The three attributes vt100 drops. Recovered via the shadow parser
         // (see `emu/shadow.rs`).
