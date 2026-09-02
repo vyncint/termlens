@@ -9,6 +9,17 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **A child starts in the test process's working directory, not `$HOME`.**
+  Without `current_dir` the PTY layer fell back to the home directory, so a
+  relative `spawn()` path and a directory-sensitive program behaved unlike
+  every other Rust process API — while `current_dir`'s rustdoc promised the
+  test runner's directory all along. The default is now what
+  `std::process::Command` does; `current_dir` still overrides it. A test that
+  relied on the old fallback should say `.current_dir(std::env::home_dir())`
+  explicitly. (#215)
+
 ### Fixed
 
 - **`find` no longer matches the blank padding past the end of a row.** Its

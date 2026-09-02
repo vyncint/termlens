@@ -1200,9 +1200,12 @@ impl TerminalBuilder {
         self
     }
 
-    /// Run the program with `dir` as its working directory instead of
-    /// inheriting the test runner's. Directory-sensitive programs no
-    /// longer need a `cd … && …` through a shell.
+    /// Run the program with `dir` as its working directory. The default is
+    /// the test process's own — what `std::process::Command` does — so a
+    /// relative program path or a directory-sensitive program behaves as it
+    /// would under any other Rust process API, and no `cd … && …` through a
+    /// shell is needed. (Before 0.9 the default was the PTY layer's
+    /// fallback, `$HOME`, while this text claimed otherwise: #215.)
     ///
     /// [`spawn`](Self::spawn) fails with [`Error::Spawn`] if `dir` is not
     /// an existing directory — running somewhere else instead would make
@@ -1391,6 +1394,9 @@ impl TerminalBuilder {
     /// `TERM=xterm-256color` — matching the escape sequences the emulator
     /// speaks, and deterministic regardless of the host environment.
     ///
+    /// The child starts in the test process's working directory unless
+    /// [`current_dir`](Self::current_dir) names another.
+    ///
     /// # Errors
     ///
     /// [`Error::Spawn`] when the configuration cannot produce a runnable
@@ -1427,8 +1433,18 @@ impl TerminalBuilder {
 
         let mut cmd = CommandBuilder::new(program);
         cmd.args(&self.args);
-        if let Some(dir) = &self.cwd {
-            cmd.cwd(dir);
+        // Always set: without a cwd the PTY layer falls back to $HOME, which
+        // made a relative program path and a directory-sensitive program
+        // behave unlike every other Rust process API while `current_dir`'s
+        // rustdoc promised the opposite (#215). The test process's own
+        // directory is the default `std::process::Command` gives.
+        match &self.cwd {
+            Some(dir) => cmd.cwd(dir),
+            None => {
+                if let Ok(here) = std::env::current_dir() {
+                    cmd.cwd(here);
+                }
+            }
         }
         if self.env_clear {
             cmd.env_clear();

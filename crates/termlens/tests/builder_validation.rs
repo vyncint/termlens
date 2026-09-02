@@ -29,6 +29,25 @@ fn an_empty_program_name_is_a_short_typed_error() {
 }
 
 #[test]
+fn the_default_working_directory_is_the_test_process_s() -> termlens::Result<()> {
+    // Without `current_dir` the child used to start in $HOME — the PTY
+    // layer's fallback — while `current_dir`'s rustdoc said it inherited the
+    // test runner's (#215). Pinned here so the default cannot move quietly.
+    let mut t = Terminal::builder().spawn("/bin/pwd")?;
+    assert!(t.wait_exit()?.success());
+    let reported = std::path::PathBuf::from(t.screen().row_text(0).trim());
+    let expected = std::env::current_dir()?;
+    assert_eq!(
+        reported.canonicalize()?,
+        expected.canonicalize()?,
+        "child ran in {} rather than the test process's {}",
+        reported.display(),
+        expected.display()
+    );
+    Ok(())
+}
+
+#[test]
 fn a_missing_working_directory_fails_instead_of_running_elsewhere() {
     let missing = std::env::temp_dir().join("termlens-no-such-dir-xyz");
     assert!(!missing.is_dir(), "test precondition");
