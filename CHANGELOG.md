@@ -29,6 +29,12 @@ listed under a **Changed** or **Removed** heading.
   state, that a needle is found precisely when `contains` is true. Both now
   trim trailing whitespace per row first; the trim treats a drawn trailing
   U+00A0/U+3000 as padding too, and both rustdocs say so. (#212)
+- **`env_clear()` no longer leaks the machine's login shell.** The PTY layer
+  fills `SHELL` from the host when the variable is absent, so a child's
+  supposedly hermetic environment differed between two machines with
+  different shells. `SHELL=/bin/sh` is now pinned under `env_clear` the way
+  `TERM` is, an explicit `.env("SHELL", …)` still wins, and a test asserts
+  the whole environment rather than probing one name. (#221)
 - **A highlight over CJK or emoji is one span again.** A wide character's
   continuation column carried no style, so `with_styles()` rendered a bar
   over `ab汉cd` as two spans with a hole and `cell(row, col).style()` on

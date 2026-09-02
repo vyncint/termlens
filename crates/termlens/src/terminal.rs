@@ -1185,11 +1185,15 @@ impl TerminalBuilder {
         self
     }
 
-    /// Don't inherit the parent process environment: the child sees only
-    /// variables set via [`env`](Self::env) or [`envs`](Self::envs) (plus the
-    /// default `TERM`, see [`spawn`](Self::spawn)). Strict control keeps tests
-    /// hermetic — a developer's exotic `LS_COLORS` should never change a
-    /// snapshot.
+    /// Don't inherit the parent process environment: the child sees exactly
+    /// the variables set via [`env`](Self::env) or [`envs`](Self::envs), plus
+    /// the two the harness pins itself unless you set them —
+    /// `TERM=xterm-256color` and `SHELL=/bin/sh` (see [`spawn`](Self::spawn)).
+    /// Nothing else, on any machine: a developer's exotic `LS_COLORS` should
+    /// never change a snapshot, and neither should their login shell. A
+    /// hermetic environment is not a hermetic working directory, though: the
+    /// child still starts in the test process's directory unless
+    /// [`current_dir`](Self::current_dir) says otherwise.
     ///
     /// Note this differs from `std::process::Command::env_clear`, which also
     /// discards explicitly set variables; here `env()` and `envs()` entries
@@ -1395,7 +1399,10 @@ impl TerminalBuilder {
     /// speaks, and deterministic regardless of the host environment.
     ///
     /// The child starts in the test process's working directory unless
-    /// [`current_dir`](Self::current_dir) names another.
+    /// [`current_dir`](Self::current_dir) names another. Under
+    /// [`env_clear`](Self::env_clear) it also gets `SHELL=/bin/sh` unless
+    /// `SHELL` was set explicitly, so its environment is a function of the
+    /// builder alone rather than of the machine's login shell.
     ///
     /// # Errors
     ///
@@ -1458,6 +1465,13 @@ impl TerminalBuilder {
         );
         if !self.envs.iter().any(|(k, _)| k == "TERM") {
             cmd.env("TERM", "xterm-256color");
+        }
+        // The PTY layer fills SHELL from the host's login shell when the
+        // variable is absent, which put one machine-shaped value inside an
+        // environment env_clear promises is hermetic (#221). Pinned the way
+        // TERM is; an explicit `.env("SHELL", …)` still wins.
+        if self.env_clear && !self.envs.iter().any(|(k, _)| k == "SHELL") {
+            cmd.env("SHELL", "/bin/sh");
         }
         for (key, value) in &self.envs {
             cmd.env(key, value);

@@ -106,6 +106,34 @@ fn envs_and_env_preserve_order_and_duplicates() -> termlens::Result<()> {
 }
 
 #[test]
+fn env_clear_hands_the_child_exactly_the_builder_environment() -> termlens::Result<()> {
+    // Enumerate the whole environment rather than probing one name, so a
+    // leaked variable cannot arrive unnoticed: SHELL did, filled in by the
+    // PTY layer from the host's login shell (#221). `/usr/bin/env` is spawned
+    // directly — no shell, which would add PWD and friends of its own — and
+    // by absolute path, because PATH is gone.
+    let mut t = Terminal::builder()
+        .env_clear()
+        .env("MARKER", "1")
+        .spawn("/usr/bin/env")?;
+    assert!(t.wait_exit()?.success());
+    let screen = t.screen();
+    let mut vars: Vec<String> = screen
+        .text()
+        .lines()
+        .filter(|line| line.contains('='))
+        .map(str::to_owned)
+        .collect();
+    vars.sort();
+    assert_eq!(
+        vars,
+        ["MARKER=1", "SHELL=/bin/sh", "TERM=xterm-256color"],
+        "the child's environment is not a function of the builder alone:\n{screen}"
+    );
+    Ok(())
+}
+
+#[test]
 fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termlens::Result<()> {
     // Probe HOME, not PATH: shells synthesize a compiled-in default PATH
     // when none is inherited, so PATH can't distinguish "inherited" from
