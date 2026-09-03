@@ -19,15 +19,19 @@
 //! don't fit.
 //!
 //! And it holds the **character-set state** vt100 ignores: which glyph set
-//! `ESC ( Ps` / `ESC ) Ps` designated into G0 and G1, and which of the two
-//! `SI`/`SO` has invoked. That is what lets the emulator hand the grid the
-//! glyph a byte *draws* — `ESC ( 0 l q q q k` is `┌───┐`, not five letters —
-//! which is how ncurses draws every border (`smacs`/`rmacs` on an xterm
-//! terminfo are exactly `ESC ( 0` / `ESC ( B`). Only the DEC Special
-//! Graphics set is translated; every other designation reads as ASCII, and
-//! G2/G3 with their single shifts are not modelled. The tracker decides, the
-//! emulator rewrites: the bytes the parsers see are then a translated stream
-//! rather than a sub-slice of the read, which `emu/vt100.rs` stages.
+//! `ESC ( ) * + Ps` designated into G0–G3, which of G0/G1 `SI`/`SO` has
+//! lock-shifted, and whether `ESC N` (SS2) / `ESC O` (SS3) has invoked G2/G3
+//! for the next character only. That is what lets the emulator hand the grid
+//! the glyph a byte *draws* — `ESC ( 0 l q q q k` is `┌───┐`, not five
+//! letters — which is how ncurses draws every border (`smacs`/`rmacs` on an
+//! xterm terminfo are exactly `ESC ( 0` / `ESC ( B`). A mixed line of text
+//! and box-drawing uses the single shift instead, so `ESC * 0 ESC N l` is
+//! `┌` and the character after it is back to the locked set. Only the DEC
+//! Special Graphics set is translated; every other designation reads as
+//! ASCII. Locking shifts remain G0/G1 (`SO`/`SI`); `LS2`/`LS3` are not
+//! modelled. The tracker decides, the emulator rewrites: the bytes the
+//! parsers see are then a translated stream rather than a sub-slice of the
+//! read, which `emu/vt100.rs` stages.
 
 use std::sync::Arc;
 
@@ -110,7 +114,7 @@ pub(crate) fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Which glyph set a G0/G1 designation currently names.
+/// Which glyph set a G0–G3 designation currently names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Charset {
     /// ASCII — and every national replacement set, which differ from it in
@@ -160,6 +164,15 @@ fn dec_special_graphics(b: u8) -> Option<&'static str> {
         b'~' => "\u{b7}",   // · bullet
         _ => return None,
     })
+}
+
+/// SS2/SS3 invoke G2/G3 for exactly one character, then the locking
+/// shift resumes. Stored as which *slot* to read, not a copy of the set:
+/// a designation between the shift and the character still applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SingleShift {
+    G2,
+    G3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,15 +387,22 @@ pub(crate) struct SeqTracker {
     /// from every value it could have asked for.
     cursor_style: Option<u8>,
     /// The intermediate byte of the current `ESC <intermediate> <final>`
-    /// sequence — `(` or `)` for a G0/G1 designation — so the final byte
-    /// knows which set it designates. Zero once a second intermediate makes
-    /// it something else.
+    /// sequence — `(` `)` `*` `+` for a G0–G3 designation — so the final
+    /// byte knows which set it designates. Zero once a second intermediate
+    /// makes it something else.
     esc_intermediate: u8,
-    /// What `ESC ( Ps` and `ESC ) Ps` last designated into G0 and G1.
+    /// What `ESC ( ) * + Ps` last designated into G0–G3.
     g0: Charset,
     g1: Charset,
+    g2: Charset,
+    g3: Charset,
     /// True after `SO` (`0x0e`) invoked G1; `SI` (`0x0f`) returns to G0.
+    /// Single shifts override this for one character without changing it.
     shifted_out: bool,
+    /// Pending SS2/SS3, if any. Cleared by the next character, or by RIS;
+    /// an intervening control or designation must not consume it, or a
+    /// mixed line that shifts then redraws would lose the graphic.
+    single_shift: Option<SingleShift>,
     /// Which introducer opened the current DCS-class string: `P` (DCS),
     /// `X` (SOS), `^` (PM) or `_` (APC). Sixel and kitty graphics differ
     /// only by this, so consuming all four alike — which is all the tracker
@@ -449,7 +469,10 @@ impl SeqTracker {
             esc_intermediate: 0,
             g0: Charset::Ascii,
             g1: Charset::Ascii,
+            g2: Charset::Ascii,
+            g3: Charset::Ascii,
             shifted_out: false,
+            single_shift: None,
             dcs_introducer: 0,
             dcs_final: 0,
             dcs_intermediate: 0,
@@ -572,19 +595,35 @@ impl SeqTracker {
     ///
     /// Consulted **before** the byte is stepped: whether a byte is a
     /// character depends on the state the tracker is in before it, and the
-    /// designation's own final byte must not be translated.
+    /// designation's own final byte must not be translated. A pending
+    /// single shift is read here and consumed in `transition` when the
+    /// character is processed, so a second look (the open-link label) still
+    /// sees the same set.
     pub(crate) fn graphics_glyph(&self, b: u8) -> Option<&'static str> {
         if self.state != State::Ground {
             return None;
         }
-        let invoked = if self.shifted_out { self.g1 } else { self.g0 };
-        if invoked != Charset::DecSpecialGraphics {
+        if self.invoked_charset() != Charset::DecSpecialGraphics {
             return None;
         }
         dec_special_graphics(b)
     }
 
-    /// Apply the final byte of an `ESC ( Ps` / `ESC ) Ps` designation.
+    fn invoked_charset(&self) -> Charset {
+        match self.single_shift {
+            Some(SingleShift::G2) => self.g2,
+            Some(SingleShift::G3) => self.g3,
+            None => {
+                if self.shifted_out {
+                    self.g1
+                } else {
+                    self.g0
+                }
+            }
+        }
+    }
+
+    /// Apply the final byte of an `ESC ( ) * + Ps` designation.
     ///
     /// `0` is DEC Special Graphics. Everything else — `B` (ASCII), `A` (UK,
     /// which differs from ASCII only at `#`), the alternate-ROM sets —
@@ -599,6 +638,8 @@ impl SeqTracker {
         match self.esc_intermediate {
             b'(' => self.g0 = set,
             b')' => self.g1 = set,
+            b'*' => self.g2 = set,
+            b'+' => self.g3 = set,
             _ => {}
         }
     }
@@ -1097,7 +1138,9 @@ impl SeqTracker {
                     }
                     // Locking shifts: SO invokes G1, SI returns to G0. vt100
                     // sees both bytes too and ignores them, so nothing else
-                    // has to be told.
+                    // has to be told. A pending single shift overrides
+                    // whichever is locked, for one character, and is not
+                    // consumed here — SI/SO are C0, not GL.
                     match b {
                         SO => self.shifted_out = true,
                         SI => self.shifted_out = false,
@@ -1135,6 +1178,17 @@ impl SeqTracker {
                             }
                         }
                     }
+                    // A single shift lasts for one *character*, not one byte:
+                    // a multi-byte UTF-8 character consumes it too, so a
+                    // continuation byte must not, or the shift survives `汉`
+                    // and translates the byte after it. C0, DEL and newline
+                    // still do not consume it: SS2 then SI then `l` draws
+                    // from G2, which is the mixed-line case this exists for.
+                    // RIS clears it separately.
+                    let utf8_continuation = (0x80..=0xbf).contains(&b);
+                    if b >= 0x20 && b != 0x7f && !utf8_continuation {
+                        self.single_shift = None;
+                    }
                     self.track_utf8(b);
                     State::Ground
                 }
@@ -1162,8 +1216,9 @@ impl SeqTracker {
                 CAN | SUB => State::Ground,
                 // RIS (`ESC c`), the hard reset: the terminal returns to its
                 // power-on state, so the cursor is the terminal's default
-                // again, both character sets are ASCII with G0 invoked, and
-                // any open hyperlink span cannot survive.
+                // again, all four character sets are ASCII with G0 invoked,
+                // no single shift is pending, and any open hyperlink span
+                // cannot survive.
                 //
                 // Reporting the last `DECSCUSR` after a reset would claim a
                 // fact the terminal does not hold — and it would do it in the
@@ -1182,8 +1237,23 @@ impl SeqTracker {
                     self.cursor_style = None;
                     self.g0 = Charset::Ascii;
                     self.g1 = Charset::Ascii;
+                    self.g2 = Charset::Ascii;
+                    self.g3 = Charset::Ascii;
                     self.shifted_out = false;
+                    self.single_shift = None;
                     self.close_link();
+                    State::Ground
+                }
+                // SS2 / SS3: invoke G2 / G3 for the next character only.
+                // These are two-character escapes in the *output* stream;
+                // `ESC O A` as a DECCKM cursor key is what we *send*, a
+                // different direction, and is not parsed here.
+                b'N' => {
+                    self.single_shift = Some(SingleShift::G2);
+                    State::Ground
+                }
+                b'O' => {
+                    self.single_shift = Some(SingleShift::G3);
                     State::Ground
                 }
                 // Final byte of a two-character sequence (ESC 7, ESC =, …).
@@ -1191,15 +1261,15 @@ impl SeqTracker {
             },
             State::EscIntermediate => match b {
                 // A second intermediate makes this something other than a
-                // G0/G1 designation (`ESC % G` selects UTF-8, for one).
+                // G0–G3 designation (`ESC % G` selects UTF-8, for one).
                 0x20..=0x2f => {
                     self.esc_intermediate = 0;
                     State::EscIntermediate
                 }
                 ESC => State::Esc,
                 CAN | SUB => State::Ground,
-                // The final byte: a designation, if the intermediate was `(`
-                // or `)`, and the end of the sequence either way.
+                // The final byte: a designation, if the intermediate was a
+                // G-set introducer, and the end of the sequence either way.
                 0x30..=0x7e => {
                     self.designate(b);
                     State::Ground
@@ -1637,6 +1707,10 @@ mod tests {
     fn a_label_drawn_in_the_graphics_set_records_the_glyphs() {
         let seen = links(b"\x1b(0\x1b]8;;http://x/\x1b\\lqk\x1b]8;;\x1b\\\x1b(B");
         assert_eq!(seen[0].2.as_deref(), Some("\u{250c}\u{2500}\u{2510}"));
+        // SS2 is looked up twice (the rewriter, then the open span) and
+        // consumed once: a shift that stuck would keep translating.
+        let seen = links(b"\x1b*0\x1b]8;;http://x/\x1b\\\x1bNl|\x1b]8;;\x1b\\");
+        assert_eq!(seen[0].2.as_deref(), Some("\u{250c}|"));
     }
 
     #[test]
@@ -1924,9 +1998,87 @@ mod tests {
         assert_eq!(drawn(b"\x1b(0q\x0eq\x0fq"), "\u{2500}q\u{2500}");
     }
 
+    /// The issue's reproduction: designate G2/G3, single-shift one graphic,
+    /// then the locked set resumes. `|` is itself a Special Graphics byte
+    /// (`≠`), so a shift that stuck would translate it too.
     #[test]
-    fn a_hard_reset_returns_both_sets_to_ascii() {
+    fn ss2_invokes_g2_for_one_character() {
+        assert_eq!(drawn(b"\x1b*0\x1bNl\x1b(B|"), "\u{250c}|");
+        assert_eq!(
+            drawn(b"\x1b*0\x1bNll"),
+            "\u{250c}l",
+            "the character after the shift is the locked set again"
+        );
+        // Designated but not invoked: G2 does not replace the locking shift.
+        assert_eq!(drawn(b"\x1b*0l"), "l");
+        // SS2 with G2 still ASCII changes nothing, and does not stick.
+        assert_eq!(drawn(b"\x1bNlq"), "lq");
+    }
+
+    #[test]
+    fn ss3_invokes_g3_for_one_character() {
+        assert_eq!(drawn(b"\x1b+0\x1bOl\x1b(B|"), "\u{250c}|");
+        assert_eq!(drawn(b"\x1b+0\x1bOll"), "\u{250c}l");
+        assert_eq!(drawn(b"\x1b+0l"), "l");
+    }
+
+    /// A single shift overrides the locked set without disturbing it: SO
+    /// stays in G1 around the one G2 character.
+    #[test]
+    fn a_single_shift_overrides_the_locking_shift_for_one_character() {
+        // G1 graphics, G2 ASCII: SO then SS2 then `lqk` is `l` then `─┐`.
+        assert_eq!(drawn(b"\x1b)0\x1b*B\x0e\x1bNlqk"), "l\u{2500}\u{2510}");
+        // And the other way: G0 graphics, SS2 from ASCII G2 turns one
+        // byte back into a letter without leaving the graphics set.
+        assert_eq!(drawn(b"\x1b(0\x1b*B\x1bNlq"), "l\u{2500}");
+    }
+
+    /// SS2/SS3 apply to the next *character*, not the next byte. An
+    /// intervening SI or a G0 redesignation must not eat the shift.
+    #[test]
+    fn a_single_shift_survives_intervening_controls_and_designations() {
+        assert_eq!(drawn(b"\x1b*0\x1bN\x0fl"), "\u{250c}");
+        assert_eq!(drawn(b"\x1b*0\x1bN\x7fl"), "\u{250c}");
+        assert_eq!(drawn(b"\x1b*0\x1bN\x1b(Bl"), "\u{250c}");
+        // A designation into G2 between the shift and the character still
+        // applies: the slot is read when the character is drawn.
+        assert_eq!(drawn(b"\x1b*0\x1bN\x1b*Bl"), "l");
+        assert_eq!(drawn(b"\x1bN\x1b*0l"), "\u{250c}");
+    }
+
+    /// A single shift is one *character*: CJK, emoji and `é` consume it,
+    /// so the graphics byte after them is a letter. `drawn` skips UTF-8,
+    /// so this asks the tracker after the character rather than concatenating.
+    #[test]
+    fn a_multibyte_character_consumes_a_single_shift() {
+        for ch in ["汉", "🦀", "é"] {
+            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+            t.feed(b"\x1b*0\x1bN");
+            assert_eq!(
+                t.graphics_glyph(b'l'),
+                Some("\u{250c}"),
+                "shift pending before {ch}"
+            );
+            t.feed(ch.as_bytes());
+            assert_eq!(
+                t.graphics_glyph(b'l'),
+                None,
+                "shift must not survive {ch} and translate the next l"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hard_reset_returns_all_four_sets_to_ascii() {
         assert_eq!(drawn(b"\x1b(0\x1b)0\x0eq\x1bcq\x0fq"), "\u{2500}qq");
+        // Pending SS2 does not survive RIS. Redesignating G2 afterwards
+        // without a new shift would still translate `l` if the shift stuck,
+        // which is worse than never shifting: the rest of the line goes.
+        assert_eq!(drawn(b"\x1b*0\x1bN\x1bc\x1b*0l"), "l");
+        // G2 itself is ASCII again, so a new SS2 without redesignating is
+        // a letter too.
+        assert_eq!(drawn(b"\x1b*0\x1bc\x1bNl"), "l");
+        assert_eq!(drawn(b"\x1b+0\x1bO\x1bc\x1b+0l"), "l");
     }
 
     /// Only a byte in ground state is a character: the same bytes inside an
@@ -1956,7 +2108,15 @@ mod tests {
     /// intermediate is not a designation at all.
     #[test]
     fn other_designations_read_as_ascii() {
-        for seq in [&b"\x1b(A"[..], b"\x1b(B", b"\x1b(1", b"\x1b(2", b"\x1b(<"] {
+        for seq in [
+            &b"\x1b(A"[..],
+            b"\x1b(B",
+            b"\x1b(1",
+            b"\x1b*A",
+            b"\x1b+B",
+            b"\x1b(2",
+            b"\x1b(<",
+        ] {
             let mut bytes = seq.to_vec();
             bytes.push(b'q');
             assert_eq!(drawn(&bytes), "q", "{seq:?}");
@@ -1964,6 +2124,9 @@ mod tests {
         // `ESC ( 0` then `ESC % G` (select UTF-8): the second sequence has
         // two intermediates and designates nothing, so G0 stays graphics.
         assert_eq!(drawn(b"\x1b(0\x1b%Gq"), "\u{2500}");
+        // Same for a national set in G2/G3, invoked by the single shift.
+        assert_eq!(drawn(b"\x1b*A\x1bNq"), "q");
+        assert_eq!(drawn(b"\x1b+A\x1bOq"), "q");
     }
 
     #[test]
@@ -1972,6 +2135,13 @@ mod tests {
         t.feed(b"\x1b(");
         assert!(t.mid_sequence());
         t.feed(b"0");
+        assert_eq!(t.graphics_glyph(b'l'), Some("\u{250c}"));
+
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        t.feed(b"\x1b*");
+        assert!(t.mid_sequence());
+        t.feed(b"0\x1bN");
+        assert!(!t.mid_sequence());
         assert_eq!(t.graphics_glyph(b'l'), Some("\u{250c}"));
     }
 
@@ -2001,6 +2171,12 @@ mod tests {
     fn esc_intermediate_completes_on_final() {
         assert!(fed(b"\x1b(").mid_sequence()); // charset designation, unfinished
         assert!(!fed(b"\x1b(B").mid_sequence());
+        assert!(fed(b"\x1b*").mid_sequence());
+        assert!(!fed(b"\x1b*0").mid_sequence());
+        // SS2/SS3 are two-character escapes; they must not stay mid-sequence
+        // or wait_idle would hang after a lone graphic shift.
+        assert!(!fed(b"\x1bN").mid_sequence());
+        assert!(!fed(b"\x1bO").mid_sequence());
     }
 
     #[test]

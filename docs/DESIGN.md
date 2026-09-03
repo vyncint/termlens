@@ -629,14 +629,19 @@ But it is an implementation detail:
   unicode-torture snapshot rather than promised).
 - vt100 has no character-set handling at all — `ESC ( 0` reaches
   `unhandled_escape` and is dropped — so **DEC Special Graphics is
-  translated by termlens itself**. The sequence tracker holds the G0/G1
-  designations and the `SI`/`SO` shift, and the emulator asks it, byte by
-  byte and *before* stepping, whether the byte draws as a glyph; if so the
-  glyph is staged in place of the byte and the staged stream is what both
-  parsers receive. Rewriting before either parser is what keeps the primary
-  and the attribute shadow the same shape, exactly as the SGR rewrite does.
-  Scope is deliberately narrow and stated in the README: G0/G1 and the
-  locking shifts, one set translated, everything else read as ASCII.
+  translated by termlens itself**. The sequence tracker holds the G0–G3
+  designations, the `SI`/`SO` locking shift, and a pending SS2/SS3, and the
+  emulator asks it, byte by byte and *before* stepping, whether the byte
+  draws as a glyph; if so the glyph is staged in place of the byte and the
+  staged stream is what both parsers receive. The single shift is consumed
+  when that character is processed, not when it is looked up, so a second
+  reader (an open hyperlink label) still sees the same set. Rewriting
+  before either parser is what keeps the primary and the attribute shadow
+  the same shape, exactly as the SGR rewrite does. Scope is deliberately
+  narrow and stated in the README: G0–G3 designation, locking shifts on
+  G0/G1, SS2/SS3 for one character, one set translated, everything else
+  read as ASCII. `LS2`/`LS3` and `DECSC`/`DECRC` of charset state are not
+  modelled.
 
 ### The attribute shadow
 

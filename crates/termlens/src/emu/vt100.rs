@@ -722,6 +722,13 @@ mod tests {
             emu.snapshot().row_text(0).trim_end(),
             "\u{250c}\u{2500}\u{2510} ok"
         );
+
+        // G2 + SS2 and G3 + SS3: one graphic, then the locked set resumes.
+        // `|` is itself a Special Graphics byte, so a stuck shift is `≠`.
+        let emu = emu_with(b"\x1b*0\x1bNl\x1b(B|");
+        assert_eq!(emu.snapshot().row_text(0).trim_end(), "\u{250c}|");
+        let emu = emu_with(b"\x1b+0\x1bOl\x1b(B|");
+        assert_eq!(emu.snapshot().row_text(0).trim_end(), "\u{250c}|");
     }
 
     /// A style set inside the graphics set travels with the glyph, and the

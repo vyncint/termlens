@@ -47,6 +47,17 @@ listed under a **Changed** or **Removed** heading.
 
 ### Fixed
 
+- **G2/G3 designation and SS2/SS3 single shifts are modelled, so a
+  one-character line-drawing shift draws `┌` rather than `l`.** `ESC * 0`
+  / `ESC + 0` designate the DEC Special Graphics set into G2/G3, and
+  `ESC N` (SS2) / `ESC O` (SS3) invoke that set for exactly one character
+  before the locking shift resumes. The designation was already consumed;
+  the shift did nothing, so a mixed line of text and box-drawing showed
+  the letter. A pending single shift is consumed by the next character —
+  including a multi-byte UTF-8 one — and does not survive `RIS`. Locking
+  shifts remain G0/G1 only (`SO`/`SI`); `LS2`/`LS3` and `DECSC`/`DECRC` of
+  charset state are still unmodelled. (#235)
+
 - **`find` no longer matches the blank padding past the end of a row.** Its
   single-row path searched the row padded out to the terminal width while
   `contains` searched the trimmed text, so `find("Total: ")` was `Some` on
