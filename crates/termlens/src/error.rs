@@ -66,6 +66,27 @@ pub enum Error {
     #[error("invalid terminal size: {0}")]
     Size(String),
 
+    /// The VT emulator panicked while processing the child's output, so the
+    /// grid stopped advancing at the screen embedded here.
+    ///
+    /// The emulation runs on the reader thread, where a panic propagates
+    /// nowhere: before this existed the drain simply died, every later
+    /// snapshot returned the same frozen screen, and each wait ran to its
+    /// deadline reporting a predicate that was never going to become true.
+    /// A wait now fails immediately and says why. The screen is the last one
+    /// taken before the failure — the emulator is not asked again, because
+    /// its state after a panic means nothing.
+    #[error(
+        "the terminal emulator failed and the screen stopped advancing: {detail}\n\
+         --- last screen before the failure ---\n{screen}"
+    )]
+    Emulator {
+        /// The panic message from the emulator.
+        detail: String,
+        /// The last screen taken before the emulator failed.
+        screen: Screen,
+    },
+
     /// Typed input or control the child cannot receive — e.g. a mouse
     /// click while the application never enabled mouse tracking (sending
     /// it anyway would feed the app bytes it would misparse as garbage
@@ -95,13 +116,14 @@ pub enum Error {
 }
 
 impl Error {
-    /// The screen embedded in [`Error::Timeout`], [`Error::Eof`] or
-    /// [`Error::Write`], if any.
+    /// The screen embedded in [`Error::Timeout`], [`Error::Eof`],
+    /// [`Error::Emulator`] or [`Error::Write`], if any.
     #[must_use]
     pub fn screen(&self) -> Option<&Screen> {
         match self {
             Error::Timeout { screen, .. }
             | Error::Eof { screen, .. }
+            | Error::Emulator { screen, .. }
             | Error::Write { screen, .. } => Some(screen),
             _ => None,
         }
