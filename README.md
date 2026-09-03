@@ -219,8 +219,13 @@ design. termlens's position:
   [stress workflow](.github/workflows/stress.yml) on Linux and macOS —
   wait/timing changes don't merge without surviving it.
 
-## Known limitations (v0.8)
+## Known limitations
 
+- **Terminal dimensions are 2–1000 cells per axis.** At one column, a
+  double-width character overflows the backend's arithmetic; at one row, a
+  line that wraps does the same (a one-row terminal that scrolls by newline
+  is fine). Larger grids are refused because every snapshot costs one entry
+  per cell.
 - Scrollback is **bounded** (1000 rows by default), **text only** — a
   scrolled-off row has no styles and no cell addressing — and is **not
   reflowed** by a `resize`: rows keep the width they were captured at, by
