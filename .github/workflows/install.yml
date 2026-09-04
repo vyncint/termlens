@@ -11,7 +11,7 @@
 #   * A **fresh dependency resolution**. Our CI resolves against the committed
 #     lockfile; a consumer does not, so a dependency's own release can break
 #     the published crate days after it was published with nothing changed
-#     here. That is why this runs weekly and not only at publish.
+#     here. That is why this runs daily and not only at publish.
 #   * A feature that resolves in this workspace and nowhere else. `decode` is
 #     off by default and pulls a dependency of its own, which makes it exactly
 #     the shape of thing that works until someone outside tries it.
@@ -36,9 +36,16 @@ on:
       version:
         description: "Version to verify (default: the newest published)"
         required: false
-  # Scheduled runs are disabled. Uncomment the block below to restore them.
-  # schedule:
-  #   - cron: "37 7 * * 1" # Mondays, after the stress run
+  # Daily, deliberately. This job is the only one that sees a *fresh*
+  # `cargo add termlens`, and that is the build that breaks between releases
+  # without any change here: tinyvec 1.13.0 (2026-09-03) did not compile, so
+  # for four hours every new consumer of the published 0.8.0 failed to build
+  # while every check in this repository stayed green on the committed
+  # lockfile. #208 turned the weekly cron off; a weekly run would have
+  # missed that window entirely. Both legs together cost under a minute
+  # (~20s Ubuntu, ~30s macOS), so a day is the right latency for the price.
+  schedule:
+    - cron: "37 7 * * *" # 07:37 UTC, after Dependabot's morning
 
 permissions:
   contents: read
