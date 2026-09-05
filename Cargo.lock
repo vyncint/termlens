@@ -184,6 +184,7 @@ name = "hello-tui"
 version = "0.8.0"
 dependencies = [
  "crossterm",
+ "termlens",
 ]
 
 [[package]]

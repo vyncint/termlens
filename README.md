@@ -49,6 +49,12 @@ fn quits_from_the_main_screen() -> termlens::Result<()> {
 When a wait times out, the error embeds the screen — your CI log shows
 exactly what the app was displaying, not "assertion failed: false".
 
+The builder chain above is what every test of a package's own binary
+starts from, so it has a name: `termlens::bin!("myapp")` spawns
+`CARGO_BIN_EXE_myapp` at 80x24 with a cleared environment and a
+five-second deadline, and builder calls after the name override any of it —
+`termlens::bin!("myapp", size(120, 40), env("NO_COLOR", "1"))?`.
+
 ## What it is (and is not)
 
 - **Not** an expect-style stream matcher — [rexpect] and [expectrl] already

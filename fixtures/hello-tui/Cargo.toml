@@ -12,5 +12,13 @@ authors.workspace = true
 [dependencies]
 crossterm.workspace = true
 
+# `termlens::bin!` can only be exercised from the integration tests of a
+# package that owns a binary — that is where Cargo sets CARGO_BIN_EXE_* — so
+# the macro's test lives here rather than beside the crate's own tests.
+# Without default features, so the `features` CI job's --no-default-features
+# leg still builds termlens without `insta`; the test needs nothing of it.
+[dev-dependencies]
+termlens = { path = "../../crates/termlens", default-features = false }
+
 [lints]
 workspace = true

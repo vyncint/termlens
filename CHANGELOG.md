@@ -22,6 +22,14 @@ listed under a **Changed** or **Removed** heading.
   state means nothing. `wait_exit` is deliberately unaffected: the child's
   exit status is still true. (#211)
 
+- **`termlens::bin!("myapp")` spawns one of your package's binaries under
+  the harness defaults.** Every integration test of a binary opened with the
+  same five lines — a fixed 80x24 grid, `env_clear()`, a five-second
+  deadline, `spawn(env!("CARGO_BIN_EXE_myapp"))` — so the chain has a name.
+  Builder calls follow the name and override any default:
+  `termlens::bin!("myapp", size(120, 40), env("NO_COLOR", "1"))?`. A
+  misspelled binary is a compile error naming the variable, not a spawn
+  failure at run time.
 - **`Screen::mouse_modes` reports every mouse tracking mode the application
   enabled, and `DECRQM` answers each one on its own evidence.** The backend
   collapses `?9`/`?1000`/`?1002`/`?1003` into the one protocol a terminal
