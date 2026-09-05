@@ -9,6 +9,18 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Added
+
+- **A skill for AI coding agents.** `skills/termlens/SKILL.md` teaches an
+  agent how to test a terminal program with termlens without the mistakes
+  agents make on their own: no `sleep`, `snapshot_after` for whole-screen
+  snapshots, the 2x2 geometry floor, `bin!` for hermetic spawns, the two
+  coordinate orders, `wait_frame` only for applications that emit
+  synchronized updates (stock ratatui does not), and four copy-paste recipes
+  — a CLI snapshot, a ratatui navigation flow, overriding defaults, targeted
+  cell and style assertions. Every Rust block in it is compiled against the
+  crate in CI, and the README shows the one-line install for Claude Code.
+
 ## [0.9.0] - 2026-09-05
 
 ### Added

@@ -66,6 +66,11 @@ cargo insta review            # inspect and accept/reject each diff
 - `docs/DESIGN.md` — the architecture in four layers, wait semantics, and the
   snapshot format spec. **Read this before touching `wait.rs`, `terminal.rs`,
   or the emulator.**
+- `skills/termlens/` — the skill for AI coding agents that write tests
+  *with* termlens (`AGENTS.md` briefs agents working *on* it). Every Rust
+  block in `SKILL.md` is compiled against the crate by
+  `.github/scripts/check-skill-snippets.sh`; run it after editing the file.
+  `.claude/skills/termlens` links to it so Claude Code finds it here.
 - `.github/` — CI, commit policy enforcement, release automation.
 
 ## 3. Testing policy
