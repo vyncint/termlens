@@ -21,6 +21,13 @@ listed under a **Changed** or **Removed** heading.
   cell and style assertions. Every Rust block in it is compiled against the
   crate in CI, and the README shows the one-line install for Claude Code.
 
+### Changed
+
+- **`Screen::row_text` rejects an out-of-bounds row instead of returning an
+  ambiguous empty string.** Callers with a potentially invalid index should
+  bounds-check against `rows()` first, or use `cell(row, 0)` and treat `None`
+  as absent. (#260)
+
 ### Fixed
 
 - **docs.rs labels APIs gated by the `decode` and `insta` features.** Optional
