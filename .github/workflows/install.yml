@@ -14,7 +14,12 @@
 #     here. That is why this runs daily and not only at publish.
 #   * A feature that resolves in this workspace and nowhere else. `decode` is
 #     off by default and pulls a dependency of its own, which makes it exactly
-#     the shape of thing that works until someone outside tries it.
+#     the shape of thing that works until someone outside tries it. The
+#     mirror image is a consumer that declines the defaults: an optional
+#     dependency a workspace sibling happens to enable looks fine here and
+#     fails for them. Two of the three in-house consumers are that shape
+#     (launchbound and reconverge; only mossaic takes `decode`), so both
+#     shapes are verified (#238).
 #
 # The consumer is a real crate in an empty directory, and the test it runs is
 # a real PTY — which is the whole product, so nothing else would do. Nothing
@@ -56,11 +61,13 @@ concurrency:
 
 jobs:
   consume:
-    name: consume (${{ matrix.os }})
+    name: consume (${{ matrix.os }}, ${{ matrix.features }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        # The two shapes real consumers use — see the header (#238).
+        features: [decode, no-default-features]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -69,6 +76,9 @@ jobs:
         env:
           TAG: ${{ github.event.release.tag_name }}
           WANTED: ${{ inputs.version }}
+          # Only the leg that asks for `decode` demands the registry advertise
+          # it; the other leg proves the crate stands with no feature at all.
+          WANTED_FEATURES: ${{ matrix.features == 'decode' && 'decode insta' || '' }}
         run: |
           api="https://crates.io/api/v1/crates/termlens"
           agent="termlens-install-check (github actions)"
@@ -107,7 +117,7 @@ jobs:
           # actually ask for — a feature renamed at the last moment would be
           # invisible to every test in this repository.
           features=$(printf '%s' "$body" | jq -r '.version.features | keys | join(",")')
-          for wanted in decode insta; do
+          for wanted in $WANTED_FEATURES; do
             case ",$features," in
               *",$wanted,"*) ;;
               *) echo "::error::the published $version has no '$wanted' feature (it has: $features)"; exit 1 ;;
@@ -122,18 +132,24 @@ jobs:
       - name: Build a consumer against it
         env:
           VERSION: ${{ steps.crate.outputs.version }}
+          FEATURES: ${{ matrix.features }}
         run: |
           cd "$RUNNER_TEMP"
           cargo new --lib consumer --edition 2021 --vcs none
           cd consumer
-          # Exactly what the README tells a reader to type, plus the feature
-          # that carries the decoder.
-          cargo add termlens@"=$VERSION" --dev --features decode
+          # Exactly what the README tells a reader to type, plus the flag this
+          # leg verifies: the feature that carries the decoder, or none of the
+          # defaults at all.
+          case "$FEATURES" in
+            decode) cargo add termlens@"=$VERSION" --dev --features decode ;;
+            no-default-features) cargo add termlens@"=$VERSION" --dev --no-default-features ;;
+            *) echo "::error::unknown matrix leg $FEATURES"; exit 1 ;;
+          esac
 
           mkdir -p tests
           cat > tests/published.rs <<'RUST'
-          //! The published crate, from an empty project: a real PTY, a real
-          //! screen, and the decoder behind the `decode` feature.
+          //! The published crate, from an empty project: a real PTY and a
+          //! real screen, in every feature configuration.
           use std::time::Duration;
 
           use termlens::{Key, Terminal};
@@ -162,6 +178,24 @@ jobs:
               t.send(Key::Enter)?;
               assert!(t.wait_exit()?.success());
               Ok(())
+          }
+          RUST
+
+          if [ "$FEATURES" = decode ]; then
+          cat > tests/decode.rs <<'RUST'
+          //! The decoder behind the `decode` feature, reached from outside.
+          use std::time::Duration;
+
+          use termlens::{Key, Terminal};
+
+          fn sh(script: &str) -> termlens::Result<Terminal> {
+              Terminal::builder()
+                  .size(40, 10)
+                  .env_clear()
+                  .timeout(Duration::from_secs(30))
+                  .arg("-c")
+                  .arg(script)
+                  .spawn("/bin/sh")
           }
 
           #[test]
@@ -192,9 +226,21 @@ jobs:
               Ok(())
           }
           RUST
+          fi
 
           echo "--- the consumer's manifest ---"
           cat Cargo.toml
           echo "--- what it resolved to ---"
           cargo tree --depth 1 --edges normal,dev
-          cargo test --test published -- --nocapture
+          if [ "$FEATURES" = no-default-features ]; then
+            # The point of this leg. `insta` is the whole of the default
+            # feature's tree; a consumer that declined the defaults must not
+            # carry it, and an optional dependency that only resolves because
+            # a workspace sibling enables it would show up here and nowhere
+            # in this repository.
+            if cargo tree --edges normal,dev | grep -qE '(^|[^[:alnum:]_-])insta v'; then
+              echo "::error::a --no-default-features consumer still resolves insta"
+              exit 1
+            fi
+          fi
+          cargo test --tests -- --nocapture

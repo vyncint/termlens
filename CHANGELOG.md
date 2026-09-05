@@ -32,6 +32,14 @@ listed under a **Changed** or **Removed** heading.
   invisible, and a `DECRQM` probe for any member but the last had to be
   answered "not recognized". The sequence tracker now keeps the requested
   set; `mouse_mode()` still reports the protocol. (#151)
+- **The fresh-install check verifies a `--no-default-features` consumer as
+  well as a `decode` one.** `install.yml` is the only job that builds
+  termlens from outside this workspace, and it did so in one shape — the
+  one the fewest real consumers use: of the three in-house ones, two declare
+  `default-features = false`. Its matrix now runs both shapes on Ubuntu and
+  macOS, the registry check demands the `decode` feature only on the leg
+  that asks for it, and the no-defaults leg fails if the consumer's tree
+  still resolves `insta`. (#238)
 - **The `inspect` example answers `--help`, and takes its deadline and
   silence window from flags.** `inspect --help` used to look for a program
   called `--help`, and both timings were hardcoded, so an application slower
