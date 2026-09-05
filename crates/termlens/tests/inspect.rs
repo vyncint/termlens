@@ -66,6 +66,34 @@ fn inspect_runs_and_reports_cli_failures() {
 }
 
 #[test]
+fn inspect_clears_and_selectively_sets_the_child_environment() {
+    let bin = inspect_bin();
+    let output = Command::new(&bin)
+        .env("TERMLENS_INSPECT_LEAK", "secret")
+        .args(["--env", "KEPT=yes"])
+        .args(["sh", "-c", "printf ${TERMLENS_INSPECT_LEAK-unset}:$KEPT"])
+        .output()
+        .expect("inspect runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("unset:yes"),
+        "cleared/selected environment missing from:\n{stdout}"
+    );
+
+    let inherited = Command::new(&bin)
+        .env("TERMLENS_INSPECT_INHERITED", "yes")
+        .args(["--inherit-env"])
+        .args(["sh", "-c", "printf inherited:$TERMLENS_INSPECT_INHERITED"])
+        .output()
+        .expect("inspect runs");
+    let stdout = String::from_utf8_lossy(&inherited.stdout);
+    assert!(
+        stdout.contains("inherited:yes"),
+        "inherited environment missing from:\n{stdout}"
+    );
+}
+
+#[test]
 fn inspect_survives_a_reader_that_closes_early() {
     use std::io::Read;
     use std::process::Stdio;

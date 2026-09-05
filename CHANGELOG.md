@@ -21,6 +21,12 @@ listed under a **Changed** or **Removed** heading.
   cell and style assertions. Every Rust block in it is compiled against the
   crate in CI, and the README shows the one-line install for Claude Code.
 
+### Changed
+
+- **The `inspect` example clears the child environment by default.** It keeps
+  `PATH` so bare program names work; `--env` adds selected values and
+  `--inherit-env` restores the previous behavior. (#263)
+
 ## [0.9.0] - 2026-09-05
 
 ### Added
