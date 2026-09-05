@@ -84,19 +84,25 @@
 //! application normalized the other way. The grid keeps exactly the
 //! codepoints the application sent.
 //!
-//! With the default `insta` feature, snapshot-test whole screens:
+//! With the default `insta` feature, snapshot-test whole screens — after
+//! waiting for what the application paints and for the picture to hold
+//! still, which [`snapshot_after`](Terminal::snapshot_after) does in one
+//! call:
 //!
 //! ```no_run
 //! # fn main() -> termlens::Result<()> {
 //! # let mut t = termlens::Terminal::builder().spawn("true")?;
+//! let screen = t.snapshot_after(|s| s.contains("Ready"))?;
 //! #[cfg(feature = "insta")]
-//! {
-//!     insta::assert_snapshot!(t.screen());        // plain insta…
-//!     termlens::assert_screen_snapshot!(t.screen()); // …or the bundled macro
-//! }
+//! insta::assert_snapshot!(screen); // or termlens::assert_screen_snapshot!(screen)
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! Testing a binary of your own package? [`bin!`] spawns
+//! `CARGO_BIN_EXE_<name>` under the harness defaults — a fixed grid, a
+//! cleared environment, a deadline — with builder calls after the name to
+//! override any of them.
 
 #![warn(missing_docs)]
 
