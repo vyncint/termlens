@@ -855,19 +855,29 @@ impl Screen {
     }
 
     /// The text of one row, blank cells rendered as spaces, trailing
-    /// whitespace **included**. Returns an empty string for out-of-bounds
-    /// rows.
+    /// whitespace **included**.
     ///
     /// Wide characters contribute their character once; their continuation
     /// cell contributes nothing (so the string's *display width* matches the
     /// row, not its `char` count).
+    ///
+    /// # Panics
+    ///
+    /// Panics when `row` is outside the screen. Unlike the clamped ranges
+    /// accepted by [`rect_text`](Self::rect_text), a single invalid index is
+    /// a caller mistake; returning an empty string would make it
+    /// indistinguishable from a blank row. Use [`cell`](Self::cell) when an
+    /// out-of-bounds result is expected and should be represented by `None`.
     #[must_use]
     pub fn row_text(&self, row: u16) -> String {
+        assert!(
+            row < self.rows,
+            "row_text: row {row} is outside the {}-row screen",
+            self.rows
+        );
         let mut out = String::with_capacity(usize::from(self.cols));
         for col in 0..self.cols {
-            let Some(cell) = self.cell(row, col) else {
-                return out;
-            };
+            let cell = self.cell(row, col).expect("row and column are in bounds");
             if cell.is_wide_continuation() {
                 continue;
             }
@@ -1497,7 +1507,12 @@ mod tests {
         assert_eq!(s.row_text(0), "ab        ");
         // 汉 is wide: one char + continuation, then x, then 7 blanks.
         assert_eq!(s.row_text(1), "汉x       ");
-        assert_eq!(s.row_text(9), "");
+    }
+
+    #[test]
+    #[should_panic(expected = "row_text: row 9 is outside the 2-row screen")]
+    fn row_text_rejects_out_of_bounds_rows() {
+        let _ = screen(10, 2, &["ab", "汉x"]).row_text(9);
     }
 
     #[test]
