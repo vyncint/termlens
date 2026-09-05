@@ -21,6 +21,12 @@ listed under a **Changed** or **Removed** heading.
   cell and style assertions. Every Rust block in it is compiled against the
   crate in CI, and the README shows the one-line install for Claude Code.
 
+### Changed
+
+- **`Terminal::drag` takes four column-first coordinate arguments instead of
+  two unlabelled tuples.** This matches the other mouse methods and prevents a
+  row-first `Screen::find` result from being passed through transposed. (#257)
+
 ## [0.9.0] - 2026-09-05
 
 ### Added
