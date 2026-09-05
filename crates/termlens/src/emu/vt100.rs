@@ -222,7 +222,7 @@ impl Emulator for Vt100Emulator {
             // Asked before the step, because whether this byte is a character
             // at all depends on the state the tracker is in before it — and
             // a designation's own final byte must not be drawn.
-            if let Some(glyph) = self.tracker.graphics_glyph(byte) {
+            if let Some(glyph) = self.tracker.charset_glyph(byte) {
                 self.staged.extend_from_slice(&bytes[fed..i]);
                 self.staged.extend_from_slice(glyph.as_bytes());
                 fed = i + 1;

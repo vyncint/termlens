@@ -232,10 +232,11 @@ design. termlens's position:
   decision (`Terminal::resize` says why). The visible grid stays the
   fully-featured surface.
 - **Character sets: G0–G3 designation, SO/SI locking shifts, SS2/SS3
-  single shifts, and one set translated.** `ESC ( ) * + Ps` designations,
+  single shifts, and two sets translated.** `ESC ( ) * + Ps` designations,
   the `SO`/`SI` locking shifts, and `ESC N`/`ESC O` (SS2/SS3, one character)
-  are modelled, and the DEC Special Graphics set (`0`) is translated; every
-  other designation — the UK set, the alternate ROMs — reads as ASCII.
+  are modelled; the DEC Special Graphics set (`0`) and the UK set (`A`,
+  `£` at `#`) are translated, and every other designation — the alternate
+  ROMs, the other national sets — is acknowledged and reads as ASCII.
   Locking shifts remain G0/G1 only (`LS2`/`LS3` are not modelled).
   `DECSC`/`DECRC` do not save or restore the charset state.
 - `wait_frame` needs the application to bracket its repaints in DEC 2026

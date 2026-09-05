@@ -26,8 +26,10 @@
 //! letters — which is how ncurses draws every border (`smacs`/`rmacs` on an
 //! xterm terminfo are exactly `ESC ( 0` / `ESC ( B`). A mixed line of text
 //! and box-drawing uses the single shift instead, so `ESC * 0 ESC N l` is
-//! `┌` and the character after it is back to the locked set. Only the DEC
-//! Special Graphics set is translated; every other designation reads as
+//! `┌` and the character after it is back to the locked set. Two sets are
+//! translated: DEC Special Graphics, and the UK set (`ESC ( A`), whose one
+//! difference from ASCII is `£` at `#`; every other designation — the
+//! alternate ROMs, the other national sets — is acknowledged and reads as
 //! ASCII. Locking shifts remain G0/G1 (`SO`/`SI`); `LS2`/`LS3` are not
 //! modelled. The tracker decides, the emulator rewrites: the bytes the
 //! parsers see are then a translated stream rather than a sub-slice of the
@@ -117,9 +119,12 @@ pub(crate) fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
 /// Which glyph set a G0–G3 designation currently names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Charset {
-    /// ASCII — and every national replacement set, which differ from it in
-    /// a handful of positions this crate does not model.
+    /// ASCII — and every designation this crate has no table for: the
+    /// alternate ROMs and the national replacement sets other than the UK
+    /// one, which differ from it in a handful of positions.
     Ascii,
+    /// The DEC United Kingdom set (`ESC ( A`): ASCII with `£` at `#`.
+    Uk,
     /// DEC Special Graphics (`ESC ( 0`): the line-drawing set.
     DecSpecialGraphics,
 }
@@ -589,9 +594,10 @@ impl SeqTracker {
         std::mem::replace(&mut self.frame_printable, 0)
     }
 
-    /// The glyph `b` draws in the invoked character set, when that set is
-    /// DEC Special Graphics and `b` is one of the bytes it redefines — or
-    /// `None` when the byte draws as itself, or is not a character at all.
+    /// The glyph `b` draws in the invoked character set, when that set
+    /// redefines `b` — the 32 bytes DEC Special Graphics redraws, or `#` in
+    /// the UK set — or `None` when the byte draws as itself, or is not a
+    /// character at all.
     ///
     /// Consulted **before** the byte is stepped: whether a byte is a
     /// character depends on the state the tracker is in before it, and the
@@ -599,14 +605,15 @@ impl SeqTracker {
     /// single shift is read here and consumed in `transition` when the
     /// character is processed, so a second look (the open-link label) still
     /// sees the same set.
-    pub(crate) fn graphics_glyph(&self, b: u8) -> Option<&'static str> {
+    pub(crate) fn charset_glyph(&self, b: u8) -> Option<&'static str> {
         if self.state != State::Ground {
             return None;
         }
-        if self.invoked_charset() != Charset::DecSpecialGraphics {
-            return None;
+        match self.invoked_charset() {
+            Charset::Ascii => None,
+            Charset::Uk => (b == b'#').then_some("\u{a3}"),
+            Charset::DecSpecialGraphics => dec_special_graphics(b),
         }
-        dec_special_graphics(b)
     }
 
     fn invoked_charset(&self) -> Charset {
@@ -625,15 +632,17 @@ impl SeqTracker {
 
     /// Apply the final byte of an `ESC ( ) * + Ps` designation.
     ///
-    /// `0` is DEC Special Graphics. Everything else — `B` (ASCII), `A` (UK,
-    /// which differs from ASCII only at `#`), the alternate-ROM sets —
-    /// reads as ASCII: close enough for every one of them that guessing at
-    /// the odd position would be a worse answer than the plain one.
+    /// `0` is DEC Special Graphics and `A` the United Kingdom set, whose one
+    /// difference from ASCII is `£` at `#`. Everything else — `B` (ASCII),
+    /// the alternate-ROM sets `1` and `2`, the other national sets — reads
+    /// as ASCII: a designation acknowledged and left untranslated, which is
+    /// close enough for every one of them that guessing at the odd position
+    /// would be a worse answer than the plain one.
     fn designate(&mut self, final_byte: u8) {
-        let set = if final_byte == b'0' {
-            Charset::DecSpecialGraphics
-        } else {
-            Charset::Ascii
+        let set = match final_byte {
+            b'0' => Charset::DecSpecialGraphics,
+            b'A' => Charset::Uk,
+            _ => Charset::Ascii,
         };
         match self.esc_intermediate {
             b'(' => self.g0 = set,
@@ -1166,7 +1175,7 @@ impl SeqTracker {
                     // as the glyph it draws: the label is what a reader sees
                     // and clicks, and a reader sees `─`, not `q`.
                     if printable && self.link_open {
-                        let drawn: &[u8] = match self.graphics_glyph(b) {
+                        let drawn: &[u8] = match self.charset_glyph(b) {
                             Some(glyph) => glyph.as_bytes(),
                             None => std::slice::from_ref(&b),
                         };
@@ -1955,7 +1964,7 @@ mod tests {
         let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         let mut out = String::new();
         for &b in bytes {
-            match t.graphics_glyph(b) {
+            match t.charset_glyph(b) {
                 Some(glyph) => out.push_str(glyph),
                 None if t.state == State::Ground && (0x20..0x7f).contains(&b) => {
                     out.push(b as char);
@@ -2055,13 +2064,13 @@ mod tests {
             let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
             t.feed(b"\x1b*0\x1bN");
             assert_eq!(
-                t.graphics_glyph(b'l'),
+                t.charset_glyph(b'l'),
                 Some("\u{250c}"),
                 "shift pending before {ch}"
             );
             t.feed(ch.as_bytes());
             assert_eq!(
-                t.graphics_glyph(b'l'),
+                t.charset_glyph(b'l'),
                 None,
                 "shift must not survive {ch} and translate the next l"
             );
@@ -2089,19 +2098,19 @@ mod tests {
         for &b in b"\x1b(0" {
             t.step(b);
         }
-        assert_eq!(t.graphics_glyph(b'q'), Some("\u{2500}"));
+        assert_eq!(t.charset_glyph(b'q'), Some("\u{2500}"));
         for &b in b"\x1b]0;lqqk" {
-            assert_eq!(t.graphics_glyph(b), None, "inside an OSC: {b:?}");
+            assert_eq!(t.charset_glyph(b), None, "inside an OSC: {b:?}");
             t.step(b);
         }
         t.step(0x07);
         assert_eq!(&*t.title(), "lqqk", "the title keeps its letters");
         for &b in b"\x1b[3" {
-            assert_eq!(t.graphics_glyph(b), None, "inside a CSI: {b:?}");
+            assert_eq!(t.charset_glyph(b), None, "inside a CSI: {b:?}");
             t.step(b);
         }
         t.step(b'm');
-        assert_eq!(t.graphics_glyph(b'x'), Some("\u{2502}"), "and ground again");
+        assert_eq!(t.charset_glyph(b'x'), Some("\u{2502}"), "and ground again");
     }
 
     /// Other national sets and the alternate ROMs read as ASCII, and a second
@@ -2135,14 +2144,14 @@ mod tests {
         t.feed(b"\x1b(");
         assert!(t.mid_sequence());
         t.feed(b"0");
-        assert_eq!(t.graphics_glyph(b'l'), Some("\u{250c}"));
+        assert_eq!(t.charset_glyph(b'l'), Some("\u{250c}"));
 
         let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         t.feed(b"\x1b*");
         assert!(t.mid_sequence());
         t.feed(b"0\x1bN");
         assert!(!t.mid_sequence());
-        assert_eq!(t.graphics_glyph(b'l'), Some("\u{250c}"));
+        assert_eq!(t.charset_glyph(b'l'), Some("\u{250c}"));
     }
 
     #[test]

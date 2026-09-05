@@ -169,3 +169,25 @@ fn a_multibyte_character_consumes_a_single_shift() -> termlens::Result<()> {
     assert!(t.wait_exit()?.success());
     Ok(())
 }
+
+/// The UK set (`ESC ( A`) differs from ASCII in one position: `#` draws
+/// `£`. The designation used to be consumed and the byte drawn as itself,
+/// so a price in the UK set read `#42` and a test asserting `£42` failed
+/// against an application that was correct (#234). `SO`/`SI` select it the
+/// way they select the graphics set.
+#[test]
+fn the_uk_set_draws_a_pound_sign_at_hash() -> termlens::Result<()> {
+    let mut t = sh(concat!(
+        r"printf '\033(A#42 a-z\033(B#\n'; ",
+        r"printf '\033)A\016#\017#\n'; ",
+        "printf DONE; read _"
+    ))?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    assert_eq!(s.row_text(0).trim_end(), "£42 a-z#", "{s}");
+    assert_eq!(s.row_text(1).trim_end(), "£#", "{s}");
+    assert_eq!(s.find("£"), Some((0, 0)), "one cell, one column: {s}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}

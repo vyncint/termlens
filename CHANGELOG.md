@@ -68,6 +68,14 @@ listed under a **Changed** or **Removed** heading.
   shifts remain G0/G1 only (`SO`/`SI`); `LS2`/`LS3` and `DECSC`/`DECRC` of
   charset state are still unmodelled. (#235)
 
+- **The UK character set is translated: `ESC ( A` then `#` draws `£`.**
+  The designation was parsed and then rendered as ASCII, so an application
+  printing a price in the UK set showed `#42` on the grid, a test asserting
+  `£42` failed against a correct application, and a snapshot that blessed
+  `#42` kept passing. The set differs from ASCII in that one position, so
+  that is the one byte translated; the alternate-ROM sets and the other
+  national sets still read as ASCII, and the docs now say which sets are
+  translated. (#234)
 - **`find` no longer matches the blank padding past the end of a row.** Its
   single-row path searched the row padded out to the terminal width while
   `contains` searched the trimmed text, so `find("Total: ")` was `Some` on
