@@ -84,19 +84,25 @@
 //! application normalized the other way. The grid keeps exactly the
 //! codepoints the application sent.
 //!
-//! With the default `insta` feature, snapshot-test whole screens:
+//! With the default `insta` feature, snapshot-test whole screens — after
+//! waiting for what the application paints and for the picture to hold
+//! still, which [`snapshot_after`](Terminal::snapshot_after) does in one
+//! call:
 //!
 //! ```no_run
 //! # fn main() -> termlens::Result<()> {
 //! # let mut t = termlens::Terminal::builder().spawn("true")?;
+//! let screen = t.snapshot_after(|s| s.contains("Ready"))?;
 //! #[cfg(feature = "insta")]
-//! {
-//!     insta::assert_snapshot!(t.screen());        // plain insta…
-//!     termlens::assert_screen_snapshot!(t.screen()); // …or the bundled macro
-//! }
+//! insta::assert_snapshot!(screen); // or termlens::assert_screen_snapshot!(screen)
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! Testing a binary of your own package? [`bin!`] spawns
+//! `CARGO_BIN_EXE_<name>` under the harness defaults — a fixed grid, a
+//! cleared environment, a deadline — with builder calls after the name to
+//! override any of them.
 
 #![warn(missing_docs)]
 
@@ -116,7 +122,7 @@ pub use graphics::{
     GraphicsAction, GraphicsFormat, GraphicsPayload, GraphicsProtocol, GraphicsSeen,
 };
 pub use keys::{Chord, Input, Key};
-pub use screen::{Cell, Clipboard, Color, CursorShape, Link, MouseMode, Screen, Style};
+pub use screen::{Cell, Clipboard, Color, CursorShape, Link, MouseMode, MouseModes, Screen, Style};
 #[cfg(unix)]
 pub use terminal::Signal;
 pub use terminal::{
@@ -153,5 +159,47 @@ macro_rules! assert_screen_snapshot {
     };
     ($screen:expr, @$inline:literal) => {
         $crate::insta::assert_snapshot!($screen, @$inline)
+    };
+}
+
+/// Spawn one of this package's binaries under the harness defaults.
+///
+/// `termlens::bin!("myapp")` is the chain every integration test of a
+/// binary starts from:
+///
+/// ```ignore
+/// Terminal::builder()
+///     .size(80, 24)                       // a fixed grid, so snapshots are stable
+///     .env_clear()                        // nothing on the host leaks into the app
+///     .timeout(Duration::from_secs(5))    // a hang is a readable failure, not a stuck job
+///     .spawn(env!("CARGO_BIN_EXE_myapp"))
+/// ```
+///
+/// Any builder method can follow the name as a call, and later calls
+/// override the defaults:
+///
+/// ```ignore
+/// let mut t = termlens::bin!("myapp")?;
+/// let mut t = termlens::bin!("myapp", size(120, 40), env("NO_COLOR", "1"))?;
+/// let mut t = termlens::bin!("myapp", timeout(Duration::from_secs(30)), args(["--fast"]))?;
+/// ```
+///
+/// `CARGO_BIN_EXE_<name>` is set by Cargo for the integration tests of the
+/// package that owns the binary, so this works from that package's `tests/`
+/// and a misspelled name is a compile error naming the variable rather than
+/// a spawn failure at run time. The examples above are not compiled as
+/// doctests for the same reason: this crate has no binary called `myapp`.
+/// To spawn a program that is not one of your own binaries, or with
+/// different defaults, use [`Terminal::builder`] directly — the macro adds
+/// nothing else.
+#[macro_export]
+macro_rules! bin {
+    ($name:literal $(, $method:ident $args:tt)* $(,)?) => {
+        $crate::Terminal::builder()
+            .size(80, 24)
+            .env_clear()
+            .timeout(::std::time::Duration::from_secs(5))
+            $(.$method $args)*
+            .spawn(::std::env!(::std::concat!("CARGO_BIN_EXE_", $name)))
     };
 }

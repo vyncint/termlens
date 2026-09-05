@@ -71,9 +71,10 @@ jobs:
   #
   # Priced and deferred, deliberately (#226): the default set on the macOS
   # leg — a second full suite per PR for a fault class the stress workflow
-  # is better placed to find — and a --no-default-features consumer in
-  # install.yml, which would need the registry step there to stop assuming
-  # `decode`.
+  # is better placed to find. The other half #226 deferred, a
+  # --no-default-features consumer in install.yml, landed with #238: that
+  # workflow's matrix now runs both shapes, and its registry step demands
+  # `decode` only on the leg that asks for it.
   features:
     name: features
     runs-on: ubuntu-latest

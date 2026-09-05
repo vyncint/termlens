@@ -49,6 +49,12 @@ fn quits_from_the_main_screen() -> termlens::Result<()> {
 When a wait times out, the error embeds the screen — your CI log shows
 exactly what the app was displaying, not "assertion failed: false".
 
+The builder chain above is what every test of a package's own binary
+starts from, so it has a name: `termlens::bin!("myapp")` spawns
+`CARGO_BIN_EXE_myapp` at 80x24 with a cleared environment and a
+five-second deadline, and builder calls after the name override any of it —
+`termlens::bin!("myapp", size(120, 40), env("NO_COLOR", "1"))?`.
+
 ## What it is (and is not)
 
 - **Not** an expect-style stream matcher — [rexpect] and [expectrl] already
@@ -213,6 +219,11 @@ design. termlens's position:
   mid-escape-sequence, and no synchronized update is open. Silence is
   evidence a render finished — not proof. Use it for "the app settled",
   not for precise sequencing.
+- **`snapshot_after(pred)` is the whole-screen snapshot with the rules
+  built in**: it waits for the predicate, then for the picture to hold
+  still, and returns that screen. `wait_stable(quiet)` is the settle on its
+  own; unlike `wait_idle` it is reset by *changes*, not bytes, so a bell or
+  a repaint that alters no cell does not keep it waiting.
 - **Hermetic environments.** `env_clear()` blocks inheritance,
   `TERM=xterm-256color` is pinned by default, fixtures draw no clocks and
   no animations. The CI suite runs a 100-iteration
@@ -232,12 +243,13 @@ design. termlens's position:
   decision (`Terminal::resize` says why). The visible grid stays the
   fully-featured surface.
 - **Character sets: G0–G3 designation, SO/SI locking shifts, SS2/SS3
-  single shifts, and one set translated.** `ESC ( ) * + Ps` designations,
+  single shifts, and two sets translated.** `ESC ( ) * + Ps` designations,
   the `SO`/`SI` locking shifts, and `ESC N`/`ESC O` (SS2/SS3, one character)
-  are modelled, and the DEC Special Graphics set (`0`) is translated; every
-  other designation — the UK set, the alternate ROMs — reads as ASCII.
-  Locking shifts remain G0/G1 only (`LS2`/`LS3` are not modelled).
-  `DECSC`/`DECRC` do not save or restore the charset state.
+  are modelled; the DEC Special Graphics set (`0`) and the UK set (`A`,
+  `£` at `#`) are translated, and every other designation — the alternate
+  ROMs, the other national sets — is acknowledged and reads as ASCII.
+  `DECSC`/`DECRC` save and restore this state with the cursor. Locking
+  shifts remain G0/G1 only (`LS2`/`LS3` are not modelled).
 - `wait_frame` needs the application to bracket its repaints in DEC 2026
   synchronized updates, and only the last 8 completed frames are retained;
   everything else waits with `wait_until`, under the three rules in
@@ -272,7 +284,11 @@ design. termlens's position:
   terminal would infer.** The cursor shape follows `DECSCUSR` and is cleared
   by a hard reset (`RIS`); the window title is not, because in xterm the
   title is a window property that `RIS` does not restore, and guessing either
-  way would be the same error. Nothing here models `DECSTR` (soft reset).
+  way would be the same error. `DECSTR` (soft reset) resets what a `Screen`
+  can observe — cursor keys, bracketed paste, mouse tracking, focus
+  reporting, the cursor's visibility and shape, the character sets — and
+  leaves the alternate screen alone; attributes, margins, origin and insert
+  modes and the keypad are not modelled.
 - **Two SGR style attributes are not modeled.** Overline (`SGR 53`) and double
   underline (`SGR 21`) do not reach [`Style`](https://docs.rs/termlens/latest/termlens/struct.Style.html),
   so `with_styles()` cannot distinguish those attributes from a plain cell.

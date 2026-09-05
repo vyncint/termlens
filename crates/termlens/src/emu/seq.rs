@@ -13,10 +13,12 @@
 //!    are parsed incrementally in O(1) space, and `?2026` is recognized
 //!    anywhere in a multi-mode list such as `CSI ? 2026 ; 25 h`.
 //!
-//! It also tracks the one piece of screen state the vt100 backend does not
-//! expose: the **window title** (`OSC 0`/`OSC 2`), kept whole in its own
-//! buffer — the diagnostic capture below truncates at 24 bytes, real titles
-//! don't fit.
+//! It also tracks screen state the vt100 backend does not expose: the
+//! **window title** (`OSC 0`/`OSC 2`), kept whole in its own buffer — the
+//! diagnostic capture below truncates at 24 bytes, real titles don't fit —
+//! focus reporting (mode 1004), the cursor shape (`DECSCUSR`), and the
+//! **set of mouse tracking modes** the application asked for, which vt100
+//! collapses into the one protocol it would report in.
 //!
 //! And it holds the **character-set state** vt100 ignores: which glyph set
 //! `ESC ( ) * + Ps` designated into G0–G3, which of G0/G1 `SI`/`SO` has
@@ -26,17 +28,21 @@
 //! letters — which is how ncurses draws every border (`smacs`/`rmacs` on an
 //! xterm terminfo are exactly `ESC ( 0` / `ESC ( B`). A mixed line of text
 //! and box-drawing uses the single shift instead, so `ESC * 0 ESC N l` is
-//! `┌` and the character after it is back to the locked set. Only the DEC
-//! Special Graphics set is translated; every other designation reads as
-//! ASCII. Locking shifts remain G0/G1 (`SO`/`SI`); `LS2`/`LS3` are not
-//! modelled. The tracker decides, the emulator rewrites: the bytes the
+//! `┌` and the character after it is back to the locked set. Two sets are
+//! translated: DEC Special Graphics, and the UK set (`ESC ( A`), whose one
+//! difference from ASCII is `£` at `#`; every other designation — the
+//! alternate ROMs, the other national sets — is acknowledged and reads as
+//! ASCII. `DECSC`/`DECRC` save and restore this state alongside the cursor,
+//! and `RIS` and `DECSTR` return it to power-on. Locking shifts remain G0/G1
+//! (`SO`/`SI`); `LS2`/`LS3` are not modelled. The tracker decides, the
+//! emulator rewrites: the bytes the
 //! parsers see are then a translated stream rather than a sub-slice of the
 //! read, which `emu/vt100.rs` stages.
 
 use std::sync::Arc;
 
 use crate::graphics::{GraphicsBuilder, GraphicsCounts, GraphicsPayload};
-use crate::screen::{Clipboard, Link};
+use crate::screen::{Clipboard, Link, MouseModes};
 
 /// OSC strings are captured whole (titles must not truncate), but bounded:
 /// a buggy or hostile stream must not grow memory without limit. No real
@@ -117,11 +123,25 @@ pub(crate) fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
 /// Which glyph set a G0–G3 designation currently names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Charset {
-    /// ASCII — and every national replacement set, which differ from it in
-    /// a handful of positions this crate does not model.
+    /// ASCII — and every designation this crate has no table for: the
+    /// alternate ROMs and the national replacement sets other than the UK
+    /// one, which differ from it in a handful of positions.
     Ascii,
+    /// The DEC United Kingdom set (`ESC ( A`): ASCII with `£` at `#`.
+    Uk,
     /// DEC Special Graphics (`ESC ( 0`): the line-drawing set.
     DecSpecialGraphics,
+}
+
+/// What `DECSC` saves of the character-set state — see
+/// [`SeqTracker::saved_charsets`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SavedCharsets {
+    g0: Charset,
+    g1: Charset,
+    g2: Charset,
+    g3: Charset,
+    shifted_out: bool,
 }
 
 /// The glyph a byte draws in DEC Special Graphics, where it differs from
@@ -204,6 +224,10 @@ pub(crate) enum SeqEvent {
     SyncBegin,
     /// A `CSI ? 2026 … l` completed: a frame is now complete.
     SyncEnd,
+    /// `DECSTR` (`CSI ! p`) completed: the tracker has already returned
+    /// its own state to the defaults; the emulator must do the same for
+    /// the modes it holds.
+    SoftReset,
     /// The application asked the terminal a question.
     Query(Query),
     /// An inline graphics payload completed. Carried out of the tracker
@@ -305,6 +329,19 @@ fn printable(bytes: &[u8]) -> String {
     out
 }
 
+/// The bit a DEC private mode number occupies in the tracked set of mouse
+/// tracking modes, matching [`MouseModes`]'s layout; zero for any other
+/// parameter, so accumulating over a whole list is one `|=` per value.
+fn mouse_bit(mode: u32) -> u8 {
+    match mode {
+        9 => 1,
+        1000 => 2,
+        1002 => 4,
+        1003 => 8,
+        _ => 0,
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct SeqTracker {
     state: State,
@@ -329,6 +366,10 @@ pub(crate) struct SeqTracker {
     /// anywhere in a multi-mode list, so scanning for it beats assuming it
     /// is the only parameter.
     csi_saw_1004: bool,
+    /// The mouse tracking modes (`9`, `1000`, `1002`, `1003`) named in the
+    /// current CSI's parameter list, as [`mouse_bit`]s — the same scan as
+    /// `csi_saw_1004`, for a group rather than one mode.
+    csi_saw_mouse: u8,
     /// Raw capture of the current sequence (from ESC), for diagnostics
     /// and DCS query recognition. Bounded; long sequences truncate.
     seq_buf: [u8; 24],
@@ -380,6 +421,14 @@ pub(crate) struct SeqTracker {
     /// Tracked here because vt100 does not model 1004 at all — the same
     /// reason the window title is tracked here.
     focus_events: bool,
+    /// The mouse tracking modes the application has enabled and not yet
+    /// disabled, as [`mouse_bit`]s. vt100 collapses the four into the one
+    /// protocol it would report in — correct for the input path, since a
+    /// terminal reports in one protocol — which cannot say which members
+    /// of the group were asked for; crossterm asks for three at once. The
+    /// set is kept here so `DECRQM` can answer each mode on its own
+    /// evidence and a snapshot can report what was requested (#151).
+    mouse_tracking: u8,
     /// The raw `DECSCUSR` parameter the application last asked for, or
     /// `None` while it has never asked. Kept as the parameter rather than
     /// as a decoded shape so the one place that knows what `5` means is
@@ -403,6 +452,13 @@ pub(crate) struct SeqTracker {
     /// an intervening control or designation must not consume it, or a
     /// mixed line that shifts then redraws would lose the graphic.
     single_shift: Option<SingleShift>,
+    /// The charset half of the state `DECSC` (`ESC 7`) saves: G0–G3 and
+    /// which of G0/G1 is locked in. `DECRC` (`ESC 8`) restores it; with
+    /// nothing saved it restores the power-on defaults, as xterm does. vt100
+    /// saves and restores the cursor and attributes itself, so only the
+    /// half it does not know about lives here. `None` after RIS, or a
+    /// restore after a reset would resurrect a designation from before it.
+    saved_charsets: Option<SavedCharsets>,
     /// Which introducer opened the current DCS-class string: `P` (DCS),
     /// `X` (SOS), `^` (PM) or `_` (APC). Sixel and kitty graphics differ
     /// only by this, so consuming all four alike — which is all the tracker
@@ -449,6 +505,7 @@ impl SeqTracker {
             csi_param_count: 0,
             csi_saw_2026: false,
             csi_saw_1004: false,
+            csi_saw_mouse: 0,
             seq_buf: [0; 24],
             seq_len: 0,
             osc_buf: Vec::new(),
@@ -465,6 +522,7 @@ impl SeqTracker {
             capture,
             frame_printable: 0,
             focus_events: false,
+            mouse_tracking: 0,
             cursor_style: None,
             esc_intermediate: 0,
             g0: Charset::Ascii,
@@ -473,6 +531,7 @@ impl SeqTracker {
             g3: Charset::Ascii,
             shifted_out: false,
             single_shift: None,
+            saved_charsets: None,
             dcs_introducer: 0,
             dcs_final: 0,
             dcs_intermediate: 0,
@@ -578,6 +637,12 @@ impl SeqTracker {
         self.focus_events
     }
 
+    /// The mouse tracking modes the application has enabled and not yet
+    /// disabled — the requested set, not the one protocol vt100 reports in.
+    pub(crate) fn mouse_tracking(&self) -> MouseModes {
+        MouseModes::from_bits(self.mouse_tracking)
+    }
+
     /// The raw `DECSCUSR` parameter last requested, `None` if never.
     pub(crate) fn cursor_style(&self) -> Option<u8> {
         self.cursor_style
@@ -589,9 +654,10 @@ impl SeqTracker {
         std::mem::replace(&mut self.frame_printable, 0)
     }
 
-    /// The glyph `b` draws in the invoked character set, when that set is
-    /// DEC Special Graphics and `b` is one of the bytes it redefines — or
-    /// `None` when the byte draws as itself, or is not a character at all.
+    /// The glyph `b` draws in the invoked character set, when that set
+    /// redefines `b` — the 32 bytes DEC Special Graphics redraws, or `#` in
+    /// the UK set — or `None` when the byte draws as itself, or is not a
+    /// character at all.
     ///
     /// Consulted **before** the byte is stepped: whether a byte is a
     /// character depends on the state the tracker is in before it, and the
@@ -599,14 +665,15 @@ impl SeqTracker {
     /// single shift is read here and consumed in `transition` when the
     /// character is processed, so a second look (the open-link label) still
     /// sees the same set.
-    pub(crate) fn graphics_glyph(&self, b: u8) -> Option<&'static str> {
+    pub(crate) fn charset_glyph(&self, b: u8) -> Option<&'static str> {
         if self.state != State::Ground {
             return None;
         }
-        if self.invoked_charset() != Charset::DecSpecialGraphics {
-            return None;
+        match self.invoked_charset() {
+            Charset::Ascii => None,
+            Charset::Uk => (b == b'#').then_some("\u{a3}"),
+            Charset::DecSpecialGraphics => dec_special_graphics(b),
         }
-        dec_special_graphics(b)
     }
 
     fn invoked_charset(&self) -> Charset {
@@ -623,17 +690,46 @@ impl SeqTracker {
         }
     }
 
+    /// Every set back to ASCII with G0 invoked and no single shift pending:
+    /// the power-on charset state, which RIS returns to and which `DECRC`
+    /// with nothing saved restores.
+    fn reset_charsets(&mut self) {
+        self.g0 = Charset::Ascii;
+        self.g1 = Charset::Ascii;
+        self.g2 = Charset::Ascii;
+        self.g3 = Charset::Ascii;
+        self.shifted_out = false;
+        self.single_shift = None;
+    }
+
+    /// The tracker's half of `DECSTR`: the character sets and the `DECSC`
+    /// slot back to power-on, the cursor shape back to the terminal's
+    /// default, focus reporting off. The window title, the clipboard, the
+    /// bell count and the link log stay, for the same reason they survive
+    /// `RIS`: they are records of what the application emitted, not modes
+    /// the terminal holds. An open link span stays open too — a soft reset
+    /// clears no screen, so the text after it is still the span's text.
+    fn soft_reset(&mut self) {
+        self.reset_charsets();
+        self.saved_charsets = None;
+        self.cursor_style = None;
+        self.focus_events = false;
+        self.mouse_tracking = 0;
+    }
+
     /// Apply the final byte of an `ESC ( ) * + Ps` designation.
     ///
-    /// `0` is DEC Special Graphics. Everything else — `B` (ASCII), `A` (UK,
-    /// which differs from ASCII only at `#`), the alternate-ROM sets —
-    /// reads as ASCII: close enough for every one of them that guessing at
-    /// the odd position would be a worse answer than the plain one.
+    /// `0` is DEC Special Graphics and `A` the United Kingdom set, whose one
+    /// difference from ASCII is `£` at `#`. Everything else — `B` (ASCII),
+    /// the alternate-ROM sets `1` and `2`, the other national sets — reads
+    /// as ASCII: a designation acknowledged and left untranslated, which is
+    /// close enough for every one of them that guessing at the odd position
+    /// would be a worse answer than the plain one.
     fn designate(&mut self, final_byte: u8) {
-        let set = if final_byte == b'0' {
-            Charset::DecSpecialGraphics
-        } else {
-            Charset::Ascii
+        let set = match final_byte {
+            b'0' => Charset::DecSpecialGraphics,
+            b'A' => Charset::Uk,
+            _ => Charset::Ascii,
         };
         match self.esc_intermediate {
             b'(' => self.g0 = set,
@@ -665,6 +761,7 @@ impl SeqTracker {
         self.csi_param_count = 0;
         self.csi_saw_2026 = false;
         self.csi_saw_1004 = false;
+        self.csi_saw_mouse = 0;
     }
 
     fn push_seq(&mut self, b: u8) {
@@ -694,6 +791,7 @@ impl SeqTracker {
         if self.csi_param == 1004 {
             self.csi_saw_1004 = true;
         }
+        self.csi_saw_mouse |= mouse_bit(self.csi_param);
         if self.csi_param_count == 0 {
             self.csi_first_param = self.csi_param;
         }
@@ -714,11 +812,11 @@ impl SeqTracker {
                 self.csi_has_digits = true;
             }
             b';' => self.end_csi_param(),
-            // `$` is the intermediate of the DECRQM request (`CSI ? n $ p`)
-            // and `SP` of DECSCUSR (`CSI Ps SP q`); recording them keeps
-            // those sequences classifiable instead of discarding them as
-            // unrecognized.
-            b'$' | b' ' => self.csi_intermediate = b,
+            // `$` is the intermediate of the DECRQM request (`CSI ? n $ p`),
+            // `SP` of DECSCUSR (`CSI Ps SP q`) and `!` of DECSTR
+            // (`CSI ! p`); recording them keeps those sequences
+            // classifiable instead of discarding them as unrecognized.
+            b'$' | b' ' | b'!' => self.csi_intermediate = b,
             // Sub-parameters or other intermediates: none of the sequences
             // we recognize use them.
             _ => self.csi_invalid = true,
@@ -749,6 +847,19 @@ impl SeqTracker {
                 (_, b'p' | b'y') => SeqEvent::Query(Query::Unanswerable(self.seq_printable())),
                 _ => SeqEvent::None,
             };
+        }
+
+        // DECSTR (`CSI ! p`), the soft reset: what a well-behaved TUI sends
+        // on startup and teardown for a known-good terminal without the
+        // screen clear RIS brings. The spec's list is long; the modes this
+        // crate holds are returned to their defaults here, and the emulator
+        // is told to do the same for the ones it holds (#233).
+        if self.csi_intermediate == b'!' {
+            if b == b'p' && self.csi_prefix == 0 && params_empty {
+                self.soft_reset();
+                return SeqEvent::SoftReset;
+            }
+            return SeqEvent::None;
         }
 
         // DECSCUSR (`CSI Ps SP q`): the shape of the cursor, and whether it
@@ -787,6 +898,17 @@ impl SeqTracker {
             match b {
                 b'h' => self.focus_events = true,
                 b'l' => self.focus_events = false,
+                _ => {}
+            }
+        }
+
+        // The mouse tracking modes, kept as the set the application asked
+        // for — see `mouse_tracking`. Every mode named in one list is set
+        // or cleared together, which is how they arrive.
+        if self.csi_prefix == b'?' && self.csi_saw_mouse != 0 {
+            match b {
+                b'h' => self.mouse_tracking |= self.csi_saw_mouse,
+                b'l' => self.mouse_tracking &= !self.csi_saw_mouse,
                 _ => {}
             }
         }
@@ -1166,7 +1288,7 @@ impl SeqTracker {
                     // as the glyph it draws: the label is what a reader sees
                     // and clicks, and a reader sees `─`, not `q`.
                     if printable && self.link_open {
-                        let drawn: &[u8] = match self.graphics_glyph(b) {
+                        let drawn: &[u8] = match self.charset_glyph(b) {
                             Some(glyph) => glyph.as_bytes(),
                             None => std::slice::from_ref(&b),
                         };
@@ -1235,13 +1357,41 @@ impl SeqTracker {
                 // the terminal still holds.
                 b'c' => {
                     self.cursor_style = None;
-                    self.g0 = Charset::Ascii;
-                    self.g1 = Charset::Ascii;
-                    self.g2 = Charset::Ascii;
-                    self.g3 = Charset::Ascii;
-                    self.shifted_out = false;
-                    self.single_shift = None;
+                    self.reset_charsets();
+                    self.saved_charsets = None;
+                    self.mouse_tracking = 0;
                     self.close_link();
+                    State::Ground
+                }
+                // DECSC / DECRC: the charset half of save-cursor and
+                // restore-cursor. The idiom is save, jump, draw a border,
+                // restore — and a restore that forgot the designation
+                // rendered the border after it as `lqk`. vt100 does the
+                // cursor and attributes; the sets are ours (#232).
+                b'7' => {
+                    self.saved_charsets = Some(SavedCharsets {
+                        g0: self.g0,
+                        g1: self.g1,
+                        g2: self.g2,
+                        g3: self.g3,
+                        shifted_out: self.shifted_out,
+                    });
+                    State::Ground
+                }
+                b'8' => {
+                    match self.saved_charsets {
+                        Some(saved) => {
+                            self.g0 = saved.g0;
+                            self.g1 = saved.g1;
+                            self.g2 = saved.g2;
+                            self.g3 = saved.g3;
+                            self.shifted_out = saved.shifted_out;
+                        }
+                        // Nothing saved: xterm restores the defaults rather
+                        // than leaving the current designation, and so do
+                        // we — the least surprising answer, and no new state.
+                        None => self.reset_charsets(),
+                    }
                     State::Ground
                 }
                 // SS2 / SS3: invoke G2 / G3 for the next character only.
@@ -1955,7 +2105,7 @@ mod tests {
         let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         let mut out = String::new();
         for &b in bytes {
-            match t.graphics_glyph(b) {
+            match t.charset_glyph(b) {
                 Some(glyph) => out.push_str(glyph),
                 None if t.state == State::Ground && (0x20..0x7f).contains(&b) => {
                     out.push(b as char);
@@ -2055,13 +2205,13 @@ mod tests {
             let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
             t.feed(b"\x1b*0\x1bN");
             assert_eq!(
-                t.graphics_glyph(b'l'),
+                t.charset_glyph(b'l'),
                 Some("\u{250c}"),
                 "shift pending before {ch}"
             );
             t.feed(ch.as_bytes());
             assert_eq!(
-                t.graphics_glyph(b'l'),
+                t.charset_glyph(b'l'),
                 None,
                 "shift must not survive {ch} and translate the next l"
             );
@@ -2089,19 +2239,19 @@ mod tests {
         for &b in b"\x1b(0" {
             t.step(b);
         }
-        assert_eq!(t.graphics_glyph(b'q'), Some("\u{2500}"));
+        assert_eq!(t.charset_glyph(b'q'), Some("\u{2500}"));
         for &b in b"\x1b]0;lqqk" {
-            assert_eq!(t.graphics_glyph(b), None, "inside an OSC: {b:?}");
+            assert_eq!(t.charset_glyph(b), None, "inside an OSC: {b:?}");
             t.step(b);
         }
         t.step(0x07);
         assert_eq!(&*t.title(), "lqqk", "the title keeps its letters");
         for &b in b"\x1b[3" {
-            assert_eq!(t.graphics_glyph(b), None, "inside a CSI: {b:?}");
+            assert_eq!(t.charset_glyph(b), None, "inside a CSI: {b:?}");
             t.step(b);
         }
         t.step(b'm');
-        assert_eq!(t.graphics_glyph(b'x'), Some("\u{2502}"), "and ground again");
+        assert_eq!(t.charset_glyph(b'x'), Some("\u{2502}"), "and ground again");
     }
 
     /// Other national sets and the alternate ROMs read as ASCII, and a second
@@ -2135,14 +2285,14 @@ mod tests {
         t.feed(b"\x1b(");
         assert!(t.mid_sequence());
         t.feed(b"0");
-        assert_eq!(t.graphics_glyph(b'l'), Some("\u{250c}"));
+        assert_eq!(t.charset_glyph(b'l'), Some("\u{250c}"));
 
         let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
         t.feed(b"\x1b*");
         assert!(t.mid_sequence());
         t.feed(b"0\x1bN");
         assert!(!t.mid_sequence());
-        assert_eq!(t.graphics_glyph(b'l'), Some("\u{250c}"));
+        assert_eq!(t.charset_glyph(b'l'), Some("\u{250c}"));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use termlens::{CursorShape, Key, MouseMode, Screen, Terminal};
+use termlens::{CursorShape, Key, MouseMode, MouseModes, Screen, Terminal};
 
 /// One script walks the whole state surface: set everything, assert, then
 /// unwind everything and assert the way back.
@@ -202,6 +202,60 @@ fn a_snapshot_keeps_its_own_view_of_the_links() -> termlens::Result<()> {
     Ok(())
 }
 
+/// `DECSTR` (`CSI ! p`) is the polite reset — no screen clear — that a
+/// well-behaved TUI sends on teardown, and it used to have no effect at
+/// all (#233). What it resets here is the list a test can check on a
+/// `Screen`: cursor keys, bracketed paste, mouse tracking, focus reporting,
+/// the cursor's visibility and shape, and the character sets (covered in
+/// `charset.rs`). Attributes, margins, origin and insert modes and the
+/// keypad are not replayed — nothing observes them, so nothing could catch
+/// a wrong replay — and the alternate screen is left alone, as specified.
+#[test]
+fn a_soft_reset_returns_the_modes_a_screen_can_observe() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"printf '\033[?1049h\033[?1h\033[?2004h\033[?1000h\033[?1006h\033[?1004h\033[?25l\033[5 q'; ",
+                r"printf 'set'; read _; ",
+                r"printf '\033[!p'; ",
+                r"printf ' reset'; read _",
+            ),
+        ])
+        .spawn("sh")?;
+
+    t.wait_until(|s| {
+        s.contains("set")
+            && s.alternate_screen()
+            && s.application_cursor()
+            && s.bracketed_paste()
+            && s.mouse_mode() == MouseMode::PressRelease
+            && s.focus_events()
+            && !s.cursor().2
+            && s.cursor_shape() == CursorShape::Bar
+    })?;
+
+    t.send(Key::Enter)?;
+    t.wait_until(|s| s.contains("reset"))?;
+    let s = t.screen();
+    assert!(
+        s.alternate_screen(),
+        "the alternate screen is left alone: {s}"
+    );
+    assert!(!s.application_cursor(), "{s}");
+    assert!(!s.bracketed_paste(), "{s}");
+    assert_eq!(s.mouse_mode(), MouseMode::None, "{s}");
+    assert!(!s.focus_events(), "{s}");
+    assert!(s.cursor().2, "DECTCEM: the cursor is visible again: {s}");
+    assert_eq!(s.cursor_shape(), CursorShape::Default, "{s}");
+    assert_eq!(s.cursor_blink(), None, "{s}");
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 #[test]
 fn mouse_mode_reports_the_exact_tracking_mode() -> termlens::Result<()> {
     let mut t = Terminal::builder()
@@ -221,6 +275,70 @@ fn mouse_mode_reports_the_exact_tracking_mode() -> termlens::Result<()> {
     t.wait_until(|s| s.contains("1000") && s.mouse_mode() == MouseMode::PressRelease)?;
     t.send(Key::Enter)?;
     t.wait_until(|s| s.contains("1003") && s.mouse_mode() == MouseMode::AnyMotion)?;
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// The set an application asked for is a different fact from the protocol
+/// the terminal reports in, and only the latter was observable: crossterm
+/// enables 1000, 1002 and 1003 together, the backend keeps the last, and an
+/// application downgraded from any-motion to button-motion — losing hover
+/// entirely — was indistinguishable from one that never had it (#151). The
+/// input path keeps the collapsed value; the set is reported beside it.
+#[test]
+fn mouse_modes_reports_the_set_the_application_asked_for() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"printf '\033[?1000h\033[?1002h\033[?1003h\033[?1006h'; printf 'all three\n'; read _; ",
+                r"printf '\033[?1003l'; printf 'minus 1003\n'; read _; ",
+                r"printf '\033[?1002l\033[?1000l'; printf 'none\n'; read _",
+            ),
+        ])
+        .spawn("sh")?;
+
+    let set = |modes: &[MouseMode]| -> Vec<MouseMode> { modes.to_vec() };
+    t.wait_until(|s| {
+        s.contains("all three")
+            && s.mouse_mode() == MouseMode::AnyMotion
+            && s.mouse_modes().iter().collect::<Vec<_>>()
+                == set(&[
+                    MouseMode::PressRelease,
+                    MouseMode::ButtonMotion,
+                    MouseMode::AnyMotion,
+                ])
+    })?;
+    let s = t.screen();
+    assert!(
+        s.mouse_modes().contains(MouseMode::ButtonMotion),
+        "{:?}",
+        s.mouse_modes()
+    );
+    assert!(
+        !s.mouse_modes().contains(MouseMode::Press),
+        "{:?}",
+        s.mouse_modes()
+    );
+    assert_eq!(s.mouse_modes().len(), 3);
+
+    // Releasing 1003 alone: the set still holds the other two, while the
+    // protocol collapses to none — as xterm does, and as `click` needs.
+    t.send(Key::Enter)?;
+    t.wait_until(|s| {
+        s.contains("minus 1003")
+            && s.mouse_mode() == MouseMode::None
+            && s.mouse_modes().iter().collect::<Vec<_>>()
+                == set(&[MouseMode::PressRelease, MouseMode::ButtonMotion])
+    })?;
+
+    t.send(Key::Enter)?;
+    t.wait_until(|s| s.contains("none") && s.mouse_modes().is_empty())?;
+    assert_eq!(t.screen().mouse_modes(), MouseModes::default());
+    assert!(t.screen().mouse_modes().contains(MouseMode::None));
+
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())

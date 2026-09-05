@@ -22,6 +22,53 @@ listed under a **Changed** or **Removed** heading.
   state means nothing. `wait_exit` is deliberately unaffected: the child's
   exit status is still true. (#211)
 
+- **`snapshot_after` and `wait_stable`: the whole-screen snapshot as one
+  call, and a settle that output changing nothing cannot hold up.**
+  `snapshot_after(pred)` waits for the predicate, then for the picture to
+  hold still for 100ms, and returns that screen — DESIGN §2's three rules
+  for race-free waits without having to remember them. `wait_stable(quiet)`
+  is the settle on its own, and differs from `wait_idle` in what resets the
+  clock: changes rather than bytes, so a bell, a cell rewritten with the
+  glyph already in it or an answered query — output `wait_idle` can never
+  see silence through — is invisible to it. Both have `_for` twins, refuse
+  to settle inside an open synchronized update, count stillness that
+  predates the call, and return the screen they settled on.
+- **`termlens::bin!("myapp")` spawns one of your package's binaries under
+  the harness defaults.** Every integration test of a binary opened with the
+  same five lines — a fixed 80x24 grid, `env_clear()`, a five-second
+  deadline, `spawn(env!("CARGO_BIN_EXE_myapp"))` — so the chain has a name.
+  Builder calls follow the name and override any default:
+  `termlens::bin!("myapp", size(120, 40), env("NO_COLOR", "1"))?`. A
+  misspelled binary is a compile error naming the variable, not a spawn
+  failure at run time.
+- **`Screen::mouse_modes` reports every mouse tracking mode the application
+  enabled, and `DECRQM` answers each one on its own evidence.** The backend
+  collapses `?9`/`?1000`/`?1002`/`?1003` into the one protocol a terminal
+  reports in — right for the input path, and unchanged there — so it could
+  not say which members of the group an application asked for: crossterm's
+  `EnableMouseCapture` sends three at once and only the last survived, a
+  regression from any-motion to button-motion tracking (losing hover) was
+  invisible, and a `DECRQM` probe for any member but the last had to be
+  answered "not recognized". The sequence tracker now keeps the requested
+  set; `mouse_mode()` still reports the protocol. (#151)
+- **The fresh-install check verifies a `--no-default-features` consumer as
+  well as a `decode` one.** `install.yml` is the only job that builds
+  termlens from outside this workspace, and it did so in one shape — the
+  one the fewest real consumers use: of the three in-house ones, two declare
+  `default-features = false`. Its matrix now runs both shapes on Ubuntu and
+  macOS, the registry check demands the `decode` feature only on the leg
+  that asks for it, and the no-defaults leg fails if the consumer's tree
+  still resolves `insta`. (#238)
+- **The `inspect` example answers `--help`, and takes its deadline and
+  silence window from flags.** `inspect --help` used to look for a program
+  called `--help`, and both timings were hardcoded, so an application slower
+  than five seconds to paint its first screen could not be inspected at all.
+  `--timeout SECONDS` (default 5) and `--idle MILLIS` (default 300) now sit
+  beside `--size`; `--help`/`-h` print one usage text to stdout and exit 0,
+  a missing program prints the same text to stderr and exits 1, and
+  `--version` names the termlens version the example was built from. An
+  unknown option is refused rather than spawned. (#229, #236)
+
 ### Changed
 
 - **The smallest terminal is 2x2, not 1x1.** One column panics the emulator on
@@ -58,6 +105,33 @@ listed under a **Changed** or **Removed** heading.
   shifts remain G0/G1 only (`SO`/`SI`); `LS2`/`LS3` and `DECSC`/`DECRC` of
   charset state are still unmodelled. (#235)
 
+- **`DECSC`/`DECRC` save and restore the character-set state.** Save,
+  jump, draw the frame, restore is how a full-screen application draws a
+  border, and the restore lost the designation, so the border after it
+  rendered as `lqk` — the failure #204 fixed, arriving through a different
+  door. `ESC 7` now saves G0–G3 and the locking shift alongside the cursor
+  the backend already saved, `ESC 8` restores them, a restore with nothing
+  saved returns to ASCII as xterm does, and `RIS` clears the slot so a
+  restore cannot resurrect a designation from before the reset. (#232)
+- **`DECSTR` (soft reset, `CSI ! p`) is modelled.** The polite reset a
+  well-behaved TUI sends on startup and teardown parsed cleanly and did
+  nothing, so text printed after it kept rendering in the character set the
+  application had told the terminal to forget, while `RIS` got this right.
+  It now returns the character sets and the `DECSC` slot to power-on, the
+  cursor shape to the terminal's default, and turns off cursor-key mode,
+  bracketed paste, every mouse tracking mode and encoding, and focus
+  reporting; the cursor becomes visible and the alternate screen is left
+  alone, as specified. Attributes, margins, origin and insert modes and the
+  keypad are not replayed — nothing on `Screen` observes them — and the
+  README says so. (#233)
+- **The UK character set is translated: `ESC ( A` then `#` draws `£`.**
+  The designation was parsed and then rendered as ASCII, so an application
+  printing a price in the UK set showed `#42` on the grid, a test asserting
+  `£42` failed against a correct application, and a snapshot that blessed
+  `#42` kept passing. The set differs from ASCII in that one position, so
+  that is the one byte translated; the alternate-ROM sets and the other
+  national sets still read as ASCII, and the docs now say which sets are
+  translated. (#234)
 - **`find` no longer matches the blank padding past the end of a row.** Its
   single-row path searched the row padded out to the terminal width while
   `contains` searched the trimmed text, so `find("Total: ")` was `Some` on

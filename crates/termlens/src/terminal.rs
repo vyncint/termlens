@@ -2802,7 +2802,8 @@ impl Terminal {
     ///    [`screen`](Self::screen) taken at that moment is half-painted —
     ///    including for an application that brackets every repaint
     ///    correctly. `wait_idle` will not declare idleness while an update
-    ///    is open.
+    ///    is open. [`snapshot_after`](Self::snapshot_after) is rules 1–3
+    ///    as one call: the predicate, then a settle, then the screen.
     ///
     /// Applications that emit DEC 2026 synchronized updates get rule 3 for
     /// free from [`wait_frame`](Self::wait_frame), which sees only complete
@@ -3202,6 +3203,195 @@ impl Terminal {
             }
             .min(deadline - now)
             .max(Duration::from_millis(1));
+            guard = self.shared.wait_timeout(guard, sleep);
+        }
+    }
+
+    /// How long the picture must hold still for
+    /// [`snapshot_after`](Self::snapshot_after) — the settle the suite's
+    /// own whole-screen snapshots use, and long enough that a repaint split
+    /// across two PTY reads on a loaded machine still reads as one.
+    const SETTLE: Duration = Duration::from_millis(100);
+
+    /// Wait for `predicate`, then for the picture to hold still, and return
+    /// that screen — the three rules for race-free waits as one call.
+    ///
+    /// [`wait_until`](Self::wait_until) guarantees only that the bytes
+    /// which made the predicate true have been processed, and nothing
+    /// marks where a repaint ends, so a whole-screen snapshot taken right
+    /// after it can be torn: half a row painted, the rest still crossing
+    /// the PTY (`docs/DESIGN.md` §2). This waits for the predicate, then
+    /// for the grid to stay unchanged for 100ms
+    /// ([`wait_stable`](Self::wait_stable) with a fixed window), and hands
+    /// back the screen that held still:
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// let screen = t.snapshot_after(|s| s.contains("Ready"))?;
+    /// insta::assert_snapshot!(screen);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Assert on the returned `Screen` rather than on a later
+    /// [`screen`](Self::screen): the live grid may already have moved on,
+    /// and the returned one is the instant that was seen to hold still.
+    /// The settle is a heuristic — stillness is evidence a render
+    /// finished, not proof — so an application that emits DEC 2026
+    /// synchronized updates should prefer [`wait_frame`](Self::wait_frame),
+    /// whose frames are complete by construction; and an application that
+    /// keeps painting *different* content cannot settle here, and times
+    /// out saying so.
+    ///
+    /// Both halves run under the deadline (builder `timeout`), each on its
+    /// own, so a predicate that takes most of it does not starve the
+    /// settle.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Timeout`] / [`Error::Eof`] from the predicate wait, each
+    /// carrying the screen. [`Error::Timeout`] from the settle when the
+    /// picture keeps changing, or the application is inside an unfinished
+    /// synchronized update — the message says which. [`Error::Emulator`]
+    /// if the emulation itself failed.
+    pub fn snapshot_after(&mut self, predicate: impl FnMut(&Screen) -> bool) -> Result<Screen> {
+        self.snapshot_after_deadline(predicate, self.default_timeout)
+    }
+
+    /// [`snapshot_after`](Self::snapshot_after) with a per-call deadline,
+    /// applied to each half.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`snapshot_after`](Self::snapshot_after), against `timeout`.
+    pub fn snapshot_after_for(
+        &mut self,
+        predicate: impl FnMut(&Screen) -> bool,
+        timeout: Duration,
+    ) -> Result<Screen> {
+        self.snapshot_after_deadline(predicate, timeout)
+    }
+
+    fn snapshot_after_deadline(
+        &mut self,
+        predicate: impl FnMut(&Screen) -> bool,
+        timeout: Duration,
+    ) -> Result<Screen> {
+        self.wait_until_deadline(predicate, timeout)?;
+        self.wait_stable_deadline(Self::SETTLE, timeout)
+    }
+
+    /// Block until the picture has held still — no cell, cursor or size
+    /// change for `quiet` — with the stream not ending mid-escape-sequence
+    /// and **no synchronized update left open**, and return the screen
+    /// that held still. EOF counts as still (nothing more can arrive).
+    ///
+    /// The difference from [`wait_idle`](Self::wait_idle) is what resets
+    /// the clock: bytes there, *changes* here. An application that rings
+    /// the bell, rewrites a cell with the glyph already in it, or answers
+    /// a query produces output that changes nothing, and `wait_idle` never
+    /// sees silence through it; this does not care, because the grid is
+    /// what a snapshot asserts on. Stillness before the call counts — a
+    /// grid that has been quiet longer than `quiet` returns at once — and
+    /// the screen returned is the newest observation of that picture, so
+    /// its counters ([`Screen::bells`], [`Screen::repaints`]) are current.
+    ///
+    /// The same honest caveat as `wait_idle`: a picture that stopped
+    /// changing is evidence the application finished rendering, not proof.
+    /// Prefer [`wait_until`](Self::wait_until) on visible content where
+    /// possible, [`wait_frame`](Self::wait_frame) where the application
+    /// emits DEC 2026 synchronized updates, and
+    /// [`snapshot_after`](Self::snapshot_after) for the common case of a
+    /// predicate followed by a whole-screen snapshot.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Timeout`] when the deadline (builder `timeout`) expires
+    /// first — the picture kept changing, `quiet` exceeds the timeout, or
+    /// the application is inside an unfinished synchronized update, which
+    /// the message names. [`Error::Emulator`] if the emulation failed.
+    pub fn wait_stable(&mut self, quiet: Duration) -> Result<Screen> {
+        self.wait_stable_deadline(quiet, self.default_timeout)
+    }
+
+    /// [`wait_stable`](Self::wait_stable) with a per-call timeout. As with
+    /// [`wait_idle_for`](Self::wait_idle_for), `quiet` is the stillness
+    /// waited *for* and `timeout` how long to wait for it, so `quiet` must
+    /// be the smaller of the two.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`wait_stable`](Self::wait_stable), against `timeout`.
+    pub fn wait_stable_for(&mut self, quiet: Duration, timeout: Duration) -> Result<Screen> {
+        self.wait_stable_deadline(quiet, timeout)
+    }
+
+    fn wait_stable_deadline(&mut self, quiet: Duration, timeout: Duration) -> Result<Screen> {
+        let deadline = Instant::now() + timeout;
+        let mut guard = self.shared.lock();
+        // The picture as last observed, and since when it has looked so.
+        // Bytes are the only thing that can change the grid, so the last
+        // byte's arrival bounds the last change: stillness before the call
+        // counts, exactly as silence before a `wait_idle` does.
+        let mut last = guard.peek_snapshot();
+        let mut since = guard.last_activity;
+        let mut seen_generation = guard.generation;
+        loop {
+            // Ahead of the EOF shortcut: a grid that stopped changing
+            // because the emulator died has not settled.
+            if let Some(failure) = guard.emulator_failure() {
+                return Err(failure);
+            }
+            if guard.generation != seen_generation {
+                seen_generation = guard.generation;
+                let now = guard.peek_snapshot();
+                if !now.same_picture(&last) {
+                    since = guard.last_activity;
+                }
+                // Always the newest observation, so the screen handed back
+                // carries current counters even when the picture is old.
+                last = now;
+            }
+            if guard.eof {
+                return Ok(last);
+            }
+            let held = since.elapsed();
+            if held >= quiet
+                && !guard.emu.mid_sequence()
+                && !guard.utf8_pending
+                && !guard.emu.in_sync_update()
+            {
+                return Ok(last);
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                let stuck_mid_frame = guard.emu.in_sync_update();
+                let screen = guard.peek_snapshot();
+                let note = format!("{}{}", guard.query_note(), history_note(&screen));
+                drop(guard);
+                let waiting_for = if stuck_mid_frame {
+                    format!(
+                        "the screen to hold still for {quiet:?} — the application is inside \
+                         an unfinished DEC 2026 synchronized update (Begin with no End), so \
+                         the screen below is a half-painted frame{note}"
+                    )
+                } else {
+                    format!("the screen to hold still for {quiet:?}{note}")
+                };
+                return Err(Error::Timeout {
+                    waiting_for,
+                    timeout,
+                    screen,
+                });
+            }
+            // Sleep until the stillness could complete, the deadline hits,
+            // or new bytes arrive — whichever first; poll-cap while only a
+            // mid-sequence stall is being waited out.
+            let sleep = if held < quiet { quiet - held } else { POLL_CAP }
+                .min(deadline - now)
+                .max(Duration::from_millis(1));
             guard = self.shared.wait_timeout(guard, sleep);
         }
     }

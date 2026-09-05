@@ -35,7 +35,12 @@ fn the_default_working_directory_is_the_test_process_s() -> termlens::Result<()>
     // test runner's (#215). Pinned here so the default cannot move quietly.
     let mut t = Terminal::builder().spawn("/bin/pwd")?;
     assert!(t.wait_exit()?.success());
-    let reported = std::path::PathBuf::from(t.screen().row_text(0).trim());
+    // The path is read off the grid, and a path longer than the 80 columns
+    // wraps onto the next row — a checkout under a long temporary directory
+    // is enough (#240). A wrap inserts no character of its own, so the
+    // whole screen with the row breaks removed is the path as printed,
+    // whatever its length.
+    let reported = std::path::PathBuf::from(t.screen().text().replace('\n', "").trim());
     let expected = std::env::current_dir()?;
     assert_eq!(
         reported.canonicalize()?,

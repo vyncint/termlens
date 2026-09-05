@@ -59,15 +59,25 @@ program nobody modified for us. Every reply is truthful or absent:
 modes whose state the emulator holds exactly report set/reset, and
 anything else reports "not recognized" rather than a guess.
 
-The mouse tracking modes show where that line actually falls. The
+The mouse tracking modes used to show where that line falls. The
 backend collapses `9`/`1000`/`1002`/`1003` into one mutually exclusive
-value, so it cannot say which members of a group an application set —
-crossterm's `EnableMouseCapture` sends three at once and only the last
-survives. But that ambiguity exists only *while something is tracking*.
+value — rightly, for the *input* path: a terminal reports in exactly one
+protocol, the last mode enabled wins, and disabling any of them turns
+reporting off, which is what xterm does and what `click` must encode
+for. But that value cannot say which members of the group an
+application *asked for*; crossterm's `EnableMouseCapture` sends three at
+once and only the last survives, so a probe for `1002` while `1003` was
+also on could only be answered "not recognized" — honest, and provoked
+on every run. The sequence tracker now keeps the requested set, beside
+the focus flag and the window title that live there for the same reason
+(the backend does not model them), so `DECRQM` answers each tracking
+mode on its own evidence and `Screen::mouse_modes` reports the set,
+while `Screen::mouse_mode` and the input path keep the backend's
+one-protocol answer. Both are facts; each is reported where it belongs.
 With no tracking mode active — the state every application probes from
-at startup — nothing was collapsed and every tracking mode is genuinely
-reset, so that is what we report. Answering "not recognized" there
-would close a loop on itself: the application concludes the terminal has
+at startup — every tracking mode reports reset, which is what lets
+capability detection succeed: answering "not recognized" there would
+close a loop on itself, where the application concludes the terminal has
 no mouse, never enables tracking, and `click` then refuses, blaming the
 application for a decision we caused.
 
@@ -251,6 +261,21 @@ screen dump** — a CI log alone answers "what was the app showing?".
   **This is a heuristic**: silence is evidence of a finished render, not
   proof. Prefer `wait_until` on visible content, or `wait_frame` where the
   app uses synchronized output.
+- `wait_stable(quiet)` — resolves when the **picture** has not changed for
+  `quiet` — no cell, cursor or size differs between snapshots — under the
+  same mid-sequence and open-update conditions as `wait_idle`, and returns
+  the screen that held still. What resets the clock is the difference:
+  bytes for `wait_idle`, changes here. A bell, a cell rewritten with the
+  glyph already in it, a query answered — output that changes nothing —
+  keeps `wait_idle` from ever seeing silence and is invisible here.
+  Stillness before the call counts (bytes are the only thing that can
+  change the grid, so the last byte bounds the last change), EOF counts as
+  still, the screen returned is the newest observation of the picture so
+  its counters are current, and the heuristic caveat is the same.
+- `snapshot_after(pred)` — `wait_until(pred)`, then `wait_stable` with a
+  fixed 100ms window, returning the settled screen: rules 1–3 below as one
+  call, for the common case of "wait for the app to show X, then snapshot
+  the whole screen". Both halves run under the deadline, each on its own.
 - `wait_exit()` — polls `try_wait` on a capped backoff ladder (1→20ms),
   then grace-drains the PTY (≤500ms) so the final screen is complete
   before returning. Idempotent via a cached status.
@@ -284,7 +309,8 @@ matching a way of waiting:
 | you waited with | use |
 |---|---|
 | `wait_frame` | the `Screen` it returns — the matched frame, complete by construction |
-| `wait_until` | `wait_idle` after it (no idleness while an update is open), then `screen()` |
+| `wait_until` | `wait_idle` or `wait_stable` after it (neither settles while an update is open), then `screen()` |
+| `snapshot_after` | the `Screen` it returns — predicate, then stillness, in one call |
 | neither | a predicate naming the last thing the app paints, so its truth implies the repaint finished |
 
 ### The three rules for race-free waits
@@ -324,8 +350,11 @@ the PTY. Three rules make such waits deterministic:
    our own suite.
 3. **Settle before whole-screen snapshots.** A snapshot asserts on cells
    the test never named, so no targeted predicate can cover it; call
-   `wait_idle` first. That is a heuristic (silence ≠ proof of a finished
-   render — see above), and it is the honest tool for the job.
+   `wait_idle` first — or `wait_stable`, which an application's bells and
+   no-op repaints cannot keep from settling. That is a heuristic (silence
+   ≠ proof of a finished render — see above), and it is the honest tool
+   for the job. `snapshot_after(pred)` is rules 1–3 as one call: the
+   predicate, the settle, and the screen it settled on.
 
 4. **`wait_frame` removes the torn-frame race, not rule 1.** An
    application that brackets its repaints in DEC 2026 synchronized updates
@@ -491,7 +520,7 @@ Rules:
    input modes (bracketed paste, application cursor, mouse tracking) are
    captured with every snapshot and read through plain accessors —
    `Screen::title`, `Screen::alternate_screen`, `Screen::bracketed_paste`,
-   `Screen::application_cursor`, `Screen::mouse_mode`,
+   `Screen::application_cursor`, `Screen::mouse_mode`, `Screen::mouse_modes`,
    `Screen::focus_events`, `Screen::clipboard`, `Screen::cursor_shape`,
    `Screen::cursor_blink`, `Screen::links`. Keeping them out of
    the rendering means existing snapshot files stay valid, and state

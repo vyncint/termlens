@@ -83,14 +83,72 @@ fn a_styled_border_keeps_its_style() -> termlens::Result<()> {
 
 /// A hard reset returns both sets to ASCII — and clears the screen, as RIS
 /// does, so the glyph drawn before it is gone and the byte after it is a
-/// letter again.
+/// letter again. It clears the `DECSC` slot too: a `DECRC` after the reset
+/// must not resurrect a designation from before it (#232).
 #[test]
 fn a_hard_reset_returns_to_ascii() -> termlens::Result<()> {
-    let mut t = sh(r"printf '\033(0q\033cq'; printf DONE; read _")?;
+    let mut t = sh(r"printf '\033(0q\0337\033c\0338q'; printf DONE; read _")?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
     assert_eq!(s.row_text(0).trim_end(), "qDONE", "{s}");
     assert!(!s.contains("─"), "{s}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// A soft reset (`DECSTR`, `CSI ! p`) returns the sets to ASCII the way
+/// `RIS` does — and unlike `RIS` clears nothing, so the glyph drawn before
+/// it stays. It used to parse cleanly and do nothing, so text printed after
+/// an application's teardown reset kept rendering as box drawing (#233).
+#[test]
+fn a_soft_reset_returns_to_ascii_without_clearing_the_screen() -> termlens::Result<()> {
+    let mut t = sh(concat!(
+        r"printf '\033(0q\033[!pq\n'; ",
+        r"printf '\033(0\0337\033[!p\0338lqk\n'; ",
+        "printf DONE; read _"
+    ))?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    assert_eq!(s.row_text(0).trim_end(), "─q", "{s}");
+    // Row 1 draws after a DECRC: the soft reset emptied the saved slot, so
+    // the restore returns to ASCII rather than to the graphics set saved
+    // before it. (The cursor it restores is the row's start, where it was.)
+    assert_eq!(s.row_text(1).trim_end(), "lqk", "{s}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// The save/jump/draw/restore idiom: `DECSC` saves the designated sets and
+/// the locking shift with the cursor, `DECRC` brings them back. The
+/// restore used to leave whatever was designated in between, so a border
+/// drawn after it read `lqk` (#232). Row 1 restores an `SO` state, since
+/// the shift is part of what is saved.
+#[test]
+fn decsc_and_decrc_save_and_restore_the_charset_state() -> termlens::Result<()> {
+    let mut t = sh(concat!(
+        r"printf '\033(0\0337\033(B\0338lqk\033(B\n'; ",
+        r"printf '\033)0\016\0337\017\0338lqk\017\n'; ",
+        "printf DONE; read _"
+    ))?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    assert_eq!(s.row_text(0).trim_end(), "┌─┐", "{s}");
+    assert_eq!(s.row_text(1).trim_end(), "┌─┐", "{s}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// `DECRC` with nothing saved restores the defaults, as xterm does — G0 at
+/// ASCII — rather than leaving whatever was last designated.
+#[test]
+fn decrc_with_nothing_saved_returns_to_ascii() -> termlens::Result<()> {
+    let mut t = sh(r"printf '\033(0\0338lqk'; printf DONE; read _")?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    assert_eq!(s.row_text(0).trim_end(), "lqkDONE", "{s}");
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
@@ -165,6 +223,28 @@ fn a_multibyte_character_consumes_a_single_shift() -> termlens::Result<()> {
         !s.contains("┌"),
         "the shift must not survive the multi-byte character:\n{s}"
     );
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// The UK set (`ESC ( A`) differs from ASCII in one position: `#` draws
+/// `£`. The designation used to be consumed and the byte drawn as itself,
+/// so a price in the UK set read `#42` and a test asserting `£42` failed
+/// against an application that was correct (#234). `SO`/`SI` select it the
+/// way they select the graphics set.
+#[test]
+fn the_uk_set_draws_a_pound_sign_at_hash() -> termlens::Result<()> {
+    let mut t = sh(concat!(
+        r"printf '\033(A#42 a-z\033(B#\n'; ",
+        r"printf '\033)A\016#\017#\n'; ",
+        "printf DONE; read _"
+    ))?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    assert_eq!(s.row_text(0).trim_end(), "£42 a-z#", "{s}");
+    assert_eq!(s.row_text(1).trim_end(), "£#", "{s}");
+    assert_eq!(s.find("£"), Some((0, 0)), "one cell, one column: {s}");
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())

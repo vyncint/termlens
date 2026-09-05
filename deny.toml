@@ -25,6 +25,12 @@ allow = [
 confidence-threshold = 0.8
 
 [bans]
+# Path dependencies without a version are "wildcards" to cargo-deny. The
+# only one here is a fixture's dev-dependency on the crate under test
+# (hello-tui -> termlens, for the bin! macro's test), and every fixture is
+# publish = false, so a version requirement would only be a number to bump
+# on every release. Wildcards on registry dependencies stay denied.
+allow-wildcard-paths = true
 multiple-versions = "warn"
 wildcards = "deny"
 
