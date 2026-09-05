@@ -234,7 +234,7 @@ fn buttons_modifiers_drag_and_horizontal_wheel_reach_the_wire() -> termlens::Res
     t.scroll_with(termlens::Scroll::Up.ctrl(), 5, 5)?;
     t.scroll_with(termlens::Scroll::Down.shift(), 5, 5)?;
     // Drag left button from (2,2) to (6,3): press, motion (0+32), release.
-    t.drag(termlens::MouseButton::Left, (2, 2), (6, 3))?;
+    t.drag(termlens::MouseButton::Left, 2, 2, 6, 3)?;
 
     t.wait_until(|s| s.row_text(0).contains("|"))?;
     let text = t.screen().row_text(0);
@@ -279,7 +279,7 @@ fn a_drag_reports_one_motion_per_cell_crossed() -> termlens::Result<()> {
     t.wait_until(|s| s.contains("READY"))?;
 
     // Seven cells crossed, from column 5 to column 12 on row 4.
-    t.drag(termlens::MouseButton::Left, (5, 4), (12, 4))?;
+    t.drag(termlens::MouseButton::Left, 5, 4, 12, 4)?;
     t.wait_until(|s| s.row_text(0).contains("|"))?;
     let text = t.screen().row_text(0);
 
@@ -317,7 +317,7 @@ fn press_release_tracking_still_gets_no_motion_at_all() -> termlens::Result<()> 
         ])
         .spawn("/bin/sh")?;
     t.wait_until(|s| s.contains("READY"))?;
-    t.drag(termlens::MouseButton::Left, (5, 4), (12, 4))?;
+    t.drag(termlens::MouseButton::Left, 5, 4, 12, 4)?;
     t.wait_until(|s| s.row_text(0).contains("|"))?;
     let text = t.screen().row_text(0);
     assert!(!text.contains("[<32;"), "no motion under ?1000:\n{text}");
@@ -339,7 +339,7 @@ fn drag_is_refused_when_the_mode_cannot_express_it() -> termlens::Result<()> {
     t.wait_until(|s| s.contains("READY"))?;
 
     let err = t
-        .drag(termlens::MouseButton::Left, (1, 1), (4, 4))
+        .drag(termlens::MouseButton::Left, 1, 1, 4, 4)
         .expect_err("X10 reports presses only");
     assert!(matches!(err, Error::Input(_)), "got: {err}");
     assert!(err.to_string().contains("X10"), "unhelpful: {err}");
@@ -428,7 +428,7 @@ fn mouse_events_outside_the_grid_are_refused() -> termlens::Result<()> {
     assert!(err.to_string().contains("20x5"), "{err}");
 
     let err = t
-        .drag(termlens::MouseButton::Left, (0, 0), (20, 0))
+        .drag(termlens::MouseButton::Left, 0, 0, 20, 0)
         .expect_err("off-grid drag endpoint");
     assert!(matches!(err, Error::Input(_)), "got: {err}");
     assert!(err.to_string().contains("(20, 0)"), "{err}");
@@ -550,8 +550,7 @@ fn a_mouse_click_at_a_departed_child_blames_the_child() -> termlens::Result<()> 
     for err in [
         t.click(1, 1).unwrap_err(),
         t.scroll(1, 1, Scroll::Up).unwrap_err(),
-        t.drag(termlens::MouseButton::Left, (1, 1), (2, 2))
-            .unwrap_err(),
+        t.drag(termlens::MouseButton::Left, 1, 1, 2, 2).unwrap_err(),
     ] {
         assert!(matches!(err, Error::Write { .. }), "got: {err}");
         assert!(

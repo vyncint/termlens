@@ -1018,6 +1018,8 @@ impl Screen {
 
     /// Locate the first occurrence of `needle` scanning rows top to bottom;
     /// returns the `(row, col)` of its first character.
+    /// Mouse methods such as [`Terminal::drag`](crate::Terminal::drag) take
+    /// columns first, so destructure this pair before using it as mouse input.
     ///
     /// The **visible screen only**, like [`contains`](Self::contains): a
     /// needle that has scrolled into history is not found here, however
