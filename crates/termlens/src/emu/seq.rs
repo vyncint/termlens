@@ -1151,7 +1151,11 @@ impl SeqTracker {
             // An omitted parameter is 0, and a 0 count means 1 — vt100's own
             // `canonicalize_params_1`, so a rewritten move and the move it
             // replaces read their parameter the same way.
-            let ps = if params_empty { 0 } else { self.csi_first_param };
+            let ps = if params_empty {
+                0
+            } else {
+                self.csi_first_param
+            };
             let count = u16::try_from(ps).unwrap_or(u16::MAX).max(1);
             match b {
                 // Only `0` (this column) and `3` (all) are modelled. The
