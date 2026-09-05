@@ -219,6 +219,11 @@ design. termlens's position:
   mid-escape-sequence, and no synchronized update is open. Silence is
   evidence a render finished — not proof. Use it for "the app settled",
   not for precise sequencing.
+- **`snapshot_after(pred)` is the whole-screen snapshot with the rules
+  built in**: it waits for the predicate, then for the picture to hold
+  still, and returns that screen. `wait_stable(quiet)` is the settle on its
+  own; unlike `wait_idle` it is reset by *changes*, not bytes, so a bell or
+  a repaint that alters no cell does not keep it waiting.
 - **Hermetic environments.** `env_clear()` blocks inheritance,
   `TERM=xterm-256color` is pinned by default, fixtures draw no clocks and
   no animations. The CI suite runs a 100-iteration

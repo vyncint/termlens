@@ -22,6 +22,17 @@ listed under a **Changed** or **Removed** heading.
   state means nothing. `wait_exit` is deliberately unaffected: the child's
   exit status is still true. (#211)
 
+- **`snapshot_after` and `wait_stable`: the whole-screen snapshot as one
+  call, and a settle that output changing nothing cannot hold up.**
+  `snapshot_after(pred)` waits for the predicate, then for the picture to
+  hold still for 100ms, and returns that screen — DESIGN §2's three rules
+  for race-free waits without having to remember them. `wait_stable(quiet)`
+  is the settle on its own, and differs from `wait_idle` in what resets the
+  clock: changes rather than bytes, so a bell, a cell rewritten with the
+  glyph already in it or an answered query — output `wait_idle` can never
+  see silence through — is invisible to it. Both have `_for` twins, refuse
+  to settle inside an open synchronized update, count stillness that
+  predates the call, and return the screen they settled on.
 - **`termlens::bin!("myapp")` spawns one of your package's binaries under
   the harness defaults.** Every integration test of a binary opened with the
   same five lines — a fixed 80x24 grid, `env_clear()`, a five-second

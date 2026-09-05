@@ -534,6 +534,18 @@ impl Screen {
         }
     }
 
+    /// Whether two snapshots show the same picture: size, cursor and every
+    /// cell. Deliberately not `==`, which also compares the out-of-band
+    /// state — bells, repaints, the title — none of which is a picture.
+    /// This is what `wait_stable` watches.
+    pub(crate) fn same_picture(&self, other: &Screen) -> bool {
+        self.cols == other.cols
+            && self.rows == other.rows
+            && (self.cursor_row, self.cursor_col, self.cursor_visible)
+                == (other.cursor_row, other.cursor_col, other.cursor_visible)
+            && (Arc::ptr_eq(&self.cells, &other.cells) || self.cells == other.cells)
+    }
+
     /// Stamp the repaint count onto a freshly built snapshot.
     ///
     /// The count lives on the terminal, not the emulator: it is the same
