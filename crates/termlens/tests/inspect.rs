@@ -214,3 +214,39 @@ fn inspect_takes_its_deadline_and_silence_window_from_flags() {
         "a 1s deadline took {elapsed:?}; the flag was not honoured"
     );
 }
+
+/// A relative program path is how `inspect` is pointed at something just
+/// built (`inspect ./target/debug/myapp`), and it resolves only because a
+/// child starts in the test process's working directory rather than in
+/// `$HOME` (#215). The test pinning that default reads `pwd` inside a
+/// shell; this one pins the mechanism the viewer actually relies on (#237).
+#[cfg(unix)]
+#[test]
+fn inspect_resolves_a_relative_program_path_from_its_working_directory() {
+    let bin = inspect_bin();
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("inspect-relative");
+    std::fs::create_dir_all(&scratch).expect("scratch directory");
+    // A real program linked into the scratch directory, rather than `sh -c`,
+    // which resolves its own arguments and would test the shell instead of
+    // termlens. A symlink rather than a copy: macOS refuses to run a system
+    // binary copied out of `/bin` (its signature is trusted at that path
+    // only), and a multi-call `echo` keeps its own name this way.
+    let echo = scratch.join("echo");
+    let _ = std::fs::remove_file(&echo);
+    std::os::unix::fs::symlink("/bin/echo", &echo)
+        .expect("link /bin/echo into the scratch directory");
+
+    let out = Command::new(&bin)
+        .current_dir(&scratch)
+        .args(["./echo", "relative path resolved"])
+        .output()
+        .expect("failed to run the inspect example");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "inspect failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("relative path resolved"), "{stdout}");
+    assert!(stdout.contains("--- exited: exit code 0 ---"), "{stdout}");
+}
