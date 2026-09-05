@@ -331,6 +331,60 @@ fn a_probe_then_enable_application_gets_its_mouse() -> termlens::Result<()> {
     Ok(())
 }
 
+/// Each mouse tracking mode is answered on its own evidence now that the
+/// tracker keeps the set the application asked for (#151). Before, a probe
+/// for a member other than the last one enabled — which is every probe
+/// after crossterm's three-at-once enable — was answered "not recognized".
+#[test]
+fn decrqm_answers_each_mouse_tracking_mode_on_its_own() -> termlens::Result<()> {
+    // Reply values: 1 = set, 2 = reset, 0 = not recognized. The reply is
+    // `ESC [ ? <mode> ; <value> $ y`, so its length follows the mode's.
+    for (script, reply_len, expect, label) in [
+        (
+            r"printf '\033[?1000h\033[?1002h\033[?1003h\033[?1002$p'",
+            11,
+            "[?1002;1$y",
+            "a member other than the last enabled is set",
+        ),
+        (
+            r"printf '\033[?1000h\033[?1002h\033[?1003h\033[?9$p'",
+            8,
+            "[?9;2$y",
+            "a member never asked for is reset, not unrecognized",
+        ),
+        (
+            r"printf '\033[?1000h\033[?1002h\033[?1003h\033[?1003l\033[?1003$p'",
+            11,
+            "[?1003;2$y",
+            "a released member is reset while the others stay",
+        ),
+        (
+            r"printf '\033[?1000h\033[?1002h\033[?1003h\033[?1003l\033[?1002$p'",
+            11,
+            "[?1002;1$y",
+            "and the others do stay set",
+        ),
+    ] {
+        let mut t = Terminal::builder()
+            .size(80, 6)
+            .timeout(Duration::from_secs(10))
+            .args([
+                "-c",
+                &format!(
+                    "stty -icanon -echo; {script}; \
+                     head -c {reply_len} | tr -d '\\033'; printf ' DONE'; read guard"
+                ),
+            ])
+            .spawn("/bin/sh")?;
+        t.wait_until(|s| s.contains("DONE"))?;
+        let row = t.screen().row_text(0);
+        assert!(row.contains(expect), "{label}: got {row:?}");
+        t.send(Key::Enter)?;
+        assert!(t.wait_exit()?.success());
+    }
+    Ok(())
+}
+
 /// Mode 1004 is now answerable, because termlens tracks it exactly — the
 /// honesty rule's precondition. Before, an application probing for focus
 /// support was told "not recognized" even right after enabling it.

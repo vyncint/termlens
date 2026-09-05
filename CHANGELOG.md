@@ -22,6 +22,16 @@ listed under a **Changed** or **Removed** heading.
   state means nothing. `wait_exit` is deliberately unaffected: the child's
   exit status is still true. (#211)
 
+- **`Screen::mouse_modes` reports every mouse tracking mode the application
+  enabled, and `DECRQM` answers each one on its own evidence.** The backend
+  collapses `?9`/`?1000`/`?1002`/`?1003` into the one protocol a terminal
+  reports in — right for the input path, and unchanged there — so it could
+  not say which members of the group an application asked for: crossterm's
+  `EnableMouseCapture` sends three at once and only the last survived, a
+  regression from any-motion to button-motion tracking (losing hover) was
+  invisible, and a `DECRQM` probe for any member but the last had to be
+  answered "not recognized". The sequence tracker now keeps the requested
+  set; `mouse_mode()` still reports the protocol. (#151)
 - **The `inspect` example answers `--help`, and takes its deadline and
   silence window from flags.** `inspect --help` used to look for a program
   called `--help`, and both timings were hardcoded, so an application slower

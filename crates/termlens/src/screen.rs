@@ -99,6 +99,100 @@ pub enum MouseMode {
     AnyMotion,
 }
 
+impl MouseMode {
+    /// The bit this mode occupies in a [`MouseModes`] set; `None` has none.
+    fn bit(self) -> u8 {
+        match self {
+            MouseMode::None => 0,
+            MouseMode::Press => 1,
+            MouseMode::PressRelease => 2,
+            MouseMode::ButtonMotion => 4,
+            MouseMode::AnyMotion => 8,
+        }
+    }
+
+    /// Every tracking mode, in the order of the private modes that enable
+    /// them: `?9`, `?1000`, `?1002`, `?1003`.
+    const TRACKING: [MouseMode; 4] = [
+        MouseMode::Press,
+        MouseMode::PressRelease,
+        MouseMode::ButtonMotion,
+        MouseMode::AnyMotion,
+    ];
+}
+
+/// The set of mouse tracking modes an application has enabled and not yet
+/// disabled — what it *asked for*, as distinct from the one protocol the
+/// terminal reports in, which is [`Screen::mouse_mode`].
+///
+/// A terminal reports mouse events in exactly one protocol, so the four
+/// tracking modes collapse into one value on the input path: enabling
+/// `?1003` after `?1002` upgrades the reports, disabling either turns them
+/// off. But an application enables them as a set — crossterm's
+/// `EnableMouseCapture` sends `?1000`, `?1002` and `?1003` together — and
+/// "did it ask for any-motion tracking, or only button-motion?" is a
+/// question about that set. Whether hovering does anything at all hangs on
+/// it, and a regression from `?1003` to `?1002` passes every test that
+/// only reads the collapsed value while the last mode sent stays the same.
+///
+/// Read it from a snapshot via [`Screen::mouse_modes`]:
+///
+/// ```no_run
+/// # fn main() -> termlens::Result<()> {
+/// # let mut t = termlens::Terminal::builder().spawn("true")?;
+/// use termlens::MouseMode;
+/// t.wait_until(|s| s.mouse_modes().contains(MouseMode::AnyMotion))?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct MouseModes(u8);
+
+impl MouseModes {
+    pub(crate) fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    /// Whether the application currently has `mode` enabled.
+    ///
+    /// [`MouseMode::None`] is not a tracking mode; asking for it answers
+    /// whether the set is empty, so `contains(MouseMode::None)` reads as
+    /// "the application asked for no tracking at all".
+    #[must_use]
+    pub fn contains(self, mode: MouseMode) -> bool {
+        match mode {
+            MouseMode::None => self.is_empty(),
+            tracking => self.0 & tracking.bit() != 0,
+        }
+    }
+
+    /// True while no tracking mode is enabled.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// How many tracking modes are enabled.
+    #[must_use]
+    pub fn len(self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    /// The enabled modes, in the order of the private modes that enable
+    /// them (`?9`, `?1000`, `?1002`, `?1003`).
+    pub fn iter(self) -> impl Iterator<Item = MouseMode> {
+        MouseMode::TRACKING
+            .into_iter()
+            .filter(move |mode| self.0 & mode.bit() != 0)
+    }
+}
+
+impl fmt::Debug for MouseModes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_set().entries(self.iter()).finish()
+    }
+}
+
 /// The shape of the cursor an application asked its terminal for with
 /// `DECSCUSR` (`CSI Ps SP q`).
 ///
@@ -275,7 +369,12 @@ pub(crate) struct TermState {
     pub(crate) alternate_screen: bool,
     pub(crate) bracketed_paste: bool,
     pub(crate) application_cursor: bool,
+    /// The one protocol the terminal reports in — the backend's collapsed
+    /// value, which is also what `click` and `scroll` encode for.
     pub(crate) mouse: MouseMode,
+    /// The tracking modes the application has asked for and not yet
+    /// released, kept by the sequence tracker (#151).
+    pub(crate) mouse_modes: MouseModes,
     /// Behind an `Arc` deliberately: `Screen` is embedded in every
     /// `Error` and cloned on every wait, so its size is load-bearing.
     pub(crate) clipboard: Option<Arc<Clipboard>>,
@@ -313,6 +412,7 @@ impl Default for TermState {
             bracketed_paste: false,
             application_cursor: false,
             mouse: MouseMode::None,
+            mouse_modes: MouseModes::default(),
             clipboard: None,
             bells: 0,
             focus_events: false,
@@ -596,14 +696,33 @@ impl Screen {
         self.state.focus_events
     }
 
-    /// Which mouse events the application asked to be reported —
-    /// [`MouseMode::None`] until it enables a tracking mode.
+    /// The protocol mouse events are reported in — [`MouseMode::None`]
+    /// until the application enables a tracking mode.
     /// [`Terminal::click`](crate::Terminal::click) and
     /// [`Terminal::scroll`](crate::Terminal::scroll) consult the same
     /// state, so their reports always match what the application expects.
+    ///
+    /// One value, because a terminal reports in one protocol: the four
+    /// tracking modes are mutually exclusive on the wire, the last one
+    /// enabled wins, and disabling any of them turns reporting off. For the
+    /// *set* the application asked for — which distinguishes an
+    /// application that enabled `?1002` and `?1003` from one that enabled
+    /// `?1003` alone — see [`mouse_modes`](Self::mouse_modes).
     #[must_use]
     pub fn mouse_mode(&self) -> MouseMode {
         self.state.mouse
+    }
+
+    /// Every mouse tracking mode the application has enabled and not yet
+    /// disabled, as a set — see [`MouseModes`] for why the set and the
+    /// reporting protocol are two different facts.
+    ///
+    /// `DECRQM` answers each tracking mode from this same set, so an
+    /// application that probes `?1002` while `?1003` is also on is told
+    /// "set" rather than "not recognized".
+    #[must_use]
+    pub fn mouse_modes(&self) -> MouseModes {
+        self.state.mouse_modes
     }
 
     /// The most recent `OSC 52` clipboard write observed at this snapshot,
@@ -1748,6 +1867,7 @@ mod tests {
             bracketed_paste: true,
             application_cursor: true,
             mouse: MouseMode::AnyMotion,
+            mouse_modes: MouseModes::from_bits(0b1110),
             clipboard: Some(Arc::new(Clipboard::new("c", Some("copied".into())))),
             bells: 3,
             focus_events: true,
@@ -1766,6 +1886,24 @@ mod tests {
         assert_eq!(s.title(), "my app");
         assert!(s.alternate_screen() && s.bracketed_paste() && s.application_cursor());
         assert_eq!(s.mouse_mode(), MouseMode::AnyMotion);
+        let modes = s.mouse_modes();
+        assert_eq!(
+            modes.iter().collect::<Vec<_>>(),
+            [
+                MouseMode::PressRelease,
+                MouseMode::ButtonMotion,
+                MouseMode::AnyMotion
+            ]
+        );
+        assert!(modes.contains(MouseMode::ButtonMotion) && !modes.contains(MouseMode::Press));
+        assert!(!modes.contains(MouseMode::None) && !modes.is_empty() && modes.len() == 3);
+        assert_eq!(
+            format!("{modes:?}"),
+            "{PressRelease, ButtonMotion, AnyMotion}"
+        );
+        assert!(
+            default.mouse_modes().is_empty() && default.mouse_modes().contains(MouseMode::None)
+        );
         let clip = s.clipboard().expect("captured");
         assert_eq!((clip.targets(), clip.text()), ("c", Some("copied")));
         assert_eq!(s.scrollback_rows(), 1);

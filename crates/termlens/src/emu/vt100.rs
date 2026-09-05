@@ -313,6 +313,7 @@ impl Emulator for Vt100Emulator {
             bracketed_paste: screen.bracketed_paste(),
             application_cursor: screen.application_cursor(),
             mouse: convert_mouse(screen.mouse_protocol_mode()),
+            mouse_modes: self.tracker.mouse_tracking(),
             clipboard: self.tracker.clipboard(),
             bells: self.tracker.bells(),
             focus_events: self.tracker.focus_events(),
@@ -388,28 +389,23 @@ impl Emulator for Vt100Emulator {
                 screen.mouse_protocol_encoding(),
                 ::vt100::MouseProtocolEncoding::Utf8
             )),
-            // The mouse tracking modes need care, because vt100 collapses
-            // all four into one mutually exclusive value. Two cases, and
-            // only one of them is ambiguous:
-            //
-            // - Nothing is tracking. Then nothing was collapsed, and every
-            //   tracking mode is genuinely reset — a fact, not a guess. This
-            //   is the state every application is in when it probes at
-            //   startup, so it is the case that decides whether
-            //   capability detection works at all.
-            // - A *different* mode is tracking. The application may have set
-            //   several (crossterm's EnableMouseCapture sends 1000, 1002 and
-            //   1003 together) and vt100 kept only the last, so claiming the
-            //   others are reset would be a guess dressed up as an answer.
-            //   `NotRecognized` stays honest here.
-            9 | 1000 | 1002 | 1003 => match screen.mouse_protocol_mode() {
-                ::vt100::MouseProtocolMode::None => ModeState::Reset,
-                ::vt100::MouseProtocolMode::Press if mode == 9 => ModeState::Set,
-                ::vt100::MouseProtocolMode::PressRelease if mode == 1000 => ModeState::Set,
-                ::vt100::MouseProtocolMode::ButtonMotion if mode == 1002 => ModeState::Set,
-                ::vt100::MouseProtocolMode::AnyMotion if mode == 1003 => ModeState::Set,
-                _ => ModeState::NotRecognized,
-            },
+            // The mouse tracking modes, each on its own evidence: the
+            // tracker keeps the set the application asked for (#151). vt100
+            // collapses the four into one value, so before this a probe for
+            // `1002` while `1003` was also on had to answer "not
+            // recognized" — the only honest reply to a question the state
+            // could not answer, and one crossterm's three-at-once enable
+            // provoked on every run.
+            9 => on(self.tracker.mouse_tracking().contains(MouseMode::Press)),
+            1000 => on(self
+                .tracker
+                .mouse_tracking()
+                .contains(MouseMode::PressRelease)),
+            1002 => on(self
+                .tracker
+                .mouse_tracking()
+                .contains(MouseMode::ButtonMotion)),
+            1003 => on(self.tracker.mouse_tracking().contains(MouseMode::AnyMotion)),
             _ => ModeState::NotRecognized,
         }
     }
@@ -969,19 +965,50 @@ mod tests {
     }
 
     #[test]
-    fn an_active_tracking_mode_reports_itself_and_stays_silent_on_the_rest() {
-        let emu = emu_with(b"\x1b[?1002h");
-        assert_eq!(emu.mode_state(1002), ModeState::Set);
-        // Genuinely ambiguous: crossterm's EnableMouseCapture sends 1000,
-        // 1002 and 1003 together and vt100 keeps only the last, so calling
-        // the others reset would be a guess dressed up as an answer.
-        for mode in [9, 1000, 1003] {
-            assert_eq!(
-                emu.mode_state(mode),
-                ModeState::NotRecognized,
-                "mode {mode}"
-            );
+    fn each_tracking_mode_is_answered_on_its_own_evidence() {
+        // crossterm's EnableMouseCapture: three modes in one breath. vt100
+        // keeps only the last, and before the tracker held the set (#151)
+        // the other two had to be answered "not recognized" — the only
+        // honest reply to a question the state could not answer.
+        let emu = emu_with(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h");
+        for mode in [1000, 1002, 1003] {
+            assert_eq!(emu.mode_state(mode), ModeState::Set, "mode {mode}");
         }
+        assert_eq!(emu.mode_state(9), ModeState::Reset, "never asked for");
+        // The set is what was asked for; the protocol is vt100's collapse.
+        let screen = emu.snapshot();
+        assert_eq!(screen.mouse_mode(), MouseMode::AnyMotion);
+        assert_eq!(
+            screen.mouse_modes().iter().collect::<Vec<_>>(),
+            [
+                MouseMode::PressRelease,
+                MouseMode::ButtonMotion,
+                MouseMode::AnyMotion
+            ]
+        );
+
+        // Releasing one member releases that member alone in the set, while
+        // vt100 — like xterm — turns reporting off, since the protocol it
+        // was reporting in is gone. Both facts are true; each is reported
+        // where it belongs.
+        let emu = emu_with(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1003l");
+        assert_eq!(emu.mode_state(1003), ModeState::Reset);
+        assert_eq!(emu.mode_state(1002), ModeState::Set);
+        let screen = emu.snapshot();
+        assert_eq!(screen.mouse_mode(), MouseMode::None);
+        assert!(screen.mouse_modes().contains(MouseMode::ButtonMotion));
+
+        // A list sets or clears every member it names, and a hard reset
+        // empties the set.
+        let emu = emu_with(b"\x1b[?1000;1002;1003h\x1b[?1000;1002l");
+        assert_eq!(
+            emu.snapshot().mouse_modes().iter().collect::<Vec<_>>(),
+            [MouseMode::AnyMotion]
+        );
+        assert!(emu_with(b"\x1b[?1003h\x1bc")
+            .snapshot()
+            .mouse_modes()
+            .is_empty());
     }
 
     #[test]

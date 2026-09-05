@@ -59,15 +59,25 @@ program nobody modified for us. Every reply is truthful or absent:
 modes whose state the emulator holds exactly report set/reset, and
 anything else reports "not recognized" rather than a guess.
 
-The mouse tracking modes show where that line actually falls. The
+The mouse tracking modes used to show where that line falls. The
 backend collapses `9`/`1000`/`1002`/`1003` into one mutually exclusive
-value, so it cannot say which members of a group an application set —
-crossterm's `EnableMouseCapture` sends three at once and only the last
-survives. But that ambiguity exists only *while something is tracking*.
+value — rightly, for the *input* path: a terminal reports in exactly one
+protocol, the last mode enabled wins, and disabling any of them turns
+reporting off, which is what xterm does and what `click` must encode
+for. But that value cannot say which members of the group an
+application *asked for*; crossterm's `EnableMouseCapture` sends three at
+once and only the last survives, so a probe for `1002` while `1003` was
+also on could only be answered "not recognized" — honest, and provoked
+on every run. The sequence tracker now keeps the requested set, beside
+the focus flag and the window title that live there for the same reason
+(the backend does not model them), so `DECRQM` answers each tracking
+mode on its own evidence and `Screen::mouse_modes` reports the set,
+while `Screen::mouse_mode` and the input path keep the backend's
+one-protocol answer. Both are facts; each is reported where it belongs.
 With no tracking mode active — the state every application probes from
-at startup — nothing was collapsed and every tracking mode is genuinely
-reset, so that is what we report. Answering "not recognized" there
-would close a loop on itself: the application concludes the terminal has
+at startup — every tracking mode reports reset, which is what lets
+capability detection succeed: answering "not recognized" there would
+close a loop on itself, where the application concludes the terminal has
 no mouse, never enables tracking, and `click` then refuses, blaming the
 application for a decision we caused.
 
@@ -491,7 +501,7 @@ Rules:
    input modes (bracketed paste, application cursor, mouse tracking) are
    captured with every snapshot and read through plain accessors —
    `Screen::title`, `Screen::alternate_screen`, `Screen::bracketed_paste`,
-   `Screen::application_cursor`, `Screen::mouse_mode`,
+   `Screen::application_cursor`, `Screen::mouse_mode`, `Screen::mouse_modes`,
    `Screen::focus_events`, `Screen::clipboard`, `Screen::cursor_shape`,
    `Screen::cursor_blink`, `Screen::links`. Keeping them out of
    the rendering means existing snapshot files stay valid, and state

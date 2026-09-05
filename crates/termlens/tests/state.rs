@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use termlens::{CursorShape, Key, MouseMode, Screen, Terminal};
+use termlens::{CursorShape, Key, MouseMode, MouseModes, Screen, Terminal};
 
 /// One script walks the whole state surface: set everything, assert, then
 /// unwind everything and assert the way back.
@@ -275,6 +275,70 @@ fn mouse_mode_reports_the_exact_tracking_mode() -> termlens::Result<()> {
     t.wait_until(|s| s.contains("1000") && s.mouse_mode() == MouseMode::PressRelease)?;
     t.send(Key::Enter)?;
     t.wait_until(|s| s.contains("1003") && s.mouse_mode() == MouseMode::AnyMotion)?;
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// The set an application asked for is a different fact from the protocol
+/// the terminal reports in, and only the latter was observable: crossterm
+/// enables 1000, 1002 and 1003 together, the backend keeps the last, and an
+/// application downgraded from any-motion to button-motion — losing hover
+/// entirely — was indistinguishable from one that never had it (#151). The
+/// input path keeps the collapsed value; the set is reported beside it.
+#[test]
+fn mouse_modes_reports_the_set_the_application_asked_for() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"printf '\033[?1000h\033[?1002h\033[?1003h\033[?1006h'; printf 'all three\n'; read _; ",
+                r"printf '\033[?1003l'; printf 'minus 1003\n'; read _; ",
+                r"printf '\033[?1002l\033[?1000l'; printf 'none\n'; read _",
+            ),
+        ])
+        .spawn("sh")?;
+
+    let set = |modes: &[MouseMode]| -> Vec<MouseMode> { modes.to_vec() };
+    t.wait_until(|s| {
+        s.contains("all three")
+            && s.mouse_mode() == MouseMode::AnyMotion
+            && s.mouse_modes().iter().collect::<Vec<_>>()
+                == set(&[
+                    MouseMode::PressRelease,
+                    MouseMode::ButtonMotion,
+                    MouseMode::AnyMotion,
+                ])
+    })?;
+    let s = t.screen();
+    assert!(
+        s.mouse_modes().contains(MouseMode::ButtonMotion),
+        "{:?}",
+        s.mouse_modes()
+    );
+    assert!(
+        !s.mouse_modes().contains(MouseMode::Press),
+        "{:?}",
+        s.mouse_modes()
+    );
+    assert_eq!(s.mouse_modes().len(), 3);
+
+    // Releasing 1003 alone: the set still holds the other two, while the
+    // protocol collapses to none — as xterm does, and as `click` needs.
+    t.send(Key::Enter)?;
+    t.wait_until(|s| {
+        s.contains("minus 1003")
+            && s.mouse_mode() == MouseMode::None
+            && s.mouse_modes().iter().collect::<Vec<_>>()
+                == set(&[MouseMode::PressRelease, MouseMode::ButtonMotion])
+    })?;
+
+    t.send(Key::Enter)?;
+    t.wait_until(|s| s.contains("none") && s.mouse_modes().is_empty())?;
+    assert_eq!(t.screen().mouse_modes(), MouseModes::default());
+    assert!(t.screen().mouse_modes().contains(MouseMode::None));
+
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())

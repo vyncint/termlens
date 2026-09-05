@@ -13,10 +13,12 @@
 //!    are parsed incrementally in O(1) space, and `?2026` is recognized
 //!    anywhere in a multi-mode list such as `CSI ? 2026 ; 25 h`.
 //!
-//! It also tracks the one piece of screen state the vt100 backend does not
-//! expose: the **window title** (`OSC 0`/`OSC 2`), kept whole in its own
-//! buffer — the diagnostic capture below truncates at 24 bytes, real titles
-//! don't fit.
+//! It also tracks screen state the vt100 backend does not expose: the
+//! **window title** (`OSC 0`/`OSC 2`), kept whole in its own buffer — the
+//! diagnostic capture below truncates at 24 bytes, real titles don't fit —
+//! focus reporting (mode 1004), the cursor shape (`DECSCUSR`), and the
+//! **set of mouse tracking modes** the application asked for, which vt100
+//! collapses into the one protocol it would report in.
 //!
 //! And it holds the **character-set state** vt100 ignores: which glyph set
 //! `ESC ( ) * + Ps` designated into G0–G3, which of G0/G1 `SI`/`SO` has
@@ -40,7 +42,7 @@
 use std::sync::Arc;
 
 use crate::graphics::{GraphicsBuilder, GraphicsCounts, GraphicsPayload};
-use crate::screen::{Clipboard, Link};
+use crate::screen::{Clipboard, Link, MouseModes};
 
 /// OSC strings are captured whole (titles must not truncate), but bounded:
 /// a buggy or hostile stream must not grow memory without limit. No real
@@ -327,6 +329,19 @@ fn printable(bytes: &[u8]) -> String {
     out
 }
 
+/// The bit a DEC private mode number occupies in the tracked set of mouse
+/// tracking modes, matching [`MouseModes`]'s layout; zero for any other
+/// parameter, so accumulating over a whole list is one `|=` per value.
+fn mouse_bit(mode: u32) -> u8 {
+    match mode {
+        9 => 1,
+        1000 => 2,
+        1002 => 4,
+        1003 => 8,
+        _ => 0,
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct SeqTracker {
     state: State,
@@ -351,6 +366,10 @@ pub(crate) struct SeqTracker {
     /// anywhere in a multi-mode list, so scanning for it beats assuming it
     /// is the only parameter.
     csi_saw_1004: bool,
+    /// The mouse tracking modes (`9`, `1000`, `1002`, `1003`) named in the
+    /// current CSI's parameter list, as [`mouse_bit`]s — the same scan as
+    /// `csi_saw_1004`, for a group rather than one mode.
+    csi_saw_mouse: u8,
     /// Raw capture of the current sequence (from ESC), for diagnostics
     /// and DCS query recognition. Bounded; long sequences truncate.
     seq_buf: [u8; 24],
@@ -402,6 +421,14 @@ pub(crate) struct SeqTracker {
     /// Tracked here because vt100 does not model 1004 at all — the same
     /// reason the window title is tracked here.
     focus_events: bool,
+    /// The mouse tracking modes the application has enabled and not yet
+    /// disabled, as [`mouse_bit`]s. vt100 collapses the four into the one
+    /// protocol it would report in — correct for the input path, since a
+    /// terminal reports in one protocol — which cannot say which members
+    /// of the group were asked for; crossterm asks for three at once. The
+    /// set is kept here so `DECRQM` can answer each mode on its own
+    /// evidence and a snapshot can report what was requested (#151).
+    mouse_tracking: u8,
     /// The raw `DECSCUSR` parameter the application last asked for, or
     /// `None` while it has never asked. Kept as the parameter rather than
     /// as a decoded shape so the one place that knows what `5` means is
@@ -478,6 +505,7 @@ impl SeqTracker {
             csi_param_count: 0,
             csi_saw_2026: false,
             csi_saw_1004: false,
+            csi_saw_mouse: 0,
             seq_buf: [0; 24],
             seq_len: 0,
             osc_buf: Vec::new(),
@@ -494,6 +522,7 @@ impl SeqTracker {
             capture,
             frame_printable: 0,
             focus_events: false,
+            mouse_tracking: 0,
             cursor_style: None,
             esc_intermediate: 0,
             g0: Charset::Ascii,
@@ -608,6 +637,12 @@ impl SeqTracker {
         self.focus_events
     }
 
+    /// The mouse tracking modes the application has enabled and not yet
+    /// disabled — the requested set, not the one protocol vt100 reports in.
+    pub(crate) fn mouse_tracking(&self) -> MouseModes {
+        MouseModes::from_bits(self.mouse_tracking)
+    }
+
     /// The raw `DECSCUSR` parameter last requested, `None` if never.
     pub(crate) fn cursor_style(&self) -> Option<u8> {
         self.cursor_style
@@ -679,6 +714,7 @@ impl SeqTracker {
         self.saved_charsets = None;
         self.cursor_style = None;
         self.focus_events = false;
+        self.mouse_tracking = 0;
     }
 
     /// Apply the final byte of an `ESC ( ) * + Ps` designation.
@@ -725,6 +761,7 @@ impl SeqTracker {
         self.csi_param_count = 0;
         self.csi_saw_2026 = false;
         self.csi_saw_1004 = false;
+        self.csi_saw_mouse = 0;
     }
 
     fn push_seq(&mut self, b: u8) {
@@ -754,6 +791,7 @@ impl SeqTracker {
         if self.csi_param == 1004 {
             self.csi_saw_1004 = true;
         }
+        self.csi_saw_mouse |= mouse_bit(self.csi_param);
         if self.csi_param_count == 0 {
             self.csi_first_param = self.csi_param;
         }
@@ -860,6 +898,17 @@ impl SeqTracker {
             match b {
                 b'h' => self.focus_events = true,
                 b'l' => self.focus_events = false,
+                _ => {}
+            }
+        }
+
+        // The mouse tracking modes, kept as the set the application asked
+        // for — see `mouse_tracking`. Every mode named in one list is set
+        // or cleared together, which is how they arrive.
+        if self.csi_prefix == b'?' && self.csi_saw_mouse != 0 {
+            match b {
+                b'h' => self.mouse_tracking |= self.csi_saw_mouse,
+                b'l' => self.mouse_tracking &= !self.csi_saw_mouse,
                 _ => {}
             }
         }
@@ -1310,6 +1359,7 @@ impl SeqTracker {
                     self.cursor_style = None;
                     self.reset_charsets();
                     self.saved_charsets = None;
+                    self.mouse_tracking = 0;
                     self.close_link();
                     State::Ground
                 }
