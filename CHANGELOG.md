@@ -9,6 +9,8 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-05
+
 ### Added
 
 - **`Error::Emulator`: an emulator panic is a diagnosis, not a timeout.** The
