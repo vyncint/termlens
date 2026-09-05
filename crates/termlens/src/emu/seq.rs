@@ -30,8 +30,10 @@
 //! translated: DEC Special Graphics, and the UK set (`ESC ( A`), whose one
 //! difference from ASCII is `£` at `#`; every other designation — the
 //! alternate ROMs, the other national sets — is acknowledged and reads as
-//! ASCII. Locking shifts remain G0/G1 (`SO`/`SI`); `LS2`/`LS3` are not
-//! modelled. The tracker decides, the emulator rewrites: the bytes the
+//! ASCII. `DECSC`/`DECRC` save and restore this state alongside the cursor,
+//! and `RIS` returns it to power-on. Locking shifts remain G0/G1
+//! (`SO`/`SI`); `LS2`/`LS3` are not modelled. The tracker decides, the
+//! emulator rewrites: the bytes the
 //! parsers see are then a translated stream rather than a sub-slice of the
 //! read, which `emu/vt100.rs` stages.
 
@@ -127,6 +129,17 @@ enum Charset {
     Uk,
     /// DEC Special Graphics (`ESC ( 0`): the line-drawing set.
     DecSpecialGraphics,
+}
+
+/// What `DECSC` saves of the character-set state — see
+/// [`SeqTracker::saved_charsets`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SavedCharsets {
+    g0: Charset,
+    g1: Charset,
+    g2: Charset,
+    g3: Charset,
+    shifted_out: bool,
 }
 
 /// The glyph a byte draws in DEC Special Graphics, where it differs from
@@ -408,6 +421,13 @@ pub(crate) struct SeqTracker {
     /// an intervening control or designation must not consume it, or a
     /// mixed line that shifts then redraws would lose the graphic.
     single_shift: Option<SingleShift>,
+    /// The charset half of the state `DECSC` (`ESC 7`) saves: G0–G3 and
+    /// which of G0/G1 is locked in. `DECRC` (`ESC 8`) restores it; with
+    /// nothing saved it restores the power-on defaults, as xterm does. vt100
+    /// saves and restores the cursor and attributes itself, so only the
+    /// half it does not know about lives here. `None` after RIS, or a
+    /// restore after a reset would resurrect a designation from before it.
+    saved_charsets: Option<SavedCharsets>,
     /// Which introducer opened the current DCS-class string: `P` (DCS),
     /// `X` (SOS), `^` (PM) or `_` (APC). Sixel and kitty graphics differ
     /// only by this, so consuming all four alike — which is all the tracker
@@ -478,6 +498,7 @@ impl SeqTracker {
             g3: Charset::Ascii,
             shifted_out: false,
             single_shift: None,
+            saved_charsets: None,
             dcs_introducer: 0,
             dcs_final: 0,
             dcs_intermediate: 0,
@@ -628,6 +649,18 @@ impl SeqTracker {
                 }
             }
         }
+    }
+
+    /// Every set back to ASCII with G0 invoked and no single shift pending:
+    /// the power-on charset state, which RIS returns to and which `DECRC`
+    /// with nothing saved restores.
+    fn reset_charsets(&mut self) {
+        self.g0 = Charset::Ascii;
+        self.g1 = Charset::Ascii;
+        self.g2 = Charset::Ascii;
+        self.g3 = Charset::Ascii;
+        self.shifted_out = false;
+        self.single_shift = None;
     }
 
     /// Apply the final byte of an `ESC ( ) * + Ps` designation.
@@ -1244,13 +1277,40 @@ impl SeqTracker {
                 // the terminal still holds.
                 b'c' => {
                     self.cursor_style = None;
-                    self.g0 = Charset::Ascii;
-                    self.g1 = Charset::Ascii;
-                    self.g2 = Charset::Ascii;
-                    self.g3 = Charset::Ascii;
-                    self.shifted_out = false;
-                    self.single_shift = None;
+                    self.reset_charsets();
+                    self.saved_charsets = None;
                     self.close_link();
+                    State::Ground
+                }
+                // DECSC / DECRC: the charset half of save-cursor and
+                // restore-cursor. The idiom is save, jump, draw a border,
+                // restore — and a restore that forgot the designation
+                // rendered the border after it as `lqk`. vt100 does the
+                // cursor and attributes; the sets are ours (#232).
+                b'7' => {
+                    self.saved_charsets = Some(SavedCharsets {
+                        g0: self.g0,
+                        g1: self.g1,
+                        g2: self.g2,
+                        g3: self.g3,
+                        shifted_out: self.shifted_out,
+                    });
+                    State::Ground
+                }
+                b'8' => {
+                    match self.saved_charsets {
+                        Some(saved) => {
+                            self.g0 = saved.g0;
+                            self.g1 = saved.g1;
+                            self.g2 = saved.g2;
+                            self.g3 = saved.g3;
+                            self.shifted_out = saved.shifted_out;
+                        }
+                        // Nothing saved: xterm restores the defaults rather
+                        // than leaving the current designation, and so do
+                        // we — the least surprising answer, and no new state.
+                        None => self.reset_charsets(),
+                    }
                     State::Ground
                 }
                 // SS2 / SS3: invoke G2 / G3 for the next character only.

@@ -83,14 +83,49 @@ fn a_styled_border_keeps_its_style() -> termlens::Result<()> {
 
 /// A hard reset returns both sets to ASCII — and clears the screen, as RIS
 /// does, so the glyph drawn before it is gone and the byte after it is a
-/// letter again.
+/// letter again. It clears the `DECSC` slot too: a `DECRC` after the reset
+/// must not resurrect a designation from before it (#232).
 #[test]
 fn a_hard_reset_returns_to_ascii() -> termlens::Result<()> {
-    let mut t = sh(r"printf '\033(0q\033cq'; printf DONE; read _")?;
+    let mut t = sh(r"printf '\033(0q\0337\033c\0338q'; printf DONE; read _")?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
     assert_eq!(s.row_text(0).trim_end(), "qDONE", "{s}");
     assert!(!s.contains("─"), "{s}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// The save/jump/draw/restore idiom: `DECSC` saves the designated sets and
+/// the locking shift with the cursor, `DECRC` brings them back. The
+/// restore used to leave whatever was designated in between, so a border
+/// drawn after it read `lqk` (#232). Row 1 restores an `SO` state, since
+/// the shift is part of what is saved.
+#[test]
+fn decsc_and_decrc_save_and_restore_the_charset_state() -> termlens::Result<()> {
+    let mut t = sh(concat!(
+        r"printf '\033(0\0337\033(B\0338lqk\033(B\n'; ",
+        r"printf '\033)0\016\0337\017\0338lqk\017\n'; ",
+        "printf DONE; read _"
+    ))?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    assert_eq!(s.row_text(0).trim_end(), "┌─┐", "{s}");
+    assert_eq!(s.row_text(1).trim_end(), "┌─┐", "{s}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// `DECRC` with nothing saved restores the defaults, as xterm does — G0 at
+/// ASCII — rather than leaving whatever was last designated.
+#[test]
+fn decrc_with_nothing_saved_returns_to_ascii() -> termlens::Result<()> {
+    let mut t = sh(r"printf '\033(0\0338lqk'; printf DONE; read _")?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    assert_eq!(s.row_text(0).trim_end(), "lqkDONE", "{s}");
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())

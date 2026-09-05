@@ -68,6 +68,14 @@ listed under a **Changed** or **Removed** heading.
   shifts remain G0/G1 only (`SO`/`SI`); `LS2`/`LS3` and `DECSC`/`DECRC` of
   charset state are still unmodelled. (#235)
 
+- **`DECSC`/`DECRC` save and restore the character-set state.** Save,
+  jump, draw the frame, restore is how a full-screen application draws a
+  border, and the restore lost the designation, so the border after it
+  rendered as `lqk` — the failure #204 fixed, arriving through a different
+  door. `ESC 7` now saves G0–G3 and the locking shift alongside the cursor
+  the backend already saved, `ESC 8` restores them, a restore with nothing
+  saved returns to ASCII as xterm does, and `RIS` clears the slot so a
+  restore cannot resurrect a designation from before the reset. (#232)
 - **The UK character set is translated: `ESC ( A` then `#` draws `£`.**
   The designation was parsed and then rendered as ASCII, so an application
   printing a price in the UK set showed `#42` on the grid, a test asserting

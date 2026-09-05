@@ -237,8 +237,8 @@ design. termlens's position:
   are modelled; the DEC Special Graphics set (`0`) and the UK set (`A`,
   `£` at `#`) are translated, and every other designation — the alternate
   ROMs, the other national sets — is acknowledged and reads as ASCII.
-  Locking shifts remain G0/G1 only (`LS2`/`LS3` are not modelled).
-  `DECSC`/`DECRC` do not save or restore the charset state.
+  `DECSC`/`DECRC` save and restore this state with the cursor. Locking
+  shifts remain G0/G1 only (`LS2`/`LS3` are not modelled).
 - `wait_frame` needs the application to bracket its repaints in DEC 2026
   synchronized updates, and only the last 8 completed frames are retained;
   everything else waits with `wait_until`, under the three rules in
