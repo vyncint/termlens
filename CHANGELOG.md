@@ -22,6 +22,16 @@ listed under a **Changed** or **Removed** heading.
   state means nothing. `wait_exit` is deliberately unaffected: the child's
   exit status is still true. (#211)
 
+- **The `inspect` example answers `--help`, and takes its deadline and
+  silence window from flags.** `inspect --help` used to look for a program
+  called `--help`, and both timings were hardcoded, so an application slower
+  than five seconds to paint its first screen could not be inspected at all.
+  `--timeout SECONDS` (default 5) and `--idle MILLIS` (default 300) now sit
+  beside `--size`; `--help`/`-h` print one usage text to stdout and exit 0,
+  a missing program prints the same text to stderr and exits 1, and
+  `--version` names the termlens version the example was built from. An
+  unknown option is refused rather than spawned. (#229, #236)
+
 ### Changed
 
 - **The smallest terminal is 2x2, not 1x1.** One column panics the emulator on
