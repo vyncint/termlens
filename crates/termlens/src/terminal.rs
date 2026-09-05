@@ -2510,8 +2510,12 @@ impl Terminal {
         self.write_input(&bytes, "a mouse click")
     }
 
-    /// Drag from one cell to another: press, a motion report **per cell
-    /// crossed**, release.
+    /// Drag from `(from_col, from_row)` to `(to_col, to_row)`: press, a
+    /// motion report **per cell crossed**, release.
+    ///
+    /// Coordinates are columns first, matching [`click`](Self::click) and
+    /// the other mouse methods. [`Screen::find`](crate::Screen::find) returns
+    /// `(row, col)` instead, so destructure its result before passing it here.
     ///
     /// The path is a straight line, interpolated on both axes for a diagonal
     /// drag. A real pointer's exact path is not reproducible and does not
@@ -2543,8 +2547,10 @@ impl Terminal {
     pub fn drag(
         &mut self,
         button: impl Into<MouseChord>,
-        from: (u16, u16),
-        to: (u16, u16),
+        from_col: u16,
+        from_row: u16,
+        to_col: u16,
+        to_row: u16,
     ) -> Result<()> {
         self.ensure_deliverable("a mouse drag")?;
         let chord = button.into();
@@ -2562,6 +2568,8 @@ impl Terminal {
             MouseMode::ButtonMotion | MouseMode::AnyMotion => true,
         };
         let (cols, rows) = self.screen().size();
+        let from = (from_col, from_row);
+        let to = (to_col, to_row);
         // Endpoints only — see the Errors section above.
         check_mouse_in_grid(from.0, from.1, cols, rows)?;
         check_mouse_in_grid(to.0, to.1, cols, rows)?;
