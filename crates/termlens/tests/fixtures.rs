@@ -164,8 +164,8 @@ fn unicode_torture_renders_with_correct_widths() -> termlens::Result<()> {
     // Wait on the cursor, not on contains("done"): the predicate would turn
     // true before the trailing newline is processed, and the snapshot would
     // catch the cursor mid-line. After "done\r\n" the cursor rests at the
-    // start of row 7 — that is the fixture's true "finished drawing" state.
-    t.wait_until(|s| s.cursor() == (7, 0, true))?;
+    // start of row 8 — that is the fixture's true "finished drawing" state.
+    t.wait_until(|s| s.cursor() == (8, 0, true))?;
 
     let screen = t.screen();
     // "width: |一二三| vs |abc|" — "width: " is 7 columns, "|一二三|" is
