@@ -105,6 +105,7 @@
 //! override any of them.
 
 #![warn(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod emu;
 mod error;
@@ -117,6 +118,7 @@ mod wait;
 
 pub use error::{Error, Result};
 #[cfg(feature = "decode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "decode")))]
 pub use graphics::{Bitmap, DecodeError};
 pub use graphics::{
     GraphicsAction, GraphicsFormat, GraphicsPayload, GraphicsProtocol, GraphicsSeen,
@@ -134,6 +136,7 @@ pub use terminal::{
 /// default), so [`assert_screen_snapshot!`] always agrees with the `insta`
 /// version doing the snapshotting.
 #[cfg(feature = "insta")]
+#[cfg_attr(docsrs, doc(cfg(feature = "insta")))]
 pub use insta;
 
 /// Snapshot-assert anything that displays like a [`Screen`].
@@ -152,6 +155,7 @@ pub use insta;
 /// # }
 /// ```
 #[cfg(feature = "insta")]
+#[cfg_attr(docsrs, doc(cfg(feature = "insta")))]
 #[macro_export]
 macro_rules! assert_screen_snapshot {
     ($screen:expr) => {
