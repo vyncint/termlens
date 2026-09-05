@@ -55,6 +55,26 @@ starts from, so it has a name: `termlens::bin!("myapp")` spawns
 five-second deadline, and builder calls after the name override any of it —
 `termlens::bin!("myapp", size(120, 40), env("NO_COLOR", "1"))?`.
 
+### AI-Assisted Testing (Claude Code / Cursor / Agents)
+
+Coding agents write terminal tests badly in predictable ways: a `sleep`
+where a wait belongs, a snapshot taken mid-repaint, a `1x1` terminal, a
+`(row, col)` handed to a method that wants `(col, row)`. The skill at
+[`skills/termlens/SKILL.md`](skills/termlens/SKILL.md) is the counter to
+each: the model, the rules that keep a PTY test from flaking, the API in one
+page, and four copy-paste recipes — a CLI snapshot, a ratatui navigation
+flow, overriding defaults, targeted cell and style assertions. Every Rust
+block in it is compiled against the crate in CI, so it cannot drift from the
+API. Install it for Claude Code with one command:
+
+```sh
+mkdir -p ~/.claude/skills/termlens && curl -sSL https://raw.githubusercontent.com/vyncint/termlens/main/skills/termlens/SKILL.md -o ~/.claude/skills/termlens/SKILL.md
+```
+
+Other agents take the same file: add it to a Cursor rule or reference it
+from `.github/copilot-instructions.md`. Inside this repository Claude Code
+finds it without installing anything, through `.claude/skills/termlens`.
+
 ## What it is (and is not)
 
 - **Not** an expect-style stream matcher — [rexpect] and [expectrl] already

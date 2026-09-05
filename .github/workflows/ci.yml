@@ -195,10 +195,26 @@ jobs:
 
   # Single stable job name for branch protection: require this one check and
   # matrix/job changes never break the required-checks configuration.
+  # The skill for coding agents (skills/termlens/SKILL.md) is what an agent
+  # copies from, so a recipe that no longer compiles teaches the wrong API to
+  # everyone who installed it. Every Rust block in it is compiled against the
+  # crate in this checkout, inside a consumer that owns a `myapp` binary.
+  skill:
+    name: skill
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - run: .github/scripts/check-skill-snippets.sh
+
   required-green:
     name: required-green
     if: always()
-    needs: [fmt, clippy, test, features, msrv, docs, deny, zizmor, gates-listed]
+    needs: [fmt, clippy, test, features, msrv, docs, deny, zizmor, gates-listed, skill]
     runs-on: ubuntu-latest
     steps:
       - name: Verify every needed job succeeded
