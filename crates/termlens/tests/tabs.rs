@@ -164,6 +164,42 @@ fn a_soft_reset_restores_the_default_stops() -> termlens::Result<()> {
     Ok(())
 }
 
+/// The documented resize rule, through a real `resize`: columns the grid
+/// did not have before get the every-eighth pattern, and the stops inside
+/// the old width are left exactly as they were.
+///
+/// This is the rule most likely to be broken by a later change and the one
+/// nothing else pins end to end — a set rebuilt from scratch on resize would
+/// lose the custom stop and pass every other test in this file.
+#[test]
+fn a_resize_extends_the_stops_and_keeps_the_ones_it_had() -> termlens::Result<()> {
+    // The stop at column 4 is set before the resize; `READY` parks the
+    // child so the widen lands between the two halves of the script.
+    //
+    // One `read` and no trailing wait: a resize raises `SIGWINCH` in the
+    // child, which can cut a pending `read` short, so a script that paused
+    // twice would be racing the signal for which pause our one keypress
+    // lands in. With a single pause the second half is printed after the
+    // widen either way.
+    let mut t = sh(concat!(
+        r"printf '\033[4G\033H\033[1GREADY\r\n'; read _; ",
+        r"printf '\011a\033[25G\011b\r\nDONE'"
+    ))?;
+    t.wait_until(|s| s.contains("READY"))?;
+    t.resize(40, 4)?;
+    t.send(Key::Enter)?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    assert_eq!(s.find("a"), Some((1, 3)), "the custom stop survives:\n{s}");
+    assert_eq!(
+        s.find("b"),
+        Some((1, 32)),
+        "and column 25 tabs on to the every-eighth stop at 33:\n{s}"
+    );
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// A table drawn the way the capabilities are meant to be used: clear the
 /// stops, set the column ones, then tab between them for every row. This is
 /// the failure the issue describes — every character present, every column
