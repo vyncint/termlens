@@ -301,6 +301,7 @@ impl GraphicsPayload {
     /// size. [`DecodeError::TooLarge`] covers declared dimensions or sixel
     /// commands beyond the 4096-pixel and related safety limits.
     #[cfg(feature = "decode")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "decode")))]
     pub fn decode(&self) -> Result<Bitmap, DecodeError> {
         let data = self.data.as_deref().ok_or(DecodeError::NotCaptured)?;
         match self.protocol {
@@ -386,6 +387,7 @@ impl GraphicsPayload {
 /// be about the picture — "the day at week 30 is Primer's brightest green" —
 /// rather than about its size in bytes.
 #[cfg(feature = "decode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "decode")))]
 #[derive(Clone, PartialEq, Eq)]
 pub struct Bitmap {
     width: u32,
@@ -493,6 +495,7 @@ const MAX_SIXEL_REGISTERS: usize = 65_536;
 
 /// Why a payload could not be decoded.
 #[cfg(feature = "decode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "decode")))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DecodeError {
