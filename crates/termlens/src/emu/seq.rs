@@ -31,7 +31,7 @@
 //! difference from ASCII is `£` at `#`; every other designation — the
 //! alternate ROMs, the other national sets — is acknowledged and reads as
 //! ASCII. `DECSC`/`DECRC` save and restore this state alongside the cursor,
-//! and `RIS` returns it to power-on. Locking shifts remain G0/G1
+//! and `RIS` and `DECSTR` return it to power-on. Locking shifts remain G0/G1
 //! (`SO`/`SI`); `LS2`/`LS3` are not modelled. The tracker decides, the
 //! emulator rewrites: the bytes the
 //! parsers see are then a translated stream rather than a sub-slice of the
@@ -222,6 +222,10 @@ pub(crate) enum SeqEvent {
     SyncBegin,
     /// A `CSI ? 2026 … l` completed: a frame is now complete.
     SyncEnd,
+    /// `DECSTR` (`CSI ! p`) completed: the tracker has already returned
+    /// its own state to the defaults; the emulator must do the same for
+    /// the modes it holds.
+    SoftReset,
     /// The application asked the terminal a question.
     Query(Query),
     /// An inline graphics payload completed. Carried out of the tracker
@@ -663,6 +667,20 @@ impl SeqTracker {
         self.single_shift = None;
     }
 
+    /// The tracker's half of `DECSTR`: the character sets and the `DECSC`
+    /// slot back to power-on, the cursor shape back to the terminal's
+    /// default, focus reporting off. The window title, the clipboard, the
+    /// bell count and the link log stay, for the same reason they survive
+    /// `RIS`: they are records of what the application emitted, not modes
+    /// the terminal holds. An open link span stays open too — a soft reset
+    /// clears no screen, so the text after it is still the span's text.
+    fn soft_reset(&mut self) {
+        self.reset_charsets();
+        self.saved_charsets = None;
+        self.cursor_style = None;
+        self.focus_events = false;
+    }
+
     /// Apply the final byte of an `ESC ( ) * + Ps` designation.
     ///
     /// `0` is DEC Special Graphics and `A` the United Kingdom set, whose one
@@ -756,11 +774,11 @@ impl SeqTracker {
                 self.csi_has_digits = true;
             }
             b';' => self.end_csi_param(),
-            // `$` is the intermediate of the DECRQM request (`CSI ? n $ p`)
-            // and `SP` of DECSCUSR (`CSI Ps SP q`); recording them keeps
-            // those sequences classifiable instead of discarding them as
-            // unrecognized.
-            b'$' | b' ' => self.csi_intermediate = b,
+            // `$` is the intermediate of the DECRQM request (`CSI ? n $ p`),
+            // `SP` of DECSCUSR (`CSI Ps SP q`) and `!` of DECSTR
+            // (`CSI ! p`); recording them keeps those sequences
+            // classifiable instead of discarding them as unrecognized.
+            b'$' | b' ' | b'!' => self.csi_intermediate = b,
             // Sub-parameters or other intermediates: none of the sequences
             // we recognize use them.
             _ => self.csi_invalid = true,
@@ -791,6 +809,19 @@ impl SeqTracker {
                 (_, b'p' | b'y') => SeqEvent::Query(Query::Unanswerable(self.seq_printable())),
                 _ => SeqEvent::None,
             };
+        }
+
+        // DECSTR (`CSI ! p`), the soft reset: what a well-behaved TUI sends
+        // on startup and teardown for a known-good terminal without the
+        // screen clear RIS brings. The spec's list is long; the modes this
+        // crate holds are returned to their defaults here, and the emulator
+        // is told to do the same for the ones it holds (#233).
+        if self.csi_intermediate == b'!' {
+            if b == b'p' && self.csi_prefix == 0 && params_empty {
+                self.soft_reset();
+                return SeqEvent::SoftReset;
+            }
+            return SeqEvent::None;
         }
 
         // DECSCUSR (`CSI Ps SP q`): the shape of the cursor, and whether it

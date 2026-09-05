@@ -97,6 +97,29 @@ fn a_hard_reset_returns_to_ascii() -> termlens::Result<()> {
     Ok(())
 }
 
+/// A soft reset (`DECSTR`, `CSI ! p`) returns the sets to ASCII the way
+/// `RIS` does — and unlike `RIS` clears nothing, so the glyph drawn before
+/// it stays. It used to parse cleanly and do nothing, so text printed after
+/// an application's teardown reset kept rendering as box drawing (#233).
+#[test]
+fn a_soft_reset_returns_to_ascii_without_clearing_the_screen() -> termlens::Result<()> {
+    let mut t = sh(concat!(
+        r"printf '\033(0q\033[!pq\n'; ",
+        r"printf '\033(0\0337\033[!p\0338lqk\n'; ",
+        "printf DONE; read _"
+    ))?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    assert_eq!(s.row_text(0).trim_end(), "─q", "{s}");
+    // Row 1 draws after a DECRC: the soft reset emptied the saved slot, so
+    // the restore returns to ASCII rather than to the graphics set saved
+    // before it. (The cursor it restores is the row's start, where it was.)
+    assert_eq!(s.row_text(1).trim_end(), "lqk", "{s}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// The save/jump/draw/restore idiom: `DECSC` saves the designated sets and
 /// the locking shift with the cursor, `DECRC` brings them back. The
 /// restore used to leave whatever was designated in between, so a border

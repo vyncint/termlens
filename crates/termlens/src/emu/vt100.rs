@@ -236,6 +236,17 @@ impl Emulator for Vt100Emulator {
                     self.record_graphics(*payload);
                     None
                 }
+                SeqEvent::SoftReset => {
+                    // The tracker has reset what it holds; the grid's
+                    // modes are vt100's, which does not implement DECSTR,
+                    // so it is handed the sequences that reset them one by
+                    // one. The soft reset itself goes through first, in
+                    // stream order, then the replay.
+                    self.feed_staged(&bytes[fed..=i]);
+                    fed = i + 1;
+                    self.feed(SOFT_RESET_REPLAY);
+                    None
+                }
                 SeqEvent::None => None,
                 SeqEvent::SyncBegin => {
                     // Stamped here, at the byte that opened the update,
@@ -410,6 +421,17 @@ impl Emulator for Vt100Emulator {
         self.capture_scrolled_rows();
     }
 }
+
+/// What `DECSTR` resets of the state vt100 holds, as the sequences vt100
+/// understands: cursor keys back to normal (`DECCKM`), bracketed paste off,
+/// every mouse tracking mode and encoding off, and the cursor visible
+/// (`DECTCEM`). The rest of the specified list — attributes, margins,
+/// origin and insert modes, the keypad — is deliberately not replayed:
+/// none of it is observable through `Screen` today, and a replay nothing
+/// can check is a claim nothing can catch. The alternate screen is left
+/// alone, as the spec says.
+const SOFT_RESET_REPLAY: &[u8] =
+    b"\x1b[?1l\x1b[?2004l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?25h";
 
 fn convert_mouse(mode: ::vt100::MouseProtocolMode) -> MouseMode {
     match mode {

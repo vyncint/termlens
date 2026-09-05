@@ -202,6 +202,60 @@ fn a_snapshot_keeps_its_own_view_of_the_links() -> termlens::Result<()> {
     Ok(())
 }
 
+/// `DECSTR` (`CSI ! p`) is the polite reset — no screen clear — that a
+/// well-behaved TUI sends on teardown, and it used to have no effect at
+/// all (#233). What it resets here is the list a test can check on a
+/// `Screen`: cursor keys, bracketed paste, mouse tracking, focus reporting,
+/// the cursor's visibility and shape, and the character sets (covered in
+/// `charset.rs`). Attributes, margins, origin and insert modes and the
+/// keypad are not replayed — nothing observes them, so nothing could catch
+/// a wrong replay — and the alternate screen is left alone, as specified.
+#[test]
+fn a_soft_reset_returns_the_modes_a_screen_can_observe() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            concat!(
+                r"printf '\033[?1049h\033[?1h\033[?2004h\033[?1000h\033[?1006h\033[?1004h\033[?25l\033[5 q'; ",
+                r"printf 'set'; read _; ",
+                r"printf '\033[!p'; ",
+                r"printf ' reset'; read _",
+            ),
+        ])
+        .spawn("sh")?;
+
+    t.wait_until(|s| {
+        s.contains("set")
+            && s.alternate_screen()
+            && s.application_cursor()
+            && s.bracketed_paste()
+            && s.mouse_mode() == MouseMode::PressRelease
+            && s.focus_events()
+            && !s.cursor().2
+            && s.cursor_shape() == CursorShape::Bar
+    })?;
+
+    t.send(Key::Enter)?;
+    t.wait_until(|s| s.contains("reset"))?;
+    let s = t.screen();
+    assert!(
+        s.alternate_screen(),
+        "the alternate screen is left alone: {s}"
+    );
+    assert!(!s.application_cursor(), "{s}");
+    assert!(!s.bracketed_paste(), "{s}");
+    assert_eq!(s.mouse_mode(), MouseMode::None, "{s}");
+    assert!(!s.focus_events(), "{s}");
+    assert!(s.cursor().2, "DECTCEM: the cursor is visible again: {s}");
+    assert_eq!(s.cursor_shape(), CursorShape::Default, "{s}");
+    assert_eq!(s.cursor_blink(), None, "{s}");
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 #[test]
 fn mouse_mode_reports_the_exact_tracking_mode() -> termlens::Result<()> {
     let mut t = Terminal::builder()

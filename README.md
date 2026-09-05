@@ -273,7 +273,11 @@ design. termlens's position:
   terminal would infer.** The cursor shape follows `DECSCUSR` and is cleared
   by a hard reset (`RIS`); the window title is not, because in xterm the
   title is a window property that `RIS` does not restore, and guessing either
-  way would be the same error. Nothing here models `DECSTR` (soft reset).
+  way would be the same error. `DECSTR` (soft reset) resets what a `Screen`
+  can observe — cursor keys, bracketed paste, mouse tracking, focus
+  reporting, the cursor's visibility and shape, the character sets — and
+  leaves the alternate screen alone; attributes, margins, origin and insert
+  modes and the keypad are not modelled.
 - **Two SGR style attributes are not modeled.** Overline (`SGR 53`) and double
   underline (`SGR 21`) do not reach [`Style`](https://docs.rs/termlens/latest/termlens/struct.Style.html),
   so `with_styles()` cannot distinguish those attributes from a plain cell.

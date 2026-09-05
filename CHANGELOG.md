@@ -76,6 +76,17 @@ listed under a **Changed** or **Removed** heading.
   the backend already saved, `ESC 8` restores them, a restore with nothing
   saved returns to ASCII as xterm does, and `RIS` clears the slot so a
   restore cannot resurrect a designation from before the reset. (#232)
+- **`DECSTR` (soft reset, `CSI ! p`) is modelled.** The polite reset a
+  well-behaved TUI sends on startup and teardown parsed cleanly and did
+  nothing, so text printed after it kept rendering in the character set the
+  application had told the terminal to forget, while `RIS` got this right.
+  It now returns the character sets and the `DECSC` slot to power-on, the
+  cursor shape to the terminal's default, and turns off cursor-key mode,
+  bracketed paste, every mouse tracking mode and encoding, and focus
+  reporting; the cursor becomes visible and the alternate screen is left
+  alone, as specified. Attributes, margins, origin and insert modes and the
+  keypad are not replayed — nothing on `Screen` observes them — and the
+  README says so. (#233)
 - **The UK character set is translated: `ESC ( A` then `#` draws `£`.**
   The designation was parsed and then rendered as ASCII, so an application
   printing a price in the UK set showed `#42` on the grid, a test asserting
