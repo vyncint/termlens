@@ -37,7 +37,11 @@ pub enum Color {
 ///
 /// Inspect them per cell via [`Cell::style`], or snapshot them wholesale
 /// with [`Screen::with_styles`] (plain snapshots stay text-only).
+/// More terminal attributes may be added in future releases. To construct a
+/// style for comparison, start from `Style::default()` and assign the fields
+/// relevant to the assertion rather than using a struct literal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub struct Style {
     /// Foreground color.
     pub fg: Color,

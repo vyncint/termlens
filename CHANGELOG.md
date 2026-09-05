@@ -21,6 +21,12 @@ listed under a **Changed** or **Removed** heading.
   cell and style assertions. Every Rust block in it is compiled against the
   crate in CI, and the README shows the one-line install for Claude Code.
 
+### Changed
+
+- **`Style` is non-exhaustive so new terminal attributes can be added without
+  another breaking change.** Downstream struct literals should migrate to
+  `Style::default()` followed by assignments to relevant fields. (#259)
+
 ## [0.9.0] - 2026-09-05
 
 ### Added
