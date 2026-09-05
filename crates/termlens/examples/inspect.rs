@@ -5,6 +5,7 @@
 //! cargo run --example inspect -- ls -la
 //! cargo run --example inspect -- --size 120x40 htop
 //! cargo run --example inspect -- --timeout 30 ./target/debug/slow-app
+//! cargo run --example inspect -- --env NO_COLOR=1 my-app
 //! ```
 //!
 //! Waits for the program to exit (up to the deadline, `--timeout`, five
@@ -33,12 +34,15 @@ use termlens::Terminal;
 /// The one copy of the usage text: `--help` prints it to stdout and exits
 /// 0, a missing program prints it to stderr and exits 1 (#229).
 const USAGE: &str = "\
-usage: inspect [--size COLSxROWS] [--timeout SECONDS] [--idle MILLIS] <program> [args…]
+usage: inspect [--size COLSxROWS] [--timeout SECONDS] [--idle MILLIS]
+               [--inherit-env] [--env KEY=VALUE]... <program> [args…]
 
 Runs <program> in an 80x24 pseudo-terminal (or --size), waits for it to
 exit or for the deadline (--timeout, default 5 seconds), and prints the
 rendered screen. A program still running at the deadline is snapshotted
 after --idle milliseconds (default 300) of output silence, then killed.
+The child environment is cleared by default except for PATH; --inherit-env
+keeps the caller's environment, and repeatable --env sets selected values.
 
 Exit code 0: a screen was printed; the trailer under it says what the
 program did. Exit code 1: inspect itself could not run — bad arguments,
@@ -71,6 +75,8 @@ fn main() -> ExitCode {
     let mut size = (80u16, 24u16);
     let mut timeout = Duration::from_secs(5);
     let mut idle = Duration::from_millis(300);
+    let mut inherit_env = false;
+    let mut env = Vec::new();
 
     // Options come before the program; everything after it is the
     // program's own, however flag-like it looks.
@@ -95,6 +101,15 @@ fn main() -> ExitCode {
                 .map(|secs| timeout = Duration::from_secs(secs)),
             "--idle" => take(&mut args, "--idle", "MILLIS", "1000", |s| s.parse().ok())
                 .map(|millis| idle = Duration::from_millis(millis)),
+            "--inherit-env" => {
+                inherit_env = true;
+                Ok(())
+            }
+            "--env" => take(&mut args, "--env", "KEY=VALUE", "NO_COLOR=1", |s| {
+                let (key, value) = s.split_once('=')?;
+                (!key.is_empty()).then(|| (key.to_owned(), value.to_owned()))
+            })
+            .map(|pair| env.push(pair)),
             other => Err(format!("unknown option {other:?} (try --help)")),
         };
         if let Err(message) = parsed {
@@ -108,12 +123,21 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let mut t = match Terminal::builder()
+    let mut builder = Terminal::builder()
         .size(size.0, size.1)
         .timeout(timeout)
-        .args(args)
-        .spawn(&program)
-    {
+        .args(args);
+    if !inherit_env {
+        builder = builder.env_clear();
+        if let Some(path) = std::env::var_os("PATH") {
+            builder = builder.env("PATH", path);
+        }
+    }
+    for (key, value) in env {
+        builder = builder.env(key, value);
+    }
+
+    let mut t = match builder.spawn(&program) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("inspect: {e}");
