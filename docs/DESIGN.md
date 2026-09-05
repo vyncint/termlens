@@ -671,6 +671,28 @@ But it is an implementation detail:
   G0/G1, SS2/SS3 for one character, one set translated, everything else
   read as ASCII. `LS2`/`LS3` and `DECSC`/`DECRC` of charset state are not
   modelled.
+- vt100's tab stops are a hardcoded eight with no way to be told otherwise,
+  so **the stop set is termlens's too**, and for the same reason: `HTS`,
+  `TBC`, `CHT` and `CBT` reached `unhandled_escape`/`unhandled_csi` and were
+  dropped, while `hts`, `tbc` and `cbt` sit in the terminfo entry every
+  child is handed. The set is one flag per column in the sequence tracker;
+  the *cursor column* each operation is relative to is the grid's, so the
+  tracker classifies and the emulator resolves — feeding the bytes it still
+  owes the parser first, so the position it reads is current rather than
+  wherever the last feed stopped. A motion then goes out as `CSI n G`
+  (`CHA`), which vt100 does dispatch, so this is a rewrite on the same
+  staged stream the glyph substitution uses rather than a new grid
+  operation. The original escape is fed rather than dropped: vt100 ignores
+  all four, and dropping a final byte would leave its parser in a
+  half-consumed escape that swallows the next one. Plain `HT` is rewritten
+  too — vt100 *does* act on it, and its eight and a custom stop would
+  disagree the moment an application set one; the `CHA` lands after it and
+  wins, which is sound because `HT` draws nothing and only moves the cursor.
+  Both parsers are fed the rewrite, so the attribute shadow keeps the same
+  shape as the primary grid and the invariant `snapshot` debug-asserts still
+  holds. Scope is in the README: `TBC 0` and `TBC 3` only, back-tab to the
+  nearest stop strictly left of the cursor, and a resize that extends into
+  new columns with the default pattern while leaving existing stops alone.
 
 ### The attribute shadow
 
