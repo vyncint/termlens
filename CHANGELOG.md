@@ -23,6 +23,23 @@ listed under a **Changed** or **Removed** heading.
 
 ### Changed
 
+- **`Screen::row_text` rejects an out-of-bounds row instead of returning an
+  ambiguous empty string.** Callers with a potentially invalid index should
+  bounds-check against `rows()` first, or use `cell(row, 0)` and treat `None`
+  as absent. (#260)
+
+- **`Terminal::drag` takes four column-first coordinate arguments instead of
+  two unlabelled tuples.** This matches the other mouse methods and prevents a
+  row-first `Screen::find` result from being passed through transposed. (#257)
+
+- **`Style` is non-exhaustive so new terminal attributes can be added without
+  another breaking change.** Downstream struct literals should migrate to
+  `Style::default()` followed by assignments to relevant fields. (#259)
+
+- **The `inspect` example clears the child environment by default.** It keeps
+  `PATH` so bare program names work; `--env` adds selected values and
+  `--inherit-env` restores the previous behavior. (#263)
+
 ### Fixed
 
 - **docs.rs labels APIs gated by the `decode` and `insta` features.** Optional
