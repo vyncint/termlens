@@ -38,6 +38,19 @@
 //! emulator rewrites: the bytes the
 //! parsers see are then a translated stream rather than a sub-slice of the
 //! read, which `emu/vt100.rs` stages.
+//!
+//! The same split holds the **tab stops** (see [`TabStops`]). vt100 has a
+//! hardcoded eight and no way to be told otherwise, so `HTS`, `TBC`, `CHT`
+//! and `CBT` reached its dispatch table and vanished — and an application
+//! that lays a table out by setting its own stops, which is what the
+//! capabilities are for, drew every column in the wrong place. The set
+//! lives here; the *cursor column* every one of those operations needs
+//! lives in the grid, so the tracker emits a [`TabOp`] and the emulator
+//! resolves it against the position it holds, rewriting a motion as `CHA`
+//! (`CSI n G`) — a sequence the backend does dispatch, the same way DEC
+//! Special Graphics became a glyph substitution. Plain `HT` is rewritten
+//! too, or vt100's fixed eight and these stops would disagree the moment an
+//! application set one.
 
 use std::sync::Arc;
 
@@ -118,6 +131,161 @@ pub(crate) fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// Columns between the tab stops a terminal powers on with. Eight is the
+/// value every terminfo, every shell and vt100's own hardcoded `col_tab` is
+/// written against.
+const TAB_INTERVAL: u16 = 8;
+
+/// Whether the power-on layout has a stop at `col`.
+///
+/// Column 0 is one of them, as it is in xterm's `TabReset` and alacritty's
+/// `TabStops::new`. Forward motion scans strictly right of the cursor and so
+/// can never land there; it matters only to `CBT`, which would clamp to 0
+/// anyway. Keeping it makes the set the plain "every eighth column" the
+/// resize rule extends, with no column that has to be special-cased.
+fn default_stop(col: u16) -> bool {
+    col % TAB_INTERVAL == 0
+}
+
+/// Where the tab stops are: one flag per column, `cols` wide.
+///
+/// The whole set lives in the tracker because vt100 holds no tab state at
+/// all — its `HT` is a fixed eight — so there is nothing here to keep in
+/// step with the backend, only a column to hand back to it.
+#[derive(Debug)]
+struct TabStops {
+    stops: Vec<bool>,
+}
+
+impl TabStops {
+    fn new(cols: u16) -> Self {
+        Self {
+            stops: (0..cols).map(default_stop).collect(),
+        }
+    }
+
+    /// The rightmost column, which every motion clamps to.
+    ///
+    /// Zero for an empty set, which makes both motions no-ops rather than
+    /// panics; the builder floors a terminal at two columns, so an empty set
+    /// only ever arises in a unit test.
+    fn last_column(&self) -> u16 {
+        u16::try_from(self.stops.len())
+            .unwrap_or(u16::MAX)
+            .saturating_sub(1)
+    }
+
+    /// Grow or shrink to `cols`.
+    ///
+    /// **Decision:** columns the grid did not have before get the power-on
+    /// every-eighth pattern, and stops inside the old width are left exactly
+    /// as they were. A resize is not a reset — an application that set its
+    /// own stops and then had its window widened would otherwise find them
+    /// gone — and there is no better answer for territory that never
+    /// existed than the layout the terminal would have powered on with.
+    /// Narrowing drops the columns that no longer exist; widening again does
+    /// not bring their stops back, since the set no longer holds them. This
+    /// is what alacritty does, and it is the simple end of the trade.
+    fn set_cols(&mut self, cols: u16) {
+        let old = u16::try_from(self.stops.len()).unwrap_or(u16::MAX);
+        self.stops.resize(usize::from(cols), false);
+        for col in old..cols {
+            self.stops[usize::from(col)] = default_stop(col);
+        }
+    }
+
+    /// Back to the power-on layout, for `RIS` and `DECSTR`.
+    fn reset(&mut self) {
+        let cols = u16::try_from(self.stops.len()).unwrap_or(u16::MAX);
+        for col in 0..cols {
+            self.stops[usize::from(col)] = default_stop(col);
+        }
+    }
+
+    /// `HTS`: a stop at `col`. Out-of-range columns are dropped rather than
+    /// clamped — clamping would set a stop the application did not ask for.
+    fn set(&mut self, col: u16) {
+        if let Some(stop) = self.stops.get_mut(usize::from(col)) {
+            *stop = true;
+        }
+    }
+
+    /// `TBC 0`: clear the stop at `col`.
+    fn clear(&mut self, col: u16) {
+        if let Some(stop) = self.stops.get_mut(usize::from(col)) {
+            *stop = false;
+        }
+    }
+
+    /// `TBC 3`: clear every stop. Forward motion then runs to the last
+    /// column and back-tab to column 0, which is what a terminal with no
+    /// stops does.
+    fn clear_all(&mut self) {
+        self.stops.fill(false);
+    }
+
+    /// The most steps a motion can usefully take: one per column.
+    fn steps_bound(&self) -> u16 {
+        u16::try_from(self.stops.len()).unwrap_or(u16::MAX)
+    }
+
+    /// The column `count` stops right of `col`, or the last column if the
+    /// stops run out first.
+    fn forward(&self, col: u16, count: u16) -> u16 {
+        let last = self.last_column();
+        // vt100 reports a column past the end while a wrap is pending, and
+        // clamps it in `col_tab`; clamping here keeps the rewrite agreeing
+        // with the move it replaces.
+        let mut at = col.min(last);
+        // Every step moves at least one column, so more steps than there are
+        // columns cannot move further — and `CSI 65535 I` is a parameter an
+        // application is free to send.
+        for _ in 0..count.min(self.steps_bound()) {
+            match ((at.saturating_add(1))..=last).find(|&c| self.stops[usize::from(c)]) {
+                Some(next) => at = next,
+                None => return last,
+            }
+        }
+        at
+    }
+
+    /// The column `count` stops left of `col`, or column 0 if the stops run
+    /// out first.
+    ///
+    /// Each step goes to the nearest stop *strictly* left of where it
+    /// started, which is what xterm and alacritty both do: a cursor sitting
+    /// one past a stop it just tabbed to and then wrote over moves to that
+    /// stop, not to the one before it.
+    fn back(&self, col: u16, count: u16) -> u16 {
+        let mut at = col.min(self.last_column());
+        for _ in 0..count.min(self.steps_bound()) {
+            match (0..at).rev().find(|&c| self.stops[usize::from(c)]) {
+                Some(prev) => at = prev,
+                None => return 0,
+            }
+        }
+        at
+    }
+}
+
+/// A tab-stop operation the tracker recognized but cannot carry out alone:
+/// every one of them is relative to the cursor column, which lives in the
+/// grid. The emulator resolves it against the position it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TabOp {
+    /// `HTS` (`ESC H`): set a stop at the cursor column.
+    Set,
+    /// `TBC` / `TBC 0` (`CSI g`): clear the stop at the cursor column.
+    ClearAtCursor,
+    /// `TBC 3` (`CSI 3 g`): clear every stop.
+    ClearAll,
+    /// `HT` (`\t`) or `CHT` (`CSI n I`): forward `n` stops.
+    Forward(u16),
+    /// `CBT` (`CSI n Z`): back `n` stops. Also what an application echoing
+    /// `Shift-Tab` emits on its output side.
+    Back(u16),
 }
 
 /// Which glyph set a G0–G3 designation currently names.
@@ -234,6 +402,9 @@ pub(crate) enum SeqEvent {
     /// rather than stored in it because the placement — where the cursor
     /// stood — is a fact about the grid, which only the emulator holds.
     Graphics(Box<GraphicsPayload>),
+    /// A tab-stop operation completed, and needs the cursor column to
+    /// finish — carried out for the same reason a graphics placement is.
+    Tabs(TabOp),
 }
 
 /// A terminal query the application issued. The tracker classifies;
@@ -487,10 +658,14 @@ pub(crate) struct SeqTracker {
     /// the whole payload or the start of one.
     dcs_body: Vec<u8>,
     dcs_body_full: bool,
+    /// Where the tab stops are. Sized to the grid, so `set_cols` follows
+    /// every resize.
+    tabs: TabStops,
 }
 
 impl SeqTracker {
-    pub(crate) fn new(capture: usize) -> Self {
+    /// `cols` sizes the tab-stop set; everything else here is width-agnostic.
+    pub(crate) fn new(capture: usize, cols: u16) -> Self {
         Self {
             state: State::Ground,
             utf8_remaining: 0,
@@ -540,6 +715,35 @@ impl SeqTracker {
             dcs_head_len: 0,
             dcs_body: Vec::new(),
             dcs_body_full: true,
+            tabs: TabStops::new(cols),
+        }
+    }
+
+    /// Resize the tab-stop set with the grid. See [`TabStops::set_cols`] for
+    /// what happens to the columns on either side of the change.
+    pub(crate) fn set_cols(&mut self, cols: u16) {
+        self.tabs.set_cols(cols);
+    }
+
+    /// Carry out a [`TabOp`] at cursor column `col`, returning the column the
+    /// cursor must move to when the operation is a motion and `None` when it
+    /// only edits the set.
+    pub(crate) fn tab_op(&mut self, op: TabOp, col: u16) -> Option<u16> {
+        match op {
+            TabOp::Set => {
+                self.tabs.set(col);
+                None
+            }
+            TabOp::ClearAtCursor => {
+                self.tabs.clear(col);
+                None
+            }
+            TabOp::ClearAll => {
+                self.tabs.clear_all();
+                None
+            }
+            TabOp::Forward(count) => Some(self.tabs.forward(col, count)),
+            TabOp::Back(count) => Some(self.tabs.back(col, count)),
         }
     }
 
@@ -715,6 +919,7 @@ impl SeqTracker {
         self.cursor_style = None;
         self.focus_events = false;
         self.mouse_tracking = 0;
+        self.tabs.reset();
     }
 
     /// Apply the final byte of an `ESC ( ) * + Ps` designation.
@@ -934,6 +1139,40 @@ impl SeqTracker {
                 b'l' if self.sync_update => {
                     self.sync_update = false;
                     return SeqEvent::SyncEnd;
+                }
+                _ => {}
+            }
+        }
+
+        // Tab stops: `TBC` (`CSI g`), `CHT` (`CSI n I`) and `CBT`
+        // (`CSI n Z`). All three are relative to the cursor column, so they
+        // leave as requests rather than as changes.
+        if self.csi_prefix == 0 {
+            // An omitted parameter is 0, and a 0 count means 1 — vt100's own
+            // `canonicalize_params_1`, so a rewritten move and the move it
+            // replaces read their parameter the same way.
+            let ps = if params_empty {
+                0
+            } else {
+                self.csi_first_param
+            };
+            let count = u16::try_from(ps).unwrap_or(u16::MAX).max(1);
+            match b {
+                // Only `0` (this column) and `3` (all) are modelled. The
+                // rest of the family clears *line* tab stops, which this
+                // crate has no notion of; ignoring them beats inventing one.
+                b'g' if self.csi_param_count <= 1 => {
+                    return match ps {
+                        0 => SeqEvent::Tabs(TabOp::ClearAtCursor),
+                        3 => SeqEvent::Tabs(TabOp::ClearAll),
+                        _ => SeqEvent::None,
+                    };
+                }
+                b'I' if self.csi_param_count <= 1 => {
+                    return SeqEvent::Tabs(TabOp::Forward(count));
+                }
+                b'Z' if self.csi_param_count <= 1 => {
+                    return SeqEvent::Tabs(TabOp::Back(count));
                 }
                 _ => {}
             }
@@ -1242,6 +1481,7 @@ impl SeqTracker {
         const CAN: u8 = 0x18;
         const SUB: u8 = 0x1a;
         const BEL: u8 = 0x07;
+        const HT: u8 = 0x09;
         const SO: u8 = 0x0e;
         const SI: u8 = 0x0f;
 
@@ -1266,6 +1506,12 @@ impl SeqTracker {
                     match b {
                         SO => self.shifted_out = true,
                         SI => self.shifted_out = false,
+                        // Plain `HT` has to come through here as well as
+                        // `CHT`, or vt100's fixed eight would keep answering
+                        // it and the two would disagree the moment an
+                        // application set a stop of its own — a table drawn
+                        // half from each.
+                        HT => event = SeqEvent::Tabs(TabOp::Forward(1)),
                         _ => {}
                     }
                     // Anything that is not a C0 control or DEL. Named once
@@ -1360,6 +1606,7 @@ impl SeqTracker {
                     self.reset_charsets();
                     self.saved_charsets = None;
                     self.mouse_tracking = 0;
+                    self.tabs.reset();
                     self.close_link();
                     State::Ground
                 }
@@ -1392,6 +1639,14 @@ impl SeqTracker {
                         // we — the least surprising answer, and no new state.
                         None => self.reset_charsets(),
                     }
+                    State::Ground
+                }
+                // HTS (`ESC H`): a tab stop at the cursor column, which the
+                // emulator supplies. `hts` is in the terminfo entry every
+                // child is handed, so an application laying out a table is
+                // entitled to expect it.
+                b'H' => {
+                    event = SeqEvent::Tabs(TabOp::Set);
                     State::Ground
                 }
                 // SS2 / SS3: invoke G2 / G3 for the next character only.
@@ -1507,8 +1762,13 @@ mod tests {
     use super::*;
     use crate::graphics::GraphicsFormat;
 
+    /// The width these tests construct a tracker at. Only the tab-stop set
+    /// is sized, and only the tab tests care what the size is; the rest is
+    /// width-agnostic and takes the default terminal's 80.
+    const TEST_COLS: u16 = 80;
+
     fn fed(bytes: &[u8]) -> SeqTracker {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         t.feed(bytes);
         t
     }
@@ -1540,7 +1800,7 @@ mod tests {
     /// which is the whole of what the knob is for.
     #[test]
     fn the_capture_bound_holds_across_a_chunked_transmission() {
-        let mut tracker = SeqTracker::new(40);
+        let mut tracker = SeqTracker::new(40, TEST_COLS);
         // Ten chunks of eight data bytes: every escape fits the bound
         // comfortably, and the ten together do not.
         let mut wire: Vec<u8> = b"\x1b_Ga=T,f=32,s=4,v=4,m=1;AAAAAAAA\x1b\\".to_vec();
@@ -1567,7 +1827,7 @@ mod tests {
 
     /// Every payload a feed produced, in order.
     fn payloads(bytes: &[u8]) -> Vec<GraphicsPayload> {
-        let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         let mut out = Vec::new();
         for &byte in bytes {
             if let SeqEvent::Graphics(payload) = tracker.step(byte) {
@@ -1646,7 +1906,7 @@ mod tests {
     /// plausible-looking wrong picture.
     #[test]
     fn a_payload_past_the_capture_bound_is_counted_and_not_kept() {
-        let mut tracker = SeqTracker::new(8);
+        let mut tracker = SeqTracker::new(8, TEST_COLS);
         let mut seen = None;
         for &byte in b"\x1b_Ga=T,f=32,s=4,v=4;AAAABBBBCCCCDDDD\x1b\\" {
             if let SeqEvent::Graphics(payload) = tracker.step(byte) {
@@ -1678,7 +1938,7 @@ mod tests {
     /// it and the timeout said nothing.
     #[test]
     fn the_kitty_graphics_query_is_classified() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         let mut events = Vec::new();
         for &b in b"\x1b_Gi=1,a=q;\x1b\\" {
             events.push(t.step(b));
@@ -1701,7 +1961,7 @@ mod tests {
     /// next timeout of every application that draws.
     #[test]
     fn a_kitty_transmission_is_not_treated_as_a_query() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         let mut events = Vec::new();
         for &b in b"\x1b_Gf=24,a=T;QUJD\x1b\\" {
             events.push(t.step(b));
@@ -2003,7 +2263,7 @@ mod tests {
     #[test]
     fn hostile_input_cannot_panic_or_grow_a_buffer_past_its_bound() {
         let capture = crate::graphics::DEFAULT_CAPTURE;
-        let mut tracker = SeqTracker::new(capture);
+        let mut tracker = SeqTracker::new(capture, TEST_COLS);
         // (links, label, osc, dcs_body) high-water marks.
         let mut peak = (0usize, 0usize, 0usize, 0usize);
 
@@ -2081,7 +2341,7 @@ mod tests {
     /// with them, driven long enough to exercise eviction many times over.
     #[test]
     fn a_long_well_formed_stream_stays_bounded_and_consistent() {
-        let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         for n in 0..5_000u32 {
             let chunk = format!(
                 "\x1b]8;id={n};http://example.invalid/{n}\x1b\\label{n}\x1b]8;;\x1b\\\
@@ -2102,7 +2362,7 @@ mod tests {
     /// The glyphs a fed tracker would hand the grid for `text`, byte by
     /// byte: the translation where one applies, the byte itself otherwise.
     fn drawn(bytes: &[u8]) -> String {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         let mut out = String::new();
         for &b in bytes {
             match t.charset_glyph(b) {
@@ -2202,7 +2462,7 @@ mod tests {
     #[test]
     fn a_multibyte_character_consumes_a_single_shift() {
         for ch in ["汉", "🦀", "é"] {
-            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
             t.feed(b"\x1b*0\x1bN");
             assert_eq!(
                 t.charset_glyph(b'l'),
@@ -2235,7 +2495,7 @@ mod tests {
     /// OSC title, a CSI parameter or a DCS payload must pass untouched.
     #[test]
     fn bytes_inside_sequences_are_never_translated() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         for &b in b"\x1b(0" {
             t.step(b);
         }
@@ -2281,13 +2541,13 @@ mod tests {
 
     #[test]
     fn a_designation_split_across_feeds_still_applies() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         t.feed(b"\x1b(");
         assert!(t.mid_sequence());
         t.feed(b"0");
         assert_eq!(t.charset_glyph(b'l'), Some("\u{250c}"));
 
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         t.feed(b"\x1b*");
         assert!(t.mid_sequence());
         t.feed(b"0\x1bN");
@@ -2302,7 +2562,7 @@ mod tests {
 
     #[test]
     fn split_csi_is_mid_sequence_until_final_byte() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         t.feed(b"\x1b[3");
         assert!(t.mid_sequence());
         t.feed(b"1");
@@ -2358,7 +2618,7 @@ mod tests {
 
     #[test]
     fn sync_update_events_fire_on_2026_set_and_reset() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         let events: Vec<SeqEvent> = b"\x1b[?2026h".iter().map(|&b| t.step(b)).collect();
         assert_eq!(*events.last().unwrap(), SeqEvent::SyncBegin);
         assert!(t.in_sync_update());
@@ -2369,17 +2629,17 @@ mod tests {
 
     #[test]
     fn sync_2026_is_recognized_anywhere_in_a_multi_mode_list() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         t.feed(b"\x1b[?2026;25h");
         assert!(t.in_sync_update());
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         t.feed(b"\x1b[?25;2026h");
         assert!(t.in_sync_update());
     }
 
     #[test]
     fn lookalike_sequences_do_not_toggle_sync() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         t.feed(b"\x1b[2026h"); // not private (no '?')
         assert!(!t.in_sync_update());
         t.feed(b"\x1b[?2026m"); // wrong final byte
@@ -2466,7 +2726,7 @@ mod tests {
 
     #[test]
     fn a_clipboard_read_is_a_query_not_a_write() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         let events: Vec<SeqEvent> = b"\x1b]52;c;?\x07".iter().map(|&b| t.step(b)).collect();
         assert!(matches!(
             events.last(),
@@ -2480,19 +2740,19 @@ mod tests {
         // Applications reset terminal modes defensively at startup and on
         // crash, and such a reset string contains `?2026l`. It must not end
         // a frame that never began.
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         let events: Vec<SeqEvent> = b"\x1b[?2026l".iter().map(|&b| t.step(b)).collect();
         assert!(!events.contains(&SeqEvent::SyncEnd));
         assert!(!t.in_sync_update());
 
         // Taken verbatim from a real crash handler.
         let reset = b"\x1b[?2026l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?2004l\x1b[?1049l";
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         let events: Vec<SeqEvent> = reset.iter().map(|&b| t.step(b)).collect();
         assert!(!events.contains(&SeqEvent::SyncEnd));
 
         // And the End of a real frame still ends it, once only.
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         let events: Vec<SeqEvent> = b"\x1b[?2026h\x1b[?2026l\x1b[?2026l"
             .iter()
             .map(|&b| t.step(b))
@@ -2505,7 +2765,7 @@ mod tests {
 
     #[test]
     fn sync_survives_an_aborted_csi_inside_the_update() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         t.feed(b"\x1b[?2026h\x1b[31\x18"); // CAN aborts the SGR, not the frame
         assert!(t.in_sync_update());
         t.feed(b"\x1b[?2026l");
@@ -2513,7 +2773,7 @@ mod tests {
     }
 
     fn queries_of(bytes: &[u8]) -> Vec<Query> {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         bytes
             .iter()
             .filter_map(|&b| match t.step(b) {
@@ -2666,7 +2926,7 @@ mod tests {
 
     #[test]
     fn osc_0_and_2_set_the_title_via_bel_or_st() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         assert_eq!(&*t.title(), "");
         t.feed(b"\x1b]2;hello world\x07");
         assert_eq!(&*t.title(), "hello world");
@@ -2676,7 +2936,7 @@ mod tests {
 
     #[test]
     fn titles_longer_than_the_diagnostic_capture_are_kept_whole() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         let title = "t".repeat(80); // seq_buf truncates at 24; titles must not
         t.feed(format!("\x1b]2;{title}\x07").as_bytes());
         assert_eq!(&*t.title(), title.as_str());
@@ -2684,7 +2944,7 @@ mod tests {
 
     #[test]
     fn title_survives_chunked_delivery() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         t.feed(b"\x1b]2;split");
         t.feed(b" title\x07");
         assert_eq!(&*t.title(), "split title");
@@ -2692,14 +2952,14 @@ mod tests {
 
     #[test]
     fn title_keeps_embedded_semicolons() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         t.feed(b"\x1b]0;a;b;c\x07");
         assert_eq!(&*t.title(), "a;b;c");
     }
 
     #[test]
     fn icon_only_and_aborted_titles_do_not_change_the_title() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         t.feed(b"\x1b]2;kept\x07");
         t.feed(b"\x1b]1;icon only\x07"); // OSC 1: icon name, not the title
         assert_eq!(&*t.title(), "kept");
@@ -2714,12 +2974,135 @@ mod tests {
     #[test]
     fn split_utf8_is_mid_sequence() {
         let bytes = "汉".as_bytes(); // 3 bytes
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         t.feed(&bytes[..1]);
         assert!(t.mid_sequence());
         t.feed(&bytes[1..2]);
         assert!(t.mid_sequence());
         t.feed(&bytes[2..]);
         assert!(!t.mid_sequence());
+    }
+
+    /// Every [`TabOp`] a stream can produce, so the recognition is pinned
+    /// apart from the rewrite that acts on it.
+    fn tab_ops(bytes: &[u8]) -> Vec<TabOp> {
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut out = Vec::new();
+        for &byte in bytes {
+            if let SeqEvent::Tabs(op) = t.step(byte) {
+                out.push(op);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_five_tab_sequences_are_recognized() {
+        assert_eq!(tab_ops(b"\x1bH"), vec![TabOp::Set]);
+        assert_eq!(tab_ops(b"\x1b[g"), vec![TabOp::ClearAtCursor]);
+        assert_eq!(tab_ops(b"\x1b[0g"), vec![TabOp::ClearAtCursor]);
+        assert_eq!(tab_ops(b"\x1b[3g"), vec![TabOp::ClearAll]);
+        assert_eq!(tab_ops(b"\t"), vec![TabOp::Forward(1)]);
+        // An omitted or zero count is one, as it is for every other CSI
+        // motion; anything else is taken as written.
+        assert_eq!(tab_ops(b"\x1b[I"), vec![TabOp::Forward(1)]);
+        assert_eq!(tab_ops(b"\x1b[0I"), vec![TabOp::Forward(1)]);
+        assert_eq!(tab_ops(b"\x1b[3I"), vec![TabOp::Forward(3)]);
+        assert_eq!(tab_ops(b"\x1b[Z"), vec![TabOp::Back(1)]);
+        assert_eq!(tab_ops(b"\x1b[2Z"), vec![TabOp::Back(2)]);
+    }
+
+    #[test]
+    fn sequences_that_only_look_like_tab_operations_are_left_alone() {
+        // `TBC 1`, `2`, `4` and `5` clear *line* tab stops, which this crate
+        // has no notion of. Recognized as not ours rather than guessed at.
+        assert!(tab_ops(b"\x1b[1g").is_empty());
+        assert!(tab_ops(b"\x1b[2g").is_empty());
+        // A private prefix is a different sequence entirely.
+        assert!(tab_ops(b"\x1b[?3g").is_empty());
+        assert!(tab_ops(b"\x1b[?1I").is_empty());
+        // `CSI H` is CUP, and only the bare `ESC H` is HTS.
+        assert!(tab_ops(b"\x1b[H").is_empty());
+        assert!(tab_ops(b"\x1b[1;1H").is_empty());
+        // A tab inside a string sequence is payload, not a motion — the
+        // same rule that keeps a BEL there from being a bell.
+        assert!(tab_ops(b"\x1b]0;a\tb\x07").is_empty());
+        assert!(tab_ops(b"\x1bPq\t\x1b\\").is_empty());
+    }
+
+    #[test]
+    fn a_stop_set_at_the_cursor_is_where_the_next_tab_lands() {
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, 24);
+        // The default eight, until the application says otherwise.
+        assert_eq!(t.tab_op(TabOp::Forward(1), 1), Some(8));
+        assert_eq!(t.tab_op(TabOp::Set, 3), None);
+        assert_eq!(t.tab_op(TabOp::Forward(1), 1), Some(3));
+        // Setting one adds to the set rather than replacing it.
+        assert_eq!(t.tab_op(TabOp::Forward(1), 3), Some(8));
+        // And clearing it takes only that one away.
+        assert_eq!(t.tab_op(TabOp::ClearAtCursor, 3), None);
+        assert_eq!(t.tab_op(TabOp::Forward(1), 1), Some(8));
+    }
+
+    #[test]
+    fn motions_move_by_whole_stops_and_saturate_at_the_edges() {
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, 24);
+        assert_eq!(t.tab_op(TabOp::Forward(2), 0), Some(16));
+        // Past the last stop there is nowhere left to go but the last
+        // column, and asking for more stops than exist does not overshoot.
+        assert_eq!(t.tab_op(TabOp::Forward(9), 0), Some(23));
+        assert_eq!(t.tab_op(TabOp::Forward(u16::MAX), 0), Some(23));
+        // Back-tab goes to the nearest stop strictly left of the cursor —
+        // so a cursor one past the stop it just wrote over returns to it.
+        assert_eq!(t.tab_op(TabOp::Back(1), 17), Some(16));
+        assert_eq!(t.tab_op(TabOp::Back(1), 16), Some(8));
+        assert_eq!(t.tab_op(TabOp::Back(2), 17), Some(8));
+        assert_eq!(t.tab_op(TabOp::Back(u16::MAX), 17), Some(0));
+    }
+
+    #[test]
+    fn clearing_every_stop_leaves_the_two_edges() {
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, 24);
+        assert_eq!(t.tab_op(TabOp::ClearAll, 0), None);
+        assert_eq!(t.tab_op(TabOp::Forward(1), 0), Some(23));
+        assert_eq!(t.tab_op(TabOp::Back(1), 20), Some(0));
+        // A stop set afterwards is the only one there is.
+        assert_eq!(t.tab_op(TabOp::Set, 5), None);
+        assert_eq!(t.tab_op(TabOp::Forward(1), 0), Some(5));
+    }
+
+    #[test]
+    fn a_reset_restores_the_default_every_eighth_set() {
+        for reset in [&b"\x1bc"[..], b"\x1b[!p"] {
+            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, 24);
+            assert_eq!(t.tab_op(TabOp::ClearAll, 0), None);
+            assert_eq!(t.tab_op(TabOp::Set, 3), None);
+            assert_eq!(t.tab_op(TabOp::Forward(1), 0), Some(3));
+            t.feed(reset);
+            assert_eq!(
+                t.tab_op(TabOp::Forward(1), 0),
+                Some(8),
+                "the custom stop must not survive {}",
+                printable(reset)
+            );
+            assert_eq!(t.tab_op(TabOp::Forward(1), 8), Some(16));
+        }
+    }
+
+    #[test]
+    fn a_resize_extends_the_set_without_disturbing_the_stops_it_had() {
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, 24);
+        assert_eq!(t.tab_op(TabOp::Set, 3), None);
+        assert_eq!(t.tab_op(TabOp::ClearAtCursor, 16), None);
+        t.set_cols(40);
+        // The documented rule: new columns get the every-eighth pattern,
+        // and both edits inside the old width survive.
+        assert_eq!(t.tab_op(TabOp::Forward(1), 0), Some(3));
+        assert_eq!(t.tab_op(TabOp::Forward(1), 8), Some(24), "16 stays cleared");
+        assert_eq!(t.tab_op(TabOp::Forward(1), 24), Some(32), "new territory");
+        // Narrowing drops the columns that no longer exist, and motion
+        // clamps to the width that does.
+        t.set_cols(10);
+        assert_eq!(t.tab_op(TabOp::Forward(1), 8), Some(9));
     }
 }

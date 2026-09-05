@@ -21,6 +21,25 @@ listed under a **Changed** or **Removed** heading.
   cell and style assertions. Every Rust block in it is compiled against the
   crate in CI, and the README shows the one-line install for Claude Code.
 
+### Fixed
+
+- **Custom tab stops are honoured: `HTS`, `TBC`, `CHT` and `CBT` do what
+  they say.** Stops were fixed at every eighth column — the backend's
+  hardcoded value — and all four escapes reached a dispatch table with no
+  entry for them and vanished, though `hts`, `tbc` and `cbt` are all in the
+  terminfo entry termlens hands every child. An application that laid a
+  table out by setting its own stops and tabbing between them drew every
+  column in the wrong place, and did it *silently*: the characters were all
+  present, so `contains` still passed and only a column assertion or a
+  whole-screen snapshot could catch it. The stop set now lives in the
+  sequence tracker beside the character sets, and the emulator rewrites each
+  motion as a `CHA` the backend does dispatch. Plain `\t` is rewritten too,
+  or the backend's eight and a custom stop would disagree the moment one was
+  set. `RIS` and `DECSTR` restore the every-eighth default; a resize extends
+  the set into its new columns with that same pattern and leaves the stops
+  it already had alone. `CBT` is also what `Shift-Tab` sends, so an
+  application echoing one now moves. (#262)
+
 ## [0.9.0] - 2026-09-05
 
 ### Added
