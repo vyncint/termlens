@@ -96,9 +96,9 @@ your test ── send(Key) · click · paste · resize ──▶ PTY     └─�
    col)`, `row_text(row)`, `cursor()` → `(row, col, visible)`. Everything
    that speaks of terminal geometry or a pointer is **column-first**:
    `size()` → `(cols, rows)`, `resize(cols, rows)`, `click(col, row)`,
-   `scroll(col, row, …)`, `drag(button, (col, row), (col, row))`. Never
-   pass a `find` result straight into `drag` — the tuple types match and
-   the axes do not.
+   `scroll(col, row, …)`, `drag(button, from_col, from_row, to_col,
+   to_row)`. The four drag arguments make a transposed `find` result
+   unwritable without explicitly choosing the coordinate order.
 
 7. **Always finish the process.** Send the quit key, `wait_exit()?` and
    assert on the `ExitStatus` (`success()`, `code()`, `signal()`), then
@@ -366,8 +366,8 @@ Read the first line for the cause:
 **Drive**: `send(Key)`, `send_str("text")` (no Enter — send `Key::Enter`
 yourself; `"\n"` would send LF, not CR), `paste("text")` (bracketed if the
 app enabled it), `send_after(delay, Key)`, `click(col, row)`,
-`click_with(MouseButton::Right, col, row)`, `drag(MouseButton::Left, (c, r),
-(c, r))`, `scroll(col, row, Scroll::Down)`, `resize(cols, rows)`,
+`click_with(MouseButton::Right, col, row)`, `drag(MouseButton::Left, from_c,
+from_r, to_c, to_r)`, `scroll(col, row, Scroll::Down)`, `resize(cols, rows)`,
 `focus_in()` / `focus_out()`, `signal(Signal::Term)` (Unix), `pid()`.
 
 **Keys**: `Key::Char('j')`, `Enter`, `Esc`, `Tab`, `BackTab`, `Backspace`,
@@ -411,7 +411,7 @@ the embedded screen when there is one.
 | `t.wait_until(a)?; assert!(t.screen().b);` | `t.wait_until(\|s\| a(s) && b(s))?;` |
 | `.size(0, 0)` / `.size(1, 1)` | leave the 80x24 default, or `.size(cols, rows)` with both in 2..=1000 |
 | `Terminal::builder().spawn("myapp")` | `termlens::bin!("myapp")?` — a name on `PATH` is not your binary, and under `env_clear` there is no `PATH` |
-| `t.click(row, col)` / `t.drag(b, s.find("x").unwrap(), …)` | `t.click(col, row)`; destructure the `find` result and swap |
+| `t.click(row, col)` / passing `s.find("x")` coordinates to `t.drag(b, …)` unchanged | `t.click(col, row)`; destructure the `find` result and pass each coordinate in column-first order |
 | `t.send_str("quit\n")` | `t.send_str("quit")?; t.send(Key::Enter)?;` |
 | `t.wait_frame(…)` against a ratatui app | `t.snapshot_after(…)` unless the app emits synchronized updates |
 | `t.click(3, 4)?` as the first thing after spawn | `t.wait_until(\|s\| s.mouse_mode() != MouseMode::None)?;` first |
