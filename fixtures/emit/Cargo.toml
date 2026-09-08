@@ -9,8 +9,11 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-# No dependencies, on purpose: see the crate-level doc.
+# Nothing but libc, and only on Unix: see the crate-level doc.
 [dependencies]
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [lints]
 workspace = true
