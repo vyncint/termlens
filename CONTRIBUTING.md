@@ -32,6 +32,7 @@ cargo clippy --workspace --all-targets -- -D warnings    # default features: wha
 cargo test --workspace --no-default-features
 cargo test --workspace --no-default-features --features decode
 cargo test --workspace --no-default-features --features regex
+cargo test --workspace --no-default-features --features serde
 cargo test --workspace                                   # default features
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features

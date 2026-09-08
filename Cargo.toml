@@ -41,9 +41,13 @@ miniz_oxide = "0.9"
 # The `regex` feature: a pattern over a row of the screen, for the
 # expect-style wait and for masking volatile content by shape.
 regex = "1"
+# The `serde` feature: a Screen as JSON, and back. `rc` because the grid and
+# the out-of-band state live behind `Arc`s so a snapshot stays cheap.
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
 
 # Dev / fixture dependencies.
-insta = "1.48"
+insta = { version = "1.48", features = ["json"] }
 anyhow = "1"
 crossterm = "0.29"
 

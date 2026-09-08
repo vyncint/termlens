@@ -1762,6 +1762,7 @@ impl TerminalBuilder {
             exit_status: None,
             command_desc,
             frame_cursor: 0,
+            last_frame: None,
             cell_size: self.cell_size,
         })
     }
@@ -2246,6 +2247,9 @@ pub struct Terminal {
     /// satisfy two waits. Advanced by a resize too: a frame drawn at the
     /// old size is not the repaint that answers the new one.
     frame_cursor: u64,
+    /// The frame `wait_frame` last returned, so a timeout can show what
+    /// changed since rather than the live grid alone (#246).
+    last_frame: Option<Screen>,
     /// Declared pixels per cell, kept so a resize can recompute the PTY's
     /// pixel geometry rather than silently dropping it.
     cell_size: Option<(u16, u16)>,
@@ -3142,6 +3146,7 @@ impl Terminal {
         match outcome {
             Ok(Ok((index, frame))) => {
                 self.frame_cursor = index;
+                self.last_frame = Some(frame.clone());
                 Ok(frame)
             }
             Ok(Err(e)) => Err(e),
@@ -3151,7 +3156,9 @@ impl Terminal {
                 // the only evidence there is. The last completed frame
                 // can be arbitrarily old — it is named in `waiting_for`
                 // instead, where it reads as a count rather than a
-                // picture that claims to be current.
+                // picture that claims to be current — and what changed
+                // between that frame and the live grid is shown as a diff,
+                // which is the question a stuck wait actually asks.
                 let (frames, screen, note) = {
                     let mut guard = self.shared.lock();
                     let screen = guard.snapshot();
@@ -3188,6 +3195,13 @@ impl Terminal {
                         "{WHAT} ({} since the last one returned, {frames} in total){note}",
                         frames_phrase(frames - cursor)
                     )
+                };
+                let waiting_for = match &self.last_frame {
+                    Some(last) if !last.diff(&screen).is_empty() => format!(
+                        "{waiting_for}\n--- last returned frame → live screen ---\n{}",
+                        last.diff(&screen)
+                    ),
+                    _ => waiting_for,
                 };
                 Err(Error::Timeout {
                     waiting_for,

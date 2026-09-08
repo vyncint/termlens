@@ -1,0 +1,11 @@
+---
+source: crates/termlens/tests/export.rs
+expression: diff.to_string()
+---
+size: 30x4   cursor: 3,8
+  0 │Counter: 1                    │Counter: 2
+    │         ^                    │         ^
+  1 │> Quit                        │  Quit
+    │^^^^^^                        │^^^^^^
+… 2 rows unchanged
+styles: 1: 0-5 reverse → (none)

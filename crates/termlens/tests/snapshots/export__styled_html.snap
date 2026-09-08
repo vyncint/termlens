@@ -1,0 +1,9 @@
+---
+source: crates/termlens/tests/export.rs
+expression: html
+---
+<pre style="background:#1e1e1e;color:#d4d4d4;font-family:monospace;line-height:1.2;padding:8px"><span style="color:#11a8cd;background:#1e1e1e;font-weight:bold">myapp</span>  <span style="color:#1e1e1e;background:#d4d4d4">&gt; Alpha</span>  汉字          
+<span style="color:#d4d4d4;background:#1e1e1e;opacity:0.6">note</span> pw: <span style="color:#d4d4d4;background:#1e1e1e">      </span> <span style="color:#d4d4d4;background:#1e1e2e">  </span>            
+DONE                          
+                              
+</pre>

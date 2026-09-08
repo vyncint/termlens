@@ -35,7 +35,7 @@ use termlens::Terminal;
 /// 0, a missing program prints it to stderr and exits 1 (#229).
 const USAGE: &str = "\
 usage: inspect [--size COLSxROWS] [--timeout SECONDS] [--idle MILLIS]
-               [--inherit-env] [--env KEY=VALUE]... <program> [args…]
+               [--inherit-env] [--ansi] [--env KEY=VALUE]... <program> [args…]
 
 Runs <program> in an 80x24 pseudo-terminal (or --size), waits for it to
 exit or for the deadline (--timeout, default 5 seconds), and prints the
@@ -69,6 +69,17 @@ fn take<T>(
     parse(&raw).ok_or_else(|| format!("bad {flag} {raw:?}, expected e.g. {example}"))
 }
 
+/// The text rendering, or with `--ansi` the header over the screen in colour.
+fn render(screen: &termlens::Screen, ansi: bool) -> String {
+    if ansi {
+        let header = screen.to_string();
+        let header = header.lines().next().unwrap_or_default();
+        format!("{header}\n{}", screen.to_ansi())
+    } else {
+        screen.to_string()
+    }
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1).peekable();
 
@@ -76,6 +87,7 @@ fn main() -> ExitCode {
     let mut timeout = Duration::from_secs(5);
     let mut idle = Duration::from_millis(300);
     let mut inherit_env = false;
+    let mut ansi = false;
     let mut env = Vec::new();
 
     // Options come before the program; everything after it is the
@@ -103,6 +115,13 @@ fn main() -> ExitCode {
                 .map(|millis| idle = Duration::from_millis(millis)),
             "--inherit-env" => {
                 inherit_env = true;
+                Ok(())
+            }
+            // The screen in colour, for a person: every cell painted through
+            // the SGR its style derives to, so what the program showed is
+            // shown rather than described by a `styles:` block.
+            "--ansi" => {
+                ansi = true;
                 Ok(())
             }
             "--env" => take(&mut args, "--env", "KEY=VALUE", "NO_COLOR=1", |s| {
@@ -148,7 +167,7 @@ fn main() -> ExitCode {
     let mut out = String::new();
     match t.wait_exit() {
         Ok(status) => {
-            out.push_str(&t.screen().to_string());
+            out.push_str(&render(&t.screen(), ansi));
             out.push_str(&format!("\n--- exited: {status} ---\n"));
         }
         Err(termlens::Error::Timeout { .. }) => {
@@ -156,13 +175,13 @@ fn main() -> ExitCode {
             // instead. The settle is bounded by the deadline too, unless the
             // silence window asked for is itself longer than that.
             let _ = t.wait_idle_for(idle, timeout.max(idle));
-            out.push_str(&t.screen().to_string());
+            out.push_str(&render(&t.screen(), ansi));
             out.push_str("\n--- still running at the deadline (killed on exit) ---\n");
         }
         Err(e) => {
             // Not "still running": the OS wait itself failed, and saying so
             // is the difference between a slow program and a broken harness.
-            out.push_str(&t.screen().to_string());
+            out.push_str(&render(&t.screen(), ansi));
             out.push_str(&format!("\n--- waiting for the program failed: {e} ---\n"));
         }
     }
