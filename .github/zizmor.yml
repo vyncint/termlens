@@ -14,3 +14,14 @@ rules:
       - release.yml
       - install.yml
       - windows.yml
+      - publish-cli.yml
+
+  # Correct advice that this one workflow cannot take, which is the whole
+  # reason it exists. Trusted Publishing is configured per crate on a crate
+  # that already exists, so the *first* publish of a new name has nothing to
+  # configure it against and must use a token. Every other publish here is
+  # Trusted Publishing (release.yml), and this file is deleted along with the
+  # secret once crates.io knows termlens-cli.
+  use-trusted-publishing:
+    ignore:
+      - publish-cli.yml
