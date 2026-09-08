@@ -90,6 +90,7 @@ jobs:
       - run: cargo test --workspace --no-default-features
       - run: cargo test --workspace --no-default-features --features decode
       - run: cargo test --workspace --no-default-features --features regex
+      - run: cargo test --workspace --no-default-features --features serde
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
 

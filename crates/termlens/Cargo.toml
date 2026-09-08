@@ -32,6 +32,13 @@ decode = ["dep:miniz_oxide"]
 # reason: a suite that matches literal text should not pay for a regex
 # engine.
 regex = ["dep:regex"]
+# `Serialize`/`Deserialize` for `Screen`, `Cell`, `Style`, `Color` and the
+# out-of-band state, so a screen can leave a test as JSON — for
+# `insta::assert_json_snapshot!` with structured redactions, a CI step that
+# renders the failing screen, or a consumer in another language — and come
+# back as an equal `Screen`. Off by default; `serde` is already in most
+# consumers' trees, so the cost when on is a set of derives.
+serde = ["dep:serde"]
 
 [dependencies]
 portable-pty.workspace = true
@@ -45,12 +52,14 @@ unicode-width.workspace = true
 insta = { workspace = true, optional = true }
 miniz_oxide = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+serde_json.workspace = true
 anyhow.workspace = true
 
 [lints]

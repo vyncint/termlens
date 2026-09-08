@@ -78,7 +78,7 @@ jobs:
           WANTED: ${{ inputs.version }}
           # Only the leg that asks for `decode` demands the registry advertise
           # it; the other leg proves the crate stands with no feature at all.
-          WANTED_FEATURES: ${{ matrix.features == 'decode' && 'decode insta regex' || '' }}
+          WANTED_FEATURES: ${{ matrix.features == 'decode' && 'decode insta regex serde' || '' }}
         run: |
           api="https://crates.io/api/v1/crates/termlens"
           agent="termlens-install-check (github actions)"

@@ -11,6 +11,30 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- **`Screen::diff`.** Two screens that differed printed as two whole grids;
+  `a.diff(&b)` renders only the rows that changed, side by side over a
+  marker line under the changed columns, the size and cursor deltas, a count
+  of unchanged rows and the style runs before → after. `is_empty()` and
+  `cells()` for assertions; `assert!(a.diff(&b).is_empty(), "{}", a.diff(&b))`
+  is the documented way to compare two screens outside insta. A `wait_frame`
+  timeout now shows the diff from the frame it last returned to the live
+  screen. Plain text, so CI logs stay readable. (#246)
+
+- **`Screen::to_ansi`, `to_svg`, `to_html`.** Three renderings a person can
+  see — paste the ANSI into a terminal and the failure is on screen in
+  colour; the SVG is self-contained for a bug report or a README; the HTML
+  is a `<pre>` of `<span style>`s for a step summary or a PR comment. Pure
+  functions of the cells and styles, no dependency, a wide character one
+  glyph over two columns. (#248)
+
+- **A `serde` feature** (off by default): `Serialize`/`Deserialize` on
+  `Screen`, `Cell`, `Style`, `Color`, `CursorShape`, `MouseMode`,
+  `MouseModes`, `Link`, `Clipboard` and the graphics types. A `Screen` is
+  rows of cells, so a JSON snapshot diffs by row; `Color` is a tagged enum
+  (`{"indexed": 1}`, `{"rgb": [30, 30, 46]}`) so nothing needs a parser on
+  the way back; deserializing re-checks that every row holds exactly `cols`
+  cells. `insta::assert_json_snapshot!(t.screen())` works. (#247)
+
 - **`Screen::find_all`.** Every occurrence of a needle in reading order,
   from the same scan `find` is the first element of — NFC-folded, trimmed
   per row, real columns across wide characters — so the two cannot drift.

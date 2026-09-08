@@ -124,7 +124,9 @@ pub use graphics::{
     GraphicsAction, GraphicsFormat, GraphicsPayload, GraphicsProtocol, GraphicsSeen,
 };
 pub use keys::{Chord, Input, Key};
-pub use screen::{Cell, Clipboard, Color, CursorShape, Link, MouseMode, MouseModes, Screen, Style};
+pub use screen::{
+    Cell, Clipboard, Color, CursorShape, Link, MouseMode, MouseModes, Screen, ScreenDiff, Style,
+};
 #[cfg(unix)]
 pub use terminal::Signal;
 pub use terminal::{

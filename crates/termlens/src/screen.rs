@@ -12,6 +12,13 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::graphics::GraphicsSeen;
 
+mod diff;
+mod render;
+#[cfg(feature = "serde")]
+mod serde_impl;
+
+pub use diff::ScreenDiff;
+
 /// A terminal color, as reported by the emulator.
 ///
 /// Deliberately *not* `#[non_exhaustive]`, unlike [`Key`](crate::Key) and
@@ -23,6 +30,11 @@ use crate::graphics::GraphicsSeen;
 /// equality (`cell.style().fg == Color::Indexed(1)`) is unaffected either
 /// way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "snake_case")
+)]
 pub enum Color {
     /// The terminal's default foreground/background.
     #[default]
@@ -42,6 +54,7 @@ pub enum Color {
 /// relevant to the assertion rather than using a struct literal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Style {
     /// Foreground color.
     pub fg: Color,
@@ -87,6 +100,11 @@ pub struct Style {
 /// encode exactly what the application expects.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "snake_case")
+)]
 pub enum MouseMode {
     /// No mouse tracking enabled.
     #[default]
@@ -150,6 +168,7 @@ impl MouseMode {
 /// # }
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MouseModes(u8);
 
 impl MouseModes {
@@ -213,6 +232,11 @@ impl fmt::Debug for MouseModes {
 /// [`Screen::alternate_screen`] already catches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "snake_case")
+)]
 pub enum CursorShape {
     /// The application never sent `DECSCUSR`, so the cursor is whatever the
     /// terminal draws by default.
@@ -237,6 +261,7 @@ pub enum CursorShape {
 /// proves the copy path ran; this proves the payload, which is usually the
 /// behaviour actually under test.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Clipboard {
     targets: Arc<str>,
     text: Option<Arc<str>>,
@@ -285,6 +310,7 @@ impl Clipboard {
 /// or linked the wrong URL**. That is the failure
 /// [`Screen::clipboard`] exists to prevent for `OSC 52`, in the same shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Link {
     uri: Arc<str>,
     id: Option<Arc<str>>,
@@ -368,6 +394,7 @@ impl Link {
 /// bumps one refcount instead of copying every field, which matters because
 /// a clone happens on each wait evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct TermState {
     pub(crate) title: Arc<str>,
     pub(crate) alternate_screen: bool,
@@ -447,6 +474,7 @@ impl Default for TermState {
 
 /// One cell of the screen grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cell {
     contents: String,
     style: Style,
@@ -1788,12 +1816,12 @@ fn clamp_range(range: &impl RangeBounds<u16>, len: u16, axis: &str) -> (u16, u16
 
 impl Style {
     /// True when every attribute is at its default.
-    fn is_default(&self) -> bool {
+    pub(crate) fn is_default(&self) -> bool {
         *self == Style::default()
     }
 
     /// Fixed-order tokens for the `styles:` block (see `docs/DESIGN.md` §3).
-    fn tokens(&self) -> String {
+    pub(crate) fn tokens(&self) -> String {
         fn color(prefix: &str, color: Color, out: &mut Vec<String>) {
             match color {
                 Color::Default => {}

@@ -51,6 +51,11 @@ pub(crate) const HISTORY: usize = 512;
 /// Which protocol carried a payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "snake_case")
+)]
 pub enum GraphicsProtocol {
     /// The kitty graphics protocol: `APC G <control> ; <base64> ST`.
     Kitty,
@@ -77,6 +82,11 @@ impl fmt::Display for GraphicsProtocol {
 /// answer with the number of *escapes* instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "snake_case")
+)]
 pub enum GraphicsAction {
     /// `a=t`: transmit the data, place it later.
     Transmit,
@@ -108,6 +118,11 @@ impl GraphicsAction {
 /// How the pixels in a payload are encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "snake_case")
+)]
 pub enum GraphicsFormat {
     /// kitty `f=24`: three bytes a pixel.
     Rgb,
@@ -141,6 +156,7 @@ impl fmt::Display for GraphicsFormat {
 /// application stated or the wire carried — nothing here is inferred from a
 /// rendering, because there is no rendering.
 #[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GraphicsPayload {
     protocol: GraphicsProtocol,
     action: GraphicsAction,
@@ -753,6 +769,7 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
 /// than resetting a gauge; [`payloads`](Self::payloads) is the bounded tail
 /// of what was captured.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GraphicsSeen {
     pub(crate) counts: GraphicsCounts,
     pub(crate) payloads: Arc<Vec<GraphicsPayload>>,
@@ -766,6 +783,7 @@ impl GraphicsSeen {
 
 /// The cumulative counters, kept by the sequence tracker as bytes arrive.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct GraphicsCounts {
     pub(crate) kitty: u32,
     pub(crate) sixel: u32,
