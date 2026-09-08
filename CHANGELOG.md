@@ -9,6 +9,8 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-08
+
 ### Changed
 
 - **The stress workflow runs on Windows too.** It hunted flakes on Linux

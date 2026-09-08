@@ -23,7 +23,7 @@ doc = false
 # The version is the one release bumps alongside `workspace.package.version`
 # (docs/RELEASING.md); a path dependency needs it to publish. `serde` so a
 # saved screen can be JSON as well as the text format.
-termlens = { version = "0.10.0", path = "../termlens", default-features = false, features = ["serde"] }
+termlens = { version = "0.10.1", path = "../termlens", default-features = false, features = ["serde"] }
 serde_json.workspace = true
 
 [lints]
