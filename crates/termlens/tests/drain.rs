@@ -6,6 +6,11 @@
 //! can proceed — a permanent hang with no test input involved. This is
 //! the one failure the harness must never produce, since a hung harness
 //! cannot report anything at all.
+//!
+//! These stay on `/bin/sh` on purpose (#249): every program here puts the
+//! terminal in raw mode with `stty -icanon -echo` so replies are neither
+//! echoed onto the grid nor held for a newline, and the std-only `emit`
+//! fixture has no way to set a terminal mode.
 
 use std::time::{Duration, Instant};
 

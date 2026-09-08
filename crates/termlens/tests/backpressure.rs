@@ -4,6 +4,10 @@
 //! The other half of this story — what a harness can know about an
 //! application that never reads its replies — lives in `drain.rs`, next to
 //! the deadlock it must never cause.
+//!
+//! Stays on `/bin/sh` on purpose (#249): reading replies byte for byte
+//! needs the terminal in raw mode, which the std-only `emit` fixture cannot
+//! set — see the note in `drain.rs`.
 
 use std::time::Duration;
 
