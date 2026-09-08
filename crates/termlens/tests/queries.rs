@@ -185,8 +185,14 @@ fn the_responder_can_be_disabled_and_says_what_went_unanswered() {
 /// not blame it.
 #[test]
 fn a_query_the_app_moved_past_is_context_not_a_cause() {
+    // Ten seconds, not the 400ms the timeout below wants: the wait that must
+    // *succeed* is racing a spawn plus the fixture's deliberate 200ms pause,
+    // and a 400ms budget for both lost that race on a loaded macOS runner at
+    // four threads (found by the stress workflow). A short deadline belongs
+    // on the wait that must expire, and nowhere else — the same split
+    // `probe` already makes.
     let mut t = emit(
-        Duration::from_millis(400),
+        Duration::from_secs(10),
         // Probes kitty (deliberately unanswered), does NOT block on a
         // reply, prints, then sits in a normal read. The pause forces the
         // output into a *later read* than the probe — output batched into
@@ -198,7 +204,9 @@ fn a_query_the_app_moved_past_is_context_not_a_cause() {
     .unwrap();
     t.wait_until(|s| s.contains("ready")).unwrap();
 
-    let err = t.wait_until(|s| s.contains("never-appears")).unwrap_err();
+    let err = t
+        .wait_until_for(|s| s.contains("never-appears"), Duration::from_millis(400))
+        .unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("^[[?u"),

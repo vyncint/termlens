@@ -93,8 +93,9 @@ cargo insta review            # inspect and accept/reject each diff
   that is itself untested is a liability.
 - Anything touching wait semantics or timing (`wait.rs`, the reader thread,
   `wait_idle`) must pass the **stress workflow** (`stress.yml` — the suite in
-  a 100-iteration loop on Ubuntu and macOS). Trigger it from the Actions tab
-  on your branch, or ask a maintainer to.
+  a 100-iteration loop on Ubuntu, macOS and Windows, sharded across five
+  `--test-threads` values). Trigger it from the Actions tab on your branch,
+  or ask a maintainer to.
 - Snapshot updates must be **reviewed diffs**: run `cargo insta review` and
   look at every change. Never blind-accept with `cargo insta accept` or
   `INSTA_UPDATE=always`. A snapshot diff you can't explain is a bug report.
