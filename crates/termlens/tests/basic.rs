@@ -51,6 +51,7 @@ fn exit_codes_are_reported() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Windows has no signals")]
 fn signal_deaths_are_reported_as_signals_not_exit_codes() -> termlens::Result<()> {
     let mut t = emit(&["--wait", "--kill-self"])?;
     t.send(Key::Enter)?;

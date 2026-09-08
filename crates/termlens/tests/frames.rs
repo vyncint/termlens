@@ -29,6 +29,10 @@ fn spawn_form_echo() -> termlens::Result<Terminal> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn the_frame_completed_before_the_call_is_evaluated() -> termlens::Result<()> {
     let mut t = spawn_form_echo()?;
     // The fixture's first synchronized frame has long completed by the time
@@ -40,6 +44,10 @@ fn the_frame_completed_before_the_call_is_evaluated() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn a_frame_is_internally_consistent() -> termlens::Result<()> {
     let mut t = spawn_form_echo()?;
     t.wait_frame(|s| s.contains("form-echo ready"))?;
@@ -62,6 +70,10 @@ fn a_frame_is_internally_consistent() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn a_torn_repaint_is_never_observed() -> termlens::Result<()> {
     let mut t = spawn_form_echo()?;
     t.wait_frame(|s| s.contains("form-echo ready"))?;
@@ -115,6 +127,10 @@ fn apps_without_synchronized_output_time_out_with_guidance() {
 /// the only evidence available. The last completed frame can be
 /// arbitrarily old.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn wait_frame_timeouts_embed_the_live_screen_not_the_last_frame() {
     let mut t = emit(
         Terminal::builder().timeout(Duration::from_millis(400)),
@@ -151,6 +167,10 @@ fn wait_frame_timeouts_embed_the_live_screen_not_the_last_frame() {
 /// counter ticking 1, 2, 3 in a single write used to be visible only
 /// at 3.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn every_frame_of_a_burst_is_observable_in_order() -> termlens::Result<()> {
     let mut t = emit(
         Terminal::builder().timeout(Duration::from_secs(10)),
@@ -178,6 +198,10 @@ fn every_frame_of_a_burst_is_observable_in_order() -> termlens::Result<()> {
 /// The retention bound is real and documented: beyond it, the oldest
 /// frames are dropped.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn a_burst_longer_than_the_retention_bound_drops_its_oldest_frames() -> termlens::Result<()> {
     // 12 frames in one write, against a retention bound of 8.
     let mut burst = String::new();
@@ -203,6 +227,10 @@ fn a_burst_longer_than_the_retention_bound_drops_its_oldest_frames() -> termlens
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn wait_frame_fails_fast_on_eof() {
     let mut t = emit(
         Terminal::builder().timeout(Duration::from_secs(30)),
@@ -290,6 +318,10 @@ fn a_defensive_mode_reset_keeps_the_never_emitted_diagnosis() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn a_begin_end_pair_that_drew_nothing_is_still_a_frame() {
     // Deliberate: `frames_seen` counts repaints, not changes. An
     // application that opens and closes a synchronized update completed a
@@ -314,6 +346,10 @@ fn a_begin_end_pair_that_drew_nothing_is_still_a_frame() {
 /// the retained frame, and the assertion after it read the old screen. A
 /// regression in which the key stopped working was invisible.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn a_superseded_frame_no_longer_satisfies_a_wait() -> termlens::Result<()> {
     let mut t = emit(
         Terminal::builder().timeout(Duration::from_secs(10)),
@@ -345,6 +381,10 @@ fn a_superseded_frame_no_longer_satisfies_a_wait() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn one_frame_cannot_satisfy_two_waits() -> termlens::Result<()> {
     let mut t = emit(
         Terminal::builder().timeout(Duration::from_secs(10)),
@@ -366,6 +406,10 @@ fn one_frame_cannot_satisfy_two_waits() -> termlens::Result<()> {
 /// The burst is observable in emission order, which means out of order it
 /// is *not*: a frame already returned is behind the cursor.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn a_burst_frame_asked_for_out_of_order_is_gone() -> termlens::Result<()> {
     let mut t = emit(
         Terminal::builder().timeout(Duration::from_millis(700)),
@@ -386,6 +430,10 @@ fn a_burst_frame_asked_for_out_of_order_is_gone() -> termlens::Result<()> {
 /// `wait_frame` returns the instant the predicate saw, which can differ
 /// from the live grid by the time the call returns.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn the_returned_frame_is_the_matched_instant_not_the_live_screen() -> termlens::Result<()> {
     let mut t = emit(
         Terminal::builder().timeout(Duration::from_secs(10)),
@@ -455,6 +503,10 @@ fn a_resize_stops_offering_frames_drawn_at_the_old_size() -> termlens::Result<()
 /// runs. The grid is now resized and the cursor taken before the signal,
 /// under one lock, so there is no gap for a frame to fall into.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn the_repaint_answering_a_resize_is_offered_to_wait_frame() -> termlens::Result<()> {
     let mut t = spawn_form_echo()?;
     t.wait_frame(|s| s.contains("form-echo ready"))?;
@@ -473,6 +525,10 @@ fn the_repaint_answering_a_resize_is_offered_to_wait_frame() -> termlens::Result
 /// every repaint — the tear is real, documented, and wanted for
 /// diagnosis. `wait_frame`'s return value is the frame-consistent read.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn a_snapshot_can_be_mid_frame_for_a_synchronized_application() -> termlens::Result<()> {
     let mut t = emit(
         Terminal::builder()
@@ -540,6 +596,10 @@ fn a_wait_idle_timeout_names_an_unfinished_frame() {
 /// *inside* one synchronized update, so it is the outlier the series has to
 /// show.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn the_timing_series_shows_a_deliberately_slow_repaint() -> termlens::Result<()> {
     let mut t = spawn_form_echo()?;
     t.wait_frame(|s| s.contains("form-echo ready"))?;
@@ -608,6 +668,10 @@ fn the_timing_series_shows_a_deliberately_slow_repaint() -> termlens::Result<()>
 /// Timings are per frame even when a burst arrives in one read — the markers
 /// are stamped at the byte that carried them, not when the read landed.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn a_burst_in_one_read_is_timed_per_frame() -> termlens::Result<()> {
     let mut t = emit(
         Terminal::builder()

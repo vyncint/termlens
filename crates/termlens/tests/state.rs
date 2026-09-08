@@ -16,6 +16,10 @@ fn emit(steps: &[&str]) -> termlens::Result<Terminal> {
 /// One program walks the whole state surface: set everything, assert, then
 /// unwind everything and assert the way back.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward the mode sets an application sends, so mouse and focus modes are never observed (#149)"
+)]
 fn screen_reports_title_alternate_screen_and_input_modes() -> termlens::Result<()> {
     let mut t = emit(&[
         "--raw",
@@ -111,6 +115,10 @@ fn screen_reports_the_cursor_shape_the_application_asked_for() -> termlens::Resu
 /// apart, so a test for "it linked the docs" passed against the one that
 /// emitted nothing.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY forwards an OSC 8 link with an id of its own choosing (#149)"
+)]
 fn an_osc8_hyperlink_is_observable_and_a_missing_one_is_not() -> termlens::Result<()> {
     fn run(steps: &[&str]) -> termlens::Result<Screen> {
         let mut t = emit(steps)?;
@@ -206,6 +214,7 @@ fn a_snapshot_keeps_its_own_view_of_the_links() -> termlens::Result<()> {
 /// keypad are not replayed — nothing observes them, so nothing could catch
 /// a wrong replay — and the alternate screen is left alone, as specified.
 #[test]
+#[cfg_attr(windows, ignore = "ConPTY does not forward DECSTR (#149)")]
 fn a_soft_reset_returns_the_modes_a_screen_can_observe() -> termlens::Result<()> {
     let mut t = emit(&[
         "--raw",
@@ -250,6 +259,10 @@ fn a_soft_reset_returns_the_modes_a_screen_can_observe() -> termlens::Result<()>
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward the mode sets an application sends, so mouse and focus modes are never observed (#149)"
+)]
 fn mouse_mode_reports_the_exact_tracking_mode() -> termlens::Result<()> {
     let mut t = emit(&[
         "--raw",
@@ -280,6 +293,10 @@ fn mouse_mode_reports_the_exact_tracking_mode() -> termlens::Result<()> {
 /// entirely — was indistinguishable from one that never had it (#151). The
 /// input path keeps the collapsed value; the set is reported beside it.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward the mode sets an application sends, so mouse and focus modes are never observed (#149)"
+)]
 fn mouse_modes_reports_the_set_the_application_asked_for() -> termlens::Result<()> {
     let mut t = emit(&[
         "--raw",

@@ -69,6 +69,10 @@ fn answered(n: usize) -> termlens::Result<usize> {
 /// queue was filling because the reader could build replies faster than the
 /// writer issued one `write(2)` each.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn a_batch_of_probes_is_answered_in_full() -> termlens::Result<()> {
     // 200 and 400 are the sizes the issue measured losses at (94 and 161
     // answered).
@@ -98,6 +102,10 @@ fn a_batch_of_probes_is_answered_in_full() -> termlens::Result<()> {
 /// number twice. One `--raw` step per query reproduces that arrival shape on
 /// purpose: every step is its own `write(2)`.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn fine_grained_arrival_is_answered_in_full() -> termlens::Result<()> {
     for n in [100usize, 400] {
         let expected = (n * 6).to_string();

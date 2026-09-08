@@ -3033,13 +3033,16 @@ impl Terminal {
     ///
     /// ```
     /// # fn main() -> termlens::Result<()> {
+    /// # #[cfg(unix)] {
     /// let mut t = termlens::Terminal::builder()
     ///     .timeout(std::time::Duration::from_secs(10))
     ///     .args(["-c", r"printf '\033[?2026hFrame ready\033[?2026l'; read quit"])
     ///     .spawn("sh")?;
     /// let frame = t.wait_frame(|screen| screen.contains("Frame ready"))?;
     /// assert!(frame.contains("Frame ready"));
-    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # t.send(termlens::Key::Enter); t.wait_exit()?;
+    /// # }
+    /// # Ok(())
     /// # }
     /// ```
     ///
@@ -3051,6 +3054,7 @@ impl Terminal {
     ///
     /// ```
     /// # fn main() -> termlens::Result<()> {
+    /// # #[cfg(unix)] {
     /// let mut t = termlens::Terminal::builder()
     ///     .timeout(std::time::Duration::from_secs(10))
     ///     .args(["-c", r"printf '\033[?2026hcount 1\033[?2026l'; read k; printf '\033[?2026h count 2\033[?2026l'; read quit"])
@@ -3061,9 +3065,15 @@ impl Terminal {
     /// assert!(!frame.contains("count 2"));                    // …and that is the one you get
     /// let frame = t.wait_frame(|s| s.contains("count 2"))?;   // what the key changed
     /// assert!(frame.contains("count 2"));
-    /// # t.send(termlens::Key::Enter)?; t.wait_exit()?; Ok(())
+    /// # t.send(termlens::Key::Enter)?; t.wait_exit()?;
+    /// # }
+    /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// (Unix in the example, because `wait_frame` is: ConPTY closes a DEC
+    /// 2026 bracket before the content it wrapped — see the README's Windows
+    /// note.)
     ///
     /// # Errors
     ///

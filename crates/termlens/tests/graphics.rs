@@ -44,6 +44,10 @@ fn run(mode: &str) -> termlens::Result<(Terminal, Screen)> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward kitty or sixel payloads (#149)"
+)]
 fn a_transmitted_image_is_counted_and_described() -> termlens::Result<()> {
     let (_terminal, screen) = run("kitty")?;
     let seen = screen.graphics();
@@ -65,6 +69,10 @@ fn a_transmitted_image_is_counted_and_described() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward kitty or sixel payloads (#149)"
+)]
 fn an_image_is_stamped_with_the_cell_it_was_placed_on() -> termlens::Result<()> {
     // The fixture moves to row 2, column 5 (1-based) and transmits there.
     // This is the one fact about an image that lives in the grid rather than
@@ -80,6 +88,10 @@ fn an_image_is_stamped_with_the_cell_it_was_placed_on() -> termlens::Result<()> 
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward kitty or sixel payloads (#149)"
+)]
 fn a_chunked_transmission_is_one_image_not_three() -> termlens::Result<()> {
     // The protocol caps a payload at 4096 bytes and continues with `m=1`, so
     // every image of consequence arrives in several escapes. Counting each
@@ -105,6 +117,10 @@ fn a_chunked_transmission_is_one_image_not_three() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward kitty or sixel payloads (#149)"
+)]
 fn a_delete_is_not_an_image_transmitted() -> termlens::Result<()> {
     // An application that tears down what it drew and one that draws twice
     // as much are opposite behaviours; folding a delete into the image count
@@ -155,6 +171,10 @@ fn the_image_leaves_the_text_around_it_alone() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward kitty or sixel payloads (#149)"
+)]
 fn a_bounded_capture_keeps_the_counts_and_drops_the_bytes() -> termlens::Result<()> {
     // The budget is a memory bound, not an observation bound: every count
     // and every declared fact survives it, and only the data goes.
@@ -188,6 +208,10 @@ mod decoded {
     const BLUE: [u8; 4] = [0x00, 0x00, 0xff, 0xff];
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "ConPTY does not forward kitty or sixel payloads (#149)"
+    )]
     fn a_kitty_image_decodes_into_the_pixels_that_were_drawn() -> termlens::Result<()> {
         // The claim the whole feature exists for: not "an image of about the
         // right size went out", but "*this* image went out".
@@ -216,6 +240,10 @@ mod decoded {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "ConPTY does not forward kitty or sixel payloads (#149)"
+    )]
     fn a_sixel_decodes_into_the_pixels_that_were_painted() -> termlens::Result<()> {
         let (_terminal, screen) = run("sixel")?;
         let seen = screen.graphics();
@@ -236,6 +264,10 @@ mod decoded {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "ConPTY does not forward kitty or sixel payloads (#149)"
+    )]
     fn a_delete_refuses_to_decode_and_says_why() -> termlens::Result<()> {
         let (_terminal, screen) = run("delete")?;
         let seen = screen.graphics();
@@ -248,6 +280,10 @@ mod decoded {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "ConPTY does not forward kitty or sixel payloads (#149)"
+    )]
     fn an_uncaptured_payload_names_the_bound_rather_than_guessing() -> termlens::Result<()> {
         let mut terminal = Terminal::builder()
             .size(40, 10)

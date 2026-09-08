@@ -25,6 +25,10 @@ fn probe(steps: &[&str]) -> termlens::Result<Terminal> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn cursor_position_reports_the_position_at_the_query() -> termlens::Result<()> {
     // After printing "abc" the cursor sits at row 1, col 4 (1-based on the
     // wire); the CPR reply is exactly 6 bytes: ESC [ 1 ; 4 R.
@@ -45,6 +49,10 @@ fn cursor_position_reports_the_position_at_the_query() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn device_attribute_probes_are_unblocked() -> termlens::Result<()> {
     // DA1 reply is ESC [ ? 6 2 ; 2 2 c = 9 bytes. This is also the exact
     // pattern kitty-protocol probes rely on: the DA1 answer arriving tells
@@ -65,6 +73,10 @@ fn device_attribute_probes_are_unblocked() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn background_color_query_gets_the_configured_answer() -> termlens::Result<()> {
     // OSC 11 reply: ESC ] 1 1 ; rgb:1e1e/1e1e/2e2e BEL = 24 bytes.
     let mut t = common::spawn_emit(
@@ -88,6 +100,10 @@ fn background_color_query_gets_the_configured_answer() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn foreground_color_query_gets_the_configured_answer() -> termlens::Result<()> {
     // OSC 10 reply: ESC ] 1 0 ; rgb:cdcd/d6d6/f4f4 BEL = 24 bytes.
     let mut t = common::spawn_emit(
@@ -111,6 +127,10 @@ fn foreground_color_query_gets_the_configured_answer() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn text_area_size_reports_the_real_grid() -> termlens::Result<()> {
     // XTWINOPS 18 reply: ESC [ 8 ; 24 ; 80 t = 10 bytes.
     let mut t = probe(&[
@@ -231,6 +251,10 @@ fn wait_frame_timeouts_carry_the_query_note() {
 /// using synchronized output can turn it on against termlens — so
 /// `wait_frame` works against a program nobody modified for us.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn an_app_that_probes_for_synchronized_output_gets_it() -> termlens::Result<()> {
     let mut t = probe(&[
         // Ask "is mode 2026 supported?" and put the DECRPM reply on row 1,
@@ -259,6 +283,10 @@ fn an_app_that_probes_for_synchronized_output_gets_it() -> termlens::Result<()> 
 /// The reply must be truthful, not merely present: a mode we do not
 /// track exactly is reported as "not recognized" rather than guessed.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn mode_reports_are_truthful() -> termlens::Result<()> {
     let mut t = probe(&[
         "--raw-mode",
@@ -290,6 +318,10 @@ fn mode_reports_are_truthful() -> termlens::Result<()> {
 /// The families we recognize but cannot answer are now named in the
 /// timeout instead of hanging silently.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn decrqss_and_palette_queries_are_named() {
     for (label, query, shape) in [
         ("DECRQSS", r"\eP$qm\e\\", "^[P$qm"),
@@ -307,6 +339,10 @@ fn decrqss_and_palette_queries_are_named() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn replies_are_not_echoed_into_the_screen() -> termlens::Result<()> {
     // The reply travels the input path; unless the app prints it, it must
     // never appear in the grid. Raw mode keeps the line discipline from
@@ -334,6 +370,10 @@ fn replies_are_not_echoed_into_the_screen() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn a_probe_then_enable_application_gets_its_mouse() -> termlens::Result<()> {
     // The loop this closes on itself: the application probes `?1000$p`, is
     // told "not recognized", concludes the terminal has no mouse and never
@@ -376,6 +416,10 @@ fn a_probe_then_enable_application_gets_its_mouse() -> termlens::Result<()> {
 /// for a member other than the last one enabled — which is every probe
 /// after crossterm's three-at-once enable — was answered "not recognized".
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn decrqm_answers_each_mouse_tracking_mode_on_its_own() -> termlens::Result<()> {
     // Reply values: 1 = set, 2 = reset, 0 = not recognized. The reply is
     // `ESC [ ? <mode> ; <value> $ y`, so its length follows the mode's.
@@ -432,6 +476,10 @@ fn decrqm_answers_each_mouse_tracking_mode_on_its_own() -> termlens::Result<()> 
 /// honesty rule's precondition. Before, an application probing for focus
 /// support was told "not recognized" even right after enabling it.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn decrqm_answers_for_focus_reporting() -> termlens::Result<()> {
     // Reply values: 1 = set, 2 = reset, 0 = not recognized.
     for (sequence, expect, label) in [
@@ -473,6 +521,10 @@ fn decrqm_answers_for_focus_reporting() -> termlens::Result<()> {
 /// Pixel geometry: unset it stays unanswered and named, set it makes the
 /// two escape replies and `TIOCGWINSZ` agree instead of contradicting.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn cell_size_answers_the_pixel_reports_and_the_ioctl() -> termlens::Result<()> {
     // Unset: no reply, and the query is named in the next timeout.
     let mut mute = common::spawn_emit(
@@ -524,6 +576,7 @@ fn cell_size_answers_the_pixel_reports_and_the_ioctl() -> termlens::Result<()> {
 /// both — otherwise an application gets two different answers to the same
 /// question depending on how it asks.
 #[test]
+#[cfg_attr(windows, ignore = "TIOCGWINSZ is a Unix ioctl")]
 fn tiocgwinsz_agrees_with_the_declared_cell_size() -> termlens::Result<()> {
     let mut t = common::spawn_emit(
         Terminal::builder()
@@ -565,6 +618,10 @@ fn tiocgwinsz_agrees_with_the_declared_cell_size() -> termlens::Result<()> {
 /// reach its pixel path at all. The default claims nothing, which is what
 /// makes the declaration meaningful.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn declared_graphics_support_reaches_the_probe() -> termlens::Result<()> {
     // Default: DA1 has no `4`, and the kitty probe goes unanswered.
     let mut plain = common::spawn_emit(
@@ -636,6 +693,10 @@ fn declared_graphics_support_reaches_the_probe() -> termlens::Result<()> {
 /// halves matter: a known capability is answered truthfully, and an unknown
 /// one is *explicitly* declined — which is what turns a hang into a decision.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn xtgettcap_answers_what_it_knows_and_declines_the_rest() -> termlens::Result<()> {
     // TN=544e, colors=636f6c6f7273, and a made-up name that must be refused.
     // Wide enough that the three replies stay on one row.
@@ -680,6 +741,10 @@ fn xtgettcap_answers_what_it_knows_and_declines_the_rest() -> termlens::Result<(
 /// `TN` reports whatever `TERM` the child was actually given, so an
 /// application cannot get two different answers to "which terminal is this?".
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn xtgettcap_tn_follows_the_configured_term() -> termlens::Result<()> {
     let mut t = common::spawn_emit(
         Terminal::builder()
@@ -713,6 +778,10 @@ fn xtgettcap_tn_follows_the_configured_term() -> termlens::Result<()> {
 /// application that reads it and then matches input against it will not
 /// match what arrives.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn xtgettcap_key_capabilities_match_what_send_emits() -> termlens::Result<()> {
     // kcuu1 = 6b63757531; the value must be ESC [ A = 1b5b41.
     let mut t = common::spawn_emit(

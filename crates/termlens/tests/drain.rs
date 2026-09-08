@@ -122,6 +122,10 @@ fn undelivered_replies_are_named_where_the_kernel_makes_them_visible() {
 /// The ordinary case must be untouched: an application that reads its
 /// replies still gets every one of them.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn replies_still_reach_an_application_that_reads_them() -> termlens::Result<()> {
     let mut t = common::spawn_emit(
         Terminal::builder().timeout(Duration::from_secs(10)),
