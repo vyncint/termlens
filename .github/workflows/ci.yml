@@ -111,6 +111,27 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - run: cargo clippy --workspace --all-targets --all-features --target x86_64-pc-windows-msvc -- -D warnings
 
+  # The Windows leg (#149): the whole suite over ConPTY, with the tests that
+  # ConPTY cannot honour marked `#[cfg_attr(windows, ignore = "…")]`, each
+  # with its reason. Non-required while it earns it — `continue-on-error`
+  # keeps a ConPTY surprise from blocking a Unix fix, and required-green does
+  # not list it. Promoting it is two edits: drop continue-on-error, add it
+  # to required-green's needs. windows.yml is the dispatchable version with
+  # the ConPTY probe and the report.
+  windows:
+    name: windows (non-required)
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - run: cargo test --workspace --all-features
+
   # CONTRIBUTING §1 promises that every gate above is reproducible locally
   # and that the workflow is the source of truth when the two disagree. It
   # disagreed twice before anyone noticed (#227); this is the check that
