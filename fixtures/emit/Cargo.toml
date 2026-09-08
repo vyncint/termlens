@@ -1,0 +1,16 @@
+[package]
+name = "emit"
+description = "termlens fixture: writes exactly the bytes its arguments describe, then waits, sleeps or exits as told — the program under test where a shell script used to be"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# No dependencies, on purpose: see the crate-level doc.
+[dependencies]
+
+[lints]
+workspace = true

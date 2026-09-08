@@ -4,6 +4,21 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 
+use termlens::{Terminal, TerminalBuilder};
+
+/// Spawn the `emit` fixture with `steps` from a builder the caller has
+/// already sized and timed: what `sh -c 'printf …; read _'` used to be,
+/// with no shell deciding how `printf` reads an escape (#249). The steps
+/// are documented in `fixtures/emit/src/main.rs`.
+pub(crate) fn spawn_emit(builder: TerminalBuilder, steps: &[&str]) -> termlens::Result<Terminal> {
+    builder.args(steps).spawn(fixture_bin("emit"))
+}
+
+/// [`spawn_emit`] from the default builder.
+pub(crate) fn emit(steps: &[&str]) -> termlens::Result<Terminal> {
+    spawn_emit(Terminal::builder(), steps)
+}
+
 /// Fixture names already rebuilt by this test process.
 static BUILT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
