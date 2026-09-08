@@ -10,11 +10,16 @@ use termlens::{Terminal, TerminalBuilder};
 /// already sized and timed: what `sh -c 'printf …; read _'` used to be,
 /// with no shell deciding how `printf` reads an escape (#249). The steps
 /// are documented in `fixtures/emit/src/main.rs`.
+///
+/// This module is compiled into every test binary that declares it, and
+/// not every one of them uses every helper.
+#[allow(dead_code)]
 pub(crate) fn spawn_emit(builder: TerminalBuilder, steps: &[&str]) -> termlens::Result<Terminal> {
     builder.args(steps).spawn(fixture_bin("emit"))
 }
 
 /// [`spawn_emit`] from the default builder.
+#[allow(dead_code)]
 pub(crate) fn emit(steps: &[&str]) -> termlens::Result<Terminal> {
     spawn_emit(Terminal::builder(), steps)
 }
