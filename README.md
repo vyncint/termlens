@@ -270,6 +270,14 @@ design. termlens's position:
   ROMs, the other national sets — is acknowledged and reads as ASCII.
   `DECSC`/`DECRC` save and restore this state with the cursor. Locking
   shifts remain G0/G1 only (`LS2`/`LS3` are not modelled).
+- **Tab stops are the application's to set.** `HTS` (`ESC H`), `TBC`
+  (`CSI g`, `CSI 3 g`), `CHT` (`CSI I`) and `CBT` (`CSI Z`) all work, and a
+  plain `\t` honours whatever stops are set rather than a fixed eight.
+  `RIS` and `DECSTR` restore the every-eighth default, and a resize extends
+  the set into its new columns with that pattern while leaving existing
+  stops alone. Back-tab moves to the nearest stop *strictly* left of the
+  cursor, as xterm does. Only `TBC 0` and `TBC 3` are modelled; the rest of
+  that family clears *line* tab stops, which this crate has no notion of.
 - `wait_frame` needs the application to bracket its repaints in DEC 2026
   synchronized updates, and only the last 8 completed frames are retained;
   everything else waits with `wait_until`, under the three rules in

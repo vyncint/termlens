@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::seq::{SeqEvent, SeqTracker};
+use super::seq::{SeqEvent, SeqTracker, TabOp};
 use super::shadow::{AttrShadow, ColorNormalizer};
 use super::{Emulator, FrameSpan, InputModes, ModeState, MouseEncoding, Processed, Stop};
 use crate::graphics::{GraphicsPayload, GraphicsSeen, HISTORY};
@@ -69,7 +69,7 @@ impl Vt100Emulator {
     pub(crate) fn new(rows: u16, cols: u16, scrollback_len: usize, capture: usize) -> Self {
         Self {
             parser: ::vt100::Parser::new(rows, cols, scrollback_len),
-            tracker: SeqTracker::new(capture),
+            tracker: SeqTracker::new(capture, cols),
             shadow: AttrShadow::new(rows, cols),
             colors: ColorNormalizer::new(),
             scrollback_len,
@@ -116,6 +116,41 @@ impl Vt100Emulator {
         self.feed(&staged);
         staged.clear();
         self.staged = staged;
+    }
+
+    /// Carry out a tab-stop operation, given the bytes still owed to the
+    /// grid: `before` is everything ahead of the one that completed the
+    /// sequence, and `last` is that byte itself.
+    ///
+    /// Every one of the five is relative to the cursor column, so `before`
+    /// has to reach the parser first — the position read otherwise belongs
+    /// to wherever the last feed stopped, which on a chatty stream is an
+    /// arbitrary number of characters back.
+    ///
+    /// The split is at the completing byte and not past it, which matters
+    /// for plain `HT` alone: vt100 ignores the four escapes, but it acts on
+    /// `HT`, so feeding that byte before the column is read would move the
+    /// cursor to vt100's fixed eight and leave the computation working from
+    /// the wrong base. Reading first is correct for all five, since no
+    /// escape prefix moves the cursor either.
+    ///
+    /// The sequence is then fed rather than dropped. vt100 ignores `HTS`,
+    /// `TBC`, `CHT` and `CBT` outright, and dropping a final byte would
+    /// leave its parser sitting in a half-consumed escape that swallows
+    /// whatever came next. `HT` it does act on, moving by its own fixed
+    /// eight — which the `CHA` below then overrides, since `HT` draws
+    /// nothing and only moves the cursor.
+    fn apply_tabs(&mut self, op: TabOp, before: &[u8], last: &[u8]) {
+        self.feed_staged(before);
+        let col = self.parser.screen().cursor_position().1;
+        let target = self.tracker.tab_op(op, col);
+        self.feed_staged(last);
+        if let Some(target) = target {
+            // CHA counts from one. Both parsers are fed it, so the
+            // attribute shadow moves with the primary grid and the two
+            // stay the same shape — the invariant `snapshot` asserts.
+            self.feed(format!("\x1b[{}G", target.saturating_add(1)).as_bytes());
+        }
     }
 
     /// File a completed payload, stamped with where it landed.
@@ -245,6 +280,11 @@ impl Emulator for Vt100Emulator {
                     self.feed_staged(&bytes[fed..=i]);
                     fed = i + 1;
                     self.feed(SOFT_RESET_REPLAY);
+                    None
+                }
+                SeqEvent::Tabs(op) => {
+                    self.apply_tabs(op, &bytes[fed..i], &bytes[i..=i]);
+                    fed = i + 1;
                     None
                 }
                 SeqEvent::None => None,
@@ -413,6 +453,7 @@ impl Emulator for Vt100Emulator {
     fn set_size(&mut self, rows: u16, cols: u16) {
         self.parser.screen_mut().set_size(rows, cols);
         self.shadow.set_size(rows, cols);
+        self.tracker.set_cols(cols);
         // A resize can push rows into history on its own.
         self.capture_scrolled_rows();
     }
@@ -1026,5 +1067,102 @@ mod tests {
         let screen = emu.snapshot();
         assert_eq!(screen.size(), (5, 2));
         assert_eq!(screen.text(), "hello\n");
+    }
+
+    /// A 24-column emulator, the width the issue's reproductions use.
+    fn wide_emu(bytes: &[u8]) -> Vt100Emulator {
+        let mut emu = Vt100Emulator::new(2, 24, 0, crate::graphics::DEFAULT_CAPTURE);
+        feed_all(&mut emu, bytes);
+        emu
+    }
+
+    /// Where the cursor ended up, which is the whole of what a tab does.
+    fn cursor_col(bytes: &[u8]) -> u16 {
+        wide_emu(bytes).snapshot().cursor().1
+    }
+
+    #[test]
+    fn a_plain_tab_still_lands_on_the_default_eighth_column() {
+        // The rewrite takes `HT` over from vt100 entirely, so the behaviour
+        // that was already right has to keep being right.
+        let s = wide_emu(b"a\tb").snapshot();
+        assert_eq!(s.row_text(0).trim_end(), "a       b", "{s}");
+        assert_eq!(s.find("b"), Some((0, 8)));
+        assert_eq!(cursor_col(b"\t\t"), 16);
+    }
+
+    /// The scope note from the issue, and the one test that proves the two
+    /// tab implementations are not disagreeing: `HTS` sets a stop and a
+    /// *plain* `\t` — not `CHT` — is what honours it.
+    #[test]
+    fn a_plain_tab_honours_a_stop_set_by_hts() {
+        // Column 4 (`CSI 4 G` is one-based), set a stop, back to column 1.
+        let s = wide_emu(b"\x1b[4G\x1bH\x1b[1Ga\tb").snapshot();
+        assert_eq!(s.row_text(0).trim_end(), "a  b", "{s}");
+        assert_eq!(s.find("b"), Some((0, 3)));
+    }
+
+    #[test]
+    fn tbc_clears_one_stop_and_csi_3_g_clears_them_all() {
+        // Standing on the default stop at column 8 and clearing it sends the
+        // next tab on to 16 instead.
+        assert_eq!(cursor_col(b"\x1b[9G\x1b[g\x1b[1G\t"), 16);
+        assert_eq!(cursor_col(b"\x1b[9G\x1b[0g\x1b[1G\t"), 16);
+        // With every stop gone a tab runs to the last column and stays.
+        assert_eq!(cursor_col(b"\x1b[3g\t"), 23);
+        assert_eq!(cursor_col(b"\x1b[3g\t\t\t"), 23);
+    }
+
+    #[test]
+    fn cht_and_cbt_move_by_whole_stops() {
+        assert_eq!(cursor_col(b"\x1b[2I"), 16);
+        assert_eq!(cursor_col(b"\x1b[I"), 8);
+        // Back-tab from a stop goes to the one before it. Written without a
+        // character in the way, because a character advances the cursor and
+        // the back-tab would then return to the stop it was standing on —
+        // which is what xterm and alacritty both do, and what the issue's
+        // second reproduction reads past.
+        assert_eq!(cursor_col(b"\t\t\x1b[1Z"), 8);
+        assert_eq!(cursor_col(b"\t\tX\x1b[1Z"), 16);
+        assert_eq!(cursor_col(b"\t\t\x1b[2Z"), 0);
+        // Nowhere left to go is column 0, not a wrap.
+        assert_eq!(cursor_col(b"\x1b[9Z"), 0);
+    }
+
+    #[test]
+    fn ris_and_decstr_restore_the_default_stops() {
+        for reset in [&b"\x1bc"[..], b"\x1b[!p"] {
+            let mut stream = b"\x1b[3g\x1b[4G\x1bH".to_vec();
+            stream.extend_from_slice(reset);
+            stream.extend_from_slice(b"\x1b[1G\t");
+            assert_eq!(
+                cursor_col(&stream),
+                8,
+                "the custom stop must not survive {reset:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resize_extends_the_stops_into_the_new_columns() {
+        let mut emu = wide_emu(b"\x1b[4G\x1bH");
+        emu.set_size(2, 40);
+        // The stop set before the resize is still there …
+        feed_all(&mut emu, b"\x1b[1G\t");
+        assert_eq!(emu.snapshot().cursor().1, 3);
+        // … and the columns the grid did not have get the default pattern.
+        feed_all(&mut emu, b"\x1b[25G\t");
+        assert_eq!(emu.snapshot().cursor().1, 32);
+    }
+
+    /// The rewrite is fed to both parsers, so the attribute shadow moves
+    /// with the primary grid. `snapshot` debug-asserts they agree, which is
+    /// what this drives — a tab inside a styled span is the shape that would
+    /// break if only one of them were told.
+    #[test]
+    fn a_tab_inside_a_styled_span_keeps_the_shadow_in_step() {
+        let s = wide_emu(b"\x1b[5m\x1b[4G\x1bH\x1b[1Ga\tb\x1b[0m").snapshot();
+        assert_eq!(s.find("b"), Some((0, 3)));
+        assert!(s.cell(0, 3).unwrap().style().blink, "{s}");
     }
 }
