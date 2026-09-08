@@ -9,6 +9,13 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`termlens <subcommand> --version` is no longer an unknown option.**
+  The flag was handled only in the top-level dispatch, so `termlens inspect
+  --version` exited 2 while `-h`/`--help` worked in that position. All three
+  subcommands now print the same version string as the top-level command. (#310)
+
 ## [0.10.1] - 2026-09-08
 
 ### Changed
