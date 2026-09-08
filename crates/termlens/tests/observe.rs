@@ -106,6 +106,10 @@ fn a_bell_is_observable_and_a_title_terminator_is_not_a_bell() -> termlens::Resu
 /// must render as text in every terminal, so it must never go out as an
 /// image.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward kitty or sixel payloads (#149)"
+)]
 fn graphics_payloads_are_observable_and_absence_is_assertable() -> termlens::Result<()> {
     let mut plain = emit(&["box art: +--+", " DONE", "--wait"])?;
     plain.wait_until(|s| s.contains("DONE"))?;
@@ -147,6 +151,10 @@ fn graphics_payloads_are_observable_and_absence_is_assertable() -> termlens::Res
 /// The kitty graphics query used to escape the timeout note entirely: no
 /// answer *and* no diagnosis, alone among the startup probes.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward kitty or sixel payloads (#149)"
+)]
 fn a_blocked_kitty_graphics_query_is_named_in_the_timeout() -> termlens::Result<()> {
     let mut t = common::spawn_emit(
         Terminal::builder()
@@ -170,6 +178,10 @@ fn a_blocked_kitty_graphics_query_is_named_in_the_timeout() -> termlens::Result<
 /// A transmission is an instruction, not a question, so it must not put a
 /// query diagnosis into an unrelated timeout of an application that draws.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward kitty or sixel payloads (#149)"
+)]
 fn a_kitty_transmission_does_not_pollute_the_timeout() -> termlens::Result<()> {
     let mut t = common::spawn_emit(
         Terminal::builder()
@@ -195,6 +207,10 @@ fn a_kitty_transmission_does_not_pollute_the_timeout() -> termlens::Result<()> {
 /// frames used to be built straight from the emulator, which skipped the
 /// count and left it at zero.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn a_frame_from_wait_frame_carries_the_repaint_count() -> termlens::Result<()> {
     let mut t = emit(&[
         "READY",

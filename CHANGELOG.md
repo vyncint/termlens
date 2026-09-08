@@ -11,6 +11,17 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- **Windows.** The crate builds and the whole suite runs on `windows-latest`
+  in CI, over ConPTY. Screen assertions work; the features ConPTY renders
+  away — `wait_frame`, graphics, the responder's outbound claims, mouse
+  modes, focus reporting, link ids — are documented as Unix-only in the
+  README, with their tests marked so and the probe that measured them in
+  `tests/conpty_probe.rs`. Two things a Windows user would have hit first
+  are fixed on the way: `bin!` refused an absolute `C:\…` path as a bare
+  program name, and a child that had exited was still "listening" — a
+  pseudoconsole never reports EOF, so the reaped child now closes the
+  terminal there. (#149)
+
 - **A skill for AI coding agents.** `skills/termlens/SKILL.md` teaches an
   agent how to test a terminal program with termlens without the mistakes
   agents make on their own: no `sleep`, `snapshot_after` for whole-screen

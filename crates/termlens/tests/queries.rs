@@ -1,16 +1,11 @@
 //! The query responder: capability-probing apps get real answers instead
 //! of hanging, and whatever stays unanswered is named in timeout errors.
 //!
-//! Each shell script here genuinely BLOCKS on the terminal's reply
-//! (`head -c N` reads exactly the reply bytes), then prints a marker the
-//! test waits for — the marker appearing proves the app was unblocked.
-//!
-//! Those stay on `/bin/sh` on purpose (#249): reading a reply byte for byte
-//! needs the terminal in raw mode (`stty -icanon -echo`), which the
-//! std-only `emit` fixture cannot set. The programs that only *ask* and
-//! then block on a line — the ones whose point is that no answer comes —
-//! go through the fixture: `--wait` blocks on a line exactly as `head` did
-//! in canonical mode.
+//! Each program here genuinely BLOCKS on the terminal's reply — `--read N`
+//! reads exactly the reply bytes, in raw mode so the line discipline
+//! neither echoes them nor holds them for a newline — then prints a marker
+//! the test waits for. The marker appearing proves the app was unblocked,
+//! and the reply is on the grid with ESC drawn as `E` and BEL as `G`.
 
 use std::time::Duration;
 
@@ -18,28 +13,35 @@ use termlens::{Error, Key, Terminal};
 
 mod common;
 
-fn sh(script: &str) -> termlens::Result<Terminal> {
-    Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args(["-c", script])
-        .spawn("/bin/sh")
-}
-
 /// The `emit` fixture with the timeout the test names; steps are documented
 /// in `fixtures/emit/src/main.rs`.
 fn emit(timeout: Duration, steps: &[&str]) -> termlens::Result<Terminal> {
     common::spawn_emit(Terminal::builder().timeout(timeout), steps)
 }
 
+/// A program that asks and reads the answer, ten seconds to do it in.
+fn probe(steps: &[&str]) -> termlens::Result<Terminal> {
+    emit(Duration::from_secs(10), steps)
+}
+
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn cursor_position_reports_the_position_at_the_query() -> termlens::Result<()> {
     // After printing "abc" the cursor sits at row 1, col 4 (1-based on the
     // wire); the CPR reply is exactly 6 bytes: ESC [ 1 ; 4 R.
-    let mut t = sh(concat!(
-        r"stty -icanon -echo; printf 'abc\033[6n'; ",
-        r#"reply=$(head -c 6 | tr '\033' 'E'); "#,
-        r#"printf '\nunblocked:%s' "$reply"; read guard"#
-    ))?;
+    let mut t = probe(&[
+        "--raw-mode",
+        "abc",
+        "--csi",
+        "6n",
+        "\nunblocked:",
+        "--read",
+        "6",
+        "--wait",
+    ])?;
     t.wait_until(|s| s.contains("unblocked:E[1;4R"))?;
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
@@ -47,15 +49,23 @@ fn cursor_position_reports_the_position_at_the_query() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn device_attribute_probes_are_unblocked() -> termlens::Result<()> {
     // DA1 reply is ESC [ ? 6 2 ; 2 2 c = 9 bytes. This is also the exact
     // pattern kitty-protocol probes rely on: the DA1 answer arriving tells
     // the app "no kitty support", exactly like a real non-kitty terminal.
-    let mut t = sh(concat!(
-        r"stty -icanon -echo; printf '\033[c'; ",
-        r#"reply=$(head -c 9 | tr '\033' 'E'); "#,
-        r#"printf 'unblocked:%s' "$reply"; read guard"#
-    ))?;
+    let mut t = probe(&[
+        "--raw-mode",
+        "--csi",
+        "c",
+        "unblocked:",
+        "--read",
+        "9",
+        "--wait",
+    ])?;
     t.wait_until(|s| s.contains("unblocked:E[?62;22c"))?;
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
@@ -63,20 +73,26 @@ fn device_attribute_probes_are_unblocked() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn background_color_query_gets_the_configured_answer() -> termlens::Result<()> {
     // OSC 11 reply: ESC ] 1 1 ; rgb:1e1e/1e1e/2e2e BEL = 24 bytes.
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .background_rgb(0x1e, 0x1e, 0x2e)
-        .args([
-            "-c",
-            concat!(
-                r"stty -icanon -echo; printf '\033]11;?\007'; ",
-                r#"reply=$(head -c 24 | tr '\033\007' 'EG'); "#,
-                r#"printf 'unblocked:%s' "$reply"; read guard"#
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .timeout(Duration::from_secs(10))
+            .background_rgb(0x1e, 0x1e, 0x2e),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\e]11;?\a",
+            "unblocked:",
+            "--read",
+            "24",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("unblocked:E]11;rgb:1e1e/1e1e/2e2eG"))?;
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
@@ -84,20 +100,26 @@ fn background_color_query_gets_the_configured_answer() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn foreground_color_query_gets_the_configured_answer() -> termlens::Result<()> {
     // OSC 10 reply: ESC ] 1 0 ; rgb:cdcd/d6d6/f4f4 BEL = 24 bytes.
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .foreground_rgb(0xcd, 0xd6, 0xf4)
-        .args([
-            "-c",
-            concat!(
-                r"stty -icanon -echo; printf '\033]10;?\007'; ",
-                r#"reply=$(head -c 24 | tr '\033\007' 'EG'); "#,
-                r#"printf 'unblocked:%s' "$reply"; read guard"#
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .timeout(Duration::from_secs(10))
+            .foreground_rgb(0xcd, 0xd6, 0xf4),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\e]10;?\a",
+            "unblocked:",
+            "--read",
+            "24",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("unblocked:E]10;rgb:cdcd/d6d6/f4f4G"))?;
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
@@ -105,13 +127,21 @@ fn foreground_color_query_gets_the_configured_answer() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn text_area_size_reports_the_real_grid() -> termlens::Result<()> {
     // XTWINOPS 18 reply: ESC [ 8 ; 24 ; 80 t = 10 bytes.
-    let mut t = sh(concat!(
-        r"stty -icanon -echo; printf '\033[18t'; ",
-        r#"reply=$(head -c 10 | tr '\033' 'E'); "#,
-        r#"printf 'unblocked:%s' "$reply"; read guard"#
-    ))?;
+    let mut t = probe(&[
+        "--raw-mode",
+        "--csi",
+        "18t",
+        "unblocked:",
+        "--read",
+        "10",
+        "--wait",
+    ])?;
     t.wait_until(|s| s.contains("unblocked:E[8;24;80t"))?;
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
@@ -221,18 +251,30 @@ fn wait_frame_timeouts_carry_the_query_note() {
 /// using synchronized output can turn it on against termlens — so
 /// `wait_frame` works against a program nobody modified for us.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn an_app_that_probes_for_synchronized_output_gets_it() -> termlens::Result<()> {
-    let mut t = sh(concat!(
-        // Ask "is mode 2026 supported?" and read the DECRPM reply.
-        r"stty -icanon -echo; printf '\033[?2026$p'; ",
-        r#"reply=$(head -c 10 | tr '\033' 'E'); "#,
-        // A terminal that does not recognize the mode answers `;0$y`.
-        r#"case "$reply" in *';0$y') printf 'unsupported'; read guard; exit 0 ;; esac; "#,
-        // Recognized: bracket the repaint, exactly as a real app would.
-        r"printf '\033[?2026h\033[HPROBED FRAME\033[?2026l'; read guard"
-    ))?;
+    let mut t = probe(&[
+        // Ask "is mode 2026 supported?" and put the DECRPM reply on row 1,
+        // where the frame's `CSI H` will not paint over it.
+        "--raw-mode",
+        "--csi",
+        "?2026$p",
+        "\nreply:",
+        "--read",
+        "11",
+        // Then bracket the repaint, exactly as a real app would.
+        "--raw",
+        r"\e[?2026h\e[HPROBED FRAME\e[?2026l",
+        "--wait",
+    ])?;
 
-    t.wait_frame(|s| s.contains("PROBED FRAME"))?;
+    // A terminal that does not recognize the mode answers `;0$y`; the
+    // frame is asserted together with the reply that licensed it, so a
+    // regression to "unrecognized" fails here rather than passing quietly.
+    t.wait_frame(|s| s.contains("PROBED FRAME") && s.contains("reply:E[?2026;2$y"))?;
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
@@ -241,18 +283,28 @@ fn an_app_that_probes_for_synchronized_output_gets_it() -> termlens::Result<()> 
 /// The reply must be truthful, not merely present: a mode we do not
 /// track exactly is reported as "not recognized" rather than guessed.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn mode_reports_are_truthful() -> termlens::Result<()> {
-    let mut t = sh(concat!(
-        r"stty -icanon -echo; printf '\033[?2004h'; ",
+    let mut t = probe(&[
+        "--raw-mode",
+        "--csi",
+        "?2004h",
         // 2004 was just set -> `;1$y`; 1 (DECCKM) is untouched -> `;2$y`;
         // 12 (cursor blink) is not tracked at all -> `;0$y`.
-        r"printf '\033[?2004$p\033[?1$p\033[?12$p'; ",
+        "--raw",
+        r"\e[?2004$p\e[?1$p\e[?12$p",
         // The three replies are 11 + 8 + 9 = 28 bytes:
         // ESC[?2004;1$y  ESC[?1;2$y  ESC[?12;0$y
-        r#"reply=$(head -c 28 | tr '\033' 'E'); "#,
-        r#"printf 'got:%s' "$reply"; read guard"#
-    ))?;
-    t.wait_until(|s| s.contains("got:"))?;
+        "got:",
+        "--read",
+        "28",
+        " DONE",
+        "--wait",
+    ])?;
+    t.wait_until(|s| s.contains("DONE"))?;
     let row = t.screen().row_text(0);
     assert!(row.contains("E[?2004;1$y"), "2004 should be set: {row}");
     assert!(row.contains("E[?1;2$y"), "DECCKM should be reset: {row}");
@@ -266,6 +318,10 @@ fn mode_reports_are_truthful() -> termlens::Result<()> {
 /// The families we recognize but cannot answer are now named in the
 /// timeout instead of hanging silently.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn decrqss_and_palette_queries_are_named() {
     for (label, query, shape) in [
         ("DECRQSS", r"\eP$qm\e\\", "^[P$qm"),
@@ -283,15 +339,25 @@ fn decrqss_and_palette_queries_are_named() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn replies_are_not_echoed_into_the_screen() -> termlens::Result<()> {
     // The reply travels the input path; unless the app prints it, it must
-    // never appear in the grid. `stty -echo` keeps the line discipline
-    // from echoing what the "terminal" typed back.
-    let mut t = sh(concat!(
-        r"stty -icanon -echo; printf 'before\033[5n'; ",
-        r"head -c 4 >/dev/null; ",
-        r"printf ' after'; read guard"
-    ))?;
+    // never appear in the grid. Raw mode keeps the line discipline from
+    // echoing what the "terminal" typed back, and `--skip` reads the reply
+    // without printing it.
+    let mut t = probe(&[
+        "--raw-mode",
+        "before",
+        "--csi",
+        "5n",
+        "--skip",
+        "4",
+        " after",
+        "--wait",
+    ])?;
     t.wait_until(|s| s.contains("before after"))?;
     assert!(
         !t.screen().text().contains("[0n"),
@@ -304,23 +370,35 @@ fn replies_are_not_echoed_into_the_screen() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn a_probe_then_enable_application_gets_its_mouse() -> termlens::Result<()> {
     // The loop this closes on itself: the application probes `?1000$p`, is
     // told "not recognized", concludes the terminal has no mouse and never
     // sends `CSI ?1000h` — and `click` then refuses, blaming the
     // application for a decision termlens caused.
     //
-    // The script is written to *prove* the decision: if the reply says the
-    // mode is unrecognized it prints REFUSED and never enables tracking,
-    // so a regression fails on the wait below rather than passing quietly.
-    let mut t = sh(concat!(
-        r"stty -icanon -echo; ",
-        r#"printf '\033[?1000$p'; "#,
-        r#"reply=$(head -c 11 | tr '\033' 'E'); "#,
-        r#"case "$reply" in *';0$y') printf 'REFUSED:%s' "$reply"; read g; exit 0;; esac; "#,
-        r#"printf '\033[?1000h\033[?1006h'; printf 'MOUSE-ON:%s|' "$reply"; "#,
-        r#"click=$(head -c 20 | tr '\033' 'E'); printf 'CLICK:%s' "$click"; read g"#
-    ))?;
+    // The program prints the reply it got before it enables tracking, and
+    // the wait below asserts the reply *and* the marker together: a
+    // regression to "unrecognized" shows up as `;0$y` on the grid and the
+    // wait fails, rather than passing quietly.
+    let mut t = probe(&[
+        "--raw-mode",
+        "--csi",
+        "?1000$p",
+        "MOUSE-ON:",
+        "--read",
+        "11",
+        "|",
+        "--raw",
+        r"\e[?1000h\e[?1006h",
+        "CLICK:",
+        "--read",
+        "20",
+        "--wait",
+    ])?;
     // `;2$y` = implemented and currently reset. The application proceeds.
     t.wait_until(|s| s.contains("MOUSE-ON:E[?1000;2$y|"))?;
 
@@ -338,46 +416,53 @@ fn a_probe_then_enable_application_gets_its_mouse() -> termlens::Result<()> {
 /// for a member other than the last one enabled — which is every probe
 /// after crossterm's three-at-once enable — was answered "not recognized".
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn decrqm_answers_each_mouse_tracking_mode_on_its_own() -> termlens::Result<()> {
     // Reply values: 1 = set, 2 = reset, 0 = not recognized. The reply is
     // `ESC [ ? <mode> ; <value> $ y`, so its length follows the mode's.
-    for (script, reply_len, expect, label) in [
+    for (sequence, reply_len, expect, label) in [
         (
-            r"printf '\033[?1000h\033[?1002h\033[?1003h\033[?1002$p'",
-            11,
+            r"\e[?1000h\e[?1002h\e[?1003h\e[?1002$p",
+            "11",
             "[?1002;1$y",
             "a member other than the last enabled is set",
         ),
         (
-            r"printf '\033[?1000h\033[?1002h\033[?1003h\033[?9$p'",
-            8,
+            r"\e[?1000h\e[?1002h\e[?1003h\e[?9$p",
+            "8",
             "[?9;2$y",
             "a member never asked for is reset, not unrecognized",
         ),
         (
-            r"printf '\033[?1000h\033[?1002h\033[?1003h\033[?1003l\033[?1003$p'",
-            11,
+            r"\e[?1000h\e[?1002h\e[?1003h\e[?1003l\e[?1003$p",
+            "11",
             "[?1003;2$y",
             "a released member is reset while the others stay",
         ),
         (
-            r"printf '\033[?1000h\033[?1002h\033[?1003h\033[?1003l\033[?1002$p'",
-            11,
+            r"\e[?1000h\e[?1002h\e[?1003h\e[?1003l\e[?1002$p",
+            "11",
             "[?1002;1$y",
             "and the others do stay set",
         ),
     ] {
-        let mut t = Terminal::builder()
-            .size(80, 6)
-            .timeout(Duration::from_secs(10))
-            .args([
-                "-c",
-                &format!(
-                    "stty -icanon -echo; {script}; \
-                     head -c {reply_len} | tr -d '\\033'; printf ' DONE'; read guard"
-                ),
-            ])
-            .spawn("/bin/sh")?;
+        let mut t = common::spawn_emit(
+            Terminal::builder()
+                .size(80, 6)
+                .timeout(Duration::from_secs(10)),
+            &[
+                "--raw-mode",
+                "--raw",
+                sequence,
+                "--read",
+                reply_len,
+                " DONE",
+                "--wait",
+            ],
+        )?;
         t.wait_until(|s| s.contains("DONE"))?;
         let row = t.screen().row_text(0);
         assert!(row.contains(expect), "{label}: got {row:?}");
@@ -391,36 +476,35 @@ fn decrqm_answers_each_mouse_tracking_mode_on_its_own() -> termlens::Result<()> 
 /// honesty rule's precondition. Before, an application probing for focus
 /// support was told "not recognized" even right after enabling it.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn decrqm_answers_for_focus_reporting() -> termlens::Result<()> {
     // Reply values: 1 = set, 2 = reset, 0 = not recognized.
-    for (script, expect, label) in [
+    for (sequence, expect, label) in [
+        (r"\e[?1004$p", ";2$y", "reset before the app enables it"),
+        (r"\e[?1004h\e[?1004$p", ";1$y", "set after enabling"),
         (
-            r"printf '\033[?1004$p'",
-            ";2$y",
-            "reset before the app enables it",
-        ),
-        (
-            r"printf '\033[?1004h\033[?1004$p'",
-            ";1$y",
-            "set after enabling",
-        ),
-        (
-            r"printf '\033[?1004h\033[?1004l\033[?1004$p'",
+            r"\e[?1004h\e[?1004l\e[?1004$p",
             ";2$y",
             "reset again after disabling",
         ),
     ] {
-        let mut t = Terminal::builder()
-            .size(80, 6)
-            .timeout(Duration::from_secs(10))
-            .args([
-                "-c",
-                &format!(
-                    "stty -icanon -echo; {script}; \
-                     head -c 11 | tr -d '\\033'; printf ' DONE'; read guard"
-                ),
-            ])
-            .spawn("/bin/sh")?;
+        let mut t = common::spawn_emit(
+            Terminal::builder()
+                .size(80, 6)
+                .timeout(Duration::from_secs(10)),
+            &[
+                "--raw-mode",
+                "--raw",
+                sequence,
+                "--read",
+                "11",
+                " DONE",
+                "--wait",
+            ],
+        )?;
         t.wait_until(|s| s.contains("DONE"))?;
         let row = t.screen().row_text(0);
         assert!(row.contains(expect), "{label}: got {row:?}");
@@ -437,6 +521,10 @@ fn decrqm_answers_for_focus_reporting() -> termlens::Result<()> {
 /// Pixel geometry: unset it stays unanswered and named, set it makes the
 /// two escape replies and `TIOCGWINSZ` agree instead of contradicting.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn cell_size_answers_the_pixel_reports_and_the_ioctl() -> termlens::Result<()> {
     // Unset: no reply, and the query is named in the next timeout.
     let mut mute = common::spawn_emit(
@@ -451,28 +539,34 @@ fn cell_size_answers_the_pixel_reports_and_the_ioctl() -> termlens::Result<()> {
     assert!(err.to_string().contains("^[[16t"), "named: {err}");
     mute.send(Key::Enter)?;
 
-    // Declared: both reports answer from it.
-    let mut t = Terminal::builder()
-        .size(80, 24)
-        .cell_size(10, 20)
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                // `min 0 time 20` so a read returns on a 2s timer instead of
-                // blocking on a byte count guessed wrong.
-                r"stty -icanon -echo min 0 time 20; ",
-                r"printf '\033[16t'; a=$(dd bs=1 count=32 2>/dev/null | tr -d '\033'); ",
-                r"printf '\033[14t'; b=$(dd bs=1 count=32 2>/dev/null | tr -d '\033'); ",
-                r#"printf 'cell[%s] win[%s] DONE' "$a" "$b"; read g"#
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    // Declared: both reports answer from it. `--read-quiet` returns on a
+    // 2s timer instead of blocking on a byte count guessed wrong.
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .size(80, 24)
+            .cell_size(10, 20)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--csi",
+            "16t",
+            "cell[",
+            "--read-quiet",
+            "32",
+            "] win[",
+            "--csi",
+            "14t",
+            "--read-quiet",
+            "32",
+            "] DONE",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("DONE"))?;
     let row = t.screen().row_text(0);
     // CSI 6 ; height ; width t   and   CSI 4 ; rows*h ; cols*w t
-    assert!(row.contains("cell[[6;20;10t]"), "{row:?}");
-    assert!(row.contains("win[[4;480;800t]"), "{row:?}");
+    assert!(row.contains("cell[E[6;20;10t]"), "{row:?}");
+    assert!(row.contains("win[E[4;480;800t]"), "{row:?}");
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
@@ -482,16 +576,23 @@ fn cell_size_answers_the_pixel_reports_and_the_ioctl() -> termlens::Result<()> {
 /// both — otherwise an application gets two different answers to the same
 /// question depending on how it asks.
 #[test]
+#[cfg_attr(windows, ignore = "TIOCGWINSZ is a Unix ioctl")]
 fn tiocgwinsz_agrees_with_the_declared_cell_size() -> termlens::Result<()> {
-    let read_winsize = r#"python3 -c 'import fcntl,struct,sys,termios; b=fcntl.ioctl(0,termios.TIOCGWINSZ,b"\0"*8); r,c,xp,yp=struct.unpack("HHHH",b); print(f"{c}x{r} px {xp}x{yp}", flush=True)'"#;
-    let script = format!("{read_winsize}; read a; {read_winsize}; printf DONE; read b");
-
-    let mut t = Terminal::builder()
-        .size(80, 24)
-        .cell_size(10, 20)
-        .timeout(Duration::from_secs(20))
-        .args(["-c", &script])
-        .spawn("/bin/sh")?;
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .size(80, 24)
+            .cell_size(10, 20)
+            .timeout(Duration::from_secs(20)),
+        &[
+            "--winsize",
+            "NL",
+            "--wait",
+            "--winsize",
+            "NL",
+            "DONE",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("px"))?;
     assert!(
         t.screen().contains("80x24 px 800x480"),
@@ -517,16 +618,18 @@ fn tiocgwinsz_agrees_with_the_declared_cell_size() -> termlens::Result<()> {
 /// reach its pixel path at all. The default claims nothing, which is what
 /// makes the declaration meaningful.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn declared_graphics_support_reaches_the_probe() -> termlens::Result<()> {
     // Default: DA1 has no `4`, and the kitty probe goes unanswered.
-    let mut plain = Terminal::builder()
-        .size(80, 6)
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            r"stty -icanon -echo; printf '\033[c'; head -c 9 | tr -d '\033'; printf ' DONE'; read g",
-        ])
-        .spawn("/bin/sh")?;
+    let mut plain = common::spawn_emit(
+        Terminal::builder()
+            .size(80, 6)
+            .timeout(Duration::from_secs(10)),
+        &["--raw-mode", "--csi", "c", "--read", "9", " DONE", "--wait"],
+    )?;
     plain.wait_until(|s| s.contains("DONE"))?;
     let row = plain.screen().row_text(0);
     assert!(
@@ -537,15 +640,21 @@ fn declared_graphics_support_reaches_the_probe() -> termlens::Result<()> {
     plain.send(Key::Enter)?;
 
     // Sixel declared: DA1 gains `4`, so a probing application sees it.
-    let mut sixel = Terminal::builder()
-        .size(80, 6)
-        .graphics(termlens::Graphics::Sixel)
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            r"stty -icanon -echo; printf '\033[c'; head -c 11 | tr -d '\033'; printf ' DONE'; read g",
-        ])
-        .spawn("/bin/sh")?;
+    let mut sixel = common::spawn_emit(
+        Terminal::builder()
+            .size(80, 6)
+            .graphics(termlens::Graphics::Sixel)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--csi",
+            "c",
+            "--read",
+            "11",
+            " DONE",
+            "--wait",
+        ],
+    )?;
     sixel.wait_until(|s| s.contains("DONE"))?;
     assert!(
         sixel.screen().row_text(0).contains("[?62;4;22c"),
@@ -555,15 +664,21 @@ fn declared_graphics_support_reaches_the_probe() -> termlens::Result<()> {
     sixel.send(Key::Enter)?;
 
     // Kitty declared: the a=q probe is answered OK, echoing the id.
-    let mut kitty = Terminal::builder()
-        .size(80, 6)
-        .graphics(termlens::Graphics::Kitty)
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            r"stty -icanon -echo; printf '\033_Gi=7,a=q;\033\\'; head -c 9 | tr -d '\033'; printf ' DONE'; read g",
-        ])
-        .spawn("/bin/sh")?;
+    let mut kitty = common::spawn_emit(
+        Terminal::builder()
+            .size(80, 6)
+            .graphics(termlens::Graphics::Kitty)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\e_Gi=7,a=q;\e\\",
+            "--read",
+            "9",
+            " DONE",
+            "--wait",
+        ],
+    )?;
     kitty.wait_until(|s| s.contains("DONE"))?;
     assert!(
         kitty.screen().row_text(0).contains("_Gi=7;OK"),
@@ -578,21 +693,27 @@ fn declared_graphics_support_reaches_the_probe() -> termlens::Result<()> {
 /// halves matter: a known capability is answered truthfully, and an unknown
 /// one is *explicitly* declined — which is what turns a hang into a decision.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn xtgettcap_answers_what_it_knows_and_declines_the_rest() -> termlens::Result<()> {
     // TN=544e, colors=636f6c6f7273, and a made-up name that must be refused.
-    let mut t = Terminal::builder()
-        .size(120, 6)
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"stty -icanon -echo min 0 time 20; ",
-                r"printf '\033P+q544e;636f6c6f7273;7a7a7a7a\033\\'; ",
-                r"dd bs=1 count=200 2>/dev/null | tr -d '\033' | tr -s '\\' '|'; ",
-                r"printf ' DONE'; read g"
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    // Wide enough that the three replies stay on one row.
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .size(200, 6)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\eP+q544e;636f6c6f7273;7a7a7a7a\e\\",
+            "--read-quiet",
+            "200",
+            " DONE",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("DONE"))?;
     let text = t.screen().text();
 
@@ -620,21 +741,29 @@ fn xtgettcap_answers_what_it_knows_and_declines_the_rest() -> termlens::Result<(
 /// `TN` reports whatever `TERM` the child was actually given, so an
 /// application cannot get two different answers to "which terminal is this?".
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn xtgettcap_tn_follows_the_configured_term() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .size(120, 6)
-        .env("TERM", "xterm")
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"stty -icanon -echo min 0 time 20; ",
-                r"printf '\033P+q544e\033\\'; ",
-                r"dd bs=1 count=80 2>/dev/null | tr -d '\033' | tr -s '\\' '|'; ",
-                r#"printf ' term=%s DONE' "$TERM"; read g"#
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .size(120, 6)
+            .env("TERM", "xterm")
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\eP+q544e\e\\",
+            "--read-quiet",
+            "80",
+            " term=",
+            "--env",
+            "TERM",
+            " DONE",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("DONE"))?;
     let text = t.screen().text();
     // "xterm" is hex 787465726d
@@ -649,21 +778,26 @@ fn xtgettcap_tn_follows_the_configured_term() -> termlens::Result<()> {
 /// application that reads it and then matches input against it will not
 /// match what arrives.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn xtgettcap_key_capabilities_match_what_send_emits() -> termlens::Result<()> {
     // kcuu1 = 6b63757531; the value must be ESC [ A = 1b5b41.
-    let mut t = Terminal::builder()
-        .size(120, 6)
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"stty -icanon -echo min 0 time 20; ",
-                r"printf '\033P+q6b63757531\033\\'; ",
-                r"dd bs=1 count=80 2>/dev/null | tr -d '\033' | tr -s '\\' '|'; ",
-                r"printf ' DONE'; read g"
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .size(120, 6)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\eP+q6b63757531\e\\",
+            "--read-quiet",
+            "80",
+            " DONE",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("DONE"))?;
     let text = t.screen().text();
     assert!(text.contains("P1+r6b63757531=1b5b41"), "{text}");

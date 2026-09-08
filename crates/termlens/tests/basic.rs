@@ -51,12 +51,9 @@ fn exit_codes_are_reported() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Windows has no signals")]
 fn signal_deaths_are_reported_as_signals_not_exit_codes() -> termlens::Result<()> {
-    // Stays on `/bin/sh`: a process that signals itself is what this test
-    // is about, and the std-only fixture has no `kill`.
-    let mut t = Terminal::builder()
-        .args(["-c", "read guard; kill -TERM $$"])
-        .spawn("/bin/sh")?;
+    let mut t = emit(&["--wait", "--kill-self"])?;
     t.send(Key::Enter)?;
     let status = t.wait_exit()?;
     assert!(!status.success());
@@ -142,13 +139,15 @@ fn env_clear_hands_the_child_exactly_the_builder_environment() -> termlens::Resu
 
 #[test]
 fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termlens::Result<()> {
-    // Probe HOME, not PATH: shells synthesize a compiled-in default PATH
-    // when none is inherited, so PATH can't distinguish "inherited" from
-    // "defaulted". HOME is always set for the test process and never
-    // synthesized by a non-interactive shell.
+    // Probe a variable the parent always has and no program synthesizes:
+    // HOME on Unix, USERPROFILE on Windows, which has no HOME unless a shell
+    // put one there. Not PATH: shells synthesize a compiled-in default when
+    // none is inherited, so PATH can't distinguish "inherited" from
+    // "defaulted".
+    let inherited = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     assert!(
-        std::env::var_os("HOME").is_some(),
-        "test needs HOME in the parent env"
+        std::env::var_os(inherited).is_some(),
+        "test needs {inherited} in the parent env"
     );
     let mut t = common::spawn_emit(
         Terminal::builder()
@@ -156,9 +155,9 @@ fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termlens::
             .env_clear()
             .envs([("KEPT_AFTER", "also")]),
         &[
-            "home=",
+            "inherited=",
             "--env",
-            "HOME",
+            inherited,
             " term=",
             "--env",
             "TERM",
@@ -174,8 +173,8 @@ fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termlens::
     t.wait_until(|s| s.contains("before=yes after=also"))?;
     let screen = t.screen();
     assert!(
-        screen.contains("home=unset"),
-        "HOME leaked through env_clear:\n{screen}"
+        screen.contains("inherited=unset"),
+        "{inherited} leaked through env_clear:\n{screen}"
     );
     assert!(
         screen.contains("term=xterm-256color"),

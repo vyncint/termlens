@@ -327,7 +327,7 @@ fn the_limit_is_inclusive_and_resize_honours_it() -> termlens::Result<()> {
     // Refused without disturbing the grid, like the zero case.
     assert_eq!(t.screen().size(), (1000, 1000));
 
-    t.send_str("\n")?;
+    t.send(termlens::Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
 }

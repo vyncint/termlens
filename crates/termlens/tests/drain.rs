@@ -7,30 +7,33 @@
 //! the one failure the harness must never produce, since a hung harness
 //! cannot report anything at all.
 //!
-//! These stay on `/bin/sh` on purpose (#249): every program here puts the
-//! terminal in raw mode with `stty -icanon -echo` so replies are neither
-//! echoed onto the grid nor held for a newline, and the std-only `emit`
-//! fixture has no way to set a terminal mode.
+//! Every program here runs in `--raw-mode`, so replies are neither echoed
+//! onto the grid nor held for a newline.
 
 use std::time::{Duration, Instant};
 
 use termlens::{Error, Terminal};
 
+mod common;
+
 /// ~1000 cursor-position queries generate ~8 KB of replies — past the
 /// noncanonical tty buffer — from a child that never reads its input.
-const FLOOD: &str = r"stty -icanon -echo; i=0; while [ $i -lt 1000 ]; do printf '\033[6n'; i=$((i+1)); done; printf 'DONE\n'; sleep 3";
+fn flood() -> termlens::Result<Terminal> {
+    let queries = r"\e[6n".repeat(1000);
+    common::spawn_emit(
+        Terminal::builder()
+            .size(80, 24)
+            .env_clear()
+            // answer_queries defaults to true: this is the default config.
+            .timeout(Duration::from_secs(10)),
+        &["--raw-mode", "--raw", &queries, "DONE\n", "--sleep", "3s"],
+    )
+}
 
 #[test]
 fn a_child_that_never_reads_its_replies_cannot_wedge_the_drain() {
     let start = Instant::now();
-    let mut t = Terminal::builder()
-        .size(80, 24)
-        .env_clear()
-        // answer_queries defaults to true: this is the default config.
-        .timeout(Duration::from_secs(10))
-        .args(["-c", FLOOD])
-        .spawn("/bin/sh")
-        .expect("spawn");
+    let mut t = flood().expect("spawn");
 
     // The child's own output must keep arriving: the drain is alive.
     t.wait_until(|s| s.contains("DONE"))
@@ -64,13 +67,7 @@ fn a_child_that_never_reads_its_replies_cannot_wedge_the_drain() {
 /// exchange for a well-behaved one actually getting its answers.
 #[test]
 fn undelivered_replies_are_named_where_the_kernel_makes_them_visible() {
-    let mut t = Terminal::builder()
-        .size(80, 24)
-        .env_clear()
-        .timeout(Duration::from_secs(10))
-        .args(["-c", FLOOD])
-        .spawn("/bin/sh")
-        .expect("spawn");
+    let mut t = flood().expect("spawn");
 
     // Let the whole flood land first. The child prints DONE *after* its
     // last query, so once that is on screen the drain has read every
@@ -125,18 +122,24 @@ fn undelivered_replies_are_named_where_the_kernel_makes_them_visible() {
 /// The ordinary case must be untouched: an application that reads its
 /// replies still gets every one of them.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
 fn replies_still_reach_an_application_that_reads_them() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"stty -icanon -echo; printf 'abc\033[6n'; ",
-                r#"reply=$(head -c 6 | tr '\033' 'E'); "#,
-                r#"printf '\nunblocked:%s' "$reply"; read guard"#
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = common::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "abc",
+            "--csi",
+            "6n",
+            "\nunblocked:",
+            "--read",
+            "6",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("unblocked:E[1;4R"))?;
     t.send(termlens::Key::Enter)?;
     assert!(t.wait_exit()?.success());

@@ -70,6 +70,10 @@ fn shift_out_and_shift_in_select_the_designated_set() -> termlens::Result<()> {
 /// correspondence check — run on every snapshot — is what proves the two
 /// grids stayed the same shape through the rewrite.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY translates charset designations itself and re-emits its own rendering (#149)"
+)]
 fn a_styled_border_keeps_its_style() -> termlens::Result<()> {
     let mut t = emit(&["--raw", r"\e(0\e[31mqqq\e[0m\e(B end", "DONE", "--wait"])?;
     t.wait_until(|s| s.contains("DONE"))?;
@@ -112,6 +116,10 @@ fn a_hard_reset_returns_to_ascii() -> termlens::Result<()> {
 /// it stays. It used to parse cleanly and do nothing, so text printed after
 /// an application's teardown reset kept rendering as box drawing (#233).
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY translates charset designations itself and re-emits its own rendering (#149)"
+)]
 fn a_soft_reset_returns_to_ascii_without_clearing_the_screen() -> termlens::Result<()> {
     let mut t = emit(&[
         "--raw",
@@ -226,6 +234,10 @@ fn a_pending_single_shift_does_not_survive_ris() -> termlens::Result<()> {
 /// it, so a graphics byte after them stays a letter. The old GL-only
 /// consume left the shift pending and turned that `l` into `┌`.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY translates charset designations itself and re-emits its own rendering (#149)"
+)]
 fn a_multibyte_character_consumes_a_single_shift() -> termlens::Result<()> {
     let mut t = emit(&[
         "--raw",

@@ -2,23 +2,32 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
-fn inspect_bin() -> PathBuf {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
-        .args(["build", "-p", "termlens", "--example", "inspect"])
-        .status()
-        .expect("failed to run cargo build for the inspect example");
-    assert!(status.success(), "cargo build --example inspect failed");
+/// Built once per test process, whichever test asks first. Every test used
+/// to run its own `cargo build`, and two of them in parallel could race a
+/// relink: one unlinks and rewrites the example while the other's
+/// `Command::new` finds nothing there — `NotFound`, once, on a macOS runner
+/// (#278). Same shape as `common::fixture_bin`'s guard, for the same reason.
+fn inspect_bin() -> &'static PathBuf {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let status = Command::new(cargo)
+            .args(["build", "-p", "termlens", "--example", "inspect"])
+            .status()
+            .expect("failed to run cargo build for the inspect example");
+        assert!(status.success(), "cargo build --example inspect failed");
 
-    let test_exe = std::env::current_exe().expect("test executable path is available");
-    let profile_dir = test_exe
-        .parent()
-        .and_then(|deps| deps.parent())
-        .expect("test executable is under target/<profile>/deps");
-    profile_dir
-        .join("examples")
-        .join(format!("inspect{}", std::env::consts::EXE_SUFFIX))
+        let test_exe = std::env::current_exe().expect("test executable path is available");
+        let profile_dir = test_exe
+            .parent()
+            .and_then(|deps| deps.parent())
+            .expect("test executable is under target/<profile>/deps");
+        profile_dir
+            .join("examples")
+            .join(format!("inspect{}", std::env::consts::EXE_SUFFIX))
+    })
 }
 
 fn run_inspect(bin: &PathBuf, args: &[&str]) -> Output {
@@ -32,7 +41,7 @@ fn run_inspect(bin: &PathBuf, args: &[&str]) -> Output {
 fn inspect_runs_and_reports_cli_failures() {
     let bin = inspect_bin();
 
-    let sized = run_inspect(&bin, &["--size", "12x3", "sh", "-c", "stty size"]);
+    let sized = run_inspect(bin, &["--size", "12x3", "sh", "-c", "stty size"]);
     assert!(
         sized.status.success(),
         "inspect failed: {}",
@@ -48,7 +57,7 @@ fn inspect_runs_and_reports_cli_failures() {
         "exit status missing from:\n{stdout}"
     );
 
-    let bad_size = run_inspect(&bin, &["--size", "12", "sh"]);
+    let bad_size = run_inspect(bin, &["--size", "12", "sh"]);
     assert_eq!(bad_size.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&bad_size.stderr).contains("expected e.g. 120x40"),
@@ -56,7 +65,7 @@ fn inspect_runs_and_reports_cli_failures() {
         String::from_utf8_lossy(&bad_size.stderr)
     );
 
-    let missing_program = run_inspect(&bin, &["/definitely/not/a/program"]);
+    let missing_program = run_inspect(bin, &["/definitely/not/a/program"]);
     assert_eq!(missing_program.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&missing_program.stderr).starts_with("inspect:"),
@@ -68,7 +77,7 @@ fn inspect_runs_and_reports_cli_failures() {
 #[test]
 fn inspect_clears_and_selectively_sets_the_child_environment() {
     let bin = inspect_bin();
-    let output = Command::new(&bin)
+    let output = Command::new(bin)
         .env("TERMLENS_INSPECT_LEAK", "secret")
         .args(["--env", "KEPT=yes"])
         .args(["sh", "-c", "printf ${TERMLENS_INSPECT_LEAK-unset}:$KEPT"])
@@ -80,7 +89,7 @@ fn inspect_clears_and_selectively_sets_the_child_environment() {
         "cleared/selected environment missing from:\n{stdout}"
     );
 
-    let inherited = Command::new(&bin)
+    let inherited = Command::new(bin)
         .env("TERMLENS_INSPECT_INHERITED", "yes")
         .args(["--inherit-env"])
         .args(["sh", "-c", "printf inherited:$TERMLENS_INSPECT_INHERITED"])
@@ -102,7 +111,7 @@ fn inspect_survives_a_reader_that_closes_early() {
     // closed the write gets EPIPE — which println! turned into a panic and
     // exit 101 (#223). A viewer piped into `head` must exit cleanly.
     let bin = inspect_bin();
-    let mut child = Command::new(&bin)
+    let mut child = Command::new(bin)
         .args(["--size", "200x1000", "sh", "-c", "yes | head -n 2000"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -132,7 +141,7 @@ fn inspect_prints_its_usage_for_help_and_for_a_missing_program() {
     let bin = inspect_bin();
 
     for flag in ["--help", "-h"] {
-        let help = run_inspect(&bin, &[flag]);
+        let help = run_inspect(bin, &[flag]);
         assert_eq!(
             help.status.code(),
             Some(0),
@@ -148,7 +157,7 @@ fn inspect_prints_its_usage_for_help_and_for_a_missing_program() {
         assert!(help.stderr.is_empty(), "{flag} wrote to stderr");
     }
 
-    let version = run_inspect(&bin, &["--version"]);
+    let version = run_inspect(bin, &["--version"]);
     assert_eq!(version.status.code(), Some(0));
     assert!(
         String::from_utf8_lossy(&version.stdout)
@@ -156,7 +165,7 @@ fn inspect_prints_its_usage_for_help_and_for_a_missing_program() {
         "--version names the crate version"
     );
 
-    let none = run_inspect(&bin, &[]);
+    let none = run_inspect(bin, &[]);
     assert_eq!(
         none.status.code(),
         Some(1),
@@ -169,7 +178,7 @@ fn inspect_prints_its_usage_for_help_and_for_a_missing_program() {
         String::from_utf8_lossy(&none.stderr)
     );
 
-    let unknown = run_inspect(&bin, &["--bogus", "sh"]);
+    let unknown = run_inspect(bin, &["--bogus", "sh"]);
     assert_eq!(unknown.status.code(), Some(1));
     assert!(
         String::from_utf8_lossy(&unknown.stderr).contains("unknown option \"--bogus\""),
@@ -197,7 +206,7 @@ fn inspect_takes_its_deadline_and_silence_window_from_flags() {
         (&["--timeout"][..], "--timeout needs a SECONDS argument"),
         (&["--idle"][..], "--idle needs a MILLIS argument"),
     ] {
-        let out = run_inspect(&bin, args);
+        let out = run_inspect(bin, args);
         assert_eq!(out.status.code(), Some(1), "{args:?}");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains(expect), "{args:?}: got {stderr:?}");
@@ -214,7 +223,7 @@ fn inspect_takes_its_deadline_and_silence_window_from_flags() {
     // still on the screen it prints.
     let started = std::time::Instant::now();
     let cut = run_inspect(
-        &bin,
+        bin,
         &[
             "--timeout",
             "1",
@@ -264,7 +273,7 @@ fn inspect_resolves_a_relative_program_path_from_its_working_directory() {
     std::os::unix::fs::symlink("/bin/echo", &echo)
         .expect("link /bin/echo into the scratch directory");
 
-    let out = Command::new(&bin)
+    let out = Command::new(bin)
         .current_dir(&scratch)
         .args(["./echo", "relative path resolved"])
         .output()

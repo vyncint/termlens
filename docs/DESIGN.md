@@ -199,6 +199,40 @@ the terminal (`^[[14t`) and received no answer" — a hang becomes a
 diagnosis. `answer_queries(false)` mutes the responder for tests that
 need a silent terminal; the diagnosis still works.
 
+### Windows: ConPTY renders, and that decides what is claimed
+
+`portable-pty` gives the same four layers a ConPTY backend, and the crate
+builds and runs its suite on `windows-latest`. But ConPTY is a terminal
+emulator of its own standing between the child and layer 1: it renders the
+child's bytes into a screen and re-emits *its* rendering, and `portable-pty`
+creates it without `PSEUDOCONSOLE_PASSTHROUGH_MODE`. Measured with
+`tests/conpty_probe.rs` (twenty-one sequences in, six out verbatim):
+
+- **Eaten:** DA1, OSC 10/11, XTGETTCAP, DECRQM, mouse and focus mode sets,
+  kitty and sixel payloads, HTS/TBC. The responder never sees the question,
+  so the answers it is configured to give — `Graphics`, `background_rgb`,
+  `cell_size` — cannot reach the child.
+- **Reordered:** a DEC 2026 update arrives as `?2026h ?2026l` *then* the
+  content. A frame is the bracket, so `wait_frame` sees frames that never
+  contain what was drawn. Screen assertions yes, frame assertions no.
+- **Rewritten but equivalent:** SGR split and reordered, OSC 2 as OSC 0, DEC
+  Special Graphics already translated to UTF-8, a tab as `CUF`, an OSC 8
+  link with an id ConPTY chose.
+- **A preamble every child gets:** `CSI 6 n`, `?9001h`, `?1004h`, a title of
+  the executable path, `?25h`. Two of those bind the harness: the console
+  does **not start the child until the `6n` is answered** — the responder
+  answers it as it would any query, which is why the harness runs there at
+  all — and `?1004h` means `focus_events()` is true from the first byte.
+- **Child exit is not EOF.** The output pipe stays open until the console is
+  closed, whoever has exited. Every liveness decision reads EOF off the
+  master on Unix, so on Windows the reaped child plus the drain grace is the
+  signal instead (`EXIT_CLOSES_THE_TERMINAL`, `ExitWatch`).
+
+Each test a row above makes impossible is `#[cfg_attr(windows, ignore)]`
+with that row as its reason; the README carries the user-facing list. The
+`windows` workflow re-runs the probe and the whole suite on demand, and the
+`windows-check` gate keeps the build compiling from a Linux runner.
+
 ## 2. Wait semantics
 
 Every wait runs under the terminal's **default deadline** (builder

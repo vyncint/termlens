@@ -160,6 +160,10 @@ fn a_needle_finds_text_in_the_other_normalization_form() -> termlens::Result<()>
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Rust's console stdio refuses to write bytes that are not UTF-8, so the fixture cannot send them on Windows (#149)"
+)]
 fn unicode_torture_renders_with_correct_widths() -> termlens::Result<()> {
     let mut t = spawn_fixture("unicode-torture")?;
     // Wait on the cursor, not on contains("done"): the predicate would turn

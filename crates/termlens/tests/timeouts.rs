@@ -22,6 +22,10 @@ fn slow_app(steps: &[&str]) -> Terminal {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
 fn wait_frame_for_overrides_the_builder_default() -> termlens::Result<()> {
     let mut t = slow_app(&[
         "--sleep",

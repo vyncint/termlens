@@ -329,8 +329,26 @@ design. termlens's position:
   it would against a real terminal. On Linux the kernel discards silently,
   so that loss is undetectable and goes unreported; macOS blocks instead,
   where it is counted and named.
-- Unix only for now (Linux + macOS in CI). The PTY layer (`portable-pty`)
-  supports ConPTY, so Windows is planned, not designed out.
+- **Windows: screen assertions yes, frame assertions no.** The crate builds
+  and the whole suite runs on `windows-latest` in CI, over ConPTY through
+  `portable-pty`. ConPTY is not a passthrough — it renders the child's
+  output into a screen of its own and re-emits *that* — so what termlens
+  can honestly claim there is what survives the re-render: the grid (text,
+  cells, styles, cursor, wide characters, box drawing, title, links by URL,
+  clipboard, bracketed paste, cursor shape, bell, the alternate screen),
+  resize, typed input, `wait_until` / `wait_stable` / `snapshot_after`,
+  `bin!`. What it cannot claim, and documents as Unix-only: `wait_frame` and
+  `frame_timings` (ConPTY closes a DEC 2026 bracket *before* the content it
+  wrapped); `GraphicsPayload` and everything under `graphics` (kitty and
+  sixel never arrive); the responder's outbound claims — `Graphics`,
+  `background_rgb`, `foreground_rgb`, `cell_size` — since DA1, OSC 10/11,
+  XTGETTCAP and DECRQM are answered by ConPTY itself and never reach
+  termlens; `mouse_modes` and `mouse_mode`; `focus_events` (ConPTY turns
+  1004 on for itself); link ids (ConPTY assigns its own); `Terminal::signal`;
+  and bytes that are not UTF-8 (Rust's console stdio refuses to write
+  them). The tests for each are `#[cfg_attr(windows, ignore = "…")]` with
+  the reason in the attribute; the probe that measured all of this is
+  `tests/conpty_probe.rs`, and the `windows` workflow re-runs it on demand.
 - A child that writes and exits within its first milliseconds can lose
   output to the OS PTY teardown (macOS especially). Long-lived TUIs are
   unaffected; for run-and-exit programs, end the script with a `read` and

@@ -167,6 +167,7 @@ fn a_hard_reset_restores_the_default_stops() -> termlens::Result<()> {
 /// `DECSTR` restores them too — the soft reset a well-behaved TUI sends on
 /// startup and teardown, which leaves the screen alone.
 #[test]
+#[cfg_attr(windows, ignore = "ConPTY does not forward DECSTR (#149)")]
 fn a_soft_reset_restores_the_default_stops() -> termlens::Result<()> {
     let mut t = emit(&[
         "--csi", "3g", "--csi", "4G", "--esc", "H", "--csi", "!p", "--csi", "1G", "\tx", " DONE",

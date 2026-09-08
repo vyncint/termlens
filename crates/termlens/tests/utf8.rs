@@ -14,6 +14,10 @@ fn emit(steps: &[&str]) -> termlens::Result<Terminal> {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Rust's console stdio refuses to write bytes that are not UTF-8, so the fixture cannot send them on Windows (#149)"
+)]
 fn an_invalid_byte_is_a_replacement_character_and_the_columns_hold() -> termlens::Result<()> {
     // A Latin-1 `é` in a file name, a corrupted log line: the byte used to
     // be deleted from the grid, so `done` sat one column too far left and
@@ -52,6 +56,10 @@ fn a_character_split_across_two_writes_is_still_one_character() -> termlens::Res
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Rust's console stdio refuses to write bytes that are not UTF-8, so the fixture cannot send them on Windows (#149)"
+)]
 fn wait_idle_does_not_call_a_half_written_character_silence() -> termlens::Result<()> {
     // The application stops for 600ms in the middle of a character. That is
     // not idleness — the stream ends mid-character — so `wait_idle` must
