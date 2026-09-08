@@ -9,6 +9,8 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-08
+
 ### Added
 
 - **Styled history, opt in: `TerminalBuilder::scrollback_styles(true)` and
