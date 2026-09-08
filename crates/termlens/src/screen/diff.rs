@@ -50,6 +50,13 @@ impl Screen {
     /// # }
     /// ```
     ///
+    /// Two cells are the same when they look the same: an erased cell and a
+    /// written space in the same style are one blank on every terminal, so
+    /// they do not differ here even though [`Cell::contents`] distinguishes
+    /// them (`""` against `" "`). That is what lets a screen rendered through
+    /// a PTY be held against one built cell by cell, where every blank was
+    /// written.
+    ///
     /// Sizes that differ diff what overlaps, and the rendering says what was
     /// clipped. The rendering is plain text — no colour, so CI logs stay
     /// readable — and shows only the rows that changed, with a marker line
@@ -68,7 +75,7 @@ impl Screen {
                 let (Some(a), Some(b)) = (self.cell(row, col), other.cell(row, col)) else {
                     continue;
                 };
-                if a != b {
+                if !same_picture(a, b) {
                     changed_cols.push(col);
                     cells.push((row, col, a.clone(), b.clone()));
                 }
@@ -100,6 +107,17 @@ impl Screen {
             rows: rows_out,
         }
     }
+}
+
+/// Whether two cells draw the same thing: equal, or both blank in the same
+/// style — an erased cell (`""`) and a written space (`" "`) are the one
+/// picture a terminal can show for either.
+fn same_picture(a: &Cell, b: &Cell) -> bool {
+    let blank = |cell: &Cell| matches!(cell.contents(), "" | " ");
+    a.style() == b.style()
+        && a.is_wide() == b.is_wide()
+        && a.is_wide_continuation() == b.is_wide_continuation()
+        && (a.contents() == b.contents() || (blank(a) && blank(b)))
 }
 
 /// One row's `styles:` runs, `(none)` for an all-default row — the same

@@ -46,7 +46,21 @@ listed under a **Changed** or **Removed** heading.
   `cells()` for assertions; `assert!(a.diff(&b).is_empty(), "{}", a.diff(&b))`
   is the documented way to compare two screens outside insta. A `wait_frame`
   timeout now shows the diff from the frame it last returned to the live
-  screen. Plain text, so CI logs stay readable. (#246)
+  screen. Plain text, so CI logs stay readable. An erased cell and a
+  written space in the same style are one blank, not a difference. (#246)
+
+- **`fixtures/ratatui-app` and its fidelity test.** No fixture was a
+  ratatui application, so the one check only a PTY harness can make for
+  ratatui users was never made here. The fixture is a counter/list with
+  every repaint in a DEC 2026 bracket, `j`/`k`/`q`, and a resize
+  acknowledged on its status line; `fixtures/ratatui-app/tests/fidelity.rs`
+  renders the same `draw` through the PTY and through `TestBackend` and
+  diffs the two cell by cell — cells and styles, at two sizes with a resize
+  between. The README's comparison section now lists what `TestBackend`
+  structurally cannot see, each with the termlens assertion that does.
+  ratatui 0.30 needs Rust 1.88, so the fixture carries its own
+  `rust-version` and the MSRV check excludes it; the library's floor is
+  unchanged. (#252)
 
 - **`Screen::to_ansi`, `to_svg`, `to_html`.** Three renderings a person can
   see — paste the ANSI into a terminal and the failure is on screen in
