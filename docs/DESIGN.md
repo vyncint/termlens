@@ -478,6 +478,13 @@ re-read, which is by definition the newest N rows. Measured on 50,000
 lines through an 80x24 screen: 352ms with retention off, 327ms below the
 bound (free, within noise), 639ms on the re-read path.
 
+History is text unless the builder asks for styles (`scrollback_styles`),
+in which case the scrolled rows are captured as cells too and the shadow
+parser keeps the same history, read at the same offset, so the
+correspondence invariant extends from the grid to history; the knob's
+rustdoc carries the measured cost. `Screen::locate` searches grid then
+history and names the region.
+
 Two limits are documented rather than papered over: history is bounded, so
 a longer run drops its oldest rows; and resize does not reflow, so rows
 keep the width they were captured at — a decision, recorded on

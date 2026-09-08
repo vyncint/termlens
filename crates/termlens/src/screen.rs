@@ -433,6 +433,9 @@ pub(crate) struct TermState {
     /// history is asserted on for its content. The rows are shared, so a
     /// snapshot pays one `Arc` clone each.
     pub(crate) scrollback: Arc<[Arc<str>]>,
+    /// The scrolled-off rows as cells, when the terminal retains styled
+    /// history; `None` when it does not. In lockstep with `scrollback`.
+    pub(crate) scrollback_cells: Option<Arc<[Arc<[Cell]>]>>,
     /// Per row, whether it ended in a soft wrap rather than a line end —
     /// the backend's own record, never asked for before #265.
     pub(crate) wrapped: Arc<[bool]>,
@@ -463,6 +466,7 @@ impl Default for TermState {
             graphics: GraphicsSeen::default(),
             repaints: 0,
             scrollback: Arc::from([] as [Arc<str>; 0]),
+            scrollback_cells: None,
             wrapped: Arc::from([] as [bool; 0]),
             insert_mode: false,
             unsupported: Arc::from([] as [Arc<str>; 0]),
@@ -518,6 +522,28 @@ impl Cell {
     pub fn is_wide_continuation(&self) -> bool {
         self.wide_continuation
     }
+}
+
+/// Where [`Screen::locate`] found a needle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Location {
+    /// On the visible grid, at this `(row, col)` — the same coordinates
+    /// [`Screen::find`] reports.
+    Screen {
+        /// Grid row, zero-based from the top.
+        row: u16,
+        /// Grid column, zero-based, a real terminal column.
+        col: u16,
+    },
+    /// In the retained history, in row `row` counting from the oldest
+    /// retained row, at display column `col` of that row as it was
+    /// captured. Not a grid coordinate, and not stable across a resize.
+    History {
+        /// History row, oldest first.
+        row: usize,
+        /// Display column within that row, as captured.
+        col: u16,
+    },
 }
 
 /// An immutable snapshot of the terminal screen.
@@ -1087,6 +1113,83 @@ impl Screen {
             out.push_str(row);
         }
         out
+    }
+
+    /// Whether this terminal retains **styles** in history —
+    /// [`TerminalBuilder::scrollback_styles`](crate::TerminalBuilder::scrollback_styles)
+    /// — so [`scrollback_cell`](Self::scrollback_cell) answers.
+    #[must_use]
+    pub fn styled_scrollback(&self) -> bool {
+        self.state.scrollback_cells.is_some()
+    }
+
+    /// The cell at `(row, col)` of the retained history, row 0 the oldest,
+    /// or `None` out of range — and `None` for every cell unless the
+    /// terminal was built with
+    /// [`scrollback_styles(true)`](crate::TerminalBuilder::scrollback_styles).
+    ///
+    /// This is what keeps the masked-password assertion alive once the line
+    /// scrolls: `scrollback_cell(row, col).unwrap().style().conceal` is the
+    /// same question [`cell`](Self::cell) answers on the grid. The column is
+    /// the one the row was captured at — history is not reflowed, so after a
+    /// narrowing resize the rows captured before it are wider than the grid
+    /// is now.
+    #[must_use]
+    pub fn scrollback_cell(&self, row: usize, col: u16) -> Option<&Cell> {
+        self.state
+            .scrollback_cells
+            .as_ref()?
+            .get(row)?
+            .get(usize::from(col))
+    }
+
+    /// Where `needle` is, on the visible screen or in the retained history
+    /// — the search that spans both and says which region it found the
+    /// needle in, so a wait can be written that does not depend on where a
+    /// block currently sits.
+    ///
+    /// The grid is searched first, with [`find`](Self::find)'s semantics
+    /// (NFC on both sides, trailing whitespace trimmed, real columns); then
+    /// history, oldest row first, with the same folding. A history column is
+    /// a display column of the row **as it was captured**: history is not
+    /// reflowed, so it does not survive a narrowing resize, and it is not a
+    /// grid coordinate — nothing here promises one. Multi-row needles are
+    /// searched on the grid only.
+    ///
+    /// ```
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().size(20, 3)
+    /// #     .args(["-c", "printf 'SECRET\na\nb\nc\nd\n'; read q"]).spawn("sh")?;
+    /// # t.wait_until(|s| s.scrollback_rows() > 0)?;
+    /// use termlens::Location;
+    /// match t.screen().locate("SECRET") {
+    ///     Some(Location::History { row, col }) => assert_eq!((row, col), (0, 0)),
+    ///     other => panic!("scrolled off, so it is in history: {other:?}"),
+    /// }
+    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn locate(&self, needle: &str) -> Option<Location> {
+        if let Some((row, col)) = self.find(needle) {
+            return Some(Location::Screen { row, col });
+        }
+        if needle.is_empty() || needle.contains('\n') {
+            return None;
+        }
+        let needle = nfc(needle);
+        for (row, line) in self.state.scrollback.iter().enumerate() {
+            let folded = nfc(line);
+            let Some(byte_off) = folded.find(needle.as_str()) else {
+                continue;
+            };
+            let col = unicode_width::UnicodeWidthStr::width(&folded[..byte_off]);
+            return Some(Location::History {
+                row,
+                col: u16::try_from(col).unwrap_or(u16::MAX),
+            });
+        }
+        None
     }
 
     /// History **and** visible screen, as one text block: the retained

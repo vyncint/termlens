@@ -11,6 +11,24 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- **Styled history, opt in: `TerminalBuilder::scrollback_styles(true)` and
+  `Screen::scrollback_cell`.** A row lost every style the moment it scrolled
+  off, so the masked-password assertion — the one v0.4 paid a second parser
+  for — silently degraded to text the instant the screen filled. With the
+  knob, the scrolled rows are retained as cells beside the text, the shadow
+  parser keeps the same history and is read in lockstep so conceal, blink
+  and strikethrough come along, and a snapshot still pays one refcount per
+  retained row. Off by default, because the cost lands where a suite feels
+  it — every read that scrolls captures cells, and a full history is re-read
+  on each — and measured in the knob's rustdoc: about 90 ms against 40 ms
+  for 20,000 lines. (#146)
+
+- **`Screen::locate`**: where a needle is, on the grid or in history, as a
+  `Location` that says which. The addressing half of the scrolled-off-text
+  problem, honest about what history can promise: a history column is the
+  row's display column as it was captured, not a grid coordinate, and does
+  not survive a narrowing resize. (#147)
+
 - **`Terminal::record()`.** Every complete frame from that moment on,
   timestamped, until `stop()`: `Recording::frames()` for asserting on the
   sequence of repaints an animation went through, and `write_asciicast()`

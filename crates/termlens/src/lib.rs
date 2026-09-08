@@ -125,7 +125,8 @@ pub use graphics::{
 };
 pub use keys::{Chord, Input, Key};
 pub use screen::{
-    Cell, Clipboard, Color, CursorShape, Link, MouseMode, MouseModes, Screen, ScreenDiff, Style,
+    Cell, Clipboard, Color, CursorShape, Link, Location, MouseMode, MouseModes, Screen, ScreenDiff,
+    Style,
 };
 #[cfg(unix)]
 pub use terminal::Signal;
