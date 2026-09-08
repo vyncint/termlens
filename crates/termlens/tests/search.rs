@@ -222,3 +222,50 @@ mod patterns {
         Ok(())
     }
 }
+
+/// `mask_matching` is documented as matching "the way `find_all` matches",
+/// and `find_all` spans rows. The mask ran its matcher one row at a time, so
+/// a needle crossing a row boundary was reported and then left on screen —
+/// the one failure mode a mask exists to prevent (#300).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY re-renders the grid, so the wide-character columns this asserts on are its own (#149)"
+)]
+fn a_mask_covers_a_needle_that_spans_rows() -> termlens::Result<()> {
+    // Two occurrences, one of them crossing a wide character, and a row that
+    // must survive untouched between them.
+    let mut t = emit(&[
+        "--raw",
+        r"abc\r\ndef\r\nKEEP ME\r\nab東\r\ndef\r\n",
+        "--wait",
+    ])?;
+    t.wait_until(|s| s.contains("KEEP ME"))?;
+    let screen = t.screen();
+
+    assert_eq!(screen.find_all("abc\ndef"), vec![(0, 0)]);
+    let masked = screen.mask_matching("abc\ndef", '*');
+    assert!(
+        masked.find_all("abc\ndef").is_empty(),
+        "the needle survived the mask:\n{masked}"
+    );
+    assert_eq!(masked.row_text(0).trim_end(), "***");
+    assert_eq!(masked.row_text(1).trim_end(), "***");
+    // Everything outside the match is untouched, styles included.
+    assert_eq!(masked.row_text(2).trim_end(), "KEEP ME");
+    assert_eq!(masked.row_text(3).trim_end(), "ab東");
+    assert_eq!(masked.size(), screen.size());
+    assert_eq!(masked.cursor(), screen.cursor());
+
+    // A wide character under the match becomes two fill cells, so the row
+    // keeps its width — the invariant every mask holds.
+    let wide = screen.mask_matching("ab東\ndef", '#');
+    assert_eq!(wide.row_text(3).trim_end(), "####");
+    assert_eq!(wide.row_text(4).trim_end(), "###");
+    assert_eq!(wide.row_text(2).trim_end(), "KEEP ME");
+    assert!(wide.find_all("ab東\ndef").is_empty(), "{wide}");
+
+    t.send(Key::Enter)?;
+    t.wait_exit()?;
+    Ok(())
+}

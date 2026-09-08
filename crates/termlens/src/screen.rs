@@ -525,6 +525,21 @@ impl Cell {
     }
 }
 
+/// Whether two cursors look the same on screen.
+///
+/// A hidden cursor draws nothing, so *where* it sits is not part of the
+/// picture — and the snapshot text format does not record it, which is what
+/// made a parsed snapshot report a difference against its own original that
+/// no one could see (#298). A visible cursor's position is part of the
+/// picture, and so is the visibility itself.
+pub(crate) fn same_cursor(a: (u16, u16, bool), b: (u16, u16, bool)) -> bool {
+    match (a.2, b.2) {
+        (false, false) => true,
+        (true, true) => (a.0, a.1) == (b.0, b.1),
+        _ => false,
+    }
+}
+
 /// Where [`Screen::locate`] found a needle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Location {
@@ -616,8 +631,7 @@ impl Screen {
     pub(crate) fn same_picture(&self, other: &Screen) -> bool {
         self.cols == other.cols
             && self.rows == other.rows
-            && (self.cursor_row, self.cursor_col, self.cursor_visible)
-                == (other.cursor_row, other.cursor_col, other.cursor_visible)
+            && same_cursor(self.cursor(), other.cursor())
             && (Arc::ptr_eq(&self.cells, &other.cells) || self.cells == other.cells)
     }
 
@@ -1399,12 +1413,49 @@ impl Screen {
         let Ok(extra) = u16::try_from(segments.len() - 1) else {
             return;
         };
+        self.for_each_multirow_match(&segments, |row| {
+            let (first_line, cols) = self.searchable_row(row);
+            let first = first_line.trim_end();
+            // The needle's first character: on this row for a non-empty
+            // first segment, else the first character after the leading
+            // newlines (start of a following row).
+            let at = match segments.iter().position(|s| !s.is_empty()) {
+                Some(0) => {
+                    let byte_off = first.len() - segments[0].len();
+                    match cols.get(byte_off) {
+                        Some(&col) => (row, col),
+                        None => return false,
+                    }
+                }
+                Some(k) => match u16::try_from(k) {
+                    Ok(k) => (row + k, 0),
+                    Err(_) => return false,
+                },
+                None => (row + extra, 0),
+            };
+            visit(at)
+        });
+    }
+
+    /// Every non-overlapping multi-row match of `segments`, reported as the
+    /// row its **first** segment sits on. The shape such a needle has to
+    /// have: the first segment ends a row (after the trailing-whitespace
+    /// trim), the middle segments are whole rows, the last starts one.
+    ///
+    /// One engine, two callers — [`find_all`](Self::find_all) and
+    /// [`mask_matching`](Self::mask_matching) — so they cannot disagree
+    /// about what matched, which is exactly how a mask came to leave a
+    /// needle `find_all` reported (#300).
+    fn for_each_multirow_match(&self, segments: &[&str], mut visit: impl FnMut(u16) -> bool) {
+        let Ok(extra) = u16::try_from(segments.len().saturating_sub(1)) else {
+            return;
+        };
         let Some(last_start) = self.rows.checked_sub(extra) else {
             return;
         };
         let mut row = 0;
         while row < last_start {
-            let (first_line, cols) = self.searchable_row(row);
+            let (first_line, _) = self.searchable_row(row);
             let first = first_line.trim_end();
             let tail_matches = || {
                 segments[1..].iter().enumerate().all(|(i, seg)| {
@@ -1421,24 +1472,7 @@ impl Screen {
                 row += 1;
                 continue;
             }
-            // The needle's first character: on this row for a non-empty
-            // first segment, else the first character after the leading
-            // newlines (start of a following row).
-            let at = match segments.iter().position(|s| !s.is_empty()) {
-                Some(0) => {
-                    let byte_off = first.len() - segments[0].len();
-                    match cols.get(byte_off) {
-                        Some(&col) => (row, col),
-                        None => return,
-                    }
-                }
-                Some(k) => match u16::try_from(k) {
-                    Ok(k) => (row + k, 0),
-                    Err(_) => return,
-                },
-                None => (row + extra, 0),
-            };
-            if !visit(at) {
+            if !visit(row) {
                 return;
             }
             // Non-overlapping: the rows this match spanned are spent.
@@ -1496,6 +1530,13 @@ impl Screen {
     #[must_use]
     pub fn mask_matching(&self, pattern: &str, fill: char) -> Screen {
         let pattern = self.fold(pattern);
+        if pattern.contains('\n') {
+            // A needle that spans rows is matched by the engine `find_all`
+            // uses. The per-row scan below is handed one row at a time and
+            // never sees a newline, so it matched nothing and masked
+            // nothing — while `find_all` reported the hit (#300).
+            return self.masked_multiline(&pattern, fill);
+        }
         self.masked_spans(
             |hay| {
                 hay.match_indices(pattern.as_str())
@@ -1504,6 +1545,40 @@ impl Screen {
             },
             fill,
         )
+    }
+
+    /// The multi-row half of [`mask_matching`](Self::mask_matching): every
+    /// cell a row-spanning needle covers. `needle` is already folded.
+    fn masked_multiline(&self, needle: &str, fill: char) -> Screen {
+        let segments: Vec<&str> = needle.split('\n').collect();
+        let Ok(extra) = u16::try_from(segments.len().saturating_sub(1)) else {
+            return self.clone();
+        };
+        let width = usize::from(self.cols);
+        let mut hits = vec![false; self.cells.len()];
+        self.for_each_multirow_match(&segments, |row| {
+            for (index, segment) in segments.iter().enumerate() {
+                let at = row + index as u16;
+                let (text, cols) = self.searchable_row(at);
+                let line = text.trim_end();
+                // The same shape the matcher just checked: the first segment
+                // ends its row, the last starts one, the rest are whole rows.
+                let (start, end) = if index == 0 {
+                    (line.len().saturating_sub(segment.len()), line.len())
+                } else if index as u16 == extra {
+                    (0, segment.len())
+                } else {
+                    (0, line.len())
+                };
+                for byte in start..end {
+                    if let Some(&col) = cols.get(byte) {
+                        hits[usize::from(at) * width + usize::from(col)] = true;
+                    }
+                }
+            }
+            true
+        });
+        self.apply_mask(hits, Some(fill))
     }
 
     /// A copy of this screen with every cell for which `predicate` holds

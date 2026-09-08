@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use super::{Cell, Screen, Style};
+use super::{same_cursor, Cell, Screen, Style};
 
 /// The difference between two screens. Built by [`Screen::diff`]; render it
 /// with `{}`.
@@ -160,11 +160,17 @@ pub(super) fn row_styles(screen: &Screen, row: u16) -> String {
 impl ScreenDiff {
     /// True when the two screens show the same picture: same size, same
     /// cursor, every cell equal.
+    ///
+    /// A *hidden* cursor's coordinates are not part of the picture — it
+    /// draws nothing, and the snapshot text format does not record where it
+    /// was, so a screen parsed back from its own snapshot used to report a
+    /// difference no one could see (#298). Visibility itself is compared,
+    /// and so is a visible cursor's position.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.cells.is_empty()
             && self.before_size == self.after_size
-            && self.before_cursor == self.after_cursor
+            && same_cursor(self.before_cursor, self.after_cursor)
     }
 
     /// Every changed cell as `(row, col, before, after)`, in reading order,

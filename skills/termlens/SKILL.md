@@ -362,8 +362,13 @@ fn snapshot_diff_and_mask() -> termlens::Result<()> {
     // it in the GRID — the mask keeps every column and style where it was,
     // which a text filter over the rendering cannot. (cols, rows), like size().
     let masked: Screen = after.mask_rect(70..80, 0..1);
-    // Or by shape: every digit anywhere becomes `#`.
-    let _digits_hidden = after.mask_matching("0123456789", '#');
+    // `mask_matching` takes a LITERAL, not a set of characters: this hides
+    // the exact text "Counter: 1". To mask by shape, use `mask_cells` (or
+    // `mask_matches` with the `regex` feature) — a predicate per cell.
+    let _by_text = after.mask_matching("Counter: 1", '#');
+    let _digits_hidden = after.mask_cells(|c| {
+        !c.contents().is_empty() && c.contents().chars().all(|ch| ch.is_ascii_digit())
+    });
     termlens::assert_screen_snapshot!(&masked);
 
     // Every occurrence, not just the first; and a needle that spans a soft
@@ -460,7 +465,7 @@ from_r, to_c, to_r)`, `scroll(col, row, Scroll::Down)`, `resize(cols, rows)`,
 | `unsupported()` / `insert_mode()` | sequences the emulator did not implement (`^[[20h`…), so a plausible grid can be told from a right one / IRM left on |
 | `with_styles()` | `Display` with a `styles:` block; snapshot this to catch colour regressions |
 | `diff(&other)` | `ScreenDiff`: `is_empty()`, `cells()`, and a `Display` of only the rows that changed |
-| `mask_rect(cols, rows)` / `mask_matching(chars, fill)` / `mask_cells(pred)` | a new `Screen` with those cells replaced, styles and columns intact |
+| `mask_rect(cols, rows)` / `mask_matching(literal, fill)` / `mask_cells(pred)` | a new `Screen` with those cells replaced, styles and columns intact. `mask_matching` is a literal (rows included — it spans a wrap the way `find_all` does); `mask_cells` blanks by predicate |
 | `to_ansi()` / `to_svg()` / `to_html()` | renderings a person can see; `Screen::parse(text)` reads the text format back |
 
 **Style** (`Copy`, public fields): `fg`, `bg` (`Color::Default` /

@@ -813,7 +813,16 @@ impl Recording {
         );
         for (at, frame) in &self.frames {
             let mut data = String::from("\x1b[H\x1b[2J");
-            data.push_str(&frame.to_ansi().replace('\n', "\r\n"));
+            // `to_ansi` ends every row with a newline, the bottom one
+            // included — right for a file or a paste into a terminal, wrong
+            // for a repaint: replayed, that last linefeed sits on the last
+            // row and scrolls the whole frame up by one, so the player
+            // showed a screen the test never saw (#295). One newline comes
+            // off; the rest become CRLF, because a recording is replayed in
+            // raw mode where LF alone does not return the carriage.
+            let ansi = frame.to_ansi();
+            let painted = ansi.strip_suffix('\n').unwrap_or(&ansi);
+            data.push_str(&painted.replace('\n', "\r\n"));
             out.push_str(&format!(
                 "[{:.6}, \"o\", {}]\n",
                 at.as_secs_f64(),

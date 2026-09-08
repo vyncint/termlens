@@ -24,6 +24,62 @@ listed under a **Changed** or **Removed** heading.
 
 ### Fixed
 
+- **An exported recording scrolled every frame up by one row.**
+  `Screen::to_ansi` ends every row with a newline, the bottom one included
+  — right for a file, wrong for a repaint: replayed, that last linefeed
+  sits on the last row and scrolls the picture away, so `asciinema` showed
+  a screen the test never saw. `Recording::to_asciicast` now drops exactly
+  that newline. The regression test replays each exported event into a
+  terminal of the recorded size and compares every row against the frame it
+  came from, rather than checking the event's shape. (#295)
+
+- **`Screen::parse` deleted grid rows that read like a styles block.** The
+  split between grid and metadata was a search for a `styles:` marker, and
+  a screen can *contain* that word: a snapshot of one came back blank. The
+  header's row count now decides where the grid ends, which is unambiguous
+  for anything `Display` wrote. The one input that cannot be read both ways
+  — a hand-trimmed grid that also carries a styles block — resolves as
+  content and says so in the rustdoc, because a wrong row of text shows up
+  in a diff and a silently dropped one does not. (#296)
+
+- **`Screen::parse` rejected a combining mark after a wide character** —
+  its own format, for a cell the emulator stores correctly. A wide glyph
+  advances two columns, so stepping one back lands on the continuation
+  half, which holds no text; the mark now attaches to the leading cell that
+  owns the glyph. (#297)
+
+- **A hidden cursor made a snapshot differ from itself.** The text format
+  records `cursor: hidden` without a position, so a parsed screen came back
+  at `0,0` and `ScreenDiff::is_empty` compared the coordinates anyway —
+  a difference with nothing visible behind it, on a screen state most TUIs
+  are in. A hidden cursor draws nothing, so its position is no longer part
+  of the picture, for `diff` and for `wait_stable` alike; visibility, and a
+  visible cursor's position, still are. (#298)
+
+- **`Screen::parse` panicked on a non-ASCII hex colour.** `fg=#a€bc` is six
+  *bytes*, so the length check passed and slicing in pairs landed inside a
+  character — an unwind out of the one function whose job is turning bad
+  text into `Error::Parse`, and the CLI shares it. Every byte is now
+  checked as an ASCII hex digit before any of them is read. (#299)
+
+- **`mask_matching` left a needle that spans rows fully visible.** It is
+  documented as matching "the way `find_all` matches", and `find_all`
+  crosses row boundaries — but the mask ran its matcher one row at a time,
+  where a newline can never appear. It reported the match and masked
+  nothing, which is precisely the failure a mask exists to prevent.
+  `find_all` and the masks now share one multi-row engine, so they cannot
+  disagree about what matched. (#300)
+
+- **A fixture announced it was ready before it could be resized.**
+  `form-echo` (and the new `ratatui-app`) drew their first frame — the one
+  a test synchronizes on — before the first `event::read()`, and crossterm
+  registers its `SIGWINCH` listener on that call. A resize landing in the
+  gap was lost for good, since SIGWINCH's default disposition is ignore,
+  and `wait_frame` then ran out a full deadline against an application that
+  had simply never heard. `resize-echo` already guarded against this; the
+  other two now do the same. Found by the stress workflow on macOS at one
+  thread. (#292)
+
 - **A query test raced its own fixture's pause.**
   `a_query_the_app_moved_past_is_context_not_a_cause` spent one 400 ms
   budget on both of its waits — the one that must *succeed* and the one
