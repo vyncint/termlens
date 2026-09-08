@@ -38,7 +38,7 @@ regex = ["dep:regex"]
 # renders the failing screen, or a consumer in another language — and come
 # back as an equal `Screen`. Off by default; `serde` is already in most
 # consumers' trees, so the cost when on is a set of derives.
-serde = ["dep:serde"]
+serde = ["dep:serde", "dep:serde_json"]
 
 [dependencies]
 portable-pty.workspace = true
@@ -53,13 +53,13 @@ insta = { workspace = true, optional = true }
 miniz_oxide = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
-serde_json.workspace = true
 anyhow.workspace = true
 
 [lints]

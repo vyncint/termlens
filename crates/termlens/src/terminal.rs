@@ -1256,9 +1256,12 @@ impl EmuState {
     /// The error every screen-based wait returns once the emulator has
     /// failed. `None` while it is healthy.
     fn emulator_failure(&self) -> Option<Error> {
-        self.emu_panic.as_ref().map(|detail| Error::Emulator {
-            detail: detail.clone(),
-            screen: self.peek_snapshot(),
+        self.emu_panic.as_ref().map(|detail| {
+            Error::Emulator {
+                detail: detail.clone(),
+                screen: self.peek_snapshot(),
+            }
+            .recorded()
         })
     }
 
@@ -3045,7 +3048,8 @@ impl Terminal {
             Err(reason) => Err(Error::Write {
                 what: format!("{what} to `{}` ({reason})", self.command_desc).into(),
                 screen: self.screen(),
-            }),
+            }
+            .recorded()),
         }
     }
 
@@ -3085,7 +3089,8 @@ impl Terminal {
         Err(Error::Write {
             what: format!("{what} to `{}` ({reason})", self.command_desc).into(),
             screen: self.screen(),
-        })
+        }
+        .recorded())
     }
 
     /// Write to the child, bounded by the default deadline.
@@ -3236,7 +3241,8 @@ impl Terminal {
                 return Some(Err(Error::Eof {
                     waiting_for: format!("{WHAT}{}{}", state.query_note(), history_note(&screen)),
                     screen,
-                }));
+                }
+                .recorded()));
             }
             None
         });
@@ -3249,7 +3255,8 @@ impl Terminal {
                     waiting_for: format!("{WHAT}{note}{}", history_note(&screen)),
                     timeout,
                     screen,
-                })
+                }
+                .recorded())
             }
         }
     }
@@ -3413,7 +3420,8 @@ impl Terminal {
                 return Some(Err(Error::Eof {
                     waiting_for: format!("{WHAT}{}{}", state.query_note(), history_note(&screen)),
                     screen,
-                }));
+                }
+                .recorded()));
             }
             None
         });
@@ -3481,7 +3489,8 @@ impl Terminal {
                     waiting_for,
                     timeout,
                     screen,
-                })
+                }
+                .recorded())
             }
         }
     }
@@ -3586,7 +3595,8 @@ impl Terminal {
                     waiting_for,
                     timeout,
                     screen,
-                });
+                }
+                .recorded());
             }
             // Sleep until the quiet period could complete, the deadline
             // hits, or new bytes arrive (notification) — whichever first.
@@ -3781,7 +3791,8 @@ impl Terminal {
                     waiting_for,
                     timeout,
                     screen,
-                });
+                }
+                .recorded());
             }
             // Sleep until the stillness could complete, the deadline hits,
             // or new bytes arrive — whichever first; poll-cap while only a
@@ -3915,7 +3926,8 @@ impl Terminal {
                     ),
                     timeout,
                     screen: self.screen(),
-                });
+                }
+                .recorded());
             }
             thread::sleep(backoff.min(deadline - now));
             backoff = next_backoff(backoff);

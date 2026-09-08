@@ -1536,6 +1536,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "termlens-cli"
+version = "0.9.0"
+dependencies = [
+ "serde_json",
+ "termlens",
+]
+
+[[package]]
 name = "termwiz"
 version = "0.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

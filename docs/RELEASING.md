@@ -20,8 +20,10 @@ One page, copy-pasteable. Maintainers only.
 gh workflow run stress.yml --ref main
 gh run watch                                  # both OSes must pass
 
-# 1. Bump the version (workspace.package.version in root Cargo.toml).
-$EDITOR Cargo.toml                            # version = "X.Y.Z"
+# 1. Bump the version (workspace.package.version in root Cargo.toml), and
+#    the same number in crates/termlens-cli/Cargo.toml's `termlens = { version
+#    = … }` — a path dependency publishes by its version.
+$EDITOR Cargo.toml crates/termlens-cli/Cargo.toml
 cargo check --workspace                       # refreshes Cargo.lock
 
 # 2. Move the CHANGELOG section.
@@ -46,11 +48,22 @@ Pushing the tag runs `release.yml`, which:
 3. runs `cargo-semver-checks` against the last published release
    (skipped gracefully on the first release),
 4. `cargo publish -p termlens` via Trusted Publishing (OIDC) — the
-   repository stores no tokens,
+   repository stores no tokens — then `cargo publish -p termlens-cli` if
+   crates.io already has that crate (a warning, not a failure, if not),
 5. creates the GitHub Release with notes extracted from the CHANGELOG
    section for that version (`.github/scripts/extract-changelog.sh`), and
 6. runs the registry-consumer check against that published version on Linux
    and macOS.
+
+## termlens-cli's first publish
+
+Trusted Publishing is configured per crate, on a crate that exists. The
+first `termlens-cli` release is therefore by hand, once, from the tagged
+commit: `cargo publish -p termlens-cli --locked` with a crates.io token
+that has publish-new scope, then crates.io → termlens-cli → Settings →
+Trusted Publishing → GitHub, repository `vyncint/termlens`, workflow
+`release.yml`, environment `release`. `release.yml` publishes it on every
+tag after that.
 
 ## If something fails mid-release
 

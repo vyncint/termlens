@@ -49,6 +49,33 @@ listed under a **Changed** or **Removed** heading.
   screen. Plain text, so CI logs stay readable. An erased cell and a
   written space in the same style are one blank, not a difference. (#246)
 
+- **`termlens-cli`: the `termlens` command, and `Screen::parse`.** Two
+  saved screens could be compared only by `cargo insta review`, on the
+  machine that ran the tests. `cargo install termlens-cli` provides
+  `termlens inspect` (the example grown a command: a program in a PTY, its
+  screen printed, `--ansi` for colour), `termlens diff a b` (the cell diff
+  of two saved screens — an insta `.snap` with or without its header, the
+  block a wait error prints, a `TERMLENS_ARTIFACT_DIR` file, or the JSON
+  the `serde` feature writes — coloured on a terminal, plain in a pipe,
+  exit 1 when they differ) and `termlens render --svg|--html|--ansi|--text`.
+  The genuinely new piece is in the library: `Screen::parse` reads the
+  snapshot text format of DESIGN §3 back, `styles:` block included, so the
+  format round-trips — `Screen::parse(&s.with_styles().to_string())`
+  renders to the same text and diffs empty against `s`. A text that is not
+  the format is `Error::Parse`, naming the line. The CLI's own tests drive
+  it through a PTY with termlens. (#255)
+
+- **`TERMLENS_ARTIFACT_DIR`, and the `report` action.** A failing wait's
+  screen reached the CI log and stopped there. With the variable set, every
+  error that carries a screen also writes it to that directory —
+  `<test>-<n>.screen.json` with the `serde` feature, `.screen.txt` (the
+  `with_styles` rendering) without — and
+  `vyncint/termlens/.github/actions/report`, run with `if: failure()`,
+  renders those files and every `.snap.new` (with the diff against its
+  `.snap`) into the pull request's step summary, SVG and HTML uploaded as
+  an artifact. Off when unset; documented on `Error`. This repository's
+  own `test` job runs the action. (#251)
+
 - **`fixtures/ratatui-app` and its fidelity test.** No fixture was a
   ratatui application, so the one check only a PTY harness can make for
   ratatui users was never made here. The fixture is a counter/list with

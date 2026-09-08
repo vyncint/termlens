@@ -62,6 +62,15 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test --workspace --all-features
+        env:
+          TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens
+      # The screens of whatever failed, in the step summary (#251). The
+      # suite dogfoods the action with the CLI from this tree.
+      - uses: ./.github/actions/report
+        if: failure()
+        with:
+          cli: workspace
+          name: termlens-report-${{ matrix.os }}
 
   # Every feature configuration a consumer can ask for. The default set is
   # what `cargo add termlens --dev` produces, and until #226 no job ran it:

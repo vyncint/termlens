@@ -235,6 +235,31 @@ sizes with a resize between (`fixtures/ratatui-app/tests/fidelity.rs`). Where
 they disagree the bug is in the terminal layer — crossterm's encoding, the
 PTY, or termlens's emulation — which is the layer nothing else tests.
 
+## At a shell prompt, and in CI
+
+`cargo install termlens-cli` gives the same harness as a command:
+`termlens inspect --size 120x40 myapp` prints what a program shows,
+`termlens diff old.snap new.snap.new` prints the cell diff of two saved
+screens (coloured on a terminal, exit 1 if anything changed), and
+`termlens render --svg failing.snap` turns one into an image. A saved
+screen is the text termlens prints — an insta `.snap`, the block a wait
+error leaves in a log — read back by `Screen::parse`, or the JSON the
+`serde` feature writes.
+
+In CI, set `TERMLENS_ARTIFACT_DIR` on the test step and every screen a
+failing wait embeds is also written there; then
+`uses: vyncint/termlens/.github/actions/report@v0.10.0` with `if: failure()`
+puts those screens, and every `.snap.new` with its diff, into the pull
+request's step summary:
+
+```yaml
+- run: cargo test
+  env:
+    TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens
+- uses: vyncint/termlens/.github/actions/report@v0.10.0
+  if: failure()
+```
+
 ## Determinism
 
 PTYs are asynchronous; a harness that pretends otherwise is flaky by

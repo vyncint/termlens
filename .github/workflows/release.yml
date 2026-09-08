@@ -89,6 +89,20 @@ jobs:
       - run: cargo publish -p termlens --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      # termlens-cli (#255) follows, once crates.io knows it. Trusted
+      # Publishing is configured per crate and only for a crate that already
+      # exists, so its first publish is the owner's, by hand, with a token
+      # (docs/RELEASING.md); every release after that lands here.
+      - name: Publish termlens-cli, when it is on crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          status="$(curl -sS -o /dev/null -w '%{http_code}' https://crates.io/api/v1/crates/termlens-cli)"
+          if [ "$status" = "200" ]; then
+            cargo publish -p termlens-cli --locked
+          else
+            echo "::warning::termlens-cli is not on crates.io yet (HTTP ${status}); publish it once by hand, then link Trusted Publishing for it — docs/RELEASING.md"
+          fi
 
   github-release:
     name: GitHub release
