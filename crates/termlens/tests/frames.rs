@@ -9,6 +9,17 @@ use termlens::{Error, FrameTiming, Key, Terminal};
 mod common;
 use common as util;
 
+/// The `emit` fixture from a builder the test has timed; steps are
+/// documented in `fixtures/emit/src/main.rs`. A burst that must arrive as
+/// one read is one `--raw`.
+fn emit(builder: termlens::TerminalBuilder, steps: &[&str]) -> termlens::Result<Terminal> {
+    util::spawn_emit(builder, steps)
+}
+
+/// Three complete frames as one write: `STEP 1`, `STEP 2`, `STEP 3`.
+const BURST_OF_THREE: &str =
+    r"\e[?2026h\e[HSTEP 1\e[?2026l\e[?2026h\e[HSTEP 2\e[?2026l\e[?2026h\e[HSTEP 3\e[?2026l";
+
 fn spawn_form_echo() -> termlens::Result<Terminal> {
     Terminal::builder()
         .size(80, 24)
@@ -105,16 +116,18 @@ fn apps_without_synchronized_output_time_out_with_guidance() {
 /// arbitrarily old.
 #[test]
 fn wait_frame_timeouts_embed_the_live_screen_not_the_last_frame() {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_millis(400))
-        .args([
-            "-c",
-            // One synchronized frame, then unbracketed output that will
-            // never complete a frame.
-            r"printf '\033[?2026h\033[HOLD FRAME\033[?2026l'; printf '\r\nLIVE SCREEN'; read quit",
-        ])
-        .spawn("sh")
-        .unwrap();
+    let mut t = emit(
+        Terminal::builder().timeout(Duration::from_millis(400)),
+        // One synchronized frame, then unbracketed output that will
+        // never complete a frame.
+        &[
+            "--raw",
+            r"\e[?2026h\e[HOLD FRAME\e[?2026l",
+            "\r\nLIVE SCREEN",
+            "--wait",
+        ],
+    )
+    .unwrap();
     t.wait_frame(|s| s.contains("OLD FRAME")).unwrap();
     t.wait_until(|s| s.contains("LIVE SCREEN")).unwrap();
 
@@ -139,18 +152,11 @@ fn wait_frame_timeouts_embed_the_live_screen_not_the_last_frame() {
 /// at 3.
 #[test]
 fn every_frame_of_a_burst_is_observable_in_order() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            // Three complete frames in ONE write, then park.
-            concat!(
-                r"printf '\033[?2026h\033[HSTEP 1\033[?2026l",
-                r"\033[?2026h\033[HSTEP 2\033[?2026l",
-                r"\033[?2026h\033[HSTEP 3\033[?2026l'; read guard"
-            ),
-        ])
-        .spawn("sh")?;
+    let mut t = emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        // Three complete frames in ONE write, then park.
+        &["--raw", BURST_OF_THREE, "--wait"],
+    )?;
 
     // Settle on the live screen first, so all three frames have certainly
     // arrived (and been coalesced into as few reads as the OS chose)
@@ -174,14 +180,14 @@ fn every_frame_of_a_burst_is_observable_in_order() -> termlens::Result<()> {
 #[test]
 fn a_burst_longer_than_the_retention_bound_drops_its_oldest_frames() -> termlens::Result<()> {
     // 12 frames in one write, against a retention bound of 8.
-    let mut script = String::new();
+    let mut burst = String::new();
     for n in 1..=12 {
-        script.push_str(&format!(r"\033[?2026h\033[HFRAME {n:02}\033[?2026l"));
+        burst.push_str(&format!(r"\e[?2026h\e[HFRAME {n:02}\e[?2026l"));
     }
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_millis(600))
-        .args(["-c", &format!("printf '{script}'; read guard")])
-        .spawn("sh")?;
+    let mut t = emit(
+        Terminal::builder().timeout(Duration::from_millis(600)),
+        &["--raw", &burst, "--wait"],
+    )?;
 
     t.wait_until(|s| s.contains("FRAME 12"))?;
     // The most recent 8 are retained: 05..=12, so 05 is the oldest that
@@ -198,11 +204,11 @@ fn a_burst_longer_than_the_retention_bound_drops_its_oldest_frames() -> termlens
 
 #[test]
 fn wait_frame_fails_fast_on_eof() {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(30))
-        .args(["-c", r"printf '\033[?2026hdone\033[?2026l'; read guard"])
-        .spawn("sh")
-        .unwrap();
+    let mut t = emit(
+        Terminal::builder().timeout(Duration::from_secs(30)),
+        &["--raw", r"\e[?2026hdone\e[?2026l", "--wait"],
+    )
+    .unwrap();
     t.wait_frame(|s| s.contains("done")).unwrap();
     t.send(Key::Enter).unwrap();
 
@@ -217,12 +223,12 @@ fn wait_frame_fails_fast_on_eof() {
 
 #[test]
 fn wait_idle_does_not_resolve_inside_an_open_synchronized_update() {
-    // The frame never ends: BSU, content, then the app parks on `read`.
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_millis(600))
-        .args(["-c", r"printf '\033[?2026hhalf a frame'; read guard"])
-        .spawn("sh")
-        .unwrap();
+    // The frame never ends: BSU, content, then the app parks on `--wait`.
+    let mut t = emit(
+        Terminal::builder().timeout(Duration::from_millis(600)),
+        &["--raw", r"\e[?2026hhalf a frame", "--wait"],
+    )
+    .unwrap();
     t.wait_until(|s| s.contains("half a frame")).unwrap();
 
     let err = t.wait_idle(Duration::from_millis(100)).unwrap_err();
@@ -238,14 +244,11 @@ fn an_unmatched_end_publishes_no_frame() {
     // `?2026l` with no Begin must not manufacture a frame out of whatever
     // is on the grid — and must leave the frame count at zero, since that
     // is what gates the diagnosis below.
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_millis(600))
-        .args([
-            "-c",
-            r"printf '\033[2J\033[HNO-BEGIN\033[?2026l'; read guard",
-        ])
-        .spawn("sh")
-        .unwrap();
+    let mut t = emit(
+        Terminal::builder().timeout(Duration::from_millis(600)),
+        &["--raw", r"\e[2J\e[HNO-BEGIN\e[?2026l", "--wait"],
+    )
+    .unwrap();
     t.wait_until(|s| s.contains("NO-BEGIN")).unwrap();
 
     let err = t.wait_frame(|s| s.contains("NO-BEGIN")).unwrap_err();
@@ -261,18 +264,17 @@ fn a_defensive_mode_reset_keeps_the_never_emitted_diagnosis() {
     // defensively, and such a string contains `?2026l`. One stray End used
     // to replace the pointed diagnosis with a frame count, which reads as
     // "the app is frame-capable, your predicate is wrong".
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_millis(600))
-        .args([
-            "-c",
-            concat!(
-                r"printf '\033[?2026l\033[?25h\033[?1000l\033[?1002l",
-                r"\033[?1003l\033[?2004l\033[?1049l'; ",
-                r"printf '\033[2J\033[HPLAIN-PAINT'; read guard"
-            ),
-        ])
-        .spawn("sh")
-        .unwrap();
+    let mut t = emit(
+        Terminal::builder().timeout(Duration::from_millis(600)),
+        &[
+            "--raw",
+            r"\e[?2026l\e[?25h\e[?1000l\e[?1002l\e[?1003l\e[?2004l\e[?1049l",
+            "--raw",
+            r"\e[2J\e[HPLAIN-PAINT",
+            "--wait",
+        ],
+    )
+    .unwrap();
     t.wait_until(|s| s.contains("PLAIN-PAINT")).unwrap();
 
     let err = t.wait_frame(|s| s.contains("NEVER-DRAWN")).unwrap_err();
@@ -293,14 +295,17 @@ fn a_begin_end_pair_that_drew_nothing_is_still_a_frame() {
     // application that opens and closes a synchronized update completed a
     // repaint, even if the result is identical — deciding otherwise would
     // mean diffing grids and calling a genuine no-op repaint a non-event.
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(5))
-        .args([
-            "-c",
-            r"printf '\033[2J\033[HSTATIC'; printf '\033[?2026h\033[?2026l'; read guard",
-        ])
-        .spawn("sh")
-        .unwrap();
+    let mut t = emit(
+        Terminal::builder().timeout(Duration::from_secs(5)),
+        &[
+            "--raw",
+            r"\e[2J\e[HSTATIC",
+            "--raw",
+            r"\e[?2026h\e[?2026l",
+            "--wait",
+        ],
+    )
+    .unwrap();
     t.wait_frame(|s| s.contains("STATIC")).unwrap();
     t.send(Key::Enter).unwrap();
 }
@@ -310,16 +315,17 @@ fn a_begin_end_pair_that_drew_nothing_is_still_a_frame() {
 /// regression in which the key stopped working was invisible.
 #[test]
 fn a_superseded_frame_no_longer_satisfies_a_wait() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"printf '\033[?2026h\033[2J\033[HSTATE-A\033[?2026l'; read a; ",
-                r"printf '\033[?2026h\033[2J\033[HSTATE-B\033[?2026l'; read b"
-            ),
-        ])
-        .spawn("sh")?;
+    let mut t = emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &[
+            "--raw",
+            r"\e[?2026h\e[2J\e[HSTATE-A\e[?2026l",
+            "--wait",
+            "--raw",
+            r"\e[?2026h\e[2J\e[HSTATE-B\e[?2026l",
+            "--wait",
+        ],
+    )?;
 
     assert!(t.wait_frame(|s| s.contains("STATE-A"))?.contains("STATE-A"));
     t.send(Key::Enter)?;
@@ -340,13 +346,10 @@ fn a_superseded_frame_no_longer_satisfies_a_wait() -> termlens::Result<()> {
 
 #[test]
 fn one_frame_cannot_satisfy_two_waits() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            r"printf '\033[?2026h\033[2J\033[HONLY-FRAME\033[?2026l'; read guard",
-        ])
-        .spawn("sh")?;
+    let mut t = emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &["--raw", r"\e[?2026h\e[2J\e[HONLY-FRAME\e[?2026l", "--wait"],
+    )?;
 
     t.wait_frame(|s| s.contains("ONLY-FRAME"))?;
     let again = t.wait_frame_for(|s| s.contains("ONLY-FRAME"), Duration::from_millis(700));
@@ -364,17 +367,10 @@ fn one_frame_cannot_satisfy_two_waits() -> termlens::Result<()> {
 /// is *not*: a frame already returned is behind the cursor.
 #[test]
 fn a_burst_frame_asked_for_out_of_order_is_gone() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_millis(700))
-        .args([
-            "-c",
-            concat!(
-                r"printf '\033[?2026h\033[HSTEP 1\033[?2026l",
-                r"\033[?2026h\033[HSTEP 2\033[?2026l",
-                r"\033[?2026h\033[HSTEP 3\033[?2026l'; read guard"
-            ),
-        ])
-        .spawn("sh")?;
+    let mut t = emit(
+        Terminal::builder().timeout(Duration::from_millis(700)),
+        &["--raw", BURST_OF_THREE, "--wait"],
+    )?;
 
     t.wait_until(|s| s.contains("STEP 3"))?;
     t.wait_frame(|s| s.contains("STEP 3"))?;
@@ -391,15 +387,17 @@ fn a_burst_frame_asked_for_out_of_order_is_gone() -> termlens::Result<()> {
 /// from the live grid by the time the call returns.
 #[test]
 fn the_returned_frame_is_the_matched_instant_not_the_live_screen() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            // One complete frame, then unbracketed output that lands after
-            // the frame was published.
-            r"printf '\033[?2026h\033[2J\033[HFRAMED\033[?2026l'; printf '\r\nLIVE'; read guard",
-        ])
-        .spawn("sh")?;
+    let mut t = emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        // One complete frame, then unbracketed output that lands after
+        // the frame was published.
+        &[
+            "--raw",
+            r"\e[?2026h\e[2J\e[HFRAMED\e[?2026l",
+            "\r\nLIVE",
+            "--wait",
+        ],
+    )?;
 
     let frame = t.wait_frame(|s| s.contains("FRAMED"))?;
     t.wait_until(|s| s.contains("LIVE"))?;
@@ -424,15 +422,17 @@ fn the_returned_frame_is_the_matched_instant_not_the_live_screen() -> termlens::
 /// hold for `wait_frame`.
 #[test]
 fn a_resize_stops_offering_frames_drawn_at_the_old_size() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .size(80, 24)
-        .timeout(Duration::from_millis(700))
-        .args([
-            "-c",
-            // Paints one frame, then ignores SIGWINCH and never repaints.
-            r"printf '\033[?2026h\033[2J\033[HBEFORE-RESIZE\033[?2026l'; read guard",
-        ])
-        .spawn("sh")?;
+    let mut t = emit(
+        Terminal::builder()
+            .size(80, 24)
+            .timeout(Duration::from_millis(700)),
+        // Paints one frame, then ignores SIGWINCH and never repaints.
+        &[
+            "--raw",
+            r"\e[?2026h\e[2J\e[HBEFORE-RESIZE\e[?2026l",
+            "--wait",
+        ],
+    )?;
 
     // Deliberately not consumed: this proves the resize moves the cursor,
     // not that an earlier wait did.
@@ -474,19 +474,21 @@ fn the_repaint_answering_a_resize_is_offered_to_wait_frame() -> termlens::Result
 /// diagnosis. `wait_frame`'s return value is the frame-consistent read.
 #[test]
 fn a_snapshot_can_be_mid_frame_for_a_synchronized_application() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .size(80, 24)
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                // Frame OPEN, one of two rows painted.
-                r"printf '\033[?2026h\033[2J\033[HROW-ONE'; read a; ",
-                // Second row, then the frame closes.
-                r"printf '\033[2;1HROW-TWO\033[?2026l'; read b"
-            ),
-        ])
-        .spawn("sh")?;
+    let mut t = emit(
+        Terminal::builder()
+            .size(80, 24)
+            .timeout(Duration::from_secs(10)),
+        &[
+            // Frame OPEN, one of two rows painted.
+            "--raw",
+            r"\e[?2026h\e[2J\e[HROW-ONE",
+            "--wait",
+            // Second row, then the frame closes.
+            "--raw",
+            r"\e[2;1HROW-TWO\e[?2026l",
+            "--wait",
+        ],
+    )?;
 
     t.wait_until(|s| s.contains("ROW-ONE"))?;
     let torn = t.screen();
@@ -514,11 +516,11 @@ fn a_snapshot_can_be_mid_frame_for_a_synchronized_application() -> termlens::Res
 /// nonsense next to a quiet terminal.
 #[test]
 fn a_wait_idle_timeout_names_an_unfinished_frame() {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_millis(600))
-        .args(["-c", r"printf '\033[?2026hhalf a frame'; read guard"])
-        .spawn("sh")
-        .unwrap();
+    let mut t = emit(
+        Terminal::builder().timeout(Duration::from_millis(600)),
+        &["--raw", r"\e[?2026hhalf a frame", "--wait"],
+    )
+    .unwrap();
     t.wait_until(|s| s.contains("half a frame")).unwrap();
 
     let err = t.wait_idle(Duration::from_millis(100)).unwrap_err();
@@ -607,19 +609,20 @@ fn the_timing_series_shows_a_deliberately_slow_repaint() -> termlens::Result<()>
 /// are stamped at the byte that carried them, not when the read landed.
 #[test]
 fn a_burst_in_one_read_is_timed_per_frame() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .size(40, 6)
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"printf READY; read a; ",
-                // Three frames in a single write, so they arrive as one read.
-                r"printf '\033[?2026hone\033[?2026l\033[?2026htwotwo\033[?2026l\033[?2026hthree!\033[?2026l'; ",
-                r"printf ' DONE'; read b"
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = emit(
+        Terminal::builder()
+            .size(40, 6)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "READY",
+            "--wait",
+            // Three frames in a single write, so they arrive as one read.
+            "--raw",
+            r"\e[?2026hone\e[?2026l\e[?2026htwotwo\e[?2026l\e[?2026hthree!\e[?2026l",
+            " DONE",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("READY"))?;
     assert!(t.frame_timings().is_empty(), "nothing has repainted yet");
 
