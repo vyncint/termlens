@@ -52,11 +52,7 @@ fn exit_codes_are_reported() -> termlens::Result<()> {
 
 #[test]
 fn signal_deaths_are_reported_as_signals_not_exit_codes() -> termlens::Result<()> {
-    // Stays on `/bin/sh`: a process that signals itself is what this test
-    // is about, and the std-only fixture has no `kill`.
-    let mut t = Terminal::builder()
-        .args(["-c", "read guard; kill -TERM $$"])
-        .spawn("/bin/sh")?;
+    let mut t = emit(&["--wait", "--kill-self"])?;
     t.send(Key::Enter)?;
     let status = t.wait_exit()?;
     assert!(!status.success());

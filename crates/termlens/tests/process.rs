@@ -45,15 +45,7 @@ fn pid_reports_the_direct_child() -> termlens::Result<()> {
 #[test]
 #[cfg(unix)]
 fn signal_term_exercises_the_graceful_shutdown_path() -> termlens::Result<()> {
-    // Stays on `/bin/sh`: trapping a signal is what this test is about, and
-    // the std-only fixture has no way to install a handler.
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            "trap 'printf got-term; exit 7' TERM; printf ready; while :; do sleep 0.05; done",
-        ])
-        .spawn("sh")?;
+    let mut t = emit(&["--on-term", "got-term", "7", "ready", "--idle"])?;
     t.wait_until(|s| s.contains("ready"))?;
 
     t.signal(Signal::Term)?;
