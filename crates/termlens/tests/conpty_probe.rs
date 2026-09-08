@@ -20,9 +20,10 @@
 //! no shell quoting to decode. The verdict per case is whether the exact
 //! sent bytes appear somewhere in what the master read.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -164,6 +165,24 @@ fn escape(bytes: &[u8]) -> String {
     out
 }
 
+/// How long one case may take before it is reported as hung rather than
+/// waited on. A file printer is done in milliseconds; a console that is
+/// waiting for something it was never told is the finding, not a reason
+/// to lose the rest of the table.
+const CASE_DEADLINE: Duration = Duration::from_secs(20);
+
+/// What a terminal says to `CSI 6 n`: the cursor is at row 1, column 1.
+///
+/// ConPTY is created with `PSEUDOCONSOLE_INHERIT_CURSOR`, and a console so
+/// created asks its host terminal where the cursor is before it starts the
+/// child — and waits. termlens's responder answers that query as it would
+/// any other, which is why the real harness runs; a probe that only reads
+/// would hang on its first case, and the first run of it did. Answered
+/// here for the same reason a terminal answers it: because something is
+/// waiting on it.
+const CURSOR_REPLY: &[u8] = b"\x1b[1;1R";
+const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+
 /// Spawn `cmd`, read the master until it closes, and return every byte.
 ///
 /// The master is closed only after the child has exited and had a moment
@@ -181,13 +200,32 @@ fn through_pty(mut cmd: CommandBuilder) -> io::Result<Vec<u8>> {
         })
         .map_err(other)?;
     let mut reader = pair.master.try_clone_reader().map_err(other)?;
+    let mut writer = pair.master.take_writer().map_err(other)?;
     let collector = thread::spawn(move || {
         let mut out = Vec::new();
         let mut buf = [0u8; 4096];
+        let mut answered = 0;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => out.extend_from_slice(&buf[..n]),
+            }
+            // Every cursor-position query seen so far gets exactly one
+            // reply, whoever asked: the console at startup, or a child
+            // whose query was forwarded — which is itself a verdict.
+            let asked = out
+                .windows(CURSOR_QUERY.len())
+                .filter(|w| *w == CURSOR_QUERY)
+                .count();
+            while answered < asked {
+                if writer
+                    .write_all(CURSOR_REPLY)
+                    .and_then(|()| writer.flush())
+                    .is_err()
+                {
+                    break;
+                }
+                answered += 1;
             }
         }
         out
@@ -216,16 +254,35 @@ fn print_file(path: &PathBuf) -> CommandBuilder {
     cmd
 }
 
-fn probe(case: &Case) -> io::Result<Vec<u8>> {
-    let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "termlens-conpty-probe-{}-{n}.bin",
-        std::process::id()
-    ));
-    std::fs::write(&path, case.bytes)?;
-    let result = through_pty(print_file(&path));
-    let _ = std::fs::remove_file(&path);
-    result
+/// Run `f` on its own thread and give it [`CASE_DEADLINE`]. A case that
+/// never comes back is reported, and its thread abandoned: this is a
+/// diagnostic, and the table is worth more than a clean exit.
+fn bounded<T: Send + 'static>(
+    f: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<Option<T>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    match rx.recv_timeout(CASE_DEADLINE) {
+        Ok(result) => result.map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
+/// `Some(bytes)` the master read, or `None` when the case hung.
+fn probe(case: &'static Case) -> io::Result<Option<Vec<u8>>> {
+    bounded(move || {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "termlens-conpty-probe-{}-{n}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, case.bytes)?;
+        let result = through_pty(print_file(&path));
+        let _ = std::fs::remove_file(&path);
+        result
+    })
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -249,36 +306,43 @@ fn what_the_pty_layer_forwards() -> io::Result<()> {
     let mut forwarded = 0;
     let mut details = Vec::new();
     for case in CASES {
-        let got = probe(case)?;
-        let ok = contains(&got, case.bytes);
-        forwarded += usize::from(ok);
-        println!(
-            "{:<8} {:<32} {}",
-            if ok { "verbatim" } else { "ABSENT" },
-            case.name,
-            case.why
-        );
-        if !ok {
-            details.push((case.name, escape(case.bytes), escape(&got)));
+        let (verdict, got) = match probe(case)? {
+            None => ("HUNG", None),
+            Some(got) if contains(&got, case.bytes) => ("verbatim", Some(got)),
+            Some(got) => ("ABSENT", Some(got)),
+        };
+        forwarded += usize::from(verdict == "verbatim");
+        println!("{verdict:<8} {:<32} {}", case.name, case.why);
+        // The control case is printed whatever its verdict: what the
+        // console wraps around five plain bytes is the shape of everything
+        // else it emits.
+        if verdict != "verbatim" || case.name == "plain text" {
+            let read = got
+                .as_deref()
+                .map_or_else(|| format!("(nothing within {CASE_DEADLINE:?})"), escape);
+            details.push((case.name, escape(case.bytes), read));
         }
     }
     println!();
     println!("{forwarded}/{} forwarded verbatim", CASES.len());
-    for (name, sent, got) in &details {
+    for (name, sent, read) in &details {
         println!();
         println!("[{name}]");
         println!("  sent: {sent}");
-        println!("  read: {got}");
+        println!("  read: {read}");
     }
 
     // The suite's other dependency on the host: whether a `sh` resolves at
     // all. Reported, not judged — #249 is what removes the dependency.
-    let mut sh = CommandBuilder::new("sh");
-    sh.args(["-c", "echo sh-ok"]);
     println!();
-    match through_pty(sh) {
-        Ok(out) if contains(&out, b"sh-ok") => println!("sh: resolves and runs"),
-        Ok(out) => println!("sh: spawned, but printed {}", escape(&out)),
+    match bounded(|| {
+        let mut sh = CommandBuilder::new("sh");
+        sh.args(["-c", "echo sh-ok"]);
+        through_pty(sh)
+    }) {
+        Ok(Some(out)) if contains(&out, b"sh-ok") => println!("sh: resolves and runs"),
+        Ok(Some(out)) => println!("sh: spawned, but printed {}", escape(&out)),
+        Ok(None) => println!("sh: spawned, then hung"),
         Err(e) => println!("sh: does not spawn ({e})"),
     }
     Ok(())
