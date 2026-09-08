@@ -343,7 +343,7 @@ checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "emit"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "libc",
 ]
@@ -432,7 +432,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form-echo"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "crossterm",
 ]
@@ -524,7 +524,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hello-tui"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "crossterm",
  "termlens",
@@ -544,7 +544,7 @@ checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
 name = "image-echo"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "miniz_oxide",
 ]
@@ -1085,7 +1085,7 @@ dependencies = [
 
 [[package]]
 name = "ratatui-app"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "ratatui",
  "serde_json",
@@ -1217,7 +1217,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "resize-echo"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "crossterm",
 ]
@@ -1519,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "termlens"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "insta",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "termlens-cli"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "serde_json",
  "termlens",
@@ -1696,7 +1696,7 @@ checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "unicode-torture"
-version = "0.10.0"
+version = "0.10.1"
 
 [[package]]
 name = "unicode-truncate"
