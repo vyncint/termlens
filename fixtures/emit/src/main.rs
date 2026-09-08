@@ -23,8 +23,10 @@
 //! --echo           copy stdin to stdout, line by line, until EOF
 //! --seq N          the integers 1..=N, one per line
 //! --cwd            the current directory, as the process sees it
+//! --pid            this process's id, in decimal
 //! --exit CODE      exit now with CODE
-//! --loop           repeat every step so far, forever
+//! --loop           run the steps before it once, then the steps after it
+//!                  forever
 //! ```
 //!
 //! Every emitting step is one `write_all` and a flush, so a test that wants
@@ -49,6 +51,7 @@ enum Step {
     Echo,
     Seq(u64),
     Cwd,
+    Pid,
     Exit(i32),
 }
 
@@ -106,9 +109,10 @@ fn duration(spec: &str) -> Duration {
     }
 }
 
-fn parse(args: impl Iterator<Item = String>) -> (Vec<Step>, bool) {
+/// The steps, and the index the forever-loop starts at, if there is one.
+fn parse(args: impl Iterator<Item = String>) -> (Vec<Step>, Option<usize>) {
     let mut steps = Vec::new();
-    let mut looping = false;
+    let mut loop_from = None;
     let mut args = args;
     while let Some(arg) = args.next() {
         let mut next = |flag: &str| {
@@ -140,13 +144,14 @@ fn parse(args: impl Iterator<Item = String>) -> (Vec<Step>, bool) {
                     .unwrap_or_else(|_| usage("--seq needs a count")),
             ),
             "--cwd" => Step::Cwd,
+            "--pid" => Step::Pid,
             "--exit" => Step::Exit(
                 next("--exit")
                     .parse()
                     .unwrap_or_else(|_| usage("--exit needs an exit code")),
             ),
             "--loop" => {
-                looping = true;
+                loop_from = Some(steps.len());
                 continue;
             }
             other if other.starts_with("--") => usage(&format!("unknown step `{other}`")),
@@ -154,7 +159,7 @@ fn parse(args: impl Iterator<Item = String>) -> (Vec<Step>, bool) {
         };
         steps.push(step);
     }
-    (steps, looping)
+    (steps, loop_from)
 }
 
 /// Read one line from stdin. `None` at EOF — the terminal is gone.
@@ -200,6 +205,7 @@ fn run(steps: &[Step], out: &mut impl Write, stdin: &mut impl BufRead) -> io::Re
                 let dir = std::env::current_dir()?;
                 out.write_all(dir.to_string_lossy().as_bytes())?;
             }
+            Step::Pid => write!(out, "{}", process::id())?,
             Step::Exit(code) => {
                 out.flush()?;
                 process::exit(*code);
@@ -211,21 +217,18 @@ fn run(steps: &[Step], out: &mut impl Write, stdin: &mut impl BufRead) -> io::Re
 }
 
 fn main() {
-    let (steps, looping) = parse(std::env::args().skip(1));
+    let (steps, loop_from) = parse(std::env::args().skip(1));
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
     // A write that fails is the terminal going away under us — the harness
     // has torn down. Nothing to report to, so nothing to report.
-    let result = if looping {
-        loop {
-            if let Err(e) = run(&steps, &mut out, &mut stdin) {
-                break Err(e);
-            }
-        }
-    } else {
-        run(&steps, &mut out, &mut stdin)
+    let result = match loop_from {
+        Some(from) => run(&steps[..from], &mut out, &mut stdin).and_then(|()| loop {
+            run(&steps[from..], &mut out, &mut stdin)?;
+        }),
+        None => run(&steps, &mut out, &mut stdin),
     };
     if result.is_err() {
         process::exit(0);
