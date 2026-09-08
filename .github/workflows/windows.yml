@@ -1,0 +1,81 @@
+name: windows
+
+# The Windows machine this project does not otherwise have (#149).
+#
+# Windows is not a CI leg: the suite drives `/bin/sh` at 99 sites (#249) and
+# ConPTY re-renders rather than forwards, so a required leg today would be
+# red on the shell before it said anything about the crate. This workflow
+# runs on demand instead — against any ref — and reports rather than gates:
+# the whole suite with nothing stopping early, then the ConPTY probe
+# (`tests/conpty_probe.rs`), which prints per escape sequence whether the
+# master read what the child wrote. Both logs are the artifact; the pass
+# count and the probe table go to the job summary so no download is needed.
+#
+# The build itself is defended on every PR by ci.yml's `windows-check`,
+# from a Linux runner. This is the half that needs the OS.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [windows-cfg]
+
+permissions: {}
+
+# One report per ref at a time; a newer dispatch supersedes an older one.
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: suite (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - name: Build everything first, so a compile error is not read as a test failure
+        run: cargo build --workspace --all-targets --all-features
+      - name: Run the whole suite without stopping
+        # A red suite is the expected outcome until #249 lands; the log is
+        # the deliverable, so the step must not end the job.
+        continue-on-error: true
+        run: cargo test --workspace --all-features --no-fail-fast 2>&1 | tee suite.log
+      - name: Ask ConPTY what it forwards
+        continue-on-error: true
+        run: cargo test -p termlens --all-features --test conpty_probe -- --ignored --nocapture 2>&1 | tee probe.log
+      - name: Summarize
+        run: |
+          {
+            echo "## Suite"
+            echo
+            echo '```'
+            grep -E '^test result:|Running (unittests|tests/)|Doc-tests' suite.log || true
+            echo '```'
+            echo
+            echo "### Failed tests"
+            echo
+            echo '```'
+            grep -E '^test .* \.\.\. FAILED$' suite.log | sort || echo "(none)"
+            echo '```'
+            echo
+            echo "## ConPTY probe"
+            echo
+            echo '```'
+            sed -n '/^conpty probe on/,$p' probe.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-report
+          path: |
+            suite.log
+            probe.log
+          if-no-files-found: error
