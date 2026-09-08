@@ -138,3 +138,63 @@ fn the_asciicast_is_a_v2_header_and_one_full_repaint_per_frame() -> termlens::Re
     assert!(t.wait_exit()?.success());
     Ok(())
 }
+
+/// The exported event must *redraw* the frame it came from — every row, the
+/// bottom one included (#295). `to_ansi` ends every row with a newline, and
+/// the one after the last row scrolled the whole picture up by one when the
+/// recording was replayed, so a player showed a screen the test never saw.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so a recorded frame never holds what was drawn (#149)"
+)]
+fn the_asciicast_replays_every_row_of_every_frame() -> termlens::Result<()> {
+    // 8x3, and the bottom row is filled edge to edge: a frame whose last row
+    // is full is the one a stray linefeed damages most.
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .size(8, 3)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "READY",
+            "--wait",
+            "--raw",
+            r"\e[?2026h\e[H\e[2JTOP\e[2;1HMIDDLE\e[3;1HBOTTOMXX\e[?2026l",
+            "--wait",
+            "--raw",
+            r"\e[?2026h\e[H\e[2JSECOND\e[3;1HFILLEDUP\e[?2026l",
+            "--wait",
+        ],
+    )?;
+    t.wait_until(|s| s.contains("READY"))?;
+    let recorder = t.record();
+    t.send(Key::Enter)?;
+    t.wait_frame(|s| s.contains("BOTTOMXX"))?;
+    t.send(Key::Enter)?;
+    t.wait_frame(|s| s.contains("FILLEDUP"))?;
+    let recording = recorder.stop()?;
+    assert_eq!(recording.len(), 2, "two frames were bracketed");
+
+    let cast = recording.to_asciicast();
+    let events: Vec<&str> = cast.lines().skip(1).collect();
+    assert_eq!(events.len(), recording.len(), "one event per frame");
+    for (event, (_, frame)) in events.iter().zip(recording.frames()) {
+        let parsed: serde_json::Value = serde_json::from_str(event).expect("an asciicast event");
+        let data = parsed[2].as_str().expect("the output payload");
+        // Replay it into a terminal of the recorded size, exactly as a
+        // player would, and hold the result against the frame it came from.
+        let (cols, rows) = frame.size();
+        let mut replay = vt100::Parser::new(rows, cols, 0);
+        replay.process(data.as_bytes());
+        let played: Vec<String> = replay
+            .screen()
+            .rows(0, cols)
+            .map(|row| row.trim_end().to_owned())
+            .collect();
+        let recorded: Vec<String> = (0..rows)
+            .map(|row| frame.row_text(row).trim_end().to_owned())
+            .collect();
+        assert_eq!(played, recorded, "the event must redraw its frame");
+    }
+    Ok(())
+}

@@ -5,6 +5,7 @@
 //! test.
 
 use std::io;
+use std::time::Duration;
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::crossterm::execute;
@@ -20,6 +21,12 @@ fn main() -> io::Result<()> {
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal, state: &mut State) -> io::Result<()> {
+    // Register crossterm's SIGWINCH listener before the first frame, the way
+    // `resize-echo` and `form-echo` do: the fidelity test synchronizes on
+    // that frame and then resizes, and a signal arriving before the first
+    // `event::read()` is silently lost, because SIGWINCH's default
+    // disposition is ignore (#292).
+    let _ = event::poll(Duration::from_secs(0))?;
     paint(terminal, state)?;
     loop {
         match event::read()? {

@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use termlens::{Key, Terminal};
+use termlens::{Key, Screen, Terminal};
 
 mod common;
 
@@ -182,4 +182,108 @@ mod json {
         assert!(t.wait_exit()?.success());
         Ok(())
     }
+}
+
+/// A grid can hold the words a styles block is made of. Reading them as
+/// metadata deleted them, and a snapshot that silently loses a visible row
+/// is worse than one that fails to parse (#296).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY rewrites the stream before termlens sees it, so the grid under test is its rendering (#149)"
+)]
+fn a_grid_holding_the_words_of_a_styles_block_round_trips() -> termlens::Result<()> {
+    let mut t = emit(&["--raw", r"\r\nstyles:\r\n(none)\r\nREADY", "--wait"])?;
+    t.wait_until(|s| s.contains("READY"))?;
+    let screen = t.screen();
+    assert_eq!(screen.row_text(1).trim_end(), "styles:");
+    assert_eq!(screen.row_text(2).trim_end(), "(none)");
+
+    let plain = screen.to_string();
+    assert_eq!(
+        Screen::parse(&plain)?.to_string(),
+        plain,
+        "content, not metadata"
+    );
+    let styled = screen.with_styles().to_string();
+    let parsed = Screen::parse(&styled)?;
+    assert_eq!(parsed.with_styles().to_string(), styled);
+    assert!(screen.diff(&parsed).is_empty(), "{}", screen.diff(&parsed));
+
+    t.send(Key::Enter)?;
+    t.wait_exit()?;
+    Ok(())
+}
+
+/// The emulator stores a wide character and its combining mark in one cell;
+/// the parser walked back onto the continuation half, which holds no text,
+/// and refused its own format (#297).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY re-renders wide characters into columns of its own choosing (#149)"
+)]
+fn a_wide_character_with_a_combining_mark_round_trips() -> termlens::Result<()> {
+    // A wide+mark cell mid-row, and another ending exactly at the right
+    // margin of the 30-column grid.
+    // The characters go in as themselves; only \r\n is for the fixture to
+    // interpret. 28 narrow cells put the second wide glyph in the last two
+    // columns of the 30-column grid.
+    let margin = "a".repeat(28);
+    let text = format!("\u{6771}\u{301}X\\r\\n{margin}\u{6771}\u{302}\\r\\nREADY");
+    let mut t = emit(&["--raw", &text, "--wait"])?;
+    t.wait_until(|s| s.contains("READY"))?;
+    let screen = t.screen();
+    assert_eq!(screen.cell(0, 0).unwrap().contents(), "\u{6771}\u{301}");
+    assert!(screen.cell(1, 28).unwrap().is_wide(), "{screen}");
+    assert!(screen.cell(1, 29).unwrap().is_wide_continuation());
+
+    let saved = screen.with_styles().to_string();
+    let parsed = Screen::parse(&saved)?;
+    assert!(screen.diff(&parsed).is_empty(), "{}", screen.diff(&parsed));
+    assert_eq!(parsed.cell(0, 0).unwrap().contents(), "\u{6771}\u{301}");
+    assert_eq!(parsed.with_styles().to_string(), saved);
+
+    t.send(Key::Enter)?;
+    t.wait_exit()?;
+    Ok(())
+}
+
+/// A hidden cursor draws nothing, and the text format does not record where
+/// it sat — so a screen parsed back from its own snapshot reported a
+/// difference no reader could see (#298).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY drives the cursor itself, so its position and visibility are not the child's (#149)"
+)]
+fn a_hidden_cursor_round_trips_as_the_same_picture() -> termlens::Result<()> {
+    let mut t = emit(&["--raw", r"hello\e[2;3H\e[?25l", "--wait"])?;
+    t.wait_until(|s| s.contains("hello") && !s.cursor().2)?;
+    let screen = t.screen();
+    assert_eq!(screen.cursor(), (1, 2, false));
+
+    let parsed = Screen::parse(&screen.with_styles().to_string())?;
+    assert_eq!(
+        parsed.cursor(),
+        (0, 0, false),
+        "the position is not in the text"
+    );
+    assert!(screen.diff(&parsed).is_empty(), "{}", screen.diff(&parsed));
+
+    // Visibility itself, and a visible cursor's position, are still picture.
+    let shown = Screen::parse("size: 30x4  cursor: 1,2\nhello")?;
+    assert!(
+        !parsed.diff(&shown).is_empty(),
+        "hidden vs visible is a change"
+    );
+    let moved = Screen::parse("size: 30x4  cursor: 2,5\nhello")?;
+    assert!(
+        !shown.diff(&moved).is_empty(),
+        "a visible cursor moving is a change"
+    );
+
+    t.send(Key::Enter)?;
+    t.wait_exit()?;
+    Ok(())
 }

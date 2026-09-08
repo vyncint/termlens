@@ -186,6 +186,16 @@ fn main() -> io::Result<()> {
         EnableFocusChange
     )?;
 
+    // Initialize crossterm's event source (which registers the SIGWINCH
+    // listener) BEFORE the first draw, for the reason `resize-echo` already
+    // does it: a test synchronizes on the first drawn frame and then
+    // resizes, and a SIGWINCH landing between that draw and the first
+    // `event::read()` is silently lost — SIGWINCH's default disposition is
+    // ignore, so nothing queues it and the acknowledgement never comes
+    // (#292). A fixture must not announce that it is ready before it can
+    // actually receive what a test is about to send it.
+    let _ = event::poll(std::time::Duration::from_secs(0))?;
+
     let mut app = App::default();
     draw(&mut out, &app)?;
 

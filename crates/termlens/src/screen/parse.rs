@@ -24,6 +24,18 @@ impl Screen {
     /// line, `styles:` and its span lines (or `(none)`). Everything else is
     /// an [`Error::Parse`] naming the line.
     ///
+    /// **The header's row count decides where the grid ends**, so a grid may
+    /// contain the words `styles:` or `(none)` as ordinary content. The one
+    /// ambiguous input is a snapshot whose trailing blank rows were trimmed
+    /// by hand *and* which carries a styles block: its block falls inside
+    /// the declared row count and is read as content. Content wins, on
+    /// purpose — a wrong row of text shows up in a diff, a silently dropped
+    /// one does not.
+    ///
+    /// A hidden cursor's position is not in the text format, so it comes
+    /// back at `0,0`. That is not a difference anyone can see, and
+    /// [`diff`](Self::diff) does not report it as one.
+    ///
     /// The round trip is exact for what the format carries: the parsed
     /// screen renders to the same text, with the same `styles:` block, and
     /// [`diff`](Self::diff)s empty against the original. It does not
@@ -50,41 +62,31 @@ impl Screen {
         let (cols, rows, cursor) = parse_header(header)?;
         let body: Vec<&str> = lines.collect();
 
-        // Where the grid ends: at the `styles:` marker when there is one,
-        // else at the end. A grid row could read `styles:` itself, so the
-        // marker is the one preceded by a blank line (or first) and followed
-        // by nothing but span lines — the shape `with_styles` writes.
-        let marker = body.iter().enumerate().position(|(i, line)| {
-            line.trim_end() == "styles:"
-                && (i == 0 || body[i - 1].trim().is_empty())
-                && body[i + 1..].iter().all(|l| is_span_line(l))
-        });
-        let (grid, styles) = match marker {
-            // The blank separator before the marker is not a grid row.
-            Some(at) => (&body[..at.saturating_sub(1)], &body[at + 1..]),
-            None => (&body[..], &body[body.len()..]),
-        };
+        // The grid is the number of lines the header declares, and nothing
+        // else decides that. `Display` writes every row — blank ones
+        // included — before `with_styles` adds its block, so counting is
+        // unambiguous for text this crate produced. Deliberately *not* a
+        // search for the `styles:` marker: a grid can contain that word as
+        // ordinary content, and reading content as metadata silently
+        // deleted it (#296).
+        //
+        // Fewer lines than rows is a snapshot whose trailing blank rows were
+        // trimmed; the remainder pads out blank. The cost of the rule is at
+        // the other end: in a *trimmed* snapshot that also carries a styles
+        // block, the block's lines are within the declared row count and are
+        // read as grid content. Content wins ties, on purpose — a wrong row
+        // of text is visible in a diff, a silently dropped one is not.
+        let split = body.len().min(usize::from(rows));
+        let (grid, rest) = body.split_at(split);
 
-        // Fewer grid lines than rows is a grid whose trailing blank rows
-        // were dropped; more is only tolerated when the extra lines are
-        // blank, so a stray line is an error rather than a lost row.
         let mut cells = vec![
             Cell::new(String::new(), Style::default(), false, false);
             usize::from(cols) * usize::from(rows)
         ];
         for (index, line) in grid.iter().enumerate() {
-            let number = index + 2;
-            if index >= usize::from(rows) {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                return Err(Error::Parse(format!(
-                    "line {number}: expected `styles:` or the end of the text after the {rows}-row grid, got {line:?}"
-                )));
-            }
             parse_row(
                 line,
-                number,
+                index + 2,
                 cols,
                 &mut cells[index * usize::from(cols)..][..usize::from(cols)],
             )?;
@@ -99,20 +101,21 @@ impl Screen {
             cells,
             TermState::default(),
         );
-        let first_style_line = marker.map_or(body.len(), |at| at + 1) + 2;
-        parse_styles(styles, first_style_line, &mut screen)?;
+
+        // After the grid: blank separator lines, then `styles:` and its
+        // spans, or nothing at all.
+        if let Some(at) = rest.iter().position(|line| !line.trim().is_empty()) {
+            let number = split + at + 2;
+            if rest[at].trim_end() != "styles:" {
+                return Err(Error::Parse(format!(
+                    "line {number}: expected `styles:` or the end of the text after the {rows}-row grid, got {:?}",
+                    rest[at]
+                )));
+            }
+            parse_styles(&rest[at + 1..], number + 1, &mut screen)?;
+        }
         Ok(screen)
     }
-}
-
-/// A line the `styles:` block may hold: `(none)`, blank, or `ROW: …`.
-fn is_span_line(line: &str) -> bool {
-    let line = line.trim_end();
-    line.is_empty()
-        || line == "(none)"
-        || line
-            .split_once(": ")
-            .is_some_and(|(row, _)| !row.is_empty() && row.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// `size: <cols>x<rows>  cursor: <row>,<col>` or `cursor: hidden`.
@@ -154,7 +157,18 @@ fn parse_row(line: &str, number: usize, cols: u16, row: &mut [Cell]) -> Result<(
     for ch in line.chars() {
         let width = ch.width().unwrap_or(0);
         if width == 0 {
-            match col.checked_sub(1).map(|c| &mut row[c]) {
+            // The cell that owns the glyph before this mark. A wide
+            // character advanced the column by two, so one step back lands
+            // on its continuation half, which holds no text — the mark
+            // belongs to the leading cell another step back (#297).
+            let owner = col.checked_sub(1).map(|c| {
+                if row[c].wide_continuation {
+                    c.saturating_sub(1)
+                } else {
+                    c
+                }
+            });
+            match owner.map(|c| &mut row[c]) {
                 Some(cell) if !cell.contents.is_empty() => cell.contents.push(ch),
                 _ => {
                     return Err(Error::Parse(format!(
@@ -247,12 +261,19 @@ fn parse_styles(lines: &[&str], first_line: usize, screen: &mut Screen) -> Resul
 }
 
 /// `4` (indexed) or `#rrggbb`.
+///
+/// Six *bytes* of hex is not six hex digits: `#a\u{20ac}bc` is six bytes and
+/// slicing it in pairs lands inside a character, which used to panic where
+/// the whole point of this module is to turn bad text into `Error::Parse`
+/// (#299). Every byte is checked before any of them is read as a digit.
 fn parse_color(text: &str) -> Option<Color> {
     if let Some(hex) = text.strip_prefix('#') {
-        if hex.len() != 6 {
+        let hex = hex.as_bytes();
+        if hex.len() != 6 || !hex.iter().all(u8::is_ascii_hexdigit) {
             return None;
         }
-        let channel = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+        let digit = |i: usize| char::from(hex[i]).to_digit(16).map(|d| d as u8);
+        let channel = |i: usize| Some(digit(i)? * 16 + digit(i + 1)?);
         return Some(Color::Rgb(channel(0)?, channel(2)?, channel(4)?));
     }
     text.parse().ok().map(Color::Indexed)
@@ -281,12 +302,103 @@ mod tests {
 
     #[test]
     fn a_short_grid_is_padded_and_none_is_accepted() {
-        let screen = Screen::parse("size: 4x3  cursor: hidden\nhi\n\nstyles:\n(none)").unwrap();
+        // `lines()` drops the empty piece after a trailing newline, so a
+        // full Display of a screen ending in blank rows is already "short".
+        let screen = Screen::parse("size: 4x3  cursor: hidden\nhi").unwrap();
         assert_eq!(screen.row_text(0), "hi  ");
         assert_eq!(screen.row_text(2), "    ");
         assert_eq!(screen.cursor(), (0, 0, false));
-        let plain = Screen::parse("size: 4x3  cursor: hidden\nhi").unwrap();
-        assert!(screen.diff(&plain).is_empty());
+        let padded = Screen::parse("size: 4x3  cursor: hidden\nhi\n\n").unwrap();
+        assert!(screen.diff(&padded).is_empty());
+        // `(none)` after a full-height grid is the styles block saying the
+        // screen carries no styles at all.
+        let none = Screen::parse("size: 4x3  cursor: hidden\nhi\n\n\n\nstyles:\n(none)").unwrap();
+        assert!(screen.diff(&none).is_empty());
+    }
+
+    /// The header's row count decides where the grid ends, so these words
+    /// are content when they fall inside it (#296).
+    #[test]
+    fn a_grid_may_contain_the_words_of_a_styles_block() {
+        let saved = "size: 8x3  cursor: 0,0\n\nstyles:\n(none)";
+        let screen = Screen::parse(saved).unwrap();
+        assert_eq!(screen.row_text(1).trim_end(), "styles:");
+        assert_eq!(screen.row_text(2).trim_end(), "(none)");
+        assert_eq!(screen.to_string(), saved);
+        // Even a row shaped like a style span is text when it is in the grid.
+        let spans = "size: 12x2  cursor: 0,0\n0: 0-1 bold\n1: 5 reverse";
+        let screen = Screen::parse(spans).unwrap();
+        assert_eq!(screen.row_text(0).trim_end(), "0: 0-1 bold");
+        assert!(screen.cell(0, 0).unwrap().style().is_default());
+        assert_eq!(screen.to_string(), spans);
+    }
+
+    /// The one input the row-count rule cannot read both ways: a grid whose
+    /// trailing blank rows were trimmed by hand *and* which carries a styles
+    /// block. Content wins, and the leftover line is named rather than
+    /// silently swallowed.
+    #[test]
+    fn a_trimmed_grid_with_a_styles_block_is_read_as_content() {
+        // Wide enough to hold the word: `styles:` becomes row 2, and the
+        // span line after it has nowhere left to belong.
+        let err = Screen::parse("size: 12x3  cursor: hidden\nhi\n\nstyles:\n(none)")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("line 5") && err.contains("expected `styles:`"),
+            "{err}"
+        );
+        // Too narrow to hold it, and the same reading fails one line
+        // earlier — on the row itself rather than on what follows it.
+        let narrow = Screen::parse("size: 4x3  cursor: hidden\nhi\n\nstyles:\n(none)")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            narrow.contains("line 4") && narrow.contains("wider"),
+            "{narrow}"
+        );
+    }
+
+    /// Six bytes of hex is not six hex digits (#299).
+    #[test]
+    fn a_malformed_colour_is_an_error_not_a_panic() {
+        for token in [
+            "fg=#a\u{20ac}bc",
+            "bg=#a\u{20ac}bc",
+            "fg=#12345",
+            "fg=#zzzzzz",
+            "fg=300",
+        ] {
+            let input = format!("size: 2x2  cursor: 0,0\nx\n\nstyles:\n0: 0 {token}");
+            let err = Screen::parse(&input).unwrap_err().to_string();
+            assert!(err.contains("line 5"), "{token}: {err}");
+        }
+        // The valid forms still parse.
+        let ok =
+            Screen::parse("size: 2x2  cursor: 0,0\nxy\n\n\nstyles:\n0: 0 fg=4 bg=#1e1e2e").unwrap();
+        assert_eq!(ok.cell(0, 0).unwrap().style().fg, Color::Indexed(4));
+        assert_eq!(
+            ok.cell(0, 0).unwrap().style().bg,
+            Color::Rgb(0x1e, 0x1e, 0x2e)
+        );
+    }
+
+    /// A combining mark after a wide character belongs to the cell that owns
+    /// the glyph, not to its continuation half (#297).
+    #[test]
+    fn a_combining_mark_follows_a_wide_character() {
+        let screen = Screen::parse("size: 6x1  cursor: 0,0\n\u{6771}\u{301}X").unwrap();
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), "\u{6771}\u{301}");
+        assert!(screen.cell(0, 0).unwrap().is_wide());
+        assert!(screen.cell(0, 1).unwrap().is_wide_continuation());
+        assert_eq!(screen.cell(0, 2).unwrap().contents(), "X");
+        // Several marks in a row, and a wide character at the right margin.
+        let many = Screen::parse("size: 4x1  cursor: 0,0\nab\u{6771}\u{301}\u{302}").unwrap();
+        assert_eq!(
+            many.cell(0, 2).unwrap().contents(),
+            "\u{6771}\u{301}\u{302}"
+        );
+        assert!(many.cell(0, 3).unwrap().is_wide_continuation());
     }
 
     #[test]
