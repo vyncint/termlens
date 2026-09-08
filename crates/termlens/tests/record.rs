@@ -18,6 +18,10 @@ fn emit(builder: termlens::TerminalBuilder, steps: &[&str]) -> termlens::Result<
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so a recorded frame never holds what was drawn (#149)"
+)]
 fn a_recording_holds_every_frame_in_order_with_its_time() -> termlens::Result<()> {
     let mut t = emit(
         Terminal::builder(),
@@ -48,6 +52,10 @@ fn a_recording_holds_every_frame_in_order_with_its_time() -> termlens::Result<()
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so a recorded frame never holds what was drawn (#149)"
+)]
 fn the_budget_drops_the_oldest_frames_and_says_so() -> termlens::Result<()> {
     // Two 40x6 frames fit; the third pushes the first out.
     let mut t = emit(
@@ -88,6 +96,10 @@ fn an_application_without_synchronized_updates_is_refused() -> termlens::Result<
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so a recorded frame never holds what was drawn (#149)"
+)]
 fn the_asciicast_is_a_v2_header_and_one_full_repaint_per_frame() -> termlens::Result<()> {
     let mut t = emit(
         Terminal::builder(),
