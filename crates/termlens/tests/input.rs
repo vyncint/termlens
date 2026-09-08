@@ -1,10 +1,10 @@
 //! Typed input beyond plain keys: mouse (mode-aware), modifier chords,
 //! bracketed paste, and cursor-key modes.
 //!
-//! The programs that read what termlens typed off the wire stay on
-//! `/bin/sh` on purpose (#249): they put the terminal in raw mode with
-//! `stty -icanon -echo` first, and the std-only `emit` fixture cannot set a
-//! terminal mode. Everything that only prints goes through the fixture.
+//! The programs that read what termlens typed off the wire run the `emit`
+//! fixture in `--raw-mode`, so the bytes arrive as sent and unechoed, and
+//! print them with ESC drawn as `E` — or as hex where the exact bytes are
+//! the point.
 
 use std::time::{Duration, Instant};
 
@@ -88,18 +88,12 @@ fn paste_is_one_event_under_bracketed_paste() -> termlens::Result<()> {
 
 #[test]
 fn paste_falls_back_to_plain_bytes_without_the_mode() -> termlens::Result<()> {
-    // A plain shell never enables mode 2004; the paste must arrive as
+    // A program that never enables mode 2004; the paste must arrive as
     // raw bytes with no ESC[200~ wrapper.
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"stty -icanon -echo; ",
-                r#"reply=$(head -c 5); printf 'got:%s' "$reply"; read guard"#
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = util::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &["--raw-mode", "got:", "--read", "5", "--wait"],
+    )?;
     t.paste("plain")?;
     t.wait_until(|s| s.contains("got:plain"))?;
     t.send(Key::Enter)?;
@@ -129,22 +123,22 @@ fn an_embedded_paste_marker_cannot_end_the_paste() -> termlens::Result<()> {
 /// clears ICRNL) means nothing downstream will.
 #[test]
 fn a_pasted_line_break_arrives_as_carriage_return() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                // -icrnl is what raw mode does (crossterm's
-                // enable_raw_mode clears it): without it the line
-                // discipline rewrites our CR back to LF before the app
-                // ever sees it. READY marks the settings as applied —
-                // pasting earlier would race them.
-                r"stty -icanon -echo -icrnl; printf READY; ",
-                // Render the three bytes as hex so the wire is visible.
-                r"head -c 3 | od -An -tx1 | tr -d ' \n'; printf ' WIRE-EOF'; read guard"
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = util::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &[
+            // -icrnl is what raw mode does (crossterm's enable_raw_mode
+            // clears it): without it the line discipline rewrites our CR
+            // back to LF before the app ever sees it. READY marks the
+            // settings as applied — pasting earlier would race them.
+            "--no-icrnl",
+            "READY",
+            // The three bytes as hex, so the wire is visible.
+            "--read-hex",
+            "3",
+            " WIRE-EOF",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("READY"))?;
 
     t.paste("a\nb")?;
@@ -169,25 +163,28 @@ fn a_pasted_line_break_arrives_as_carriage_return() -> termlens::Result<()> {
 /// past a position boundary.
 #[test]
 fn mouse_reports_follow_the_utf8_encoding() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .size(120, 24)
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"stty -icanon -echo; printf '\033[?1000h\033[?1005h'; printf READY; ",
-                r"head -c 7 | od -An -tx1 | tr -d ' \n'; printf ' WIRE-EOF'; ",
-                // A loop with a sentinel, not a bare `read guard`: the
-                // padding below is a separate write from the click, so
-                // whether head's buffered read swallows it or leaves it
-                // queued is a race. A bare guard loses that race — it
-                // consumes a padding newline, the shell exits, and the
-                // final write below hits a dead PTY with EIO. Only QUIT
-                // ends this script, so the padding cannot end it early.
-                r#"while read guard; do [ "$guard" = QUIT ] && exit 0; done"#
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = util::spawn_emit(
+        Terminal::builder()
+            .size(120, 24)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\e[?1000h\e[?1005h",
+            "READY",
+            "--read-hex",
+            "7",
+            " WIRE-EOF",
+            // A sentinel, not a bare `--wait`: the padding below is a
+            // separate write from the click, so whether the buffered read
+            // swallows it or leaves it queued is a race. A bare wait loses
+            // that race — it consumes a padding newline, the program exits,
+            // and the final write below hits a dead PTY with EIO. Only QUIT
+            // ends this program, so the padding cannot end it early.
+            "--wait-for",
+            "QUIT",
+        ],
+    )?;
     t.wait_until(|s| s.contains("READY"))?;
 
     // Column 100 is 0x85 as a bare byte; UTF-8 must send c2 85.
@@ -213,21 +210,26 @@ fn mouse_reports_follow_the_utf8_encoding() -> termlens::Result<()> {
 /// SGR encoding with full (any-event) tracking.
 #[test]
 fn buttons_modifiers_drag_and_horizontal_wheel_reach_the_wire() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
+    let mut t = util::spawn_emit(
         // Wide enough that the captured wire stays on one row.
-        .size(200, 24)
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                // `min 0 time 20` rather than an exact byte count: the drag
-                // reports one motion per cell crossed, so the length depends
-                // on the path.
-                r"stty -icanon -echo min 0 time 20; printf '\033[?1003h\033[?1006h'; printf READY; ",
-                r#"wire=$(dd bs=1 count=200 2>/dev/null | tr '\033' 'E'); printf '|%s|' "$wire"; read guard"#
-            ),
-        ])
-        .spawn("/bin/sh")?;
+        Terminal::builder()
+            .size(200, 24)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\e[?1003h\e[?1006h",
+            "READY",
+            // `--read-quiet` rather than an exact byte count: the drag
+            // reports one motion per cell crossed, so the length depends
+            // on the path. The `|` follows the read, so waiting for it
+            // waits for the wire.
+            "--read-quiet",
+            "200",
+            "|",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("READY"))?;
 
     // Right-click: SGR button 2. Ctrl-click: 0 + 16. Wheel left: 66.
@@ -270,17 +272,22 @@ fn buttons_modifiers_drag_and_horizontal_wheel_reach_the_wire() -> termlens::Res
 /// something *along* the path.
 #[test]
 fn a_drag_reports_one_motion_per_cell_crossed() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .size(200, 24)
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"stty -icanon -echo min 0 time 20; printf '\033[?1002h\033[?1006h'; printf READY; ",
-                r#"wire=$(dd bs=1 count=300 2>/dev/null | tr '\033' 'E'); printf '|%s|' "$wire"; read guard"#
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = util::spawn_emit(
+        Terminal::builder()
+            .size(200, 24)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\e[?1002h\e[?1006h",
+            "READY",
+            // The `|` follows the read, so waiting for it waits for the wire.
+            "--read-quiet",
+            "300",
+            "|",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("READY"))?;
 
     // Seven cells crossed, from column 5 to column 12 on row 4.
@@ -310,17 +317,22 @@ fn a_drag_reports_one_motion_per_cell_crossed() -> termlens::Result<()> {
 /// application asked not to hear about motion, so it hears none.
 #[test]
 fn press_release_tracking_still_gets_no_motion_at_all() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .size(200, 24)
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"stty -icanon -echo min 0 time 20; printf '\033[?1000h\033[?1006h'; printf READY; ",
-                r#"wire=$(dd bs=1 count=100 2>/dev/null | tr '\033' 'E'); printf '|%s|' "$wire"; read guard"#
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = util::spawn_emit(
+        Terminal::builder()
+            .size(200, 24)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\e[?1000h\e[?1006h",
+            "READY",
+            // The `|` follows the read, so waiting for it waits for the wire.
+            "--read-quiet",
+            "100",
+            "|",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("READY"))?;
     t.drag(termlens::MouseButton::Left, 5, 4, 12, 4)?;
     t.wait_until(|s| s.row_text(0).contains("|"))?;
@@ -356,20 +368,28 @@ fn drag_is_refused_when_the_mode_cannot_express_it() -> termlens::Result<()> {
 
 #[test]
 fn arrows_follow_the_apps_cursor_key_mode() -> termlens::Result<()> {
-    // The script enables DECCKM (CSI ?1 h), reads 3 bytes, reports them,
+    // The program enables DECCKM (CSI ?1 h), reads 3 bytes, reports them,
     // then disables it and reads again — one terminal, both modes.
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"stty -icanon -echo; printf '[?1hAPP '; ",
-                r#"a=$(head -c 3 | tr '' 'E'); printf 'got:%s ' "$a"; "#,
-                r"printf '[?1lNORM '; ",
-                r#"b=$(head -c 3 | tr '' 'E'); printf 'got:%s' "$b"; read guard"#
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = util::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--csi",
+            "?1h",
+            "APP ",
+            "got:",
+            "--read",
+            "3",
+            " ",
+            "--csi",
+            "?1l",
+            "NORM ",
+            "got:",
+            "--read",
+            "3",
+            "--wait",
+        ],
+    )?;
 
     t.wait_until(|s| s.contains("APP"))?;
     t.send(Key::Up)?;
