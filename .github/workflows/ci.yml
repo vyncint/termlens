@@ -89,6 +89,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test --workspace --no-default-features
       - run: cargo test --workspace --no-default-features --features decode
+      - run: cargo test --workspace --no-default-features --features regex
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
 

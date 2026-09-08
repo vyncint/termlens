@@ -11,6 +11,28 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- **`Screen::find_all`.** Every occurrence of a needle in reading order,
+  from the same scan `find` is the first element of — NFC-folded, trimmed
+  per row, real columns across wide characters — so the two cannot drift.
+  Non-overlapping, multi-row needles supported, a `Vec`; the reasons for each
+  are in the rustdoc. "This warning appears exactly once" and "click the
+  second item" are writable without opting out of normalisation. (#264)
+
+- **A `regex` feature** (off by default): `Screen::matches`, `find_match`,
+  `find_all_matches`, `mask_matches`, and `Terminal::wait_until_matches` /
+  `_for`, which returns the screen it matched on. Matching is per row over
+  the row's text as `contains` sees it, and the column reported is a cell
+  column — the expect-style wait, pointed at a row of the rendered screen
+  rather than at the byte stream. (#245)
+
+- **Grid-aware masks: `Screen::mask_rect`, `mask_matching`, `mask_cells`.**
+  Each returns a new `Screen` with cell *contents* replaced and the size,
+  cursor, styles and wide-character structure kept, so a clock or a PID can
+  be redacted without moving a column — which is what insta's text filters
+  cannot do for a grid. A masked screen snapshots, `find`s and compares like
+  any other, and its `styles:` block is unchanged, so a colour regression
+  stays visible through the redaction. (#250)
+
 - **`Screen::unsupported()`: the sequences the emulator did not implement,
   so a plausible-looking wrong grid can be told from a right one.** The
   backend reports every escape it cannot render and termlens installed the

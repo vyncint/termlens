@@ -1177,8 +1177,68 @@ impl Screen {
     /// searches agree; [`cell`](Self::cell) still reports the character.
     #[must_use]
     pub fn find(&self, needle: &str) -> Option<(u16, u16)> {
+        let mut first = None;
+        self.for_each_match(needle, |at| {
+            first = Some(at);
+            false
+        });
+        first
+    }
+
+    /// Every occurrence of `needle`, in reading order — the `(row, col)` of
+    /// each match's first character. Matching is identical to
+    /// [`find`](Self::find), which is the first element of this same scan:
+    /// NFC on both sides, trailing whitespace trimmed per row, real columns
+    /// across double-width characters, the visible screen only.
+    ///
+    /// Two decisions, written down so they need not be discovered:
+    ///
+    /// - **Matches do not overlap.** `find_all("aa")` on a row reading
+    ///   `aaaa` is two matches, not three — each match advances past its
+    ///   own end, as `str::matches` does.
+    /// - **Multi-row needles are supported**, with exactly the semantics of
+    ///   `find`: a needle containing `\n` matches across consecutive rows,
+    ///   and the scan resumes below the rows a match consumed.
+    ///
+    /// A `Vec` rather than an iterator: a screen holds at most a few
+    /// thousand cells, so allocation is not the concern, and a `Vec` is what
+    /// `.len()` — "this warning appears exactly once" — and indexing —
+    /// "click the second item" — want. There is deliberately no count
+    /// method; `find_all(x).len()` reads fine and one scan is easier to keep
+    /// honest than two.
+    ///
+    /// ```
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder()
+    /// #     .args(["-c", r"printf 'item\nitem\nitem'; read q"]).spawn("sh")?;
+    /// # t.wait_until(|s| s.find_all("item").len() == 3)?;
+    /// let s = t.screen();
+    /// assert_eq!(s.find_all("item"), [(0, 0), (1, 0), (2, 0)]);
+    /// let (row, col) = s.find_all("item")[1];   // the second one, for a click
+    /// # assert_eq!((row, col), (1, 0));
+    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn find_all(&self, needle: &str) -> Vec<(u16, u16)> {
+        let mut all = Vec::new();
+        self.for_each_match(needle, |at| {
+            all.push(at);
+            true
+        });
+        all
+    }
+
+    /// The one scan behind [`find`](Self::find) and [`find_all`](Self::find_all):
+    /// every non-overlapping match of `needle` in reading order, handed to
+    /// `visit` until it returns `false`. One implementation, so the two can
+    /// never disagree about what matches — `find`'s rustdoc promises it
+    /// agrees with `contains`, and a second scan would be a second thing to
+    /// keep in agreement.
+    fn for_each_match(&self, needle: &str, mut visit: impl FnMut((u16, u16)) -> bool) {
         if needle.is_empty() {
-            return Some((0, 0));
+            visit((0, 0));
+            return;
         }
         let needle = &self.fold(needle);
         if !needle.contains('\n') {
@@ -1188,49 +1248,224 @@ impl Screen {
                 // trimmed — not the grid padded out to `cols`. The trimmed
                 // string is a prefix, so the byte-to-column map is unchanged
                 // and an interior space still matches (#212).
-                if let Some(byte_off) = text.trim_end().find(needle.as_str()) {
-                    return Some((row, cols.get(byte_off).copied()?));
+                for (byte_off, _) in text.trim_end().match_indices(needle.as_str()) {
+                    let Some(&col) = cols.get(byte_off) else {
+                        return;
+                    };
+                    if !visit((row, col)) {
+                        return;
+                    }
                 }
             }
-            return None;
+            return;
         }
 
         // Multi-row: the needle is a substring of `text()` — its first
         // segment ends a row (after the trailing-whitespace trim), the
         // middle segments equal whole rows, the last starts one.
         let segments: Vec<&str> = needle.split('\n').collect();
-        let extra = u16::try_from(segments.len() - 1).ok()?;
-        for row in 0..self.rows.checked_sub(extra)? {
+        let Ok(extra) = u16::try_from(segments.len() - 1) else {
+            return;
+        };
+        let Some(last_start) = self.rows.checked_sub(extra) else {
+            return;
+        };
+        let mut row = 0;
+        while row < last_start {
             let (first_line, cols) = self.searchable_row(row);
             let first = first_line.trim_end();
-            if !first.ends_with(segments[0]) {
-                continue;
-            }
-            let tail_matches = segments[1..].iter().enumerate().all(|(i, seg)| {
-                let (line, _) = self.searchable_row(row + 1 + i as u16);
-                let line = line.trim_end();
-                if i as u16 == extra - 1 {
-                    line.starts_with(seg) // last segment: prefix
-                } else {
-                    line == *seg // middle segments: whole rows
-                }
-            });
-            if !tail_matches {
+            let tail_matches = || {
+                segments[1..].iter().enumerate().all(|(i, seg)| {
+                    let (line, _) = self.searchable_row(row + 1 + i as u16);
+                    let line = line.trim_end();
+                    if i as u16 == extra - 1 {
+                        line.starts_with(seg) // last segment: prefix
+                    } else {
+                        line == *seg // middle segments: whole rows
+                    }
+                })
+            };
+            if !first.ends_with(segments[0]) || !tail_matches() {
+                row += 1;
                 continue;
             }
             // The needle's first character: on this row for a non-empty
             // first segment, else the first character after the leading
             // newlines (start of a following row).
-            return match segments.iter().position(|s| !s.is_empty()) {
+            let at = match segments.iter().position(|s| !s.is_empty()) {
                 Some(0) => {
                     let byte_off = first.len() - segments[0].len();
-                    Some((row, cols.get(byte_off).copied()?))
+                    match cols.get(byte_off) {
+                        Some(&col) => (row, col),
+                        None => return,
+                    }
                 }
-                Some(k) => Some((row + u16::try_from(k).ok()?, 0)),
-                None => Some((row + extra, 0)),
+                Some(k) => match u16::try_from(k) {
+                    Ok(k) => (row + k, 0),
+                    Err(_) => return,
+                },
+                None => (row + extra, 0),
             };
+            if !visit(at) {
+                return;
+            }
+            // Non-overlapping: the rows this match spanned are spent.
+            row += extra;
         }
-        None
+    }
+
+    /// A copy of this screen with every cell in the rectangle blanked —
+    /// the given columns of the given rows, the same range arguments and
+    /// clamping as [`rect_text`](Self::rect_text), **columns first**.
+    ///
+    /// # Masks change contents and nothing else
+    ///
+    /// Mask the grid, not the text, because width is meaning in a terminal.
+    /// A snapshot of a screen with a clock in the title bar fails on every
+    /// run, and a text filter over the rendering — insta's — turns an
+    /// eight-column `12:34:56` into a six-column `[time]` and moves every
+    /// cell after it, while the `styles:` block still names the original
+    /// columns. These three methods replace cell *contents* and keep the
+    /// size, the cursor, every style and the wide-character structure, so
+    /// the masked screen is an ordinary [`Screen`]: it snapshots, `find`s
+    /// and compares like any other, and a colour regression stays visible
+    /// through the redaction. A masked cell renders as its fill.
+    ///
+    /// # Panics
+    ///
+    /// If either range runs backwards, as [`rect_text`](Self::rect_text)
+    /// does and for the same reason.
+    #[must_use]
+    pub fn mask_rect(&self, cols: impl RangeBounds<u16>, rows: impl RangeBounds<u16>) -> Screen {
+        let (col_start, col_end) = clamp_range(&cols, self.cols, "column");
+        let (row_start, row_end) = clamp_range(&rows, self.rows, "row");
+        self.masked(
+            |row, col, _| {
+                (row_start..row_end).contains(&row) && (col_start..col_end).contains(&col)
+            },
+            None,
+        )
+    }
+
+    /// A copy of this screen with the cells covered by every match of
+    /// `pattern` — a literal, matched the way [`find_all`](Self::find_all)
+    /// matches — replaced by `fill`, one per column, so an eight-column
+    /// time stays eight columns of `▒`. A wide character under a match
+    /// becomes two fill cells. See [`mask_rect`](Self::mask_rect) for what
+    /// a mask keeps.
+    ///
+    /// With the `regex` feature, `mask_matches` takes a pattern instead; the
+    /// two share one engine.
+    ///
+    /// # Panics
+    ///
+    /// If `fill` is not one column wide: a wide fill would change the
+    /// row's width, which is the one thing a mask exists not to do.
+    #[must_use]
+    pub fn mask_matching(&self, pattern: &str, fill: char) -> Screen {
+        let pattern = self.fold(pattern);
+        self.masked_spans(
+            |hay| {
+                hay.match_indices(pattern.as_str())
+                    .map(|(start, _)| (start, start + pattern.len()))
+                    .collect()
+            },
+            fill,
+        )
+    }
+
+    /// A copy of this screen with every cell for which `predicate` holds
+    /// blanked — everything dim, say, or everything in a given colour. See
+    /// [`mask_rect`](Self::mask_rect) for what a mask keeps.
+    #[must_use]
+    pub fn mask_cells(&self, mut predicate: impl FnMut(&Cell) -> bool) -> Screen {
+        self.masked(|_, _, cell| predicate(cell), None)
+    }
+
+    /// The masks' shared core: `hit(row, col, cell)` decides, `fill` is the
+    /// replacement (`None` for a blank cell).
+    fn masked(&self, mut hit: impl FnMut(u16, u16, &Cell) -> bool, fill: Option<char>) -> Screen {
+        let width = usize::from(self.cols);
+        let hits: Vec<bool> = self
+            .cells
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| {
+                let row = u16::try_from(i / width).unwrap_or(u16::MAX);
+                let col = u16::try_from(i % width).unwrap_or(u16::MAX);
+                hit(row, col, cell)
+            })
+            .collect();
+        self.apply_mask(hits, fill)
+    }
+
+    /// Mask by byte ranges of each row's searchable text — what a literal
+    /// or a pattern match produces — mapped back to columns through the
+    /// same map `find` reports columns with.
+    fn masked_spans(
+        &self,
+        mut spans: impl FnMut(&str) -> Vec<(usize, usize)>,
+        fill: char,
+    ) -> Screen {
+        let width = usize::from(self.cols);
+        let mut hits = vec![false; self.cells.len()];
+        for row in 0..self.rows {
+            let (text, cols) = self.searchable_row(row);
+            for (start, end) in spans(text.trim_end()) {
+                for byte in start..end {
+                    if let Some(&col) = cols.get(byte) {
+                        hits[usize::from(row) * width + usize::from(col)] = true;
+                    }
+                }
+            }
+        }
+        self.apply_mask(hits, Some(fill))
+    }
+
+    fn apply_mask(&self, mut hits: Vec<bool>, fill: Option<char>) -> Screen {
+        if let Some(fill) = fill {
+            assert_eq!(
+                unicode_width::UnicodeWidthChar::width(fill),
+                Some(1),
+                "a mask fill must be one column wide, and {fill:?} is not"
+            );
+        }
+        // A masked wide character masks both of its columns, whichever of
+        // the two was hit, so the row keeps its width.
+        let width = usize::from(self.cols);
+        for i in 0..hits.len() {
+            if !hits[i] {
+                continue;
+            }
+            if self.cells[i].is_wide() && (i + 1) % width != 0 && i + 1 < hits.len() {
+                hits[i + 1] = true;
+            }
+            if self.cells[i].is_wide_continuation() && i % width != 0 {
+                hits[i - 1] = true;
+            }
+        }
+        let contents = fill.map_or_else(String::new, String::from);
+        let cells: Vec<Cell> = self
+            .cells
+            .iter()
+            .zip(&hits)
+            .map(|(cell, &hit)| {
+                if hit {
+                    Cell::new(contents.clone(), *cell.style(), false, false)
+                } else {
+                    cell.clone()
+                }
+            })
+            .collect();
+        Screen {
+            cols: self.cols,
+            rows: self.rows,
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+            cursor_visible: self.cursor_visible,
+            cells: cells.into(),
+            state: Arc::clone(&self.state),
+        }
     }
 
     /// The text within a rectangle: the given columns of the given rows,
@@ -1424,6 +1659,98 @@ impl Screen {
     #[must_use]
     pub fn with_styles(&self) -> ScreenWithStyles<'_> {
         ScreenWithStyles { screen: self }
+    }
+}
+
+/// Pattern matching over the rows of the screen (feature `regex`).
+///
+/// The crate's position — assert on the rendered screen, not the byte
+/// stream — is not weakened by matching a pattern against a *row of that
+/// screen*: the match still lands on cells with coordinates. Matching is
+/// per row over the row's text as [`contains`](Self::contains) sees it —
+/// NFC-folded, trailing whitespace trimmed — so a pattern never spans rows
+/// (a terminal has no row boundary a user reads across), and the column
+/// reported is a cell column, mapped back through wide characters exactly
+/// as [`find`](Self::find) does.
+#[cfg(feature = "regex")]
+#[cfg_attr(docsrs, doc(cfg(feature = "regex")))]
+impl Screen {
+    /// The first match of `re` in reading order: `(row, col, matched text)`,
+    /// the column being that of the match's first character.
+    ///
+    /// ```
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder()
+    /// #     .args(["-c", r"printf 'myapp v1.42.0 ready'; read q"]).spawn("sh")?;
+    /// # t.wait_until(|s| s.contains("ready"))?;
+    /// let version = regex::Regex::new(r"v\d+\.\d+\.\d+").unwrap();
+    /// let (row, col, text) = t.screen().find_match(&version).expect("a version");
+    /// assert_eq!((row, col, text.as_str()), (0, 6, "v1.42.0"));
+    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn find_match(&self, re: &regex::Regex) -> Option<(u16, u16, String)> {
+        let mut first = None;
+        self.for_each_regex_match(re, |m| {
+            first = Some(m);
+            false
+        });
+        first
+    }
+
+    /// Every match of `re`, in reading order, non-overlapping within a row
+    /// as [`regex::Regex::find_iter`] is: `(row, col, matched text)` each.
+    #[must_use]
+    pub fn find_all_matches(&self, re: &regex::Regex) -> Vec<(u16, u16, String)> {
+        let mut all = Vec::new();
+        self.for_each_regex_match(re, |m| {
+            all.push(m);
+            true
+        });
+        all
+    }
+
+    /// True if some row matches `re` — the pattern-shaped
+    /// [`contains`](Self::contains), and what
+    /// [`Terminal::wait_until_matches`](crate::Terminal::wait_until_matches)
+    /// waits on.
+    #[must_use]
+    pub fn matches(&self, re: &regex::Regex) -> bool {
+        self.find_match(re).is_some()
+    }
+
+    /// [`mask_matching`](Self::mask_matching) with a pattern: the cells
+    /// covered by every match of `re` in every row become `fill`, one per
+    /// column, so a `\d{2}:\d{2}:\d{2}` clock stays eight columns wide.
+    ///
+    /// # Panics
+    ///
+    /// If `fill` is not one column wide, as `mask_matching` does.
+    #[must_use]
+    pub fn mask_matches(&self, re: &regex::Regex, fill: char) -> Screen {
+        self.masked_spans(
+            |hay| re.find_iter(hay).map(|m| (m.start(), m.end())).collect(),
+            fill,
+        )
+    }
+
+    fn for_each_regex_match(
+        &self,
+        re: &regex::Regex,
+        mut visit: impl FnMut((u16, u16, String)) -> bool,
+    ) {
+        for row in 0..self.rows {
+            let (text, cols) = self.searchable_row(row);
+            for m in re.find_iter(text.trim_end()) {
+                let Some(&col) = cols.get(m.start()) else {
+                    return;
+                };
+                if !visit((row, col, m.as_str().to_owned())) {
+                    return;
+                }
+            }
+        }
     }
 }
 
