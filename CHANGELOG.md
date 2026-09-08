@@ -11,6 +11,27 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- **`Screen::unsupported()`: the sequences the emulator did not implement,
+  so a plausible-looking wrong grid can be told from a right one.** The
+  backend reports every escape it cannot render and termlens installed the
+  no-op callbacks and threw the list away. It is kept now — distinct shapes,
+  first seen first, in the timeout messages' form (`^[[20h`), 32 kept and
+  the rest counted in `unsupported_overflow()` — filtered to what *termlens*
+  did not honour, since the character sets, tab stops, insert mode and every
+  query the responder answers still reach the backend's callbacks. A request
+  to resize the window is listed rather than obeyed; `visual_bells()` counts
+  `ESC g` separately from `bells()`, since a flash is not a beep. (#266)
+
+- **`Screen::row_wrapped()` and `Screen::logical_text()`.** A line long
+  enough to wrap is two rows, and a needle spanning the wrap was found by
+  nobody although a reader plainly saw it. The backend has always recorded
+  which rows soft-wrapped and was never asked; each snapshot now carries the
+  bit, and `logical_text()` joins wrapped rows back together so
+  `logical_text().contains("brown fox jumps")` is true. `contains` and `find`
+  are unchanged and document the trap beside the scrollback one. The two
+  sentences that said history could not be reflowed *for lack of the
+  record* now give the true reason, cost. (#265)
+
 - **Windows.** The crate builds and the whole suite runs on `windows-latest`
   in CI, over ConPTY. Screen assertions work; the features ConPTY renders
   away — `wait_frame`, graphics, the responder's outbound claims, mouse
@@ -52,6 +73,16 @@ listed under a **Changed** or **Removed** heading.
   `--inherit-env` restores the previous behavior. (#263)
 
 ### Fixed
+
+- **Insert mode (`CSI 4 h`) is honoured.** `smir`/`rmir` are in the
+  terminfo entry every child is handed, and ncurses uses the mode for
+  `insch`; it was parsed and dropped, so an inserted character ate the rest
+  of the line and a snapshot could bless the eaten tail. The flag lives in
+  the sequence tracker beside the character sets; while it is set the
+  emulator reserves room for each printable run with the `ICH` the backend
+  does dispatch — in columns, so a wide character counts twice, and never
+  past the right margin. `RIS` and `DECSTR` clear it, and
+  `Screen::insert_mode()` reports an application that left it on. (#261)
 
 - **Custom tab stops are honoured: `HTS`, `TBC`, `CHT` and `CBT` do what
   they say.** Stops were fixed at every eighth column — the backend's

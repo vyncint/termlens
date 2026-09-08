@@ -9,6 +9,7 @@
 
 mod seq;
 mod shadow;
+mod unhandled;
 mod vt100;
 
 #[cfg(feature = "decode")]

@@ -3683,13 +3683,15 @@ impl Terminal {
     /// Rows already in scrollback keep the width they were captured at, and
     /// rows that scroll off after the resize are captured at the new width,
     /// so [`full_text`](Screen::full_text) after a narrowing resize can hold
-    /// both geometries. That is a decision rather than an omission. History
-    /// is text, with no record of which rows were soft-wrapped, so there is
-    /// nothing to reflow *from*; and discarding it on resize — the other
-    /// honest option — would make a suite that exercises a responsive layout
-    /// lose everything it had already asserted on. The visible grid is not
-    /// reflowed either: the backend clips or pads each row to the new width,
-    /// which is the stale-frame trap above.
+    /// both geometries. That is a decision rather than an omission, and the
+    /// reason is cost: the backend does record which rows soft-wrapped
+    /// ([`Screen::row_wrapped`]), so reflowing is possible, but history is
+    /// captured as text without that bit and re-laying a thousand rows out
+    /// on every resize is a price no assertion has asked for. Discarding
+    /// history on resize — the other honest option — would make a suite that
+    /// exercises a responsive layout lose everything it had already asserted
+    /// on. The visible grid is not reflowed either: the backend clips or pads
+    /// each row to the new width, which is the stale-frame trap above.
     ///
     /// # After the child exits
     ///

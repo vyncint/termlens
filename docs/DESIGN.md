@@ -481,10 +481,13 @@ bound (free, within noise), 639ms on the re-read path.
 Two limits are documented rather than papered over: history is bounded, so
 a longer run drops its oldest rows; and resize does not reflow, so rows
 keep the width they were captured at — a decision, recorded on
-`Terminal::resize`, not an omission. History is text with no record of
-which rows were soft-wrapped, so there is nothing to reflow from, and the
-other honest option, discarding history on resize, would cost a suite that
-exercises a responsive layout everything it had asserted on. Rows captured
+`Terminal::resize`, not an omission. The record needed to reflow exists —
+the backend reports which rows soft-wrapped, and `Screen::row_wrapped` and
+`Screen::logical_text` read it for the visible grid — but history is
+captured as text without it, and re-laying a thousand rows out on every
+resize is a cost no assertion has asked for; the other honest option,
+discarding history on resize, would cost a suite that exercises a
+responsive layout everything it had asserted on. Rows captured
 after a resize have the new width, so `full_text()` can hold both
 geometries, and says so where a caller meets it. The alternate screen
 accumulates no history at all (vt100 gives the alternate grid none), which

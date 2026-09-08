@@ -6,14 +6,19 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use unicode_width::UnicodeWidthStr;
+
 use super::seq::{SeqEvent, SeqTracker, TabOp};
 use super::shadow::{AttrShadow, ColorNormalizer};
+use super::unhandled::Unhandled;
 use super::{Emulator, FrameSpan, InputModes, ModeState, MouseEncoding, Processed, Stop};
 use crate::graphics::{GraphicsPayload, GraphicsSeen, HISTORY};
 use crate::screen::{Cell, Color, MouseMode, Screen, Style, TermState};
 
 pub(crate) struct Vt100Emulator {
-    parser: ::vt100::Parser,
+    /// Built with the callback set that records what vt100 could not
+    /// render, so a snapshot can say so (`emu/unhandled.rs`).
+    parser: ::vt100::Parser<Unhandled>,
     tracker: SeqTracker,
     /// Carries blink, conceal and strikethrough, which vt100 drops. See
     /// `emu/shadow.rs` for why this is a second parser rather than
@@ -68,7 +73,12 @@ impl Vt100Emulator {
 
     pub(crate) fn new(rows: u16, cols: u16, scrollback_len: usize, capture: usize) -> Self {
         Self {
-            parser: ::vt100::Parser::new(rows, cols, scrollback_len),
+            parser: ::vt100::Parser::new_with_callbacks(
+                rows,
+                cols,
+                scrollback_len,
+                Unhandled::default(),
+            ),
             tracker: SeqTracker::new(capture, cols),
             shadow: AttrShadow::new(rows, cols),
             colors: ColorNormalizer::new(),
@@ -253,7 +263,37 @@ impl Emulator for Vt100Emulator {
         // it draws instead of being sliced through, and everything else is
         // fed in one go, exactly as before.
         let mut fed = 0;
+        // Where the current run of printable bytes ends while insert mode is
+        // on, so the room is reserved once per run rather than per byte.
+        let mut run_until = 0;
         for (i, &byte) in bytes.iter().enumerate() {
+            // Insert mode: a printable run pushes the rest of the row right
+            // instead of overwriting it. vt100 does not model IRM, so the
+            // room is reserved with the `ICH` it does dispatch, sized in
+            // columns — a wide character counts twice — and never past the
+            // right margin (#261). The bytes owed to the grid go first, so
+            // the cursor column the reservation is made at is current.
+            if i >= run_until
+                && self.tracker.insert_mode()
+                && !self.tracker.mid_sequence()
+                && is_printable(byte)
+            {
+                let end = bytes[i..]
+                    .iter()
+                    .position(|&b| !is_printable(b))
+                    .map_or(bytes.len(), |p| i + p);
+                run_until = end;
+                let width = String::from_utf8_lossy(&bytes[i..end]).width();
+                self.feed_staged(&bytes[fed..i]);
+                fed = i;
+                let screen = self.parser.screen();
+                let (_, col) = screen.cursor_position();
+                let room = usize::from(screen.size().1.saturating_sub(col));
+                let reserve = width.min(room);
+                if reserve > 0 {
+                    self.feed(format!("\x1b[{reserve}@").as_bytes());
+                }
+            }
             // Asked before the step, because whether this byte is a character
             // at all depends on the state the tracker is in before it — and
             // a designation's own final byte must not be drawn.
@@ -313,6 +353,9 @@ impl Emulator for Vt100Emulator {
     }
 
     fn snapshot(&self) -> Screen {
+        let unsupported = self.parser.callbacks().shapes();
+        let unsupported_overflow = self.parser.callbacks().overflow();
+        let visual_bells = self.parser.callbacks().visual_bells();
         let screen = self.parser.screen();
         let (rows, cols) = screen.size();
         let mut cells: Vec<Cell> = Vec::with_capacity(usize::from(rows) * usize::from(cols));
@@ -363,6 +406,12 @@ impl Emulator for Vt100Emulator {
             // Filled in by the terminal, which owns the frame count.
             repaints: 0,
             scrollback: self.history.iter().cloned().collect(),
+            // The backend's own record of a soft wrap, per row (#265).
+            wrapped: (0..rows).map(|row| screen.row_wrapped(row)).collect(),
+            insert_mode: self.tracker.insert_mode(),
+            unsupported,
+            unsupported_overflow,
+            visual_bells,
         };
         Screen::from_parts(
             cols,
@@ -502,6 +551,12 @@ fn convert_cell(cell: &::vt100::Cell, shadow: Option<&::vt100::Cell>) -> Cell {
         cell.is_wide(),
         cell.is_wide_continuation(),
     )
+}
+
+/// A byte that draws: not a C0 control, not DEL, not ESC. Continuation
+/// bytes of a multi-byte character count, so a run is measured whole.
+fn is_printable(b: u8) -> bool {
+    b >= 0x20 && b != 0x7f
 }
 
 /// What the reader substitutes for a byte it could not decode (`utf8.rs`).

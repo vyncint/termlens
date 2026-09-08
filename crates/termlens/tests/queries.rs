@@ -399,8 +399,12 @@ fn a_probe_then_enable_application_gets_its_mouse() -> termlens::Result<()> {
         "20",
         "--wait",
     ])?;
-    // `;2$y` = implemented and currently reset. The application proceeds.
-    t.wait_until(|s| s.contains("MOUSE-ON:E[?1000;2$y|"))?;
+    // `;2$y` = implemented and currently reset. The application proceeds —
+    // and the wait covers the enable that follows the marker, since the
+    // click below is refused until the terminal has seen `CSI ?1000 h`.
+    t.wait_until(|s| {
+        s.contains("MOUSE-ON:E[?1000;2$y|") && s.mouse_mode() != termlens::MouseMode::None
+    })?;
 
     t.click(9, 4)?;
     // Press and release, SGR-encoded, 1-based on the wire.

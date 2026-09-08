@@ -537,6 +537,9 @@ pub(crate) struct SeqTracker {
     /// anywhere in a multi-mode list, so scanning for it beats assuming it
     /// is the only parameter.
     csi_saw_1004: bool,
+    /// Whether a completed parameter of the current CSI was `4`: insert
+    /// mode, when the final byte turns out to be a plain `h` or `l`.
+    csi_saw_irm: bool,
     /// The mouse tracking modes (`9`, `1000`, `1002`, `1003`) named in the
     /// current CSI's parameter list, as [`mouse_bit`]s — the same scan as
     /// `csi_saw_1004`, for a group rather than one mode.
@@ -661,6 +664,8 @@ pub(crate) struct SeqTracker {
     /// Where the tab stops are. Sized to the grid, so `set_cols` follows
     /// every resize.
     tabs: TabStops,
+    /// `IRM` (`CSI 4 h`) is set — see [`insert_mode`](Self::insert_mode).
+    insert_mode: bool,
 }
 
 impl SeqTracker {
@@ -680,6 +685,7 @@ impl SeqTracker {
             csi_param_count: 0,
             csi_saw_2026: false,
             csi_saw_1004: false,
+            csi_saw_irm: false,
             csi_saw_mouse: 0,
             seq_buf: [0; 24],
             seq_len: 0,
@@ -716,6 +722,7 @@ impl SeqTracker {
             dcs_body: Vec::new(),
             dcs_body_full: true,
             tabs: TabStops::new(cols),
+            insert_mode: false,
         }
     }
 
@@ -919,7 +926,16 @@ impl SeqTracker {
         self.cursor_style = None;
         self.focus_events = false;
         self.mouse_tracking = 0;
+        self.insert_mode = false;
         self.tabs.reset();
+    }
+
+    /// Whether `IRM` (`CSI 4 h`) is set: a printable byte pushes the rest
+    /// of the row right instead of overwriting the cell under the cursor.
+    /// vt100 does not model the mode, so the emulator reserves the room
+    /// with an `ICH` it does dispatch (#261).
+    pub(crate) fn insert_mode(&self) -> bool {
+        self.insert_mode
     }
 
     /// Apply the final byte of an `ESC ( ) * + Ps` designation.
@@ -966,6 +982,7 @@ impl SeqTracker {
         self.csi_param_count = 0;
         self.csi_saw_2026 = false;
         self.csi_saw_1004 = false;
+        self.csi_saw_irm = false;
         self.csi_saw_mouse = 0;
     }
 
@@ -995,6 +1012,9 @@ impl SeqTracker {
         }
         if self.csi_param == 1004 {
             self.csi_saw_1004 = true;
+        }
+        if self.csi_param == 4 {
+            self.csi_saw_irm = true;
         }
         self.csi_saw_mouse |= mouse_bit(self.csi_param);
         if self.csi_param_count == 0 {
@@ -1140,6 +1160,19 @@ impl SeqTracker {
                     self.sync_update = false;
                     return SeqEvent::SyncEnd;
                 }
+                _ => {}
+            }
+        }
+
+        // Insert mode (`IRM`, ANSI mode 4): `smir`/`rmir` in the terminfo
+        // entry every child is handed, and the mode ncurses uses for
+        // `insch`. vt100 dispatches no ANSI mode at all, so the flag lives
+        // here and the emulator acts on it (#261). Any mode list naming 4
+        // counts, as it does for the private modes above.
+        if self.csi_prefix == 0 && self.csi_saw_irm {
+            match b {
+                b'h' => self.insert_mode = true,
+                b'l' => self.insert_mode = false,
                 _ => {}
             }
         }
@@ -1606,6 +1639,7 @@ impl SeqTracker {
                     self.reset_charsets();
                     self.saved_charsets = None;
                     self.mouse_tracking = 0;
+                    self.insert_mode = false;
                     self.tabs.reset();
                     self.close_link();
                     State::Ground
