@@ -8,14 +8,12 @@ One page, copy-pasteable. Maintainers only.
   crate**: crates.io → *crate* → Settings → Trusted Publishing → GitHub,
   repository `vyncint/termlens`, workflow `release.yml`.
   - `termlens` — linked 2026-08-09.
-  - `termlens-cli` — **not linked yet**. The crate was first published on
-    2026-09-08 by the one-shot `publish-cli.yml` bootstrap (a new name has
-    no crate to configure Trusted Publishing against, which is the whole
-    chicken-and-egg). Until it is linked, `release.yml`'s termlens-cli
-    step will fail on authentication *after* `termlens` has already gone
-    out — so link it before the next tag. Then delete the
-    `CARGO_REGISTRY_TOKEN` secret and `.github/workflows/publish-cli.yml`,
-    and the repository is back to storing no secret at all.
+  - `termlens-cli` — linked 2026-09-08, and first exercised by v0.10.1.
+    The crate's own first publish could not use it (a new name has no
+    crate to configure Trusted Publishing against) and went out through a
+    one-shot token workflow, since deleted.
+
+  No token or secret is stored for publishing.
 - The publish job runs in the **`release` GitHub environment**, which
   only deploys from `v*` tags — an OIDC publish token can never be
   minted from a branch. (Optionally set the environment name `release`
@@ -73,15 +71,21 @@ Pushing the tag runs `release.yml`, which:
 ## Bootstrapping a brand-new crate
 
 Trusted Publishing is configured per crate, on a crate that already
-exists, so the *first* publish of a new name cannot use it.
-`.github/workflows/publish-cli.yml` is that one-shot path — dispatch-only,
-a typed confirmation, a tag rather than a branch, the same
-tag-matches-version guard, `--locked` — run once against
-`CARGO_REGISTRY_TOKEN`. It published `termlens-cli` 0.10.0 on 2026-09-08.
+exists, so the *first* publish of a new name cannot use it. The recipe,
+used once for `termlens-cli` on 2026-09-08 (see `publish-cli.yml` in that
+commit range for the exact shape):
 
-Afterwards, always: link Trusted Publishing for the new crate, revoke the
-token, delete the secret, delete the workflow. A stored publish token is a
-standing risk that this repository otherwise does not carry.
+1. A dispatch-only workflow with a typed confirmation, checking out the
+   **tag** rather than a branch, carrying `release.yml`'s
+   tag-matches-version guard, publishing with `--locked` against a
+   `CARGO_REGISTRY_TOKEN` repository secret.
+2. Link Trusted Publishing for the new crate on crates.io.
+3. Revoke the token, delete the secret, delete the workflow.
+
+Step 3 is not optional and comes *after* a release has proved step 2: a
+stored publish token is a standing risk this repository otherwise does not
+carry, and deleting the only fallback before the mechanism is exercised is
+the wrong order.
 
 ## If something fails mid-release
 
