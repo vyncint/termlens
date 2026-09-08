@@ -17,6 +17,8 @@ use std::time::Duration;
 
 use termlens::{Key, Terminal};
 
+mod common;
+
 /// More than any runner has cores, and more than the default `--test-threads`
 /// on the largest machine anyone is likely to be sitting at.
 const AT_ONCE: usize = 24;
@@ -30,16 +32,16 @@ fn two_dozen_terminals_open_at_once() {
         let report = report.clone();
         threads.push(thread::spawn(move || {
             let outcome = (|| -> termlens::Result<()> {
-                let mut terminal = Terminal::builder()
-                    .size(40, 10)
-                    .env_clear()
-                    .timeout(Duration::from_secs(30))
-                    .arg("-c")
-                    // The `read` is the instant-exit guard: a child that
+                let mut terminal = common::spawn_emit(
+                    Terminal::builder()
+                        .size(40, 10)
+                        .env_clear()
+                        .timeout(Duration::from_secs(30)),
+                    // The `--wait` is the instant-exit guard: a child that
                     // writes and dies inside a millisecond can lose its
                     // output to the PTY teardown.
-                    .arg(format!("printf 'terminal {index}\\n'; read _"))
-                    .spawn("/bin/sh")?;
+                    &[&format!("terminal {index}\n"), "--wait"],
+                )?;
                 terminal.wait_until(|screen| screen.contains(&format!("terminal {index}")))?;
                 terminal.send(Key::Enter)?;
                 terminal.wait_exit()?;
@@ -80,14 +82,14 @@ fn terminals_recycle_without_running_out_of_devices() {
     for round in 0..8 {
         let mut open = Vec::new();
         for index in 0..6 {
-            let mut terminal = Terminal::builder()
-                .size(20, 5)
-                .env_clear()
-                .timeout(Duration::from_secs(30))
-                .arg("-c")
-                .arg(format!("printf 'round {round} {index}\\n'; read _"))
-                .spawn("/bin/sh")
-                .unwrap_or_else(|error| panic!("round {round}, terminal {index}: {error}"));
+            let mut terminal = common::spawn_emit(
+                Terminal::builder()
+                    .size(20, 5)
+                    .env_clear()
+                    .timeout(Duration::from_secs(30)),
+                &[&format!("round {round} {index}\n"), "--wait"],
+            )
+            .unwrap_or_else(|error| panic!("round {round}, terminal {index}: {error}"));
             terminal
                 .wait_until(|screen| screen.contains(&format!("round {round} {index}")))
                 .unwrap_or_else(|error| panic!("round {round}, terminal {index}: {error}"));
