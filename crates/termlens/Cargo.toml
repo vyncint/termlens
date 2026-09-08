@@ -32,6 +32,10 @@ portable-pty.workspace = true
 vt100.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true
+# Insert mode reserves room for a printable run with `ICH`, sized in columns;
+# a wide character counts twice, and this is what says so (#261). Already in
+# the tree through vt100.
+unicode-width.workspace = true
 insta = { workspace = true, optional = true }
 miniz_oxide = { workspace = true, optional = true }
 
@@ -39,9 +43,6 @@ miniz_oxide = { workspace = true, optional = true }
 libc.workspace = true
 
 [dev-dependencies]
-# vt100 reports wide cells itself; unicode-width is only needed by our own
-# tests to construct wide-character fixtures.
-unicode-width.workspace = true
 insta.workspace = true
 anyhow.workspace = true
 

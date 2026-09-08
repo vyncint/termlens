@@ -406,6 +406,17 @@ pub(crate) struct TermState {
     /// history is asserted on for its content. The rows are shared, so a
     /// snapshot pays one `Arc` clone each.
     pub(crate) scrollback: Arc<[Arc<str>]>,
+    /// Per row, whether it ended in a soft wrap rather than a line end —
+    /// the backend's own record, never asked for before #265.
+    pub(crate) wrapped: Arc<[bool]>,
+    /// `IRM` is set: the application left the terminal in insert mode.
+    pub(crate) insert_mode: bool,
+    /// Escape sequences nobody honoured, distinct, first seen first (#266).
+    pub(crate) unsupported: Arc<[Arc<str>]>,
+    /// Distinct unsupported shapes beyond the bound, counted only.
+    pub(crate) unsupported_overflow: u64,
+    /// `ESC g` seen: a flash rather than a beep.
+    pub(crate) visual_bells: u64,
 }
 
 impl Default for TermState {
@@ -425,6 +436,11 @@ impl Default for TermState {
             graphics: GraphicsSeen::default(),
             repaints: 0,
             scrollback: Arc::from([] as [Arc<str>; 0]),
+            wrapped: Arc::from([] as [bool; 0]),
+            insert_mode: false,
+            unsupported: Arc::from([] as [Arc<str>; 0]),
+            unsupported_overflow: 0,
+            visual_bells: 0,
         }
     }
 }
@@ -848,6 +864,105 @@ impl Screen {
         self.state.graphics.clone()
     }
 
+    /// Escape sequences the emulator did not implement, so the grid below
+    /// them is not what a terminal would show. Distinct shapes, first seen
+    /// first, in the form the timeout messages use (`^[[20h` for
+    /// `CSI 20 h`), at most 32 — [`unsupported_overflow`](Self::unsupported_overflow)
+    /// counts the rest.
+    ///
+    /// Empty for an application that uses only what the emulator renders,
+    /// which is what makes it worth asserting: the failure this catches is
+    /// the one where a test passes against a plausible-looking wrong screen
+    /// because the sequence that would have made it right was dropped.
+    /// Sequences termlens handles itself — the character sets, tab stops,
+    /// insert mode, the queries it answers or names, the modes it tracks —
+    /// are not listed, since the screen does show their effect. A request to
+    /// resize the window (`CSI 8 ; rows ; cols t`) *is* listed: the grid's
+    /// size is the test's to set, so the request is recorded rather than
+    /// honoured.
+    #[must_use]
+    pub fn unsupported(&self) -> &[Arc<str>] {
+        &self.state.unsupported
+    }
+
+    /// Distinct unsupported sequences beyond the 32 that
+    /// [`unsupported`](Self::unsupported) keeps, counted so a stream that
+    /// emits thousands cannot grow a snapshot.
+    #[must_use]
+    pub fn unsupported_overflow(&self) -> u64 {
+        self.state.unsupported_overflow
+    }
+
+    /// Visual bells (`ESC g`) the application requested — a flash rather
+    /// than a beep, and a different event from [`bells`](Self::bells), so an
+    /// application that flashes on an invalid key is assertable as such.
+    #[must_use]
+    pub fn visual_bells(&self) -> u64 {
+        self.state.visual_bells
+    }
+
+    /// Whether the application has the terminal in insert mode (`IRM`,
+    /// `CSI 4 h`): a printed character pushes the rest of its row right
+    /// rather than overwriting. The same shape of assertion as
+    /// [`alternate_screen`](Self::alternate_screen) — "the application set
+    /// a mode and left it there" — and cleared by `RIS` and `DECSTR`.
+    #[must_use]
+    pub fn insert_mode(&self) -> bool {
+        self.state.insert_mode
+    }
+
+    /// Whether `row` ended in a **soft wrap** — the application wrote past
+    /// the right margin and the terminal continued on the next row — rather
+    /// than in a line end. The backend's own record; `false` for a row
+    /// outside the screen.
+    ///
+    /// This is the fact [`logical_text`](Self::logical_text) joins rows on.
+    #[must_use]
+    pub fn row_wrapped(&self, row: u16) -> bool {
+        self.state
+            .wrapped
+            .get(usize::from(row))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// The grid as the application wrote it: soft-wrapped rows joined with
+    /// nothing, every other row ending in `\n`, trailing whitespace stripped
+    /// per logical line — [`text`](Self::text) with the wraps undone, blank
+    /// rows below the content included as blank lines just as there.
+    ///
+    /// A line long enough to wrap is two rows on the grid, and a needle
+    /// spanning the wrap is not found by [`contains`](Self::contains) or
+    /// [`find`](Self::find), which read the grid row by row. This is the
+    /// accessor for that assertion: on a 20-column screen showing
+    /// `the quick brown fox` over `jumps`,
+    /// `logical_text().contains("brown fox jumps")` is true. It is `str`
+    /// matching from here on — byte-exact, no NFC fold — like
+    /// [`full_text`](Self::full_text).
+    #[must_use]
+    pub fn logical_text(&self) -> String {
+        let mut out = String::new();
+        let mut line = String::new();
+        for row in 0..self.rows {
+            line.push_str(&self.row_text(row));
+            if self.row_wrapped(row) {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line.trim_end());
+            line.clear();
+        }
+        if !line.is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line.trim_end());
+        }
+        out
+    }
+
     /// The cell at `(row, col)`, or `None` when out of bounds.
     #[must_use]
     pub fn cell(&self, row: u16, col: u16) -> Option<&Cell> {
@@ -981,6 +1096,12 @@ impl Screen {
     /// timeout therefore says how many rows have scrolled off whenever any
     /// have.
     ///
+    /// The same trap one row lower: a line long enough to **wrap** is two
+    /// rows here, and a needle spanning the wrap is not found even though a
+    /// reader plainly sees it. [`logical_text`](Self::logical_text) joins
+    /// soft-wrapped rows back together, using the wrap record the backend
+    /// keeps ([`row_wrapped`](Self::row_wrapped)).
+    ///
     /// # Normalization
     ///
     /// Both sides are folded to **NFC** before comparing, so a needle finds
@@ -1029,6 +1150,9 @@ impl Screen {
     /// needle that has scrolled into history is not found here, however
     /// recently it left. [`full_text`](Self::full_text) spans history and
     /// screen, [`scrollback_text`](Self::scrollback_text) the history alone.
+    /// A needle spanning a soft wrap is not found either — a match across a
+    /// wrap has no single row and column to report — and
+    /// [`logical_text`](Self::logical_text) is the accessor for that.
     ///
     /// Needles containing `\n` match across consecutive rows with exactly
     /// the semantics of [`Screen::contains`] (trailing whitespace stripped
@@ -1913,6 +2037,7 @@ mod tests {
             graphics: GraphicsSeen::for_test(1, 1, 2, 160),
             repaints: 9,
             scrollback: Arc::from([Arc::from("scrolled away")]),
+            ..TermState::default()
         };
         let cells = vec![Cell::new("x".into(), Style::default(), false, false)];
         let s = Screen::from_parts(1, 1, 0, 0, true, cells, state);
