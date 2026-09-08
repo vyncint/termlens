@@ -16,8 +16,6 @@ name: windows
 
 on:
   workflow_dispatch:
-  push:
-    branches: [windows-cfg]
 
 permissions: {}
 
