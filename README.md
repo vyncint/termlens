@@ -428,6 +428,8 @@ design. termlens's position:
   them). The tests for each are `#[cfg_attr(windows, ignore = "…")]` with
   the reason in the attribute; the probe that measured all of this is
   `tests/conpty_probe.rs`, and the `windows` workflow re-runs it on demand.
+  The `windows-latest` leg is a required check. This is decision 1 of
+  [docs/STABILITY.md](docs/STABILITY.md).
 - A child that writes and exits within its first milliseconds can lose
   output to the OS PTY teardown (macOS especially). Long-lived TUIs are
   unaffected; for run-and-exit programs, end the script with a `read` and
@@ -448,8 +450,12 @@ check excludes it.
 
 PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) (dev setup, testing
 policy, DCO sign-off, AI tooling policy) and
-[docs/DESIGN.md](docs/DESIGN.md) before touching wait semantics. Security
-reports: [SECURITY.md](SECURITY.md).
+[docs/DESIGN.md](docs/DESIGN.md) before touching wait semantics. What 1.0
+means — three decisions written down with their measurements, and which
+public items the promise covers — is [docs/STABILITY.md](docs/STABILITY.md);
+the emulator-backend comparison behind one of them is
+[docs/BACKENDS.md](docs/BACKENDS.md). Security reports:
+[SECURITY.md](SECURITY.md).
 
 ## License
 

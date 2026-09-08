@@ -13,6 +13,13 @@ One page, copy-pasteable. Maintainers only.
   minted from a branch. (Optionally set the environment name `release`
   on the crates.io side too, for the server-side binding.)
 
+## Before a 1.0 tag
+
+`v1.0.0` requires all three sections of [STABILITY.md](STABILITY.md) —
+Windows, backend, styled history — to be filled in with their decision
+and the measurement behind it, and the "What the promise covers" list to
+match `lib.rs`. A 1.0 with an open section is a 0.x with a bigger number.
+
 ## Cutting vX.Y.Z
 
 ```sh

@@ -49,6 +49,17 @@ listed under a **Changed** or **Removed** heading.
   screen. Plain text, so CI logs stay readable. An erased cell and a
   written space in the same style are one blank, not a difference. (#246)
 
+- **`docs/STABILITY.md`: what 1.0 means.** Not a feature list — three
+  decisions written down with the measurement that decided each: Windows
+  (screen assertions yes, frame assertions no; the ConPTY probe), the
+  emulator backend (`vt100` stays and so does the shadow parser;
+  `docs/BACKENDS.md` compares it with `alacritty_terminal`, which drops
+  blink and brings an event loop, and `wezterm-term`, which is not on
+  crates.io), and styled history (a knob, off by default, 90 ms against
+  40 ms). Plus which public items the promise covers, which stay behind
+  features, and which are heuristics. `docs/RELEASING.md` requires all
+  three sections for a 1.0 tag. (#256, #150)
+
 - **`termlens-cli`: the `termlens` command, and `Screen::parse`.** Two
   saved screens could be compared only by `cargo insta review`, on the
   machine that ran the tests. `cargo install termlens-cli` provides
@@ -169,6 +180,12 @@ listed under a **Changed** or **Removed** heading.
   crate in CI, and the README shows the one-line install for Claude Code.
 
 ### Changed
+
+- **The `windows-latest` leg is a required check.** It ran non-required
+  from #279 and held on every push to `main` since; a ConPTY surprise now
+  blocks a merge, which is what claiming the platform in
+  `docs/STABILITY.md` means. `windows.yml` stays as the on-demand report
+  with the probe. (#280)
 
 - **`assert_screen_snapshot!` earns its name.** It was `insta::assert_snapshot!`
   under another name. Given a `Terminal` it now settles the picture
