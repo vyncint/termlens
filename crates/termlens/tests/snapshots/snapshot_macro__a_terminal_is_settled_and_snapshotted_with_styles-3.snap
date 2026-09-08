@@ -1,0 +1,11 @@
+---
+source: crates/termlens/tests/snapshot_macro.rs
+expression: __screen.with_styles()
+---
+size: 30x3  cursor: 0,11
+Ready later
+
+
+
+styles:
+0: 0-4 bold

@@ -130,9 +130,42 @@ pub use screen::{
 #[cfg(unix)]
 pub use terminal::Signal;
 pub use terminal::{
-    ExitStatus, FrameTiming, Graphics, MouseButton, MouseChord, Scroll, ScrollChord, Terminal,
-    TerminalBuilder,
+    ExitStatus, FrameTiming, Graphics, MouseButton, MouseChord, Recorder, Recording, Scroll,
+    ScrollChord, Terminal, TerminalBuilder,
 };
+
+/// What [`assert_screen_snapshot!`] snapshots: a [`Terminal`], settled, or a
+/// [`Screen`] as it is. Implemented for `&mut Terminal` and `&Screen`, so the
+/// macro's method-call syntax borrows a `Terminal` mutably and a `Screen`
+/// immutably — whichever it was handed.
+#[doc(hidden)]
+pub trait SnapshotSource {
+    /// The screen to snapshot. `after` is the predicate to wait for first;
+    /// a [`Screen`] is already one instant, so it refuses one.
+    fn screen_for_snapshot(self, after: Option<&mut dyn FnMut(&Screen) -> bool>) -> Result<Screen>;
+}
+
+impl SnapshotSource for &mut Terminal {
+    fn screen_for_snapshot(self, after: Option<&mut dyn FnMut(&Screen) -> bool>) -> Result<Screen> {
+        match after {
+            Some(predicate) => self.snapshot_after(|screen| predicate(screen)),
+            None => self.wait_stable(std::time::Duration::from_millis(100)),
+        }
+    }
+}
+
+impl SnapshotSource for &Screen {
+    fn screen_for_snapshot(self, after: Option<&mut dyn FnMut(&Screen) -> bool>) -> Result<Screen> {
+        if after.is_some() {
+            return Err(Error::Input(
+                "assert_screen_snapshot!(screen, after = …): a Screen is already one instant, \
+                 so there is nothing to wait for — pass the Terminal instead"
+                    .to_owned(),
+            ));
+        }
+        Ok(self.clone())
+    }
+}
 
 /// Re-export of [`insta`](https://insta.rs) (feature `insta`, on by
 /// default), so [`assert_screen_snapshot!`] always agrees with the `insta`
@@ -141,31 +174,85 @@ pub use terminal::{
 #[cfg_attr(docsrs, doc(cfg(feature = "insta")))]
 pub use insta;
 
-/// Snapshot-assert anything that displays like a [`Screen`].
-///
-/// Sugar for [`insta::assert_snapshot!`] through the re-exported `insta`;
-/// accepts the same optional inline-snapshot form:
+/// Snapshot a terminal's screen the way a TUI snapshot has to be taken:
+/// **settled**, **with its styles**, through [`insta::assert_snapshot!`].
 ///
 /// ```no_run
 /// # fn main() -> termlens::Result<()> {
-/// # let t = termlens::Terminal::builder().spawn("true")?;
-/// #[cfg(feature = "insta")]
-/// {
-///     termlens::assert_screen_snapshot!(t.screen());
-/// }
+/// # let mut t = termlens::Terminal::builder().spawn("true")?;
+/// termlens::assert_screen_snapshot!(t);                                  // settle 100ms, styles on
+/// termlens::assert_screen_snapshot!(t, styles = false);                  // text only
+/// termlens::assert_screen_snapshot!(t, after = |s| s.contains("Ready")); // wait for it, then settle
+/// termlens::assert_screen_snapshot!(t.screen());                         // a Screen you already hold
+/// termlens::assert_screen_snapshot!(t, @"");                             // inline, filled by `cargo insta review`
 /// # Ok(())
 /// # }
 /// ```
+///
+/// # The three decisions it makes
+///
+/// A snapshot of a TUI needs three decisions every time, and forgetting any
+/// one produces a test that passes for the wrong reason:
+///
+/// 1. **Wait for the picture to settle.** `wait_until(pred)` guarantees the
+///    bytes that made `pred` true were processed — and nothing more. A
+///    repaint has no end marker, so the predicate can fire on a half-painted
+///    screen, including half a row. Given a [`Terminal`], this macro takes
+///    the screen after it has held still for 100 ms
+///    ([`wait_stable`](Terminal::wait_stable)); with `after = pred` it waits
+///    for the predicate first and then for the stillness
+///    ([`snapshot_after`](Terminal::snapshot_after)). Name the *last* thing
+///    the application paints, and rule 2 of `docs/DESIGN.md` §2 is met.
+/// 2. **Snapshot the styles, not only the text.** A TUI regression is as often
+///    a colour as a character — a highlight on the wrong row, a masked field
+///    printed in clear — and the text rendering cannot see either. Styles are
+///    on by default; `styles = false` is the text-only snapshot.
+/// 3. **Snapshot one instant.** Every accessor of the [`Screen`] the macro
+///    records reads the same snapshot, so what insta shows is one consistent
+///    picture, never two waits' worth.
+///
+/// Given a [`Screen`] instead of a terminal, the macro records it as it is
+/// (`after =` is refused: an instant has nothing to wait for). Failures come
+/// from insta unchanged; review them with `cargo insta review`. The macro
+/// uses `?`, so the test returns [`Result`] — which every test should, since
+/// the `Display` of every error carries the screen.
+///
+/// `insta::assert_snapshot!(t.screen())` remains the low-level spelling for
+/// a screen already waited for by hand.
 #[cfg(feature = "insta")]
 #[cfg_attr(docsrs, doc(cfg(feature = "insta")))]
 #[macro_export]
 macro_rules! assert_screen_snapshot {
-    ($screen:expr) => {
-        $crate::insta::assert_snapshot!($screen)
+    ($source:expr $(,)?) => {
+        $crate::assert_screen_snapshot!($source, styles = true)
     };
-    ($screen:expr, @$inline:literal) => {
-        $crate::insta::assert_snapshot!($screen, @$inline)
+    ($source:expr, @$inline:literal $(,)?) => {{
+        use $crate::SnapshotSource as _;
+        let __screen = ($source).screen_for_snapshot(::core::option::Option::None)?;
+        $crate::insta::assert_snapshot!(__screen.with_styles(), @$inline)
+    }};
+    ($source:expr, styles = $styles:expr $(,)?) => {{
+        use $crate::SnapshotSource as _;
+        let __screen = ($source).screen_for_snapshot(::core::option::Option::None)?;
+        if $styles {
+            $crate::insta::assert_snapshot!(__screen.with_styles());
+        } else {
+            $crate::insta::assert_snapshot!(__screen);
+        }
+    }};
+    ($source:expr, after = $after:expr $(,)?) => {
+        $crate::assert_screen_snapshot!($source, after = $after, styles = true)
     };
+    ($source:expr, after = $after:expr, styles = $styles:expr $(,)?) => {{
+        use $crate::SnapshotSource as _;
+        let __after: &mut dyn ::core::ops::FnMut(&$crate::Screen) -> bool = &mut $after;
+        let __screen = ($source).screen_for_snapshot(::core::option::Option::Some(__after))?;
+        if $styles {
+            $crate::insta::assert_snapshot!(__screen.with_styles());
+        } else {
+            $crate::insta::assert_snapshot!(__screen);
+        }
+    }};
 }
 
 /// Spawn one of this package's binaries under the harness defaults.

@@ -16,18 +16,17 @@ fn readme_example_compiles_and_runs() -> termlens::Result<()> {
         .timeout(Duration::from_secs(5))
         .spawn(util::fixture_bin("hello-tui"))?;
 
-    // The same shape as the README's predicate: the status text AND the
-    // bottom-right corner, which is the fixture's last byte — rule 2 of
-    // `docs/DESIGN.md` §2: a whole-screen snapshot must wait on the last
-    // thing the application paints, or it races the rest of the frame at a
-    // chunk boundary. The README waited on the first marker alone until
-    // #216; a reviewer diffing the two should see no discrepancy in shape.
-    t.wait_until(|screen| screen.contains("status: ready") && screen.contains("╯"))?;
-    // The README's most distinctive line, compiled against the `insta` the
-    // crate itself dev-depends on. A dev-dependency is present in every
-    // feature configuration, so this needs no `cfg(feature = "insta")`: the
-    // `--no-default-features` CI job builds and runs it too.
-    insta::assert_snapshot!(t.screen());
+    // The README's most distinctive line: wait for the marker, settle,
+    // snapshot with styles — the macro makes the three decisions rule 2 of
+    // `docs/DESIGN.md` §2 used to ask the reader to make by hand. The macro
+    // is behind the default `insta` feature, so the no-default-features leg
+    // takes the low-level spelling with the same three steps.
+    #[cfg(feature = "insta")]
+    termlens::assert_screen_snapshot!(t, after = |s| s.contains("status: ready"));
+    #[cfg(not(feature = "insta"))]
+    insta::assert_snapshot!(t
+        .snapshot_after(|s| s.contains("status: ready"))?
+        .with_styles());
 
     t.send(Key::Char('q'))?;
     assert!(t.wait_exit()?.success());

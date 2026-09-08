@@ -676,6 +676,182 @@ impl Signal {
     }
 }
 
+/// Cells a recording holds before its oldest frames are dropped:
+/// [`TerminalBuilder::record_budget`]'s default.
+const DEFAULT_RECORD_BUDGET: usize = 2_000_000;
+
+/// The frames a `Recorder` has collected, shared with the reader thread,
+/// which pushes every completed frame here until the recorder is stopped.
+#[derive(Debug)]
+struct RecordingState {
+    started: Instant,
+    frames: VecDeque<(Duration, Screen)>,
+    cells: usize,
+    budget: usize,
+    dropped: u64,
+}
+
+impl RecordingState {
+    fn push(&mut self, frame: Screen) {
+        let cells = usize::from(frame.cols()) * usize::from(frame.rows());
+        while !self.frames.is_empty() && self.cells + cells > self.budget {
+            if let Some((_, gone)) = self.frames.pop_front() {
+                self.cells -= usize::from(gone.cols()) * usize::from(gone.rows());
+                self.dropped += 1;
+            }
+        }
+        self.cells += cells;
+        self.frames.push_back((self.started.elapsed(), frame));
+    }
+}
+
+/// A recording in progress: every complete frame from
+/// [`Terminal::record`] on, timestamped, until [`stop`](Self::stop).
+///
+/// Holds no borrow of the terminal, so the test drives it — `send`,
+/// `wait_frame` — while the recording runs.
+pub struct Recorder {
+    state: Arc<Mutex<RecordingState>>,
+    shared: Arc<Monitor<EmuState>>,
+}
+
+impl fmt::Debug for Recorder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        f.debug_struct("Recorder")
+            .field("frames", &state.frames.len())
+            .field("dropped", &state.dropped)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Recorder {
+    /// Stop recording and hand back every frame collected, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Input`] when the application has never emitted a DEC 2026
+    /// synchronized update — the diagnosis [`wait_frame`](Terminal::wait_frame)
+    /// gives. A recording is made of complete frames; sampling the grid on a
+    /// timer instead would be the torn-frame problem in a new hat.
+    pub fn stop(self) -> Result<Recording> {
+        let frames_seen = self.shared.mutate(|state| {
+            state
+                .recorders
+                .retain(|recorder| !Arc::ptr_eq(recorder, &self.state));
+            state.frames_seen
+        });
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if frames_seen == 0 {
+            return Err(Error::Input(
+                "nothing to record — the application never emitted a DEC 2026 synchronized \
+                 update. A recording is made of complete frames, as wait_frame is; an \
+                 application that does not bracket its repaints has no frames to record, and \
+                 sampling on a timer would record torn ones. Use snapshot_after for what the \
+                 screen showed at a moment."
+                    .to_owned(),
+            ));
+        }
+        Ok(Recording {
+            frames: state.frames.iter().cloned().collect(),
+            dropped: state.dropped,
+        })
+    }
+}
+
+/// What a [`Recorder`] collected: complete frames with the time each ended,
+/// measured from [`Terminal::record`], oldest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recording {
+    frames: Vec<(Duration, Screen)>,
+    dropped: u64,
+}
+
+impl Recording {
+    /// The frames, oldest first, each with the time its synchronized update
+    /// ended, measured from the moment recording started.
+    #[must_use]
+    pub fn frames(&self) -> &[(Duration, Screen)] {
+        &self.frames
+    }
+
+    /// How many frames are here.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Whether no frame was recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    /// Frames dropped to stay within [`TerminalBuilder::record_budget`] —
+    /// the oldest ones, so the recording is honest about being a tail.
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// The recording as an [asciicast v2] document: a header line, then one
+    /// event per frame at its timestamp, each a full repaint — clear, home,
+    /// then the frame through [`Screen::to_ansi`] — which is what the format
+    /// expects and what `asciinema play` and `agg` render. termlens ships no
+    /// image encoder; this is the file those tools turn into a GIF.
+    ///
+    /// [asciicast v2]: https://docs.asciinema.org/manual/asciicast/v2/
+    #[must_use]
+    pub fn to_asciicast(&self) -> String {
+        let (cols, rows) = self
+            .frames
+            .first()
+            .map_or((80, 24), |(_, frame)| frame.size());
+        let mut out = format!(
+            "{{\"version\": 2, \"width\": {cols}, \"height\": {rows}, \
+             \"env\": {{\"TERM\": \"xterm-256color\"}}}}\n"
+        );
+        for (at, frame) in &self.frames {
+            let mut data = String::from("\x1b[H\x1b[2J");
+            data.push_str(&frame.to_ansi().replace('\n', "\r\n"));
+            out.push_str(&format!(
+                "[{:.6}, \"o\", {}]\n",
+                at.as_secs_f64(),
+                json_string(&data)
+            ));
+        }
+        out
+    }
+
+    /// Write [`to_asciicast`](Self::to_asciicast) to `path`.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error, if the file cannot be written.
+    pub fn write_asciicast(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        std::fs::write(path, self.to_asciicast())
+    }
+}
+
+/// `text` as a JSON string literal, control characters escaped.
+fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Exit status of the child process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitStatus {
@@ -820,6 +996,9 @@ struct EmuState {
     frames: VecDeque<(u64, Screen)>,
     /// Per-frame cost, kept separately and for longer than `frames`.
     timings: VecDeque<FrameTiming>,
+    /// Recordings in progress: every completed frame is handed to each,
+    /// timestamped, until its `Recorder` is stopped (#254).
+    recorders: Vec<Arc<Mutex<RecordingState>>>,
     /// Whether to answer recognized terminal queries (builder-configured).
     respond: bool,
     /// Background color reported to OSC 11 queries.
@@ -892,6 +1071,7 @@ impl EmuState {
             frames_seen: 0,
             frames: VecDeque::with_capacity(FRAME_HISTORY),
             timings: VecDeque::new(),
+            recorders: Vec::new(),
             respond,
             background,
             foreground,
@@ -1187,6 +1367,7 @@ pub struct TerminalBuilder {
     cell_size: Option<(u16, u16)>,
     graphics: Graphics,
     capture_graphics: usize,
+    record_budget: usize,
 }
 
 impl Default for TerminalBuilder {
@@ -1206,6 +1387,7 @@ impl Default for TerminalBuilder {
             cell_size: None,
             graphics: Graphics::None,
             capture_graphics: DEFAULT_CAPTURE,
+            record_budget: DEFAULT_RECORD_BUDGET,
         }
     }
 }
@@ -1399,6 +1581,17 @@ impl TerminalBuilder {
     #[must_use]
     pub fn capture_graphics(mut self, bytes: usize) -> Self {
         self.capture_graphics = bytes;
+        self
+    }
+
+    /// How much a [`record`](Terminal::record)ing may hold, in **cells**
+    /// (frames × grid size), before its oldest frames are dropped — and
+    /// reported as dropped. The default, two million cells, is about a
+    /// thousand 80x24 frames; an animation test wants a few, a session
+    /// recording wants them all and knows how long it runs.
+    #[must_use]
+    pub fn record_budget(mut self, cells: usize) -> Self {
+        self.record_budget = cells;
         self
     }
 
@@ -1763,6 +1956,7 @@ impl TerminalBuilder {
             command_desc,
             frame_cursor: 0,
             last_frame: None,
+            record_budget: self.record_budget,
             cell_size: self.cell_size,
         })
     }
@@ -2120,6 +2314,12 @@ fn reader_loop(
                                 if state.frames.len() == FRAME_HISTORY {
                                     state.frames.pop_front();
                                 }
+                                for recorder in &state.recorders {
+                                    recorder
+                                        .lock()
+                                        .unwrap_or_else(PoisonError::into_inner)
+                                        .push(frame.clone());
+                                }
                                 state.frames.push_back((state.frames_seen, frame));
                                 // Timings outlive the frame ring: a
                                 // performance line is held over a run, not
@@ -2250,6 +2450,8 @@ pub struct Terminal {
     /// The frame `wait_frame` last returned, so a timeout can show what
     /// changed since rather than the live grid alone (#246).
     last_frame: Option<Screen>,
+    /// The builder's recording budget, handed to each `record()`.
+    record_budget: usize,
     /// Declared pixels per cell, kept so a resize can recompute the PTY's
     /// pixel geometry rather than silently dropping it.
     cell_size: Option<(u16, u16)>,
@@ -2294,6 +2496,49 @@ impl Terminal {
     #[must_use]
     pub fn screen(&self) -> Screen {
         self.shared.lock().snapshot()
+    }
+
+    /// Start recording every complete frame from now on, timestamped.
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// let rec = t.record();                              // every complete frame from here on
+    /// t.send(termlens::Key::Char('j'))?;
+    /// let frame = t.wait_frame(|s| s.contains("Counter: 1"))?;
+    /// let frames = rec.stop()?;                          // oldest first, with timestamps
+    /// assert_eq!(frames.len(), 1, "one keystroke, one repaint");
+    /// frames.write_asciicast("counter.cast")?;           // render with `agg`
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Two uses share this: asserting on the *sequence* of repaints an
+    /// animation, a progress bar or a multi-step redraw went through — every
+    /// intermediate frame, not the one a predicate happened to name — and
+    /// recording a session for a bug report or a README, which
+    /// [`Recording::write_asciicast`] turns into a file `asciinema` plays and
+    /// `agg` renders.
+    ///
+    /// The recorder receives what the frame ring receives: complete DEC 2026
+    /// synchronized updates, and only those. Bounded by
+    /// [`record_budget`](TerminalBuilder::record_budget), oldest frames
+    /// dropped and the drop reported. The recorder holds no borrow of the
+    /// terminal; drive the application as usual while it runs.
+    pub fn record(&mut self) -> Recorder {
+        let state = Arc::new(Mutex::new(RecordingState {
+            started: Instant::now(),
+            frames: VecDeque::new(),
+            cells: 0,
+            budget: self.record_budget,
+            dropped: 0,
+        }));
+        self.shared
+            .mutate(|shared| shared.recorders.push(Arc::clone(&state)));
+        Recorder {
+            state,
+            shared: Arc::clone(&self.shared),
+        }
     }
 
     /// Per-frame cost for every repaint this terminal has seen, oldest
