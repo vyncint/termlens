@@ -129,11 +129,12 @@ fn a_needle_finds_text_in_the_other_normalization_form() -> termlens::Result<()>
         (nfd, nfc, "NFD screen, NFC needle"),
         (nfc, nfd, "NFC screen, NFD needle"),
     ] {
-        let mut t = Terminal::builder()
-            .size(40, 4)
-            .timeout(Duration::from_secs(10))
-            .args(["-c", &format!("printf '{on_screen} MARK'; read guard")])
-            .spawn("/bin/sh")?;
+        let mut t = util::spawn_emit(
+            Terminal::builder()
+                .size(40, 4)
+                .timeout(Duration::from_secs(10)),
+            &[&format!("{on_screen} MARK"), "--wait"],
+        )?;
         t.wait_until(|s| s.contains("MARK"))?;
         let s = t.screen();
 
