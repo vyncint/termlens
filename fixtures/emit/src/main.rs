@@ -24,6 +24,9 @@
 //! --seq N          the integers 1..=N, one per line
 //! --cwd            the current directory, as the process sees it
 //! --pid            this process's id, in decimal
+//! --env NAME       the value of environment variable NAME, or `unset`
+//! --environ        every environment variable as NAME=VALUE, one per
+//!                  line, sorted
 //! --exit CODE      exit now with CODE
 //! --loop           run the steps before it once, then the steps after it
 //!                  forever
@@ -52,6 +55,8 @@ enum Step {
     Seq(u64),
     Cwd,
     Pid,
+    Env(String),
+    Environ,
     Exit(i32),
 }
 
@@ -145,6 +150,8 @@ fn parse(args: impl Iterator<Item = String>) -> (Vec<Step>, Option<usize>) {
             ),
             "--cwd" => Step::Cwd,
             "--pid" => Step::Pid,
+            "--env" => Step::Env(next("--env")),
+            "--environ" => Step::Environ,
             "--exit" => Step::Exit(
                 next("--exit")
                     .parse()
@@ -206,6 +213,19 @@ fn run(steps: &[Step], out: &mut impl Write, stdin: &mut impl BufRead) -> io::Re
                 out.write_all(dir.to_string_lossy().as_bytes())?;
             }
             Step::Pid => write!(out, "{}", process::id())?,
+            Step::Env(name) => match std::env::var_os(name) {
+                Some(value) => out.write_all(value.to_string_lossy().as_bytes())?,
+                None => out.write_all(b"unset")?,
+            },
+            Step::Environ => {
+                let mut vars: Vec<String> = std::env::vars_os()
+                    .map(|(k, v)| format!("{}={}", k.to_string_lossy(), v.to_string_lossy()))
+                    .collect();
+                vars.sort();
+                for var in vars {
+                    writeln!(out, "{var}")?;
+                }
+            }
             Step::Exit(code) => {
                 out.flush()?;
                 process::exit(*code);
