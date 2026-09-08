@@ -308,8 +308,8 @@ design. termlens's position:
 - **Hermetic environments.** `env_clear()` blocks inheritance,
   `TERM=xterm-256color` is pinned by default, fixtures draw no clocks and
   no animations. The CI suite runs a 100-iteration
-  [stress workflow](.github/workflows/stress.yml) on Linux and macOS —
-  wait/timing changes don't merge without surviving it.
+  [stress workflow](.github/workflows/stress.yml) on Linux, macOS and
+  Windows — wait/timing changes don't merge without surviving it.
 
 ## Known limitations
 

@@ -9,6 +9,19 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **The stress workflow runs on Windows too.** It hunted flakes on Linux
+  and macOS only, which left the newest leg — required since 0.10 — as the
+  one whose liveness is *synthesized* rather than observed: Unix reads the
+  terminal-closed edge off the kernel (EOF on the master), while Windows
+  manufactures it from a reaped child plus a drain grace, and polling with
+  a grace window is the shape a one-in-N flake lives in. `fixtures`'
+  in-test `cargo build -p` is the other, on the one filesystem that
+  refuses to relink a running `.exe`. Same five `--test-threads` shards,
+  different faults at the ends of the axis, and double the per-shard clock
+  because a Windows iteration costs two to three times a Linux one. (#290)
+
 ## [0.10.0] - 2026-09-08
 
 ### Added

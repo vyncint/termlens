@@ -1,7 +1,19 @@
-# Flake hunter: the whole test suite, 100 times, on both OSes.
+# Flake hunter: the whole test suite, 100 times, on all three OSes.
 #
 # A flaky test harness is worse than none — this workflow is the credibility
 # gate. Run it before every release and whenever wait/timing code changes.
+#
+# Windows joined in 0.10 (#290), when its ci.yml leg became a required check
+# (#280) and therefore acquired a flake budget of zero. It is here for one
+# reason the other two legs do not have: on Unix "the terminal closed" is a
+# kernel fact — EOF on the master means every slave descriptor is closed —
+# while on Windows the pseudoconsole's output pipe outlives the child, so
+# the harness *manufactures* the edge instead (`EXIT_CLOSES_THE_TERMINAL`,
+# `ExitWatch`: reap the child, drain for `DRAIN_GRACE`, call it closed).
+# Polling plus a grace window is the shape a one-in-N flake lives in, and
+# until now nothing ran it more than once per commit. The second reason is
+# `common::fixture_bin`, which shells out to `cargo build -p` from inside
+# the tests, on the one filesystem that refuses to relink a running `.exe`.
 #
 # The 100 are split across SHARDS machines rather than run end to end on one.
 # Three things follow, and only the last one is a cost:
@@ -36,6 +48,13 @@
 #
 # The thread count is in the job name and in the failure, so a flake arrives
 # already half-diagnosed: at 1 it is a speed race, at 16 a contention one.
+#
+# The axis transfers across platforms; the faults at its ends do not. At 1
+# thread Windows is hunting the exit synthesis above rather than the macOS
+# teardown race — nothing contends, so a child can be reaped before its last
+# write has been drained. At 16 it is hunting conhost churn: windows-latest
+# is a four-core box, so sixteen pseudoconsoles opening and closing at once
+# is genuine oversubscription rather than a figure of speech.
 name: stress
 
 on:
@@ -66,7 +85,7 @@ jobs:
       # on is most of the diagnosis, and a cancelled shard reports nothing.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         threads: [1, 2, 4, 8, 16]
         # Balanced by wall time rather than by count. Measured on this suite:
         # a serial iteration costs 43s against 16s at four threads and 14s at
@@ -85,10 +104,20 @@ jobs:
           - threads: 16
             weight: 25
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # windows-latest defaults to pwsh and the iteration loop below is
+        # POSIX shell. Git Bash ships `seq` and arithmetic expansion, so one
+        # shell serves all three OSes and the script stays single-sourced.
+        # On Unix this only adds `pipefail`, which the loop does not use.
+        shell: bash
     # A shard is twenty iterations, which is minutes. Generous, but no longer
     # two hours: a shard that hangs should say so while the run is still worth
-    # watching.
-    timeout-minutes: 30
+    # watching. Windows gets double, because an iteration there costs roughly
+    # two to three times a Linux one and the serial shard is the long pole —
+    # a timeout that fires on a healthy run is a false alarm that costs more
+    # than the minutes it saves.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 60 || 30 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
