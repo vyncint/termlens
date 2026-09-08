@@ -13,6 +13,7 @@ use unicode_normalization::UnicodeNormalization;
 use crate::graphics::GraphicsSeen;
 
 mod diff;
+mod parse;
 mod render;
 #[cfg(feature = "serde")]
 mod serde_impl;

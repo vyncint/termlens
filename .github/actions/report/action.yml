@@ -1,0 +1,129 @@
+# The screens a failing termlens suite left behind, in the pull request
+# (#251). Run after the test step with `if: failure()`: collects insta's
+# `.snap.new` files and everything under `TERMLENS_ARTIFACT_DIR`, renders
+# each with `termlens-cli`, writes the screens and — for a `.snap.new` with a
+# `.snap` beside it — the cell diff into the step summary, and uploads the
+# SVG/HTML renderings as an artifact, since a step summary shows text and
+# not a local image.
+#
+# One `uses:` line from a consumer's workflow, nothing else: the CLI is
+# `cargo install`ed from crates.io, which every Rust runner already has.
+# This repository passes `cli: workspace` so the suite dogfoods the CLI in
+# the tree rather than the one last published.
+name: termlens report
+description: Render the screens a failing termlens test suite left behind into the step summary and an artifact.
+
+inputs:
+  artifact-dir:
+    description: >-
+      The directory the tests were run with as TERMLENS_ARTIFACT_DIR. Defaults
+      to that variable when set for the job, else $RUNNER_TEMP/termlens.
+    required: false
+    default: ""
+  cli:
+    description: >-
+      Where termlens-cli comes from: "crates.io" (cargo install termlens-cli)
+      or "workspace" (cargo install --path crates/termlens-cli, for the
+      termlens repository itself).
+    required: false
+    default: crates.io
+  cli-version:
+    description: The termlens-cli version to install from crates.io; empty means the latest.
+    required: false
+    default: ""
+  name:
+    description: The name of the uploaded artifact.
+    required: false
+    default: termlens-report
+
+runs:
+  using: composite
+  steps:
+    - name: Install termlens-cli
+      shell: bash
+      env:
+        CLI: ${{ inputs.cli }}
+        CLI_VERSION: ${{ inputs.cli-version }}
+      run: |
+        set -euo pipefail
+        root="${RUNNER_TEMP}/termlens-cli"
+        case "$CLI" in
+          workspace)
+            cargo install --path crates/termlens-cli --locked --root "$root" ;;
+          crates.io)
+            if [ -n "$CLI_VERSION" ]; then
+              cargo install termlens-cli --version "$CLI_VERSION" --locked --root "$root"
+            else
+              cargo install termlens-cli --locked --root "$root"
+            fi ;;
+          *)
+            echo "::error::cli must be crates.io or workspace, got '$CLI'"; exit 1 ;;
+        esac
+
+    - name: Render the screens into the summary
+      shell: bash
+      env:
+        ARTIFACT_DIR_INPUT: ${{ inputs.artifact-dir }}
+        ARTIFACT_NAME: ${{ inputs.name }}
+      run: |
+        set -euo pipefail
+        dir="${ARTIFACT_DIR_INPUT:-${TERMLENS_ARTIFACT_DIR:-${RUNNER_TEMP}/termlens}}"
+        out="${RUNNER_TEMP}/termlens-report"
+        mkdir -p "$out"
+        termlens() { "${RUNNER_TEMP}/termlens-cli/bin/termlens" "$@"; }
+
+        # What to show: every .snap.new outside target/, then every file the
+        # artifact hook wrote. Sorted, so the summary is stable run to run.
+        {
+          find . -path ./target -prune -o -name '*.snap.new' -print 2>/dev/null
+          if [ -d "$dir" ]; then find "$dir" -type f -print; fi
+        } | sort > "${out}/files.txt"
+
+        {
+          echo "## termlens: screens from the failing tests"
+          echo
+          if [ ! -s "${out}/files.txt" ]; then
+            echo "No \`.snap.new\` files and nothing under \`${dir}\`: the failures left no screen behind."
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        n=0
+        while IFS= read -r file; do
+          n=$((n + 1))
+          base="$(basename "$file")"
+          stem="${n}-${base}"
+          # Renderings for the artifact; the summary holds the text.
+          termlens render --svg "$file" > "${out}/${stem}.svg" || true
+          termlens render --html "$file" > "${out}/${stem}.html" || true
+          {
+            echo "<details><summary><code>${file}</code></summary>"
+            echo
+            echo '```'
+            termlens render --text "$file" || echo "(termlens could not read this file)"
+            echo '```'
+            case "$file" in
+              *.snap.new)
+                snap="${file%.new}"
+                if [ -f "$snap" ]; then
+                  echo
+                  echo "Against \`${snap}\`:"
+                  echo
+                  echo '```'
+                  termlens diff --color never "$snap" "$file" || true
+                  echo '```'
+                fi ;;
+            esac
+            echo "</details>"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+        done < "${out}/files.txt"
+        if [ "$n" -gt 0 ]; then
+          echo "SVG and HTML renderings of each are in the \`${ARTIFACT_NAME:-termlens-report}\` artifact." >> "$GITHUB_STEP_SUMMARY"
+        fi
+        echo "rendered ${n} screen(s) into the step summary"
+
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ runner.temp }}/termlens-report
+        if-no-files-found: ignore

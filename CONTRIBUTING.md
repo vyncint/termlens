@@ -64,6 +64,12 @@ cargo insta review            # inspect and accept/reject each diff
 
 - `crates/termlens/` — the published library (PTY spawn → VT emulation →
   `Screen` snapshots → wait engine).
+- `crates/termlens-cli/` — the `termlens` command (`inspect`, `diff`,
+  `render`), published as `termlens-cli`; its tests drive it through a PTY
+  with the library.
+- `.github/actions/report/` — the composite action that renders failing
+  screens into a pull request's step summary; this repository's `test` job
+  runs it with `if: failure()`.
 - `fixtures/` — deterministic terminal apps the integration suite drives;
   workspace members, never published. `fixtures/ratatui-app` is the one
   ratatui application, and carries its own test: the same `draw` through

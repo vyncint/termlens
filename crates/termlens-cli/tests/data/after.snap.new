@@ -1,0 +1,12 @@
+---
+source: tests/example.rs
+expression: t.screen().with_styles()
+---
+size: 30x4  cursor: 3,8
+myapp    Alpha  汉字
+note pw: secret
+Counter: 2
+
+styles:
+0: 0-4 fg=6 bold
+1: 0-3 dim; 9-14 conceal

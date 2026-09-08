@@ -1,6 +1,10 @@
 //! Error types. The prime directive: when a wait fails in CI, the log must
 //! show what the terminal actually looked like — so timeout/EOF errors embed
 //! a full [`Screen`] snapshot and render it in their `Display` output.
+//!
+//! The same screens reach a directory when `TERMLENS_ARTIFACT_DIR` is set
+//! (#251), so a step after the tests can render them into the pull request
+//! rather than leaving them in the log; see [`Error`].
 
 use std::time::Duration;
 
@@ -10,6 +14,20 @@ use crate::Screen;
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Errors returned by [`Terminal`](crate::Terminal) operations.
+///
+/// # `TERMLENS_ARTIFACT_DIR`
+///
+/// Every variant that carries a [`Screen`] prints it, so a CI log shows
+/// what the application displayed. When the environment variable
+/// `TERMLENS_ARTIFACT_DIR` names a directory, the same screen is also
+/// written there as it is embedded: `<test>-<n>.screen.json` with the
+/// `serde` feature, `<test>-<n>.screen.txt` (the `with_styles` rendering,
+/// which [`Screen::parse`] reads back) without, where `<test>` is the
+/// current thread's name — under `cargo test`, the test's path. Unset, the
+/// hook is one environment read and nothing else; insta's `.snap.new`
+/// files stay where insta puts them. This repository's `report` action
+/// (`.github/actions/report`) renders that directory into a pull
+/// request's step summary.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -95,6 +113,12 @@ pub enum Error {
     #[error("input not receivable: {0}")]
     Input(String),
 
+    /// A saved screen could not be read back by [`Screen::parse`]: the text
+    /// is not the snapshot format of `docs/DESIGN.md` §3. The message names
+    /// the line.
+    #[error("could not parse a saved screen: {0}")]
+    Parse(String),
+
     /// Typed input could not be delivered: the child is gone and the OS
     /// tore the terminal down, or it stopped reading its input and the
     /// write gave up at the terminal's deadline rather than blocking
@@ -127,6 +151,83 @@ impl Error {
             | Error::Write { screen, .. } => Some(screen),
             _ => None,
         }
+    }
+
+    /// The `TERMLENS_ARTIFACT_DIR` hook (#251): every error that carries a
+    /// screen passes through here on its way out of the crate, and when the
+    /// variable is set the screen is also written to that directory. The
+    /// call is a no-op when it is not — the common case, and the reason
+    /// the check is one environment read.
+    pub(crate) fn recorded(self) -> Self {
+        if let Some(screen) = self.screen() {
+            artifact::write(screen);
+        }
+        self
+    }
+}
+
+/// The `TERMLENS_ARTIFACT_DIR` hook. A CI log shows the screen a failing
+/// wait embedded; this puts the same screen somewhere a step after the
+/// tests can pick it up — the `report` action in this repository renders
+/// each into the pull request's step summary.
+pub(crate) mod artifact {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::Screen;
+
+    /// The environment variable naming the directory. Unset means off.
+    pub(crate) const VAR: &str = "TERMLENS_ARTIFACT_DIR";
+
+    /// One counter per test process, so two screens from one test are two
+    /// files rather than one overwritten.
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// Write `screen` to `$TERMLENS_ARTIFACT_DIR/<test>-<n>.screen.json`
+    /// (with the `serde` feature) or `.screen.txt` (the `with_styles`
+    /// rendering, which `Screen::parse` reads back). `<test>` is the
+    /// current thread's name, which under `cargo test` is the test's path.
+    /// Best effort: a directory that cannot be written is reported once on
+    /// stderr, and the error the screen came from is returned regardless.
+    pub(crate) fn write(screen: &Screen) {
+        let Some(dir) = std::env::var_os(VAR).filter(|d| !d.is_empty()) else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+        let thread = std::thread::current();
+        let test: String = thread
+            .name()
+            .unwrap_or("screen")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let (name, body) = render(screen, &format!("{test}-{n}"));
+        let path = dir.join(name);
+        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, body)) {
+            eprintln!("termlens: could not write {} ({VAR}): {e}", path.display());
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    fn render(screen: &Screen, stem: &str) -> (String, String) {
+        let json =
+            serde_json::to_string(screen).unwrap_or_else(|_| screen.with_styles().to_string());
+        (format!("{stem}.screen.json"), json)
+    }
+
+    #[cfg(not(feature = "serde"))]
+    fn render(screen: &Screen, stem: &str) -> (String, String) {
+        (
+            format!("{stem}.screen.txt"),
+            screen.with_styles().to_string(),
+        )
     }
 }
 

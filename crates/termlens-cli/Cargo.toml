@@ -1,0 +1,30 @@
+[package]
+name = "termlens-cli"
+description = "The termlens command: run a program in a PTY and print its screen, diff two saved screens, render one as ANSI, SVG or HTML"
+keywords = ["pty", "terminal", "testing", "tui", "snapshot"]
+categories = ["development-tools::testing", "command-line-interface"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "termlens"
+path = "src/main.rs"
+# The binary shares its name with the library it wraps; documenting it would
+# collide with the library's docs under `cargo doc --workspace`, and a
+# binary's rustdoc is its README anyway.
+doc = false
+
+[dependencies]
+# The version is the one release bumps alongside `workspace.package.version`
+# (docs/RELEASING.md); a path dependency needs it to publish. `serde` so a
+# saved screen can be JSON as well as the text format.
+termlens = { version = "0.9.0", path = "../termlens", default-features = false, features = ["serde"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true
