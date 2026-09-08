@@ -681,14 +681,19 @@ impl ExitStatus {
     ///
     /// ```no_run
     /// # fn main() -> termlens::Result<()> {
+    /// # #[cfg(unix)] {
     /// # let mut t = termlens::Terminal::builder().args(["-c", "sleep 30"]).spawn("sh")?;
     /// t.signal(termlens::Signal::Term)?;
     /// let status = t.wait_exit()?;
     /// let signal = status.signal().expect("killed, not exited");
     /// assert!(signal.contains("Terminated"), "status: {status}");
+    /// # }
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// Always `None` on Windows, which has no signals; the example is Unix
+    /// for that reason.
     ///
     /// Distinguishing "the app exited 1" from "something killed the app" is
     /// the difference between a failing test and a failing test *harness* —
@@ -1448,10 +1453,14 @@ impl TerminalBuilder {
         // env_clear removes PATH with everything else, and a bare name then
         // has nothing to resolve against; the PTY layer's "Unable to resolve
         // the PATH" named neither the cause nor a remedy (#222).
-        if self.env_clear
-            && !self.envs.iter().any(|(k, _)| k == "PATH")
-            && !program.to_string_lossy().contains('/')
-        {
+        //
+        // "Bare" is "has no directory part", asked of the path rather than
+        // of the string: `D:\\a\\x.exe` contains no `/` and is not bare, and
+        // the first Windows run said it was (#149).
+        let bare = std::path::Path::new(program)
+            .parent()
+            .is_none_or(|dir| dir.as_os_str().is_empty());
+        if self.env_clear && !self.envs.iter().any(|(k, _)| k == "PATH") && bare {
             return spawn_err(format!(
                 "`{}` is a bare program name and env_clear() removed PATH, so nothing can \
                  resolve it — give an absolute path, or set a PATH with .env(\"PATH\", …)",
