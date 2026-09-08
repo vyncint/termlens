@@ -179,7 +179,10 @@ jobs:
             || { echo "::error::the msrv job is not running rustc ${MSRV}"; exit 1; }
       # --all-targets: tests and examples compile against the same floor,
       # so they are part of the claim. Passes at 1.85 today without a bump.
-      - run: cargo check --workspace --locked --all-targets
+      # The one exclusion is the ratatui fixture: ratatui 0.30 needs 1.88,
+      # and a fixture's floor is not the library's (#252). Its own
+      # `rust-version` says so, and the `test` job builds it on stable.
+      - run: cargo check --workspace --exclude ratatui-app --locked --all-targets
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.msrv }}
 

@@ -210,6 +210,31 @@ so the backend can be swapped; details in [docs/DESIGN.md](docs/DESIGN.md).
 | ratatui `TestBackend` |    ✗     |      ✔      |     ~     | in-process only: your real binary, PTY layer, and non-ratatui output stay untested |
 | [teatest] (Go)        |    ✔     |      ✔      |     ✔     | same idea, Bubble Tea / Go ecosystem    |
 
+### What `TestBackend` cannot see
+
+`TestBackend` renders your widgets into a buffer in-process; it is the right
+tool for layout and rendering logic, and termlens does not replace it. What
+it structurally cannot observe is everything between `draw` and the user's
+eyes — and each item has one termlens assertion that does:
+
+| Invisible to `TestBackend`                      | The assertion that sees it                                         |
+| ----------------------------------------------- | ------------------------------------------------------------------ |
+| raw-mode entry and exit, the alternate screen   | `t.wait_until(\|s\| s.alternate_screen())`, and `!alternate_screen()` after `q` |
+| a resize (`SIGWINCH`) reaching the application  | `t.resize(60, 14)?; t.wait_frame(\|s\| s.contains("60x14"))`      |
+| output printed outside ratatui — a `println!`, a logger, a panic | `s.contains("panicked")`, or a snapshot of the whole grid  |
+| a torn frame — a repaint observed half-drawn    | `wait_frame` returns complete DEC 2026 frames only, and says so when the app never brackets |
+| capability probes and the modes they turn on    | `answer_queries` replies as a terminal would; `s.mouse_mode()`, `s.bracketed_paste()`, `s.focus_events()` say what was asked for |
+| mouse and paste bytes under the enabled modes   | `t.click(col, row)`, `t.scroll(…)`, `t.paste(…)` encode for the mode the app turned on |
+| a masked field that is really printed in clear  | `cell.style().conceal` — identical text, different picture         |
+| the terminal state after exit                   | `t.wait_exit()?` then `t.screen()`: `!alternate_screen()`, cursor visible again |
+
+`fixtures/ratatui-app` is the worked example: a ratatui counter/list whose
+`draw` is rendered through the PTY by termlens and in-process by
+`TestBackend`, and the two diffed cell by cell with `Screen::diff` at two
+sizes with a resize between (`fixtures/ratatui-app/tests/fidelity.rs`). Where
+they disagree the bug is in the terminal layer — crossterm's encoding, the
+PTY, or termlens's emulation — which is the layer nothing else tests.
+
 ## Determinism
 
 PTYs are asynchronous; a harness that pretends otherwise is flaky by
@@ -390,7 +415,9 @@ design. termlens's position:
 
 Rust **1.85** (driven by the default `insta` feature's dependency tree;
 checked in CI against the committed lockfile). MSRV bumps are minor
-releases.
+releases. The `ratatui-app` fixture alone needs 1.88, ratatui 0.30's floor;
+it is a workspace member, not part of the published crate, and the MSRV
+check excludes it.
 
 ## Contributing
 

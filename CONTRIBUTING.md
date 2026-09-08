@@ -38,7 +38,7 @@ RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features
 cargo deny check                          # cargo install cargo-deny
 pipx run zizmor==1.29.0 --persona=pedantic .github/workflows/   # workflow audit; needs GH_TOKEN for the online checks
-cargo +1.85 check --workspace --locked --all-targets    # the MSRV: `rust-version` in Cargo.toml
+cargo +1.85 check --workspace --exclude ratatui-app --locked --all-targets    # the MSRV: `rust-version` in Cargo.toml (the ratatui fixture needs 1.88)
 cargo clippy --workspace --all-targets --all-features --target x86_64-pc-windows-msvc -- -D warnings   # the Windows build, from any host: `rustup target add x86_64-pc-windows-msvc` once
 ```
 
@@ -65,7 +65,9 @@ cargo insta review            # inspect and accept/reject each diff
 - `crates/termlens/` — the published library (PTY spawn → VT emulation →
   `Screen` snapshots → wait engine).
 - `fixtures/` — deterministic terminal apps the integration suite drives;
-  workspace members, never published.
+  workspace members, never published. `fixtures/ratatui-app` is the one
+  ratatui application, and carries its own test: the same `draw` through
+  the PTY and through `TestBackend`, diffed cell by cell.
 - `docs/DESIGN.md` — the architecture in four layers, wait semantics, and the
   snapshot format spec. **Read this before touching `wait.rs`, `terminal.rs`,
   or the emulator.**

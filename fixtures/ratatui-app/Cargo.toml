@@ -1,0 +1,26 @@
+[package]
+name = "ratatui-app"
+description = "termlens fixture: a ratatui counter/list application, the same draw function rendered through a PTY and through TestBackend"
+publish = false
+version.workspace = true
+edition.workspace = true
+# ratatui 0.30 needs 1.88; the library's MSRV stays 1.85, and the msrv CI
+# job excludes this package — see the note beside that job.
+rust-version = "1.88"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+ratatui.workspace = true
+
+# The fidelity test lives here because `draw` does: the same function is
+# rendered through the PTY by termlens and in-process by TestBackend, and the
+# two are diffed cell by cell. `serde` because a TestBackend buffer becomes a
+# termlens Screen through the JSON the crate reads back.
+[dev-dependencies]
+termlens = { path = "../../crates/termlens", default-features = false, features = ["serde"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true
