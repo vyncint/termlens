@@ -13,3 +13,4 @@ rules:
       - stress.yml
       - release.yml
       - install.yml
+      - windows.yml

@@ -187,10 +187,28 @@ const DROP_REAP_GRACE: Duration = Duration::from_secs(2);
 /// macOS runners; Linux, whose teardown is not revoke-based, ran the same
 /// suite 100/100). Holding this lock during both edges means the kernel
 /// never sees the two windows overlap. Steady-state I/O is unaffected.
+///
+/// Unix only. ConPTY has no device table: each pseudoconsole is a pair of
+/// pipes of its own, so there is nothing for one terminal's teardown to
+/// revoke from under another's spawn, and the lock would be a tax paid for
+/// a race that cannot happen (#149). Linux keeps it on purpose — its cost
+/// is unmeasurable against a spawn, and dropping it there is a behaviour
+/// change the stress workflow would need to bless, not a cleanup.
+#[cfg(unix)]
 static PTY_LIFECYCLE: Mutex<()> = Mutex::new(());
 
-fn pty_lifecycle_guard() -> std::sync::MutexGuard<'static, ()> {
-    PTY_LIFECYCLE.lock().unwrap_or_else(PoisonError::into_inner)
+/// The lifecycle lock, held — or `None` on a platform with nothing to
+/// serialize. Callers hold and drop it the same way either way.
+type LifecycleGuard = Option<std::sync::MutexGuard<'static, ()>>;
+
+#[cfg(unix)]
+fn pty_lifecycle_guard() -> LifecycleGuard {
+    Some(PTY_LIFECYCLE.lock().unwrap_or_else(PoisonError::into_inner))
+}
+
+#[cfg(not(unix))]
+fn pty_lifecycle_guard() -> LifecycleGuard {
+    None
 }
 
 /// Attempts to open a PTY before giving up, and the step between them. The
@@ -221,7 +239,7 @@ const PTY_OPEN_BACKOFF: Duration = Duration::from_millis(25);
 /// classifying an `anyhow` error by its text is guesswork, a permanent fault
 /// still reports its own message at the end, and the cost of being wrong is
 /// under two seconds on a spawn that was going to fail anyway.
-fn open_pty(size: PtySize) -> Result<(PtyPair, std::sync::MutexGuard<'static, ()>)> {
+fn open_pty(size: PtySize) -> Result<(PtyPair, LifecycleGuard)> {
     let pty = native_pty_system();
     let mut last = String::new();
     for attempt in 0..PTY_OPEN_ATTEMPTS {
@@ -663,14 +681,19 @@ impl ExitStatus {
     ///
     /// ```no_run
     /// # fn main() -> termlens::Result<()> {
+    /// # #[cfg(unix)] {
     /// # let mut t = termlens::Terminal::builder().args(["-c", "sleep 30"]).spawn("sh")?;
     /// t.signal(termlens::Signal::Term)?;
     /// let status = t.wait_exit()?;
     /// let signal = status.signal().expect("killed, not exited");
     /// assert!(signal.contains("Terminated"), "status: {status}");
+    /// # }
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// Always `None` on Windows, which has no signals; the example is Unix
+    /// for that reason.
     ///
     /// Distinguishing "the app exited 1" from "something killed the app" is
     /// the difference between a failing test and a failing test *harness* —
@@ -1430,10 +1453,14 @@ impl TerminalBuilder {
         // env_clear removes PATH with everything else, and a bare name then
         // has nothing to resolve against; the PTY layer's "Unable to resolve
         // the PATH" named neither the cause nor a remedy (#222).
-        if self.env_clear
-            && !self.envs.iter().any(|(k, _)| k == "PATH")
-            && !program.to_string_lossy().contains('/')
-        {
+        //
+        // "Bare" is "has no directory part", asked of the path rather than
+        // of the string: `D:\\a\\x.exe` contains no `/` and is not bare, and
+        // the first Windows run said it was (#149).
+        let bare = std::path::Path::new(program)
+            .parent()
+            .is_none_or(|dir| dir.as_os_str().is_empty());
+        if self.env_clear && !self.envs.iter().any(|(k, _)| k == "PATH") && bare {
             return spawn_err(format!(
                 "`{}` is a bare program name and env_clear() removed PATH, so nothing can \
                  resolve it — give an absolute path, or set a PATH with .env(\"PATH\", …)",

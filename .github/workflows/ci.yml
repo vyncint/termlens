@@ -92,6 +92,25 @@ jobs:
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # The crate compiles for Windows and nothing ran the compiler to prove it
+  # (#149): that build was rotting unwatched, and the cost of watching it is
+  # one cross-target clippy on a Linux runner — no Windows machine involved.
+  # `cargo check`/`clippy` need only the target's std, which rustup installs;
+  # linking and running are what need Windows, and those are windows.yml.
+  windows-check:
+    name: windows-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+          components: clippy
+          targets: x86_64-pc-windows-msvc
+      - run: cargo clippy --workspace --all-targets --all-features --target x86_64-pc-windows-msvc -- -D warnings
+
   # CONTRIBUTING §1 promises that every gate above is reproducible locally
   # and that the workflow is the source of truth when the two disagree. It
   # disagreed twice before anyone noticed (#227); this is the check that
@@ -214,7 +233,7 @@ jobs:
   required-green:
     name: required-green
     if: always()
-    needs: [fmt, clippy, test, features, msrv, docs, deny, zizmor, gates-listed, skill]
+    needs: [fmt, clippy, test, features, windows-check, msrv, docs, deny, zizmor, gates-listed, skill]
     runs-on: ubuntu-latest
     steps:
       - name: Verify every needed job succeeded

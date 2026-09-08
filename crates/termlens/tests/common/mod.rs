@@ -28,7 +28,11 @@ pub(crate) fn fixture_bin(name: &str) -> PathBuf {
         },
         PathBuf::from,
     );
-    let bin = target_dir.join(profile).join(name);
+    // `.exe` on Windows, nothing elsewhere — the same rule Cargo used to
+    // name the artifact this path has to find.
+    let bin = target_dir
+        .join(profile)
+        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
 
     let mut built = BUILT.lock().unwrap();
     if !built.iter().any(|b| b == name) {

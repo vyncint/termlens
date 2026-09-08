@@ -3,7 +3,9 @@
 
 use std::time::{Duration, Instant};
 
-use termlens::{Error, Key, Signal, Terminal};
+#[cfg(unix)]
+use termlens::Signal;
+use termlens::{Error, Key, Terminal};
 
 #[test]
 fn current_dir_runs_the_child_where_asked() -> termlens::Result<()> {
@@ -36,6 +38,7 @@ fn pid_reports_the_direct_child() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg(unix)]
 fn signal_term_exercises_the_graceful_shutdown_path() -> termlens::Result<()> {
     let mut t = Terminal::builder()
         .timeout(Duration::from_secs(10))
@@ -55,6 +58,7 @@ fn signal_term_exercises_the_graceful_shutdown_path() -> termlens::Result<()> {
 }
 
 #[test]
+#[cfg(unix)]
 fn signal_after_reap_is_a_typed_error_not_a_stray_kill() {
     let mut t = Terminal::builder()
         .timeout(Duration::from_secs(10))
