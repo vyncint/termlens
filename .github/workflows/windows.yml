@@ -1,18 +1,15 @@
 name: windows
 
-# The Windows machine this project does not otherwise have (#149).
+# The Windows report (#149), on demand against any ref.
 #
-# Windows is not a CI leg: the suite drives `/bin/sh` at 99 sites (#249) and
-# ConPTY re-renders rather than forwards, so a required leg today would be
-# red on the shell before it said anything about the crate. This workflow
-# runs on demand instead — against any ref — and reports rather than gates:
-# the whole suite with nothing stopping early, then the ConPTY probe
+# ci.yml's `windows` job is the gate: the whole suite on windows-latest,
+# required since #280. This workflow is for reading rather than gating —
+# the suite with nothing stopping early, then the ConPTY probe
 # (`tests/conpty_probe.rs`), which prints per escape sequence whether the
 # master read what the child wrote. Both logs are the artifact; the pass
 # count and the probe table go to the job summary so no download is needed.
-#
-# The build itself is defended on every PR by ci.yml's `windows-check`,
-# from a Linux runner. This is the half that needs the OS.
+# Run it when a ConPTY claim in docs/STABILITY.md §1 needs re-measuring, or
+# to see the ignored-test count for a branch before opening the PR.
 
 on:
   workflow_dispatch:
@@ -42,8 +39,8 @@ jobs:
       - name: Build everything first, so a compile error is not read as a test failure
         run: cargo build --workspace --all-targets --all-features
       - name: Run the whole suite without stopping
-        # A red suite is the expected outcome until #249 lands; the log is
-        # the deliverable, so the step must not end the job.
+        # The log is the deliverable, so a failure must not end the job
+        # before the probe and the summary run.
         continue-on-error: true
         run: cargo test --workspace --all-features --no-fail-fast 2>&1 | tee suite.log
       - name: Ask ConPTY what it forwards

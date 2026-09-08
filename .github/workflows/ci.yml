@@ -124,15 +124,14 @@ jobs:
 
   # The Windows leg (#149): the whole suite over ConPTY, with the tests that
   # ConPTY cannot honour marked `#[cfg_attr(windows, ignore = "…")]`, each
-  # with its reason. Non-required while it earns it — `continue-on-error`
-  # keeps a ConPTY surprise from blocking a Unix fix, and required-green does
-  # not list it. Promoting it is two edits: drop continue-on-error, add it
-  # to required-green's needs. windows.yml is the dispatchable version with
-  # the ConPTY probe and the report.
+  # with its reason. Required since #280: it ran non-required first and held
+  # on every push to main from the day it landed through the 0.10 series.
+  # A ConPTY surprise now blocks a merge, which is the point — the platform
+  # is claimed in docs/STABILITY.md. windows.yml is the dispatchable version
+  # with the ConPTY probe and the report, for reading rather than gating.
   windows:
-    name: windows (non-required)
+    name: windows
     runs-on: windows-latest
-    continue-on-error: true
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -268,7 +267,7 @@ jobs:
   required-green:
     name: required-green
     if: always()
-    needs: [fmt, clippy, test, features, windows-check, msrv, docs, deny, zizmor, gates-listed, skill]
+    needs: [fmt, clippy, test, features, windows-check, windows, msrv, docs, deny, zizmor, gates-listed, skill]
     runs-on: ubuntu-latest
     steps:
       - name: Verify every needed job succeeded

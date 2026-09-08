@@ -77,6 +77,9 @@ cargo insta review            # inspect and accept/reject each diff
 - `docs/DESIGN.md` — the architecture in four layers, wait semantics, and the
   snapshot format spec. **Read this before touching `wait.rs`, `terminal.rs`,
   or the emulator.**
+- `docs/STABILITY.md` — what 1.0 means: three decisions (Windows, backend,
+  styled history) with their measurements, and what the promise covers.
+  `docs/BACKENDS.md` is the emulator comparison behind the second.
 - `skills/termlens/` — the skill for AI coding agents that write tests
   *with* termlens (`AGENTS.md` briefs agents working *on* it). Every Rust
   block in `SKILL.md` is compiled against the crate by
