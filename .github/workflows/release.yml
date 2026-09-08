@@ -89,20 +89,21 @@ jobs:
       - run: cargo publish -p termlens --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-      # termlens-cli (#255) follows, once crates.io knows it. Trusted
-      # Publishing is configured per crate and only for a crate that already
-      # exists, so its first publish is the owner's, by hand, with a token
-      # (docs/RELEASING.md); every release after that lands here.
-      - name: Publish termlens-cli, when it is on crates.io
+      # termlens-cli (#255), on crates.io since 0.10.0. Trusted Publishing
+      # is configured *per crate*, so the OIDC token minted above carries
+      # only the crates that have a publisher pointing at this workflow —
+      # a failure here is almost always that link missing for termlens-cli
+      # rather than anything wrong with the crate. Said out loud, because
+      # the raw error is a bare 403 and `termlens` is already published by
+      # the time this step runs.
+      - name: Publish termlens-cli
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
-          status="$(curl -sS -o /dev/null -w '%{http_code}' https://crates.io/api/v1/crates/termlens-cli)"
-          if [ "$status" = "200" ]; then
-            cargo publish -p termlens-cli --locked
-          else
-            echo "::warning::termlens-cli is not on crates.io yet (HTTP ${status}); publish it once by hand, then link Trusted Publishing for it — docs/RELEASING.md"
-          fi
+          cargo publish -p termlens-cli --locked || {
+            echo "::error::termlens-cli did not publish. If this is an authentication failure, termlens-cli has no Trusted Publishing link yet: crates.io -> termlens-cli -> Settings -> Trusted Publishing -> GitHub, repository vyncint/termlens, workflow release.yml, environment release. See docs/RELEASING.md. NOTE: termlens is already on crates.io for this tag, so re-running this job will fail on that crate instead — publish termlens-cli on its own once the link exists."
+            exit 1
+          }
 
   github-release:
     name: GitHub release

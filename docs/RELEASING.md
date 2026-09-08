@@ -4,10 +4,18 @@ One page, copy-pasteable. Maintainers only.
 
 ## Prerequisites (already satisfied)
 
-- Publishing auth is **crates.io Trusted Publishing** (linked
-  2026-08-09): crates.io → termlens → Settings → Trusted Publishing →
-  GitHub, repository `vyncint/termlens`, workflow `release.yml`. No
-  token or secret is stored anywhere.
+- Publishing auth is **crates.io Trusted Publishing**, configured **per
+  crate**: crates.io → *crate* → Settings → Trusted Publishing → GitHub,
+  repository `vyncint/termlens`, workflow `release.yml`.
+  - `termlens` — linked 2026-08-09.
+  - `termlens-cli` — **not linked yet**. The crate was first published on
+    2026-09-08 by the one-shot `publish-cli.yml` bootstrap (a new name has
+    no crate to configure Trusted Publishing against, which is the whole
+    chicken-and-egg). Until it is linked, `release.yml`'s termlens-cli
+    step will fail on authentication *after* `termlens` has already gone
+    out — so link it before the next tag. Then delete the
+    `CARGO_REGISTRY_TOKEN` secret and `.github/workflows/publish-cli.yml`,
+    and the repository is back to storing no secret at all.
 - The publish job runs in the **`release` GitHub environment**, which
   only deploys from `v*` tags — an OIDC publish token can never be
   minted from a branch. (Optionally set the environment name `release`
@@ -54,23 +62,26 @@ Pushing the tag runs `release.yml`, which:
 2. re-runs the full CI gates (`workflow_call` into ci.yml),
 3. runs `cargo-semver-checks` against the last published release
    (skipped gracefully on the first release),
-4. `cargo publish -p termlens` via Trusted Publishing (OIDC) — the
-   repository stores no tokens — then `cargo publish -p termlens-cli` if
-   crates.io already has that crate (a warning, not a failure, if not),
+4. `cargo publish -p termlens` then `cargo publish -p termlens-cli`, both
+   via Trusted Publishing (OIDC); each crate needs its own publisher
+   link, and the step says so if one is missing,
 5. creates the GitHub Release with notes extracted from the CHANGELOG
    section for that version (`.github/scripts/extract-changelog.sh`), and
 6. runs the registry-consumer check against that published version on Linux
    and macOS.
 
-## termlens-cli's first publish
+## Bootstrapping a brand-new crate
 
-Trusted Publishing is configured per crate, on a crate that exists. The
-first `termlens-cli` release is therefore by hand, once, from the tagged
-commit: `cargo publish -p termlens-cli --locked` with a crates.io token
-that has publish-new scope, then crates.io → termlens-cli → Settings →
-Trusted Publishing → GitHub, repository `vyncint/termlens`, workflow
-`release.yml`, environment `release`. `release.yml` publishes it on every
-tag after that.
+Trusted Publishing is configured per crate, on a crate that already
+exists, so the *first* publish of a new name cannot use it.
+`.github/workflows/publish-cli.yml` is that one-shot path — dispatch-only,
+a typed confirmation, a tag rather than a branch, the same
+tag-matches-version guard, `--locked` — run once against
+`CARGO_REGISTRY_TOKEN`. It published `termlens-cli` 0.10.0 on 2026-09-08.
+
+Afterwards, always: link Trusted Publishing for the new crate, revoke the
+token, delete the secret, delete the workflow. A stored publish token is a
+standing risk that this repository otherwise does not carry.
 
 ## If something fails mid-release
 
