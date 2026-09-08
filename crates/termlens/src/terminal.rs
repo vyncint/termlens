@@ -32,6 +32,57 @@ use crate::wait::{next_backoff, Expired, Monitor, INITIAL_BACKOFF, POLL_CAP};
 /// holding the PTY open must not stall the wait.
 const DRAIN_GRACE: Duration = Duration::from_millis(500);
 
+/// Whether the child being reaped is what closes the terminal.
+///
+/// On Unix it is not: EOF on the master is the signal, because EOF means
+/// every slave descriptor is closed — the exact condition under which no
+/// one can read what we type — while a reaped child says nothing about a
+/// grandchild that inherited the terminal and is still reading it. On
+/// Windows the pseudoconsole's output pipe stays open until the console
+/// itself is closed, whoever has exited, so EOF never arrives while a
+/// `Terminal` is alive and the process is the only witness there is
+/// (#149). There, a reaped child plus [`DRAIN_GRACE`] of drain is the
+/// terminal closing.
+const EXIT_CLOSES_THE_TERMINAL: bool = cfg!(windows);
+
+/// Watches the child from inside a wait, on the platform where nothing
+/// else will say it is gone: once it is reaped and [`DRAIN_GRACE`] has
+/// passed with the terminal still open, the terminal is marked closed and
+/// every wait sees the same EOF it would have seen on Unix.
+///
+/// A no-op where EOF is real. `try_wait` is a non-blocking probe of the
+/// process handle, cheap enough for the poll-cap tick it rides on.
+#[derive(Default)]
+struct ExitWatch {
+    reaped_at: Option<Instant>,
+}
+
+impl ExitWatch {
+    fn tick(
+        &mut self,
+        child: &mut Box<dyn portable_pty::Child + Send + Sync>,
+        exit_status: &mut Option<ExitStatus>,
+        state: &mut EmuState,
+    ) {
+        if !EXIT_CLOSES_THE_TERMINAL || state.eof {
+            return;
+        }
+        if exit_status.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => *exit_status = Some(ExitStatus::from_pty(&status)),
+                _ => return,
+            }
+        }
+        let reaped_at = *self.reaped_at.get_or_insert_with(Instant::now);
+        if reaped_at.elapsed() >= DRAIN_GRACE {
+            state.eof = true;
+            // A wait that skips unchanged state must see this change: EOF
+            // is a fact about the stream even when no byte carried it.
+            state.generation += 1;
+        }
+    }
+}
+
 /// How many distinct unanswered query shapes a terminal remembers for its
 /// diagnostics. The set is filled by the application under test — every
 /// distinct `CSI … n` is its own shape — so it is bounded; anything
@@ -2742,6 +2793,9 @@ impl Terminal {
     /// slave descriptor is closed, which is exactly the condition under
     /// which no one can read — while a reaped child says nothing about a
     /// grandchild that inherited the terminal and is still reading it.
+    /// Windows is the exception, and a documented one: a pseudoconsole
+    /// never reports EOF while it is open, so there the reaped child is
+    /// the signal (see [`EXIT_CLOSES_THE_TERMINAL`]).
     fn ensure_deliverable(&mut self, what: &str) -> Result<()> {
         if !self.shared.lock().eof {
             return Ok(());
@@ -2879,7 +2933,11 @@ impl Terminal {
         const WHAT: &str = "the screen predicate to hold";
         let deadline = Instant::now() + timeout;
         let mut seen_generation = None;
+        let mut exit_watch = ExitWatch::default();
         let outcome = self.shared.wait_until(deadline, |state| {
+            // Ahead of the generation check: a child that exited changes
+            // nothing on the grid, and on Windows is the only EOF there is.
+            exit_watch.tick(&mut self.child, &mut self.exit_status, state);
             // Spurious wake (poll-cap tick, unrelated notify): the state is
             // unchanged, so the predicate's verdict is too.
             if seen_generation == Some(state.generation) {
@@ -3041,7 +3099,9 @@ impl Terminal {
         let deadline = Instant::now() + timeout;
         let cursor = self.frame_cursor;
         let mut seen_frame = None;
+        let mut exit_watch = ExitWatch::default();
         let outcome = self.shared.wait_until(deadline, |state| {
+            exit_watch.tick(&mut self.child, &mut self.exit_status, state);
             if let Some(failure) = state.emulator_failure() {
                 return Some(Err(failure));
             }
@@ -3183,8 +3243,10 @@ impl Terminal {
 
     fn wait_idle_deadline(&mut self, quiet: Duration, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
+        let mut exit_watch = ExitWatch::default();
         let mut guard = self.shared.lock();
         loop {
+            exit_watch.tick(&mut self.child, &mut self.exit_status, &mut guard);
             // Ahead of the EOF shortcut: a stream that stopped because the
             // emulator died is not a stream that went quiet.
             if let Some(failure) = guard.emulator_failure() {
@@ -3372,7 +3434,9 @@ impl Terminal {
         let mut last = guard.peek_snapshot();
         let mut since = guard.last_activity;
         let mut seen_generation = guard.generation;
+        let mut exit_watch = ExitWatch::default();
         loop {
+            exit_watch.tick(&mut self.child, &mut self.exit_status, &mut guard);
             // Ahead of the EOF shortcut: a grid that stopped changing
             // because the emulator died has not settled.
             if let Some(failure) = guard.emulator_failure() {
@@ -3531,11 +3595,16 @@ impl Terminal {
             if let Some(status) = self.child.try_wait().map_err(Error::Io)? {
                 let status = ExitStatus::from_pty(&status);
                 self.exit_status = Some(status.clone());
-                let _ = self
+                let drained = self
                     .shared
                     .wait_until(Instant::now() + DRAIN_GRACE, |state| {
                         state.eof.then_some(())
                     });
+                // Where EOF was never going to come, the grace having passed
+                // with the child gone is the terminal closing.
+                if drained.is_err() && EXIT_CLOSES_THE_TERMINAL {
+                    self.shared.mutate(|state| state.eof = true);
+                }
                 return Ok(status);
             }
             let now = Instant::now();
