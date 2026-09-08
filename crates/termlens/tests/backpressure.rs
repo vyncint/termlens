@@ -5,46 +5,51 @@
 //! application that never reads its replies — lives in `drain.rs`, next to
 //! the deadlock it must never cause.
 //!
-//! Stays on `/bin/sh` on purpose (#249): reading replies byte for byte
-//! needs the terminal in raw mode, which the std-only `emit` fixture cannot
-//! set — see the note in `drain.rs`.
 
 use std::time::Duration;
 
 use termlens::{Key, Terminal};
 
+mod common;
+
 /// Ask `n` cursor-position queries back to back, then read everything, and
 /// count the answers. Each DSR reply carries exactly one `R`.
 ///
-/// Read in **one continuous `dd` of exactly the expected byte count**, and
+/// Read in **one continuous read of exactly the expected byte count**, and
 /// the shape of that read is load-bearing in both directions — stress taught
 /// me twice.
 ///
 /// A single read sized by a *timeout* stops at the first gap longer than its
 /// `VTIME`, so on a busy runner it ends early and measures scheduling: 310 of
 /// 400 on macOS. Replacing it with a retry loop was worse, and for a reason
-/// worth remembering — each retry is a `fork`+`exec` of `dd`, and **nothing
-/// reads the terminal in between**, so on a slow runner the input queue
-/// overflows in those gaps and the kernel discards: 235 of 400.
+/// worth remembering — each retry was a `fork`+`exec` of `dd`, and **nothing
+/// read the terminal in between**, so on a slow runner the input queue
+/// overflowed in those gaps and the kernel discarded: 235 of 400.
 ///
 /// Exactly-sized works because every reply here is `ESC[1;1R`, six bytes,
 /// identical — the cursor cannot move while the queries are being asked,
-/// since a DSR query prints nothing. So `dd` stops the instant it has them
-/// all, with no gap for the queue to overflow through, and `time 100` bounds
-/// it at ten seconds of silence if answers really are missing.
+/// since a DSR query prints nothing. So `--read-count` returns the instant
+/// it has them all, with no gap for the queue to overflow through, and the
+/// terminal's deadline bounds it if answers really are missing.
 fn answered(n: usize) -> termlens::Result<usize> {
-    let script = format!(
-        "stty -icanon -echo min 0 time 100; i=0; \
-         while [ $i -lt {n} ]; do printf '\\033[6n'; i=$((i+1)); done; \
-         printf ASKED; \
-         got=$(dd bs=1 count=$(({n} * 6)) 2>/dev/null | tr -cd 'R' | wc -c | tr -d ' '); \
-         printf ' GOT[%s] DONE' \"$got\"; read guard"
-    );
-    let mut t = Terminal::builder()
-        .size(80, 6)
-        .timeout(Duration::from_secs(30))
-        .args(["-c", &script])
-        .spawn("/bin/sh")?;
+    let queries = r"\e[6n".repeat(n);
+    let expected = (n * 6).to_string();
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .size(80, 6)
+            .timeout(Duration::from_secs(30)),
+        &[
+            "--raw-mode",
+            "--raw",
+            &queries,
+            "ASKED GOT[",
+            "--read-count",
+            &expected,
+            "R",
+            "] DONE",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("DONE"))?;
     let text = t.screen().text();
     let count = text
@@ -90,24 +95,30 @@ fn a_batch_of_probes_is_answered_in_full() -> termlens::Result<()> {
 /// startup batch lands in a single read. On a slow one the application's
 /// writes dribble out, the same 400 queries arrive in hundreds of reads, and
 /// 64 slots ran out again — 235 of 400 on a loaded macOS runner, at the same
-/// number twice. A fork per query reproduces that arrival shape on purpose.
+/// number twice. One `--raw` step per query reproduces that arrival shape on
+/// purpose: every step is its own `write(2)`.
 #[test]
 fn fine_grained_arrival_is_answered_in_full() -> termlens::Result<()> {
     for n in [100usize, 400] {
-        // `$(true)` forks per iteration, so each query is written separately
-        // and the reader sees it in its own read.
-        let script = format!(
-            "stty -icanon -echo min 0 time 100; i=0; \
-             while [ $i -lt {n} ]; do x=$(true); printf '\\033[6n'; i=$((i+1)); done; \
-             printf ASKED; \
-             got=$(dd bs=1 count=$(({n} * 6)) 2>/dev/null | tr -cd 'R' | wc -c | tr -d ' '); \
-             printf ' GOT[%s] DONE' \"$got\"; read guard"
-        );
-        let mut t = Terminal::builder()
-            .size(80, 6)
-            .timeout(Duration::from_secs(40))
-            .args(["-c", &script])
-            .spawn("/bin/sh")?;
+        let expected = (n * 6).to_string();
+        let mut steps: Vec<&str> = vec!["--raw-mode"];
+        for _ in 0..n {
+            steps.extend(["--raw", r"\e[6n"]);
+        }
+        steps.extend([
+            "ASKED GOT[",
+            "--read-count",
+            &expected,
+            "R",
+            "] DONE",
+            "--wait",
+        ]);
+        let mut t = common::spawn_emit(
+            Terminal::builder()
+                .size(80, 6)
+                .timeout(Duration::from_secs(40)),
+            &steps,
+        )?;
         t.wait_until(|s| s.contains("DONE"))?;
         let text = t.screen().text();
         let got: usize = text
