@@ -5,7 +5,7 @@ description: Write, fix or review headless terminal tests for a Rust CLI or TUI 
 
 # Testing terminal programs with termlens
 
-Written against **termlens 0.10.0**. Every `rust` block below is a complete
+Written against **termlens 0.10.1**. Every `rust` block below is a complete
 integration test that is compiled against the crate in CI, so the API it
 shows is the API that exists. The recipes spawn a binary called `myapp`
 that draws a list with a `> ` highlight, a status line ending in
