@@ -26,6 +26,12 @@ insta = ["dep:insta"]
 # whether an image went out should not pay for it. Every other fact about a
 # payload — placement, declared size, format, id — is free and always on.
 decode = ["dep:miniz_oxide"]
+# Pattern matching over the rows of a screen: `Screen::matches`,
+# `find_match`, `find_all_matches`, `mask_matches` and
+# `Terminal::wait_until_matches`. Off by default like `decode`, for the same
+# reason: a suite that matches literal text should not pay for a regex
+# engine.
+regex = ["dep:regex"]
 
 [dependencies]
 portable-pty.workspace = true
@@ -38,6 +44,7 @@ unicode-normalization.workspace = true
 unicode-width.workspace = true
 insta = { workspace = true, optional = true }
 miniz_oxide = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

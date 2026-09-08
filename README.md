@@ -49,6 +49,19 @@ fn quits_from_the_main_screen() -> termlens::Result<()> {
 When a wait times out, the error embeds the screen — your CI log shows
 exactly what the app was displaying, not "assertion failed: false".
 
+A clock in the title bar, a PID in the status line — anything volatile —
+would break that snapshot on every run, and a text filter over the rendering
+shifts every column after it. Mask the **grid** instead, which keeps the
+width, the styles and the cursor:
+
+```rust,ignore
+let s = t.snapshot_after(|s| s.contains("Ready"))?;
+insta::assert_snapshot!(s.mask_matching("12:34:56", '▒'));   // a literal…
+insta::assert_snapshot!(s.mask_rect(70.., ..1));              // …a rectangle…
+// …or a pattern, with the `regex` feature:
+insta::assert_snapshot!(s.mask_matches(&regex::Regex::new(r"\d\d:\d\d:\d\d")?, '▒'));
+```
+
 The builder chain above is what every test of a package's own binary
 starts from, so it has a name: `termlens::bin!("myapp")` spawns
 `CARGO_BIN_EXE_myapp` at 80x24 with a cleared environment and a
@@ -194,7 +207,7 @@ so the backend can be swapped; details in [docs/DESIGN.md](docs/DESIGN.md).
 | Tool                  | Real PTY | Screen grid | Snapshots | Notes                                   |
 | --------------------- | :------: | :---------: | :-------: | --------------------------------------- |
 | **termlens**          |    ✔     |      ✔      |     ✔     | this crate                              |
-| [rexpect] / [expectrl] |   ✔     |      ✗      |     ✗     | stream matching, no rendered screen     |
+| [rexpect] / [expectrl] |   ✔     |      ✗      |     ✗     | stream matching, no rendered screen; termlens's `regex` feature gives the same `wait_until_matches(pattern)` over a *row of the screen* |
 | [term-transcript]     |    ✗     |      ~      |   SVG     | transcripts for docs, not assertions    |
 | ratatui `TestBackend` |    ✗     |      ✔      |     ~     | in-process only: your real binary, PTY layer, and non-ratatui output stay untested |
 | [teatest] (Go)        |    ✔     |      ✔      |     ✔     | same idea, Bubble Tea / Go ecosystem    |

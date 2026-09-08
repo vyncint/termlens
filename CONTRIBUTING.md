@@ -31,6 +31,7 @@ cargo clippy --workspace --all-targets --no-default-features --features decode -
 cargo clippy --workspace --all-targets -- -D warnings    # default features: what `cargo add termlens --dev` gives you
 cargo test --workspace --no-default-features
 cargo test --workspace --no-default-features --features decode
+cargo test --workspace --no-default-features --features regex
 cargo test --workspace                                   # default features
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features

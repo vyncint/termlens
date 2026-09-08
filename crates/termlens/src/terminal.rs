@@ -3762,6 +3762,57 @@ impl fmt::Debug for Terminal {
     }
 }
 
+/// Waiting on a pattern (feature `regex`).
+#[cfg(feature = "regex")]
+#[cfg_attr(docsrs, doc(cfg(feature = "regex")))]
+impl Terminal {
+    /// Block until some row of the screen matches `re`, and return the
+    /// screen it matched on — the instant the pattern was seen, like
+    /// [`wait_frame`](Self::wait_frame) and
+    /// [`snapshot_after`](Self::snapshot_after), so the assertion lands on
+    /// that screen rather than on a later one that may have moved on.
+    /// Matching is [`Screen::matches`]: per row, NFC-folded, cell columns.
+    ///
+    /// This is the expect-style wait — "the prompt ends in a digit", "the
+    /// status line shows a version" — pointed at a row of the rendered
+    /// screen instead of at the byte stream. Everything
+    /// [`wait_until`](Self::wait_until)'s rustdoc says about race-free
+    /// waits applies unchanged; a pattern is a predicate.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Timeout`] / [`Error::Eof`], each carrying the screen.
+    pub fn wait_until_matches(&mut self, re: &regex::Regex) -> Result<Screen> {
+        self.wait_until_matches_for(re, self.default_timeout)
+    }
+
+    /// [`wait_until_matches`](Self::wait_until_matches) with a per-call
+    /// timeout.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Timeout`] / [`Error::Eof`], each carrying the screen.
+    pub fn wait_until_matches_for(
+        &mut self,
+        re: &regex::Regex,
+        timeout: Duration,
+    ) -> Result<Screen> {
+        let mut matched = None;
+        self.wait_until_deadline(
+            |screen| {
+                if screen.matches(re) {
+                    matched = Some(screen.clone());
+                    true
+                } else {
+                    false
+                }
+            },
+            timeout,
+        )?;
+        Ok(matched.expect("the wait returned Ok, so the predicate held on a screen"))
+    }
+}
+
 impl Drop for Terminal {
     /// Kill and reap the child. No zombies, even when a test panics before
     /// `wait_exit`. The reader thread ends on its own at EOF and is never
