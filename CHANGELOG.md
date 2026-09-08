@@ -11,6 +11,16 @@ listed under a **Changed** or **Removed** heading.
 
 ### Added
 
+- **`Terminal::record()`.** Every complete frame from that moment on,
+  timestamped, until `stop()`: `Recording::frames()` for asserting on the
+  sequence of repaints an animation went through, and `write_asciicast()`
+  for a file `asciinema` plays and `agg` turns into a GIF — each frame a full
+  repaint through `to_ansi`. Bounded by `TerminalBuilder::record_budget`
+  (cells; default about a thousand 80x24 frames), oldest frames dropped and
+  the drop reported; refuses, with `wait_frame`'s diagnosis, an application
+  that never emits synchronized updates, because a sampled recording is the
+  torn-frame problem in a new hat. (#254)
+
 - **`Screen::diff`.** Two screens that differed printed as two whole grids;
   `a.diff(&b)` renders only the rows that changed, side by side over a
   marker line under the changed columns, the size and cursor deltas, a count
@@ -100,6 +110,17 @@ listed under a **Changed** or **Removed** heading.
   crate in CI, and the README shows the one-line install for Claude Code.
 
 ### Changed
+
+- **`assert_screen_snapshot!` earns its name.** It was `insta::assert_snapshot!`
+  under another name. Given a `Terminal` it now settles the picture
+  (`wait_stable(100ms)`, or `snapshot_after(pred)` with `after = pred`) and
+  snapshots **with styles** by default; `styles = false` is text-only, the
+  inline `@""` form still works, and a `Screen` argument still records the
+  screen as it is. Built on `snapshot_after`/`wait_stable`, so it adds no
+  waiting logic of its own; its rustdoc is now the home of the race rules.
+  The README's first example uses it and drops the rule-2 paragraph it no
+  longer needs. The macro uses `?`, so the test returns `Result` — which
+  every test should. (#253)
 
 - **`Screen::row_text` rejects an out-of-bounds row instead of returning an
   ambiguous empty string.** Callers with a potentially invalid index should

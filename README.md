@@ -34,11 +34,9 @@ fn quits_from_the_main_screen() -> termlens::Result<()> {
         .timeout(Duration::from_secs(5))   // every wait_* has this deadline
         .spawn(env!("CARGO_BIN_EXE_myapp"))?;
 
-    // Wait on the LAST thing the app paints before snapshotting the whole
-    // screen; an early marker races the rest of the frame (DESIGN.md §2, rule 2).
-    t.wait_until(|screen| screen.contains("Ready") && screen.contains("╯"))?;
-    insta::assert_snapshot!(t.screen());   // snapshot the rendered grid
-    // …or t.screen().with_styles() to catch style-only regressions too
+    // Wait for the app's ready marker, let the picture settle, then snapshot
+    // it with its styles — the three decisions every TUI snapshot needs.
+    termlens::assert_screen_snapshot!(t, after = |s| s.contains("Ready"));
 
     t.send(Key::Char('q'))?;
     assert!(t.wait_exit()?.success());
