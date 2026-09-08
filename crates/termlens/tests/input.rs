@@ -1,5 +1,10 @@
 //! Typed input beyond plain keys: mouse (mode-aware), modifier chords,
 //! bracketed paste, and cursor-key modes.
+//!
+//! The programs that read what termlens typed off the wire stay on
+//! `/bin/sh` on purpose (#249): they put the terminal in raw mode with
+//! `stty -icanon -echo` first, and the std-only `emit` fixture cannot set a
+//! terminal mode. Everything that only prints goes through the fixture.
 
 use std::time::{Duration, Instant};
 
@@ -332,10 +337,10 @@ fn press_release_tracking_still_gets_no_motion_at_all() -> termlens::Result<()> 
 /// the same standard `click` applies to "no tracking at all".
 #[test]
 fn drag_is_refused_when_the_mode_cannot_express_it() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args(["-c", r"printf '\033[?9h'; printf READY; read guard"])
-        .spawn("/bin/sh")?;
+    let mut t = util::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &["--csi", "?9h", "READY", "--wait"],
+    )?;
     t.wait_until(|s| s.contains("READY"))?;
 
     let err = t
@@ -517,10 +522,10 @@ fn focus_events_are_refused_without_mode_1004() -> termlens::Result<()> {
 /// failure that could only reach a test by aborting it.
 #[test]
 fn typed_input_to_a_departed_child_is_a_typed_error() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args(["-c", "printf bye"])
-        .spawn("/bin/sh")?;
+    let mut t = util::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &["bye"],
+    )?;
     assert!(t.wait_exit()?.success());
 
     let err = t.send(Key::Enter).unwrap_err();
@@ -541,10 +546,10 @@ fn typed_input_to_a_departed_child_is_a_typed_error() -> termlens::Result<()> {
 /// technically true and never the reason.
 #[test]
 fn a_mouse_click_at_a_departed_child_blames_the_child() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args(["-c", "printf bye"])
-        .spawn("/bin/sh")?;
+    let mut t = util::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &["bye"],
+    )?;
     assert!(t.wait_exit()?.success());
 
     for err in [
@@ -570,10 +575,10 @@ fn a_mouse_click_at_a_departed_child_blames_the_child() -> termlens::Result<()> 
 /// other.
 #[test]
 fn a_departed_child_is_refused_identically_on_every_platform() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args(["-c", "printf bye"])
-        .spawn("/bin/sh")?;
+    let mut t = util::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &["bye"],
+    )?;
     assert!(t.wait_exit()?.success());
     // Not "the write failed" — the terminal is closed, so there is nothing
     // to write to, and that verdict is reached before any syscall.
@@ -590,16 +595,13 @@ fn a_departed_child_is_refused_identically_on_every_platform() -> termlens::Resu
 /// exactly as they would on a real terminal, and the write succeeded.
 #[test]
 fn typed_input_to_a_live_child_that_has_not_read_yet_succeeds() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            "printf READY; sleep 0.4; read line; printf ' got:%s' \"$line\"",
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = util::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &["READY", "--sleep", "400ms", " got:", "--echo-line"],
+    )?;
     t.wait_until(|s| s.contains("READY"))?;
 
-    // Sent while the child is sleeping, well before its `read`.
+    // Sent while the child is sleeping, well before its read.
     t.send_str("pending\n")?;
     t.wait_until(|s| s.contains("got:pending"))?;
     assert!(t.wait_exit()?.success());

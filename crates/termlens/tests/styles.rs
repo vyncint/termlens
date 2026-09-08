@@ -4,20 +4,20 @@ use std::time::Duration;
 
 use termlens::{Key, Terminal};
 
-fn sh(script: &str) -> termlens::Result<Terminal> {
-    Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args(["-c", script])
-        .spawn("/bin/sh")
+mod common;
+
+/// The `emit` fixture; steps are documented in `fixtures/emit/src/main.rs`.
+fn emit(steps: &[&str]) -> termlens::Result<Terminal> {
+    common::spawn_emit(Terminal::builder().timeout(Duration::from_secs(10)), steps)
 }
 
-/// Print a two-item list with `reverse` on the item given by $1.
-fn list_with_highlight(row: u16) -> String {
-    let (one, two) = match row {
-        0 => (r"\033[7mitem one\033[0m", "item two"),
-        _ => ("item one", r"\033[7mitem two\033[0m"),
+/// A two-item list with `reverse` on the item given by `row`.
+fn list_with_highlight(row: u16) -> [&'static str; 3] {
+    let list = match row {
+        0 => r"\e[7mitem one\e[0m\nitem two\n",
+        _ => r"item one\n\e[7mitem two\e[0m\n",
     };
-    format!(r"printf '{one}\n{two}\n'; read guard")
+    ["--raw", list, "--wait"]
 }
 
 #[test]
@@ -31,13 +31,13 @@ fn moving_a_highlight_changes_the_styled_rendering_only() -> termlens::Result<()
     // 17 of 100, with byte-identical grids and only the cursor differing.
     let settled = |s: &termlens::Screen| s.contains("item two") && s.cursor() == (2, 0, true);
 
-    let mut first = sh(&list_with_highlight(0))?;
+    let mut first = emit(&list_with_highlight(0))?;
     first.wait_until(settled)?;
     let a = first.screen();
     first.send(Key::Enter)?;
     first.wait_exit()?;
 
-    let mut second = sh(&list_with_highlight(1))?;
+    let mut second = emit(&list_with_highlight(1))?;
     second.wait_until(settled)?;
     let b = second.screen();
     second.send(Key::Enter)?;
@@ -56,10 +56,13 @@ fn moving_a_highlight_changes_the_styled_rendering_only() -> termlens::Result<()
 
 #[test]
 fn styled_screen_snapshot() -> termlens::Result<()> {
-    let mut t = sh(concat!(
-        r"printf '\033[1;31mERROR\033[0m plain \033[4;34munderlined\033[0m\n'; ",
-        r"printf 'second row \033[7mselected\033[0m\n'; read guard"
-    ))?;
+    let mut t = emit(&[
+        "--raw",
+        r"\e[1;31mERROR\e[0m plain \e[4;34munderlined\e[0m\n",
+        "--raw",
+        r"second row \e[7mselected\e[0m\n",
+        "--wait",
+    ])?;
     // Same trailing-newline race as above, and a snapshot embeds the cursor:
     // caught by the stress gate at iteration 46 of 100 as `cursor: 1,19`
     // against the recorded `cursor: 2,0`.
@@ -79,7 +82,7 @@ fn styled_screen_snapshot() -> termlens::Result<()> {
 fn a_highlight_over_a_wide_character_is_one_span() -> termlens::Result<()> {
     // A wide character's continuation column used to snapshot unstyled, so
     // a bar over CJK or emoji rendered as two spans with a hole (#218).
-    let mut t = sh(r"printf '\033[48;2;30;30;46mab汉cd\033[0m'; read guard")?;
+    let mut t = emit(&["--raw", r"\e[48;2;30;30;46mab汉cd\e[0m", "--wait"])?;
     t.wait_until(|s| s.contains("cd"))?;
     let s = t.screen();
     let bar = termlens::Color::Rgb(30, 30, 46);
@@ -104,13 +107,13 @@ fn a_masked_field_is_distinguishable_from_clear_text() -> termlens::Result<()> {
     // differing at all — passing for the wrong reason.
     let settled = |s: &termlens::Screen| s.contains("pw: hunter2|") && s.cursor() == (0, 12, true);
 
-    let mut masked = sh(r"printf 'pw: \033[8mhunter2\033[28m|'; read guard")?;
+    let mut masked = emit(&["--raw", r"pw: \e[8mhunter2\e[28m|", "--wait"])?;
     masked.wait_until(settled)?;
     let a = masked.screen();
     masked.send(Key::Enter)?;
     masked.wait_exit()?;
 
-    let mut clear = sh(r"printf 'pw: hunter2|'; read guard")?;
+    let mut clear = emit(&["pw: hunter2|", "--wait"])?;
     clear.wait_until(settled)?;
     let b = clear.screen();
     clear.send(Key::Enter)?;
@@ -142,10 +145,11 @@ fn a_masked_field_is_distinguishable_from_clear_text() -> termlens::Result<()> {
 
 #[test]
 fn strikethrough_and_blink_appear_in_the_styled_rendering() -> termlens::Result<()> {
-    let mut t = sh(concat!(
-        r"printf 'done \033[9mship it\033[29m ",
-        r"\033[5;31moverdue\033[0m plain'; read guard"
-    ))?;
+    let mut t = emit(&[
+        "--raw",
+        r"done \e[9mship it\e[29m \e[5;31moverdue\e[0m plain",
+        "--wait",
+    ])?;
     t.wait_until(|s| s.contains("plain"))?;
     let s = t.screen();
     let styled = s.with_styles().to_string();
@@ -169,10 +173,11 @@ fn strikethrough_and_blink_appear_in_the_styled_rendering() -> termlens::Result<
 
 #[test]
 fn colon_form_rgb_colours_match_semicolon_form() -> termlens::Result<()> {
-    let mut t = sh(concat!(
-        r"printf '\033[38;2;10;20;30mA\033[0m\033[38:2::10:20:30mB\033[0m'; ",
-        "read guard"
-    ))?;
+    let mut t = emit(&[
+        "--raw",
+        r"\e[38;2;10;20;30mA\e[0m\e[38:2::10:20:30mB\e[0m",
+        "--wait",
+    ])?;
     t.wait_until(|s| s.contains("AB"))?;
     let s = t.screen();
 
@@ -194,10 +199,7 @@ fn colon_form_rgb_colours_match_semicolon_form() -> termlens::Result<()> {
 
 #[test]
 fn dim_and_italic_appear_without_shadow_collisions() -> termlens::Result<()> {
-    let mut t = sh(concat!(
-        r"printf '\033[2mfaint\033[0m ",
-        r"\033[3mslanted\033[0m\n'; read guard"
-    ))?;
+    let mut t = emit(&["--raw", r"\e[2mfaint\e[0m \e[3mslanted\e[0m\n", "--wait"])?;
     t.wait_until(|s| s.contains("slanted") && s.cursor() == (1, 0, true))?;
     let s = t.screen();
 

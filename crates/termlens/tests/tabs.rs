@@ -10,12 +10,17 @@ use std::time::Duration;
 
 use termlens::{Key, Terminal};
 
-fn sh(script: &str) -> termlens::Result<Terminal> {
-    Terminal::builder()
-        .size(24, 4)
-        .timeout(Duration::from_secs(10))
-        .args(["-c", script])
-        .spawn("/bin/sh")
+mod common;
+
+/// The `emit` fixture on a 24-column terminal, the width the issue's
+/// reproductions use. Steps are documented in `fixtures/emit/src/main.rs`.
+fn emit(steps: &[&str]) -> termlens::Result<Terminal> {
+    common::spawn_emit(
+        Terminal::builder()
+            .size(24, 4)
+            .timeout(Duration::from_secs(10)),
+        steps,
+    )
 }
 
 /// Where a needle sits, which is the only thing any of these assert.
@@ -32,7 +37,9 @@ fn col_of(screen: &termlens::Screen, needle: &str) -> Option<u16> {
 /// have disagreed even with `CHT` working.
 #[test]
 fn a_tab_lands_on_a_stop_set_by_hts() -> termlens::Result<()> {
-    let mut t = sh(r"printf '\033[4G\033H\033[1Ga\011b'; printf ' DONE'; read _")?;
+    let mut t = emit(&[
+        "--csi", "4G", "--esc", "H", "--csi", "1G", "a\tb", " DONE", "--wait",
+    ])?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
     assert_eq!(col_of(&s, "a"), Some(0), "{s}");
@@ -46,7 +53,9 @@ fn a_tab_lands_on_a_stop_set_by_hts() -> termlens::Result<()> {
 /// rather than replacing them.
 #[test]
 fn the_default_stops_survive_a_custom_one() -> termlens::Result<()> {
-    let mut t = sh(r"printf '\033[4G\033H\033[1Ga\011b\011c'; printf ' DONE'; read _")?;
+    let mut t = emit(&[
+        "--csi", "4G", "--esc", "H", "--csi", "1G", "a\tb\tc", " DONE", "--wait",
+    ])?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
     assert_eq!(col_of(&s, "b"), Some(3), "{s}");
@@ -62,7 +71,9 @@ fn the_default_stops_survive_a_custom_one() -> termlens::Result<()> {
 fn tbc_clears_the_stop_under_the_cursor() -> termlens::Result<()> {
     // Standing on the default stop at column 9 (one-based), clear it: the
     // tab from column 1 runs past it to the next, at column 17.
-    let mut t = sh(r"printf '\033[9G\033[g\033[1Ga\011b'; printf ' DONE'; read _")?;
+    let mut t = emit(&[
+        "--csi", "9G", "--csi", "g", "--csi", "1G", "a\tb", " DONE", "--wait",
+    ])?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
     assert_eq!(col_of(&s, "b"), Some(16), "{s}");
@@ -79,7 +90,7 @@ fn csi_3_g_clears_every_stop() -> termlens::Result<()> {
     // `DONE` goes on the next row on purpose: the last column is where the
     // tabs end up, so anything printed after them on row 0 would overwrite
     // the very cell under test.
-    let mut t = sh(r"printf '\033[3ga\011\011b\r\nDONE'; read _")?;
+    let mut t = emit(&["--csi", "3g", "a\t\tb\r\nDONE", "--wait"])?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
     assert_eq!(col_of(&s, "a"), Some(0), "{s}");
@@ -96,7 +107,7 @@ fn csi_3_g_clears_every_stop() -> termlens::Result<()> {
 /// `CHT` moves forward by whole stops, with a count.
 #[test]
 fn cht_moves_forward_by_whole_stops() -> termlens::Result<()> {
-    let mut t = sh(r"printf '\033[2Ia'; printf ' DONE'; read _")?;
+    let mut t = emit(&["--csi", "2I", "a", " DONE", "--wait"])?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
     assert_eq!(col_of(&s, "a"), Some(16), "two stops forward:\n{s}");
@@ -110,7 +121,7 @@ fn cht_moves_forward_by_whole_stops() -> termlens::Result<()> {
 #[test]
 fn cbt_moves_back_by_whole_stops() -> termlens::Result<()> {
     // From a stop, back-tab reaches the one before it.
-    let mut t = sh(r"printf '\011\011\033[1Zy'; printf ' DONE'; read _")?;
+    let mut t = emit(&["\t\t", "--csi", "1Z", "y", " DONE", "--wait"])?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
     assert_eq!(col_of(&s, "y"), Some(8), "{s}");
@@ -129,7 +140,7 @@ fn cbt_moves_back_by_whole_stops() -> termlens::Result<()> {
 /// would do without the `X` in the way — the case above.
 #[test]
 fn a_back_tab_returns_to_the_stop_the_cursor_is_just_past() -> termlens::Result<()> {
-    let mut t = sh(r"printf '\011\011X\033[1Zy'; printf ' DONE'; read _")?;
+    let mut t = emit(&["\t\tX", "--csi", "1Z", "y", " DONE", "--wait"])?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
     assert_eq!(col_of(&s, "y"), Some(16), "{s}");
@@ -142,7 +153,9 @@ fn a_back_tab_returns_to_the_stop_the_cursor_is_just_past() -> termlens::Result<
 /// `RIS` puts the terminal back to power-on, and the stops with it.
 #[test]
 fn a_hard_reset_restores_the_default_stops() -> termlens::Result<()> {
-    let mut t = sh(r"printf '\033[3g\033[4G\033H\033c\011x'; printf ' DONE'; read _")?;
+    let mut t = emit(&[
+        "--csi", "3g", "--csi", "4G", "--esc", "H", "--esc", "c", "\tx", " DONE", "--wait",
+    ])?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
     assert_eq!(col_of(&s, "x"), Some(8), "every eighth column again:\n{s}");
@@ -155,7 +168,10 @@ fn a_hard_reset_restores_the_default_stops() -> termlens::Result<()> {
 /// startup and teardown, which leaves the screen alone.
 #[test]
 fn a_soft_reset_restores_the_default_stops() -> termlens::Result<()> {
-    let mut t = sh(r"printf '\033[3g\033[4G\033H\033[!p\033[1G\011x'; printf ' DONE'; read _")?;
+    let mut t = emit(&[
+        "--csi", "3g", "--csi", "4G", "--esc", "H", "--csi", "!p", "--csi", "1G", "\tx", " DONE",
+        "--wait",
+    ])?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
     assert_eq!(col_of(&s, "x"), Some(8), "every eighth column again:\n{s}");
@@ -174,23 +190,33 @@ fn a_soft_reset_restores_the_default_stops() -> termlens::Result<()> {
 #[test]
 fn a_resize_extends_the_stops_and_keeps_the_ones_it_had() -> termlens::Result<()> {
     // The stop at column 4 is set before the resize; `READY` parks the
-    // child so the widen lands between the two halves of the script.
+    // child so the widen lands between the two halves.
     //
-    // One `read` and no trailing wait: a resize raises `SIGWINCH` in the
-    // child, which can cut a pending `read` short, so a script that paused
+    // One `--wait` and no trailing one: a resize raises `SIGWINCH` in the
+    // child, which can cut a pending read short, so a program that paused
     // twice would be racing the signal for which pause our one keypress
     // lands in. With a single pause the second half is printed after the
     // widen either way.
     //
     // Which *row* it is printed on is the other side of that same race, so
-    // it is deliberately not asserted: when the `read` consumes our Enter
-    // the terminal echoes the newline and the second half starts a row
-    // lower than when `SIGWINCH` has already ended it. The column is what
-    // the resize rule is about, and it is the same either way.
-    let mut t = sh(concat!(
-        r"printf '\033[4G\033H\033[1GREADY\r\n'; read _; ",
-        r"printf '\011a\033[25G\011b\r\nDONE'"
-    ))?;
+    // it is deliberately not asserted: when the wait consumes our Enter the
+    // terminal echoes the newline and the second half starts a row lower
+    // than when `SIGWINCH` has already ended it. The column is what the
+    // resize rule is about, and it is the same either way.
+    let mut t = emit(&[
+        "--csi",
+        "4G",
+        "--esc",
+        "H",
+        "--csi",
+        "1G",
+        "READY\r\n",
+        "--wait",
+        "\ta",
+        "--csi",
+        "25G",
+        "\tb\r\nDONE",
+    ])?;
     t.wait_until(|s| s.contains("READY"))?;
     t.resize(40, 4)?;
     t.send(Key::Enter)?;
@@ -217,13 +243,25 @@ fn a_resize_extends_the_stops_and_keeps_the_ones_it_had() -> termlens::Result<()
 /// column and nothing about the escape handling would be at fault.
 #[test]
 fn a_table_laid_out_with_its_own_stops_lines_up() -> termlens::Result<()> {
-    let mut t = sh(concat!(
+    let mut t = emit(&[
         // Stops at columns 5 and 13, one-based, and nothing else.
-        r"printf '\033[3g\033[5G\033H\033[13G\033H\033[1G'; ",
-        r"printf 'id\011name\011role\r\n'; ",
-        r"printf '7\011ada\011dev\r\n'; ",
-        "printf DONE; read _"
-    ))?;
+        "--csi",
+        "3g",
+        "--csi",
+        "5G",
+        "--esc",
+        "H",
+        "--csi",
+        "13G",
+        "--esc",
+        "H",
+        "--csi",
+        "1G",
+        "id\tname\trole\r\n",
+        "7\tada\tdev\r\n",
+        "DONE",
+        "--wait",
+    ])?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
     assert_eq!(s.row_text(0).trim_end(), "id  name    role", "{s}");

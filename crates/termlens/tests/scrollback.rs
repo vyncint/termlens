@@ -6,21 +6,19 @@ use std::time::Duration;
 
 use termlens::{Error, Key, Terminal};
 
-/// `sh` printing `count` numbered lines on a `rows`-row screen, then
-/// parking so the terminal stays alive.
+mod common;
+
+/// The `emit` fixture printing `count` numbered lines on a `rows`-row
+/// screen, then parking so the terminal stays alive.
 fn numbered(rows: u16, count: usize, scrollback: usize) -> termlens::Result<Terminal> {
-    Terminal::builder()
-        .size(40, rows)
-        .scrollback(scrollback)
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            &format!(
-                "i=1; while [ $i -le {count} ]; do printf 'line-%d\\n' $i; \
-                 i=$((i+1)); done; printf 'READY'; read guard"
-            ),
-        ])
-        .spawn("/bin/sh")
+    let lines: String = (1..=count).map(|i| format!("line-{i}\n")).collect();
+    common::spawn_emit(
+        Terminal::builder()
+            .size(40, rows)
+            .scrollback(scrollback)
+            .timeout(Duration::from_secs(10)),
+        &[&lines, "READY", "--wait"],
+    )
 }
 
 #[test]
@@ -118,15 +116,13 @@ fn retention_can_be_switched_off() -> termlens::Result<()> {
 /// usable in a wait predicate.
 #[test]
 fn history_is_observable_from_a_predicate() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .size(40, 3)
-        .scrollback(100)
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            r"printf 'committed-block\n'; printf 'a\nb\nc\nd\n'; read guard",
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .size(40, 3)
+            .scrollback(100)
+            .timeout(Duration::from_secs(10)),
+        &["committed-block\n", "a\nb\nc\nd\n", "--wait"],
+    )?;
 
     // The block is asserted on *after* it has left the screen, from inside
     // the wait itself.

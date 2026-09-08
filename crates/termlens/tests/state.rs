@@ -6,26 +6,31 @@ use std::time::Duration;
 
 use termlens::{CursorShape, Key, MouseMode, MouseModes, Screen, Terminal};
 
-/// One script walks the whole state surface: set everything, assert, then
+mod common;
+
+/// The `emit` fixture; steps are documented in `fixtures/emit/src/main.rs`.
+fn emit(steps: &[&str]) -> termlens::Result<Terminal> {
+    common::spawn_emit(Terminal::builder().timeout(Duration::from_secs(10)), steps)
+}
+
+/// One program walks the whole state surface: set everything, assert, then
 /// unwind everything and assert the way back.
 #[test]
 fn screen_reports_title_alternate_screen_and_input_modes() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"printf '\033]0;termlens state\007'; ",
-                r"printf '\033[?1049h\033[?2004h\033[?1h\033[?1002h'; ",
-                r"printf 'modes: on'; ",
-                r"read _; ",
-                r"printf '\033]2;phase two\033\\'; ",
-                r"printf '\033[?1002l\033[?1l\033[?2004l\033[?1049l'; ",
-                r"printf 'modes: off'; ",
-                r"read _",
-            ),
-        ])
-        .spawn("sh")?;
+    let mut t = emit(&[
+        "--raw",
+        r"\e]0;termlens state\x07",
+        "--raw",
+        r"\e[?1049h\e[?2004h\e[?1h\e[?1002h",
+        "modes: on",
+        "--wait",
+        "--raw",
+        r"\e]2;phase two\e\\",
+        "--raw",
+        r"\e[?1002l\e[?1l\e[?2004l\e[?1049l",
+        "modes: off",
+        "--wait",
+    ])?;
 
     // State assertions are ordinary predicates — waitable like any text.
     t.wait_until(|s| {
@@ -55,23 +60,16 @@ fn screen_reports_title_alternate_screen_and_input_modes() -> termlens::Result<(
 /// The tracking mode the app enabled is reported by name, not collapsed.
 /// `DECSCUSR` leaves the grid identical, so without an accessor a screen
 /// where the application asked for a bar and one where it never asked are
-/// the same `Screen`. The script walks all three states an editor moves
+/// the same `Screen`. The program walks all three states an editor moves
 /// through: never asked, switched, switched back.
 #[test]
 fn screen_reports_the_cursor_shape_the_application_asked_for() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"printf 'ready'; read _; ",
-                // DECSCUSR 5: a blinking bar, the insert-mode cursor.
-                r"printf '\033[5 q'; printf ' insert'; read _; ",
-                // DECSCUSR 2: a steady block, the way back.
-                r"printf '\033[2 q'; printf ' normal'; read _",
-            ),
-        ])
-        .spawn("sh")?;
+    let mut t = emit(&[
+        "ready", "--wait", // DECSCUSR 5: a blinking bar, the insert-mode cursor.
+        "--csi", "5 q", " insert", "--wait",
+        // DECSCUSR 2: a steady block, the way back.
+        "--csi", "2 q", " normal", "--wait",
+    ])?;
 
     // Never asked. Distinct from a block, which is what most terminals
     // happen to draw by default — the point is that the program did not say.
@@ -114,20 +112,19 @@ fn screen_reports_the_cursor_shape_the_application_asked_for() -> termlens::Resu
 /// emitted nothing.
 #[test]
 fn an_osc8_hyperlink_is_observable_and_a_missing_one_is_not() -> termlens::Result<()> {
-    fn run(script: &str) -> termlens::Result<Screen> {
-        let mut t = Terminal::builder()
-            .timeout(Duration::from_secs(10))
-            .args(["-c", script])
-            .spawn("sh")?;
+    fn run(steps: &[&str]) -> termlens::Result<Screen> {
+        let mut t = emit(steps)?;
         t.wait_until(|s| s.contains("see docs here"))?;
         let screen = t.screen();
         assert!(t.wait_exit()?.success());
         Ok(screen)
     }
 
-    let linked =
-        run(r"printf 'see \033]8;;https://example.invalid/a\033\\docs\033]8;;\033\\ here\n'")?;
-    let plain = run(r"printf 'see docs here\n'")?;
+    let linked = run(&[
+        "--raw",
+        r"see \e]8;;https://example.invalid/a\e\\docs\e]8;;\e\\ here\n",
+    ])?;
+    let plain = run(&["see docs here\n"])?;
 
     // The grids agree exactly — this was never a rendering bug, and the URL
     // must not leak into the cells.
@@ -160,18 +157,16 @@ fn an_osc8_hyperlink_is_observable_and_a_missing_one_is_not() -> termlens::Resul
 /// asserted in a comment.
 #[test]
 fn a_snapshot_keeps_its_own_view_of_the_links() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                // Open a span and leave it open across the pause.
-                r"printf '\033]8;;http://a/\033\\LABEL one\n'; read _; ",
-                // Close it, then open a second one.
-                r"printf '\033]8;;\033\\\033]8;;http://b/\033\\X two\n'; read _",
-            ),
-        ])
-        .spawn("sh")?;
+    let mut t = emit(&[
+        // Open a span and leave it open across the pause.
+        "--raw",
+        r"\e]8;;http://a/\e\\LABEL one\n",
+        "--wait",
+        // Close it, then open a second one.
+        "--raw",
+        r"\e]8;;\e\\\e]8;;http://b/\e\\X two\n",
+        "--wait",
+    ])?;
 
     t.wait_until(|s| s.contains("one"))?;
     let early = t.screen();
@@ -212,18 +207,16 @@ fn a_snapshot_keeps_its_own_view_of_the_links() -> termlens::Result<()> {
 /// a wrong replay — and the alternate screen is left alone, as specified.
 #[test]
 fn a_soft_reset_returns_the_modes_a_screen_can_observe() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"printf '\033[?1049h\033[?1h\033[?2004h\033[?1000h\033[?1006h\033[?1004h\033[?25l\033[5 q'; ",
-                r"printf 'set'; read _; ",
-                r"printf '\033[!p'; ",
-                r"printf ' reset'; read _",
-            ),
-        ])
-        .spawn("sh")?;
+    let mut t = emit(&[
+        "--raw",
+        r"\e[?1049h\e[?1h\e[?2004h\e[?1000h\e[?1006h\e[?1004h\e[?25l\e[5 q",
+        "set",
+        "--wait",
+        "--csi",
+        "!p",
+        " reset",
+        "--wait",
+    ])?;
 
     t.wait_until(|s| {
         s.contains("set")
@@ -258,17 +251,17 @@ fn a_soft_reset_returns_the_modes_a_screen_can_observe() -> termlens::Result<()>
 
 #[test]
 fn mouse_mode_reports_the_exact_tracking_mode() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"printf '\033[?9h9\n'; read _; ",
-                r"printf '\033[?9l\033[?1000h1000\n'; read _; ",
-                r"printf '\033[?1000l\033[?1003h1003\n'; read _",
-            ),
-        ])
-        .spawn("sh")?;
+    let mut t = emit(&[
+        "--raw",
+        r"\e[?9h9\n",
+        "--wait",
+        "--raw",
+        r"\e[?9l\e[?1000h1000\n",
+        "--wait",
+        "--raw",
+        r"\e[?1000l\e[?1003h1003\n",
+        "--wait",
+    ])?;
 
     t.wait_until(|s| s.contains("9") && s.mouse_mode() == MouseMode::Press)?;
     t.send(Key::Enter)?;
@@ -288,17 +281,20 @@ fn mouse_mode_reports_the_exact_tracking_mode() -> termlens::Result<()> {
 /// input path keeps the collapsed value; the set is reported beside it.
 #[test]
 fn mouse_modes_reports_the_set_the_application_asked_for() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args([
-            "-c",
-            concat!(
-                r"printf '\033[?1000h\033[?1002h\033[?1003h\033[?1006h'; printf 'all three\n'; read _; ",
-                r"printf '\033[?1003l'; printf 'minus 1003\n'; read _; ",
-                r"printf '\033[?1002l\033[?1000l'; printf 'none\n'; read _",
-            ),
-        ])
-        .spawn("sh")?;
+    let mut t = emit(&[
+        "--raw",
+        r"\e[?1000h\e[?1002h\e[?1003h\e[?1006h",
+        "all three\n",
+        "--wait",
+        "--csi",
+        "?1003l",
+        "minus 1003\n",
+        "--wait",
+        "--raw",
+        r"\e[?1002l\e[?1000l",
+        "none\n",
+        "--wait",
+    ])?;
 
     let set = |modes: &[MouseMode]| -> Vec<MouseMode> { modes.to_vec() };
     t.wait_until(|s| {
@@ -349,16 +345,15 @@ fn a_clipboard_write_is_observable_with_its_payload() -> termlens::Result<()> {
     // The taskboard case from the coverage study: `y` copies the selected
     // title and paints a toast. The toast proves the code path ran; the
     // payload is the behaviour under test.
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(5))
-        .args([
-            "-c",
-            concat!(
-                r"printf '\033]52;c;V2lyZSB1cCB0aGUgUFRZIHJlYWRlcg==\007'; ",
-                r"printf 'copied to clipboard'; read guard"
-            ),
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = common::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(5)),
+        &[
+            "--raw",
+            r"\e]52;c;V2lyZSB1cCB0aGUgUFRZIHJlYWRlcg==\x07",
+            "copied to clipboard",
+            "--wait",
+        ],
+    )?;
 
     // Assertable in a predicate, because it is snapshot state.
     t.wait_until(|s| {
@@ -383,13 +378,10 @@ fn a_clipboard_write_is_observable_with_its_payload() -> termlens::Result<()> {
 
 #[test]
 fn an_unreadable_clipboard_payload_is_reported_as_such() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(5))
-        .args([
-            "-c",
-            r"printf '\033]52;p;not~valid~base64\007'; printf 'done'; read guard",
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = common::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(5)),
+        &["--raw", r"\e]52;p;not~valid~base64\x07", "done", "--wait"],
+    )?;
 
     t.wait_until(|s| s.contains("done"))?;
     let s = t.screen();

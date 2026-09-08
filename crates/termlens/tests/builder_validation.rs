@@ -4,7 +4,16 @@
 
 use std::time::Duration;
 
-use termlens::{Error, Terminal};
+use termlens::{Error, Terminal, TerminalBuilder};
+
+mod common;
+
+/// The `emit` fixture from a builder the test has configured — most of
+/// these never get as far as spawning it. Steps are documented in
+/// `fixtures/emit/src/main.rs`.
+fn emit(builder: TerminalBuilder, steps: &[&str]) -> termlens::Result<Terminal> {
+    common::spawn_emit(builder, steps)
+}
 
 #[test]
 fn an_empty_program_name_is_a_short_typed_error() {
@@ -33,7 +42,7 @@ fn the_default_working_directory_is_the_test_process_s() -> termlens::Result<()>
     // Without `current_dir` the child used to start in $HOME — the PTY
     // layer's fallback — while `current_dir`'s rustdoc said it inherited the
     // test runner's (#215). Pinned here so the default cannot move quietly.
-    let mut t = Terminal::builder().spawn("/bin/pwd")?;
+    let mut t = emit(Terminal::builder(), &["--cwd"])?;
     assert!(t.wait_exit()?.success());
     // The path is read off the grid, and a path longer than the 80 columns
     // wraps onto the next row — a checkout under a long temporary directory
@@ -56,24 +65,23 @@ fn the_default_working_directory_is_the_test_process_s() -> termlens::Result<()>
 fn a_bare_program_name_under_env_clear_is_refused_with_the_remedies() {
     // env_clear drops PATH, and the PTY layer's only diagnostic for the bare
     // name that then cannot resolve was "Unable to resolve the PATH" (#222).
-    let err = Terminal::builder().env_clear().spawn("sh").unwrap_err();
+    // The fixture stands in for any program: bare, it is refused before
+    // anything tries to find it.
+    let bin = common::fixture_bin("emit");
+    let err = Terminal::builder().env_clear().spawn("emit").unwrap_err();
     assert!(matches!(err, Error::Spawn { .. }), "{err}");
     let msg = err.to_string();
-    for needed in ["`sh`", "env_clear", "PATH", "absolute path"] {
+    for needed in ["`emit`", "env_clear", "PATH", "absolute path"] {
         assert!(msg.contains(needed), "missing {needed:?} in: {msg}");
     }
     // Either remedy works: a PATH of the test's own…
     let with_path = Terminal::builder()
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .args(["-c", "true"])
-        .spawn("sh");
+        .env("PATH", bin.parent().expect("the fixture has a directory"))
+        .spawn("emit");
     assert!(with_path.is_ok(), "{:?}", with_path.err());
     // …or an absolute path, which never needed one.
-    let absolute = Terminal::builder()
-        .env_clear()
-        .args(["-c", "true"])
-        .spawn("/bin/sh");
+    let absolute = Terminal::builder().env_clear().spawn(&bin);
     assert!(absolute.is_ok(), "{:?}", absolute.err());
 }
 
@@ -82,12 +90,13 @@ fn a_missing_working_directory_fails_instead_of_running_elsewhere() {
     let missing = std::env::temp_dir().join("termlens-no-such-dir-xyz");
     assert!(!missing.is_dir(), "test precondition");
 
-    let err = Terminal::builder()
-        .timeout(Duration::from_secs(2))
-        .current_dir(&missing)
-        .args(["-c", "pwd"])
-        .spawn("/bin/sh")
-        .expect_err("the requested directory does not exist");
+    let err = emit(
+        Terminal::builder()
+            .timeout(Duration::from_secs(2))
+            .current_dir(&missing),
+        &["--cwd"],
+    )
+    .expect_err("the requested directory does not exist");
 
     assert!(matches!(err, Error::Spawn { .. }), "got: {err}");
     let message = err.to_string();
@@ -104,12 +113,13 @@ fn a_file_is_not_a_working_directory() {
     let file = std::env::temp_dir().join("termlens-cwd-probe-file");
     std::fs::write(&file, b"x").expect("write probe file");
 
-    let err = Terminal::builder()
-        .timeout(Duration::from_secs(2))
-        .current_dir(&file)
-        .args(["-c", "pwd"])
-        .spawn("/bin/sh")
-        .expect_err("a file is not a directory");
+    let err = emit(
+        Terminal::builder()
+            .timeout(Duration::from_secs(2))
+            .current_dir(&file),
+        &["--cwd"],
+    )
+    .expect_err("a file is not a directory");
     assert!(matches!(err, Error::Spawn { .. }), "got: {err}");
 
     let _ = std::fs::remove_file(&file);
@@ -123,10 +133,7 @@ fn a_file_is_not_a_working_directory() {
 #[test]
 fn a_single_row_or_column_is_refused_like_a_zero() {
     for (cols, rows) in [(1u16, 8u16), (80, 1), (1, 1), (2, 1), (1, 2)] {
-        let err = Terminal::builder()
-            .size(cols, rows)
-            .args(["-c", "true"])
-            .spawn("/bin/sh")
+        let err = emit(Terminal::builder().size(cols, rows), &[])
             .expect_err(&format!("{cols}x{rows} must be refused"));
         assert!(matches!(err, Error::Size(_)), "{cols}x{rows}: got {err}");
         assert!(
@@ -142,22 +149,24 @@ fn a_single_row_or_column_is_refused_like_a_zero() {
 #[test]
 fn the_narrowest_allowed_terminal_renders_both_trigger_shapes() -> termlens::Result<()> {
     // Trigger A was one column meeting a double-width character.
-    let mut wide = Terminal::builder()
-        .size(2, 8)
-        .timeout(Duration::from_secs(5))
-        .args(["-c", r"printf '\346\261\211'; read guard"])
-        .spawn("/bin/sh")?;
+    let mut wide = emit(
+        Terminal::builder()
+            .size(2, 8)
+            .timeout(Duration::from_secs(5)),
+        &["汉", "--wait"],
+    )?;
     wide.wait_until(|s| s.contains("汉"))?;
     assert_eq!(wide.screen().row_text(0).trim_end(), "汉");
     wide.send(termlens::Key::Enter)?;
     wide.wait_exit()?;
 
     // Trigger B was one row meeting a line that wraps.
-    let mut wrap = Terminal::builder()
-        .size(2, 2)
-        .timeout(Duration::from_secs(5))
-        .args(["-c", r"printf 'abcZ'; read guard"])
-        .spawn("/bin/sh")?;
+    let mut wrap = emit(
+        Terminal::builder()
+            .size(2, 2)
+            .timeout(Duration::from_secs(5)),
+        &["abcZ", "--wait"],
+    )?;
     wrap.wait_until(|s| s.contains("Z"))?;
     let screen = wrap.screen();
     assert_eq!(screen.row_text(0).trim_end(), "ab", "{screen}");
@@ -173,12 +182,13 @@ fn the_narrowest_allowed_terminal_renders_both_trigger_shapes() -> termlens::Res
 #[test]
 fn a_zero_dimension_is_rejected_before_it_reaches_the_emulator() {
     for (cols, rows) in [(0u16, 24u16), (80, 0), (0, 0)] {
-        let err = Terminal::builder()
-            .size(cols, rows)
-            .timeout(Duration::from_secs(2))
-            .args(["-c", "read x"])
-            .spawn("/bin/sh")
-            .expect_err("a terminal cannot have a zero dimension");
+        let err = emit(
+            Terminal::builder()
+                .size(cols, rows)
+                .timeout(Duration::from_secs(2)),
+            &["--wait"],
+        )
+        .expect_err("a terminal cannot have a zero dimension");
         assert!(matches!(err, Error::Size(_)), "{cols}x{rows}: got {err}");
         assert!(
             err.to_string().contains(&format!("{cols}x{rows}")),
@@ -189,11 +199,12 @@ fn a_zero_dimension_is_rejected_before_it_reaches_the_emulator() {
 
 #[test]
 fn resize_to_zero_is_refused_without_touching_the_pty_or_the_grid() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .size(80, 24)
-        .timeout(Duration::from_secs(5))
-        .args(["-c", "printf ready; read x"])
-        .spawn("/bin/sh")?;
+    let mut t = emit(
+        Terminal::builder()
+            .size(80, 24)
+            .timeout(Duration::from_secs(5)),
+        &["ready", "--wait"],
+    )?;
     t.wait_until(|s| s.contains("ready"))?;
 
     // Zero, and — the value the guard used to let through — one, on each
@@ -223,11 +234,12 @@ fn resize_to_zero_is_refused_without_touching_the_pty_or_the_grid() -> termlens:
 /// `send` uses — EOF, so nothing is left to receive the SIGWINCH.
 #[test]
 fn resize_after_the_child_exits_is_refused_like_send() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .size(20, 4)
-        .timeout(Duration::from_secs(10))
-        .args(["-c", "printf ready; read _"])
-        .spawn("/bin/sh")?;
+    let mut t = emit(
+        Terminal::builder()
+            .size(20, 4)
+            .timeout(Duration::from_secs(10)),
+        &["ready", "--wait"],
+    )?;
     t.wait_until(|s| s.contains("ready"))?;
     t.send(termlens::Key::Enter)?;
     assert!(t.wait_exit()?.success());
@@ -281,10 +293,7 @@ fn a_missing_program_still_reports_the_underlying_search_failure() {
 #[test]
 fn an_implausible_size_is_refused_with_the_limit_named() {
     for (cols, rows) in [(5000, 5000), (1001, 24), (80, 1001), (u16::MAX, u16::MAX)] {
-        let err = Terminal::builder()
-            .size(cols, rows)
-            .args(["-c", "true"])
-            .spawn("/bin/sh")
+        let err = emit(Terminal::builder().size(cols, rows), &[])
             .expect_err("a terminal this large is refused");
         assert!(matches!(err, Error::Size(_)), "{cols}x{rows}: got {err}");
         let msg = err.to_string();
@@ -303,11 +312,12 @@ fn an_implausible_size_is_refused_with_the_limit_named() {
 /// `resize` is where a computed dimension is most likely to go wrong.
 #[test]
 fn the_limit_is_inclusive_and_resize_honours_it() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .size(1000, 1000)
-        .timeout(Duration::from_secs(20))
-        .args(["-c", "printf READY; read guard"])
-        .spawn("/bin/sh")?;
+    let mut t = emit(
+        Terminal::builder()
+            .size(1000, 1000)
+            .timeout(Duration::from_secs(20)),
+        &["READY", "--wait"],
+    )?;
     t.wait_until(|s| s.contains("READY"))?;
     assert_eq!(t.screen().size(), (1000, 1000));
 

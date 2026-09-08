@@ -5,21 +5,31 @@ use std::time::{Duration, Instant};
 
 use termlens::{Error, Key, Terminal};
 
+mod common;
+
 /// The builder default is deliberately far too short for the app; only
-/// the per-call override can see each wait through.
-fn slow_app(script: &str) -> Terminal {
-    Terminal::builder()
-        .size(80, 24)
-        .env_clear()
-        .timeout(Duration::from_millis(150))
-        .args(["-c", script])
-        .spawn("/bin/sh")
-        .expect("spawn")
+/// the per-call override can see each wait through. Steps are documented
+/// in `fixtures/emit/src/main.rs`.
+fn slow_app(steps: &[&str]) -> Terminal {
+    common::spawn_emit(
+        Terminal::builder()
+            .size(80, 24)
+            .env_clear()
+            .timeout(Duration::from_millis(150)),
+        steps,
+    )
+    .expect("spawn")
 }
 
 #[test]
 fn wait_frame_for_overrides_the_builder_default() -> termlens::Result<()> {
-    let mut t = slow_app(r"sleep 1; printf '\033[?2026hlate frame\033[?2026l'; read guard");
+    let mut t = slow_app(&[
+        "--sleep",
+        "1s",
+        "--raw",
+        r"\e[?2026hlate frame\e[?2026l",
+        "--wait",
+    ]);
     t.wait_frame_for(|s| s.contains("late frame"), Duration::from_secs(30))?;
     t.send(Key::Enter)?;
     assert!(t.wait_exit_for(Duration::from_secs(30))?.success());
@@ -28,7 +38,7 @@ fn wait_frame_for_overrides_the_builder_default() -> termlens::Result<()> {
 
 #[test]
 fn wait_idle_for_overrides_the_builder_default() -> termlens::Result<()> {
-    let mut t = slow_app(r"printf busy; read guard");
+    let mut t = slow_app(&["busy", "--wait"]);
     // A 200ms quiet period cannot be observed under the 150ms builder
     // deadline at all — the wait would expire before the silence does.
     let start = Instant::now();
@@ -52,7 +62,7 @@ fn wait_idle_for_overrides_the_builder_default() -> termlens::Result<()> {
 
 #[test]
 fn wait_exit_for_overrides_the_builder_default() -> termlens::Result<()> {
-    let mut t = slow_app("sleep 1; exit 3");
+    let mut t = slow_app(&["--sleep", "1s", "--exit", "3"]);
     let status = t.wait_exit_for(Duration::from_secs(30))?;
     assert_eq!(status.code(), Some(3), "status: {status}");
     Ok(())
@@ -62,13 +72,14 @@ fn wait_exit_for_overrides_the_builder_default() -> termlens::Result<()> {
 /// reports the deadline that actually applied — not the builder's.
 #[test]
 fn per_call_timeouts_report_their_own_deadline() {
-    let mut t = Terminal::builder()
-        .size(80, 24)
-        .env_clear()
-        .timeout(Duration::from_secs(30))
-        .args(["-c", "read guard"])
-        .spawn("/bin/sh")
-        .expect("spawn");
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .size(80, 24)
+            .env_clear()
+            .timeout(Duration::from_secs(30)),
+        &["--wait"],
+    )
+    .expect("spawn");
 
     for (label, err) in [
         (
@@ -100,12 +111,13 @@ fn per_call_timeouts_report_their_own_deadline() {
 /// The overrides must not cost wall-clock when they are not needed.
 #[test]
 fn a_short_per_call_timeout_fails_fast() {
-    let mut t = Terminal::builder()
-        .env_clear()
-        .timeout(Duration::from_secs(60))
-        .args(["-c", "read guard"])
-        .spawn("/bin/sh")
-        .expect("spawn");
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .env_clear()
+            .timeout(Duration::from_secs(60)),
+        &["--wait"],
+    )
+    .expect("spawn");
     let start = Instant::now();
     let _ = t.wait_frame_for(|s| s.contains("never"), Duration::from_millis(100));
     assert!(

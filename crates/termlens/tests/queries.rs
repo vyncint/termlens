@@ -4,16 +4,31 @@
 //! Each shell script here genuinely BLOCKS on the terminal's reply
 //! (`head -c N` reads exactly the reply bytes), then prints a marker the
 //! test waits for — the marker appearing proves the app was unblocked.
+//!
+//! Those stay on `/bin/sh` on purpose (#249): reading a reply byte for byte
+//! needs the terminal in raw mode (`stty -icanon -echo`), which the
+//! std-only `emit` fixture cannot set. The programs that only *ask* and
+//! then block on a line — the ones whose point is that no answer comes —
+//! go through the fixture: `--wait` blocks on a line exactly as `head` did
+//! in canonical mode.
 
 use std::time::Duration;
 
 use termlens::{Error, Key, Terminal};
+
+mod common;
 
 fn sh(script: &str) -> termlens::Result<Terminal> {
     Terminal::builder()
         .timeout(Duration::from_secs(10))
         .args(["-c", script])
         .spawn("/bin/sh")
+}
+
+/// The `emit` fixture with the timeout the test names; steps are documented
+/// in `fixtures/emit/src/main.rs`.
+fn emit(timeout: Duration, steps: &[&str]) -> termlens::Result<Terminal> {
+    common::spawn_emit(Terminal::builder().timeout(timeout), steps)
 }
 
 #[test]
@@ -107,11 +122,11 @@ fn text_area_size_reports_the_real_grid() -> termlens::Result<()> {
 fn unanswerable_queries_turn_timeouts_into_diagnoses() {
     // CSI 14 t (pixel size) is recognized as a question termlens cannot
     // answer; the app blocks, and the timeout error names the query.
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_millis(500))
-        .args(["-c", r"printf '\033[14t'; head -c 4 >/dev/null; echo never"])
-        .spawn("/bin/sh")
-        .unwrap();
+    let mut t = emit(
+        Duration::from_millis(500),
+        &["--csi", "14t", "--wait", "never"],
+    )
+    .unwrap();
     let err = t.wait_until(|s| s.contains("never")).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("^[[14t"), "query not named in: {msg}");
@@ -121,12 +136,13 @@ fn unanswerable_queries_turn_timeouts_into_diagnoses() {
 
 #[test]
 fn the_responder_can_be_disabled_and_says_what_went_unanswered() {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_millis(500))
-        .answer_queries(false)
-        .args(["-c", r"printf '\033[6n'; head -c 6 >/dev/null; echo never"])
-        .spawn("/bin/sh")
-        .unwrap();
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .timeout(Duration::from_millis(500))
+            .answer_queries(false),
+        &["--csi", "6n", "--wait", "never"],
+    )
+    .unwrap();
     let err = t.wait_until(|s| s.contains("never")).unwrap_err();
     assert!(matches!(err, Error::Timeout { .. }));
     let msg = err.to_string();
@@ -139,20 +155,17 @@ fn the_responder_can_be_disabled_and_says_what_went_unanswered() {
 /// not blame it.
 #[test]
 fn a_query_the_app_moved_past_is_context_not_a_cause() {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_millis(400))
+    let mut t = emit(
+        Duration::from_millis(400),
         // Probes kitty (deliberately unanswered), does NOT block on a
         // reply, prints, then sits in a normal read. The pause forces the
         // output into a *later read* than the probe — output batched into
         // the same write is deliberately not treated as progress, since
         // the emulator stops at the query byte and consumes the rest of
         // that same chunk regardless of what the application is doing.
-        .args([
-            "-c",
-            r"printf '\033[?u'; sleep 0.2; printf 'ready\n'; read guard",
-        ])
-        .spawn("/bin/sh")
-        .unwrap();
+        &["--csi", "?u", "--sleep", "200ms", "ready\n", "--wait"],
+    )
+    .unwrap();
     t.wait_until(|s| s.contains("ready")).unwrap();
 
     let err = t.wait_until(|s| s.contains("never-appears")).unwrap_err();
@@ -174,14 +187,11 @@ fn a_query_the_app_moved_past_is_context_not_a_cause() {
 /// Every unanswered query is named, not just the most recent one.
 #[test]
 fn all_unanswered_queries_are_named() {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_millis(400))
-        .args([
-            "-c",
-            r"printf '\033[?u\033[14t'; head -c 4 >/dev/null; echo never",
-        ])
-        .spawn("/bin/sh")
-        .unwrap();
+    let mut t = emit(
+        Duration::from_millis(400),
+        &["--raw", r"\e[?u\e[14t", "--wait", "never"],
+    )
+    .unwrap();
     let err = t.wait_until(|s| s.contains("never")).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("^[[?u"), "first query missing from: {msg}");
@@ -194,11 +204,11 @@ fn all_unanswered_queries_are_named() {
 /// then blames the app for not emitting frames.
 #[test]
 fn wait_frame_timeouts_carry_the_query_note() {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_millis(400))
-        .args(["-c", r"printf '\033[14t'; head -c 4 >/dev/null; echo never"])
-        .spawn("/bin/sh")
-        .unwrap();
+    let mut t = emit(
+        Duration::from_millis(400),
+        &["--csi", "14t", "--wait", "never"],
+    )
+    .unwrap();
     let err = t.wait_frame(|s| s.contains("never")).unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -257,23 +267,15 @@ fn mode_reports_are_truthful() -> termlens::Result<()> {
 /// timeout instead of hanging silently.
 #[test]
 fn decrqss_and_palette_queries_are_named() {
-    for (label, script, shape) in [
-        (
-            "DECRQSS",
-            r#"printf '\033P$qm\033\\'; head -c 4 >/dev/null; echo never"#,
-            "^[P$qm",
-        ),
-        (
-            "OSC 4",
-            r#"printf '\033]4;1;?\007'; head -c 4 >/dev/null; echo never"#,
-            "^[]4;1;?",
-        ),
+    for (label, query, shape) in [
+        ("DECRQSS", r"\eP$qm\e\\", "^[P$qm"),
+        ("OSC 4", r"\e]4;1;?\a", "^[]4;1;?"),
     ] {
-        let mut t = Terminal::builder()
-            .timeout(Duration::from_millis(400))
-            .args(["-c", script])
-            .spawn("/bin/sh")
-            .unwrap();
+        let mut t = emit(
+            Duration::from_millis(400),
+            &["--raw", query, "--wait", "never"],
+        )
+        .unwrap();
         let err = t.wait_until(|s| s.contains("never")).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains(shape), "{label} not named in: {msg}");
@@ -437,14 +439,12 @@ fn decrqm_answers_for_focus_reporting() -> termlens::Result<()> {
 #[test]
 fn cell_size_answers_the_pixel_reports_and_the_ioctl() -> termlens::Result<()> {
     // Unset: no reply, and the query is named in the next timeout.
-    let mut mute = Terminal::builder()
-        .size(80, 6)
-        .timeout(Duration::from_millis(700))
-        .args([
-            "-c",
-            r"stty -icanon -echo; printf '\033[16t'; printf MARK; read g",
-        ])
-        .spawn("/bin/sh")?;
+    let mut mute = common::spawn_emit(
+        Terminal::builder()
+            .size(80, 6)
+            .timeout(Duration::from_millis(700)),
+        &["--csi", "16t", "MARK", "--wait"],
+    )?;
     let err = mute
         .wait_until(|s| s.contains("NEVER"))
         .expect_err("must time out");

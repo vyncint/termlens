@@ -1,10 +1,10 @@
-//! Integration tests against `/bin/sh`: spawning, waiting, environment
-//! control, exit codes, and the failure modes (timeout / EOF).
+//! Integration tests against the `emit` fixture: spawning, waiting,
+//! environment control, exit codes, and the failure modes (timeout / EOF).
 //!
 //! These run headless — CI runners have no TTY, the harness makes its own.
 //!
-//! Pattern note: every script that must *print something we assert on*
-//! ends with a `read` guard, and we send Enter only after the assertion.
+//! Pattern note: every program that must *print something we assert on*
+//! ends with a `--wait`, and we send Enter only after the assertion.
 //! Output written immediately before exit can be discarded by macOS's PTY
 //! teardown (docs/DESIGN.md §2); keeping the child alive until the harness
 //! has seen the bytes makes these tests deterministic on every platform.
@@ -16,15 +16,17 @@ use std::{
 
 use termlens::{Error, Key, Terminal};
 
-const SH: &str = "/bin/sh";
+mod common;
 
-fn sh(script: &str) -> termlens::Result<Terminal> {
-    Terminal::builder().args(["-c", script]).spawn(SH)
+/// The `emit` fixture from the default builder; steps are documented in
+/// `fixtures/emit/src/main.rs`.
+fn emit(steps: &[&str]) -> termlens::Result<Terminal> {
+    common::emit(steps)
 }
 
 #[test]
 fn echo_reaches_the_screen_and_child_exits_cleanly() -> termlens::Result<()> {
-    let mut t = sh("echo hello from a real PTY; read guard")?;
+    let mut t = emit(&["hello from a real PTY\n", "--wait"])?;
     t.wait_until(|s| s.contains("hello from a real PTY"))?;
     t.send(Key::Enter)?;
     let status = t.wait_exit()?;
@@ -35,9 +37,9 @@ fn echo_reaches_the_screen_and_child_exits_cleanly() -> termlens::Result<()> {
 
 #[test]
 fn exit_codes_are_reported() -> termlens::Result<()> {
-    // The `read` keeps the exit from racing PTY setup; the line discipline
-    // buffers our Enter even if it lands before `read` starts.
-    let mut t = sh("read guard; exit 7")?;
+    // The `--wait` keeps the exit from racing PTY setup; the line discipline
+    // buffers our Enter even if it lands before the read starts.
+    let mut t = emit(&["--wait", "--exit", "7"])?;
     t.send(Key::Enter)?;
     let status = t.wait_exit()?;
     assert!(!status.success());
@@ -50,7 +52,11 @@ fn exit_codes_are_reported() -> termlens::Result<()> {
 
 #[test]
 fn signal_deaths_are_reported_as_signals_not_exit_codes() -> termlens::Result<()> {
-    let mut t = sh("read guard; kill -TERM $$")?;
+    // Stays on `/bin/sh`: a process that signals itself is what this test
+    // is about, and the std-only fixture has no `kill`.
+    let mut t = Terminal::builder()
+        .args(["-c", "read guard; kill -TERM $$"])
+        .spawn("/bin/sh")?;
     t.send(Key::Enter)?;
     let status = t.wait_exit()?;
     assert!(!status.success());
@@ -65,10 +71,10 @@ fn signal_deaths_are_reported_as_signals_not_exit_codes() -> termlens::Result<()
 
 #[test]
 fn env_vars_reach_the_child() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .env("TERMTEST_MARKER", "42")
-        .args(["-c", r#"echo "marker=$TERMTEST_MARKER"; read guard"#])
-        .spawn(SH)?;
+    let mut t = common::spawn_emit(
+        Terminal::builder().env("TERMTEST_MARKER", "42"),
+        &["marker=", "--env", "TERMTEST_MARKER", "--wait"],
+    )?;
     t.wait_until(|s| s.contains("marker=42"))?;
     t.send(Key::Enter)?;
     t.wait_exit()?;
@@ -89,16 +95,17 @@ fn envs_accepts_common_pair_iterators() {
 
 #[test]
 fn envs_and_env_preserve_order_and_duplicates() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .env("VALUE", "env-first")
-        .envs([("VALUE", "envs-first"), ("SECOND", "two")])
-        .env("VALUE", "env-last")
-        .envs([("THIRD", "three"), ("VALUE", "envs-last")])
-        .args([
-            "-c",
-            r#"echo "value=$VALUE second=$SECOND third=$THIRD"; read guard"#,
-        ])
-        .spawn(SH)?;
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .env("VALUE", "env-first")
+            .envs([("VALUE", "envs-first"), ("SECOND", "two")])
+            .env("VALUE", "env-last")
+            .envs([("THIRD", "three"), ("VALUE", "envs-last")]),
+        &[
+            "value=", "--env", "VALUE", " second=", "--env", "SECOND", " third=", "--env", "THIRD",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("value=envs-last second=two third=three"))?;
     t.send(Key::Enter)?;
     t.wait_exit()?;
@@ -109,13 +116,13 @@ fn envs_and_env_preserve_order_and_duplicates() -> termlens::Result<()> {
 fn env_clear_hands_the_child_exactly_the_builder_environment() -> termlens::Result<()> {
     // Enumerate the whole environment rather than probing one name, so a
     // leaked variable cannot arrive unnoticed: SHELL did, filled in by the
-    // PTY layer from the host's login shell (#221). `/usr/bin/env` is spawned
-    // directly — no shell, which would add PWD and friends of its own — and
-    // by absolute path, because PATH is gone.
-    let mut t = Terminal::builder()
-        .env_clear()
-        .env("MARKER", "1")
-        .spawn("/usr/bin/env")?;
+    // PTY layer from the host's login shell (#221). The fixture prints its
+    // own environment — no shell, which would add PWD and friends of its own
+    // — and is spawned by absolute path, because PATH is gone.
+    let mut t = common::spawn_emit(
+        Terminal::builder().env_clear().env("MARKER", "1"),
+        &["--environ"],
+    )?;
     assert!(t.wait_exit()?.success());
     let screen = t.screen();
     let mut vars: Vec<String> = screen
@@ -143,15 +150,27 @@ fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termlens::
         std::env::var_os("HOME").is_some(),
         "test needs HOME in the parent env"
     );
-    let mut t = Terminal::builder()
-        .envs([("KEPT_BEFORE", "yes")])
-        .env_clear()
-        .envs([("KEPT_AFTER", "also")])
-        .args([
-            "-c",
-            r#"echo "home=${HOME:-unset} term=$TERM before=$KEPT_BEFORE after=$KEPT_AFTER"; read guard"#,
-        ])
-        .spawn(SH)?;
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .envs([("KEPT_BEFORE", "yes")])
+            .env_clear()
+            .envs([("KEPT_AFTER", "also")]),
+        &[
+            "home=",
+            "--env",
+            "HOME",
+            " term=",
+            "--env",
+            "TERM",
+            " before=",
+            "--env",
+            "KEPT_BEFORE",
+            " after=",
+            "--env",
+            "KEPT_AFTER",
+            "--wait",
+        ],
+    )?;
     t.wait_until(|s| s.contains("before=yes after=also"))?;
     let screen = t.screen();
     assert!(
@@ -169,10 +188,10 @@ fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termlens::
 
 #[test]
 fn explicit_term_overrides_the_default() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .env("TERM", "vt100")
-        .args(["-c", r#"echo "term=$TERM"; read guard"#])
-        .spawn(SH)?;
+    let mut t = common::spawn_emit(
+        Terminal::builder().env("TERM", "vt100"),
+        &["term=", "--env", "TERM", "--wait"],
+    )?;
     t.wait_until(|s| s.contains("term=vt100"))?;
     t.send(Key::Enter)?;
     t.wait_exit()?;
@@ -181,10 +200,13 @@ fn explicit_term_overrides_the_default() -> termlens::Result<()> {
 
 #[test]
 fn send_str_and_enter_round_trip_through_the_line_discipline() -> termlens::Result<()> {
-    let mut t = sh(r#"read line; echo "got: $line"; read guard"#)?;
+    // The line discipline echoes what is typed onto row 0 and moves to row
+    // 1; the fixture then writes the line it read, with a suffix the echo
+    // cannot have produced — so the wait proves the round trip, not the echo.
+    let mut t = emit(&["--echo-line", " back", "--wait"])?;
     t.send_str("hello")?;
     t.send(Key::Enter)?;
-    t.wait_until(|s| s.contains("got: hello"))?;
+    t.wait_until(|s| s.contains("hello back"))?;
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
@@ -192,12 +214,12 @@ fn send_str_and_enter_round_trip_through_the_line_discipline() -> termlens::Resu
 
 #[test]
 fn timeout_error_embeds_the_screen_dump() {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_millis(400))
-        .args(["-c", "echo something visible; exec cat"])
-        .spawn(SH)
-        .unwrap();
-    // `cat` keeps the terminal open forever; the predicate can never hold.
+    let mut t = common::spawn_emit(
+        Terminal::builder().timeout(Duration::from_millis(400)),
+        &["something visible\n", "--echo"],
+    )
+    .unwrap();
+    // `--echo` keeps the terminal open forever; the predicate can never hold.
     let err = t.wait_until(|s| s.contains("never printed")).unwrap_err();
 
     let Error::Timeout { ref screen, .. } = err else {
@@ -209,16 +231,16 @@ fn timeout_error_embeds_the_screen_dump() {
     assert!(msg.contains("timed out after 400ms"), "{msg}");
     assert!(msg.contains("--- screen at timeout ---"), "{msg}");
     assert!(msg.contains("something visible"), "{msg}");
-    // Drop now kills the still-running `cat` — no zombies.
+    // Drop now kills the still-running child — no zombies.
 }
 
 #[test]
 fn waits_fail_fast_on_eof_instead_of_burning_the_timeout() {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(30))
-        .args(["-c", "echo bye; read guard"])
-        .spawn(SH)
-        .unwrap();
+    let mut t = common::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(30)),
+        &["bye\n", "--wait"],
+    )
+    .unwrap();
     // Deterministic sequencing: observe the output, then let the child
     // exit, then wait for something that can never appear.
     t.wait_until(|s| s.contains("bye")).unwrap();
@@ -239,7 +261,7 @@ fn waits_fail_fast_on_eof_instead_of_burning_the_timeout() {
 
 #[test]
 fn wait_idle_resolves_in_output_gaps() -> termlens::Result<()> {
-    let mut t = sh("printf a; sleep 1.5; printf b; read guard")?;
+    let mut t = emit(&["a", "--sleep", "1.5s", "b", "--wait"])?;
     t.wait_until(|s| s.contains("a"))?;
     t.wait_idle(Duration::from_millis(200))?;
 

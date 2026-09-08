@@ -7,12 +7,17 @@ use std::time::Duration;
 
 use termlens::{Key, Terminal};
 
-fn sh(script: &str) -> termlens::Result<Terminal> {
-    Terminal::builder()
-        .size(40, 6)
-        .timeout(Duration::from_secs(10))
-        .args(["-c", script])
-        .spawn("/bin/sh")
+mod common;
+
+/// The `emit` fixture on a 40x6 terminal; steps are documented in
+/// `fixtures/emit/src/main.rs`.
+fn emit(steps: &[&str]) -> termlens::Result<Terminal> {
+    common::spawn_emit(
+        Terminal::builder()
+            .size(40, 6)
+            .timeout(Duration::from_secs(10)),
+        steps,
+    )
 }
 
 /// The amplification assertion: one input must not become N repaints. No
@@ -20,14 +25,19 @@ fn sh(script: &str) -> termlens::Result<Terminal> {
 /// correct content.
 #[test]
 fn repaints_count_completed_updates_not_changes() -> termlens::Result<()> {
-    let mut t = sh(concat!(
-        r"printf READY; read a; ",
+    let mut t = emit(&[
+        "READY",
+        "--wait",
         // Three complete repaints, the middle one changing nothing at all.
-        r"printf '\033[?2026hone\033[?2026l'; ",
-        r"printf '\033[?2026h\033[?2026l'; ",
-        r"printf '\033[?2026htwo\033[?2026l'; ",
-        r"printf ' DONE'; read b"
-    ))?;
+        "--raw",
+        r"\e[?2026hone\e[?2026l",
+        "--raw",
+        r"\e[?2026h\e[?2026l",
+        "--raw",
+        r"\e[?2026htwo\e[?2026l",
+        " DONE",
+        "--wait",
+    ])?;
     t.wait_until(|s| s.contains("READY"))?;
     assert_eq!(t.screen().repaints(), 0, "nothing has repainted yet");
 
@@ -48,7 +58,7 @@ fn repaints_count_completed_updates_not_changes() -> termlens::Result<()> {
 /// says zero rather than guessing from its redraws.
 #[test]
 fn an_app_without_synchronized_output_reports_no_repaints() -> termlens::Result<()> {
-    let mut t = sh(r"printf 'drew\n'; printf 'drew again\n'; printf DONE; read g")?;
+    let mut t = emit(&["drew\n", "drew again\n", "DONE", "--wait"])?;
     t.wait_until(|s| s.contains("DONE"))?;
     assert_eq!(t.screen().repaints(), 0);
     t.send(Key::Enter)?;
@@ -60,11 +70,18 @@ fn an_app_without_synchronized_output_reports_no_repaints() -> termlens::Result<
 /// key is refused with a bell" are different behaviours and the same screen.
 #[test]
 fn a_bell_is_observable_and_a_title_terminator_is_not_a_bell() -> termlens::Result<()> {
-    let mut t = sh(concat!(
-        r"printf READY; read a; ",
-        r"printf '\007'; printf '\033]0;set by osc\007'; printf '\007'; ",
-        r"printf ' DONE'; read b"
-    ))?;
+    let mut t = emit(&[
+        "READY",
+        "--wait",
+        "--raw",
+        r"\a",
+        "--raw",
+        r"\e]0;set by osc\a",
+        "--raw",
+        r"\a",
+        " DONE",
+        "--wait",
+    ])?;
     t.wait_until(|s| s.contains("READY"))?;
     let before = t.screen().bells();
     assert_eq!(before, 0);
@@ -90,7 +107,7 @@ fn a_bell_is_observable_and_a_title_terminator_is_not_a_bell() -> termlens::Resu
 /// image.
 #[test]
 fn graphics_payloads_are_observable_and_absence_is_assertable() -> termlens::Result<()> {
-    let mut plain = sh(r"printf 'box art: +--+'; printf ' DONE'; read g")?;
+    let mut plain = emit(&["box art: +--+", " DONE", "--wait"])?;
     plain.wait_until(|s| s.contains("DONE"))?;
     assert!(
         plain.screen().graphics().is_empty(),
@@ -99,12 +116,15 @@ fn graphics_payloads_are_observable_and_absence_is_assertable() -> termlens::Res
     plain.send(Key::Enter)?;
     assert!(plain.wait_exit()?.success());
 
-    let mut drawing = sh(concat!(
-        r"printf 'text'; ",
-        r"printf '\033_Gf=24,s=1,v=1,a=T;QUJDREVG\033\\'; ",
-        r"printf '\033Pq#0;2;0;0;0#0~~-~~\033\\'; ",
-        r"printf ' DONE'; read g"
-    ))?;
+    let mut drawing = emit(&[
+        "text",
+        "--raw",
+        r"\e_Gf=24,s=1,v=1,a=T;QUJDREVG\e\\",
+        "--raw",
+        r"\ePq#0;2;0;0;0#0~~-~~\e\\",
+        " DONE",
+        "--wait",
+    ])?;
     drawing.wait_until(|s| s.contains("DONE"))?;
     let g = drawing.screen().graphics();
     assert_eq!(g.kitty(), 1, "one kitty payload");
@@ -128,14 +148,12 @@ fn graphics_payloads_are_observable_and_absence_is_assertable() -> termlens::Res
 /// answer *and* no diagnosis, alone among the startup probes.
 #[test]
 fn a_blocked_kitty_graphics_query_is_named_in_the_timeout() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .size(40, 4)
-        .timeout(Duration::from_millis(700))
-        .args([
-            "-c",
-            r"stty -icanon -echo; printf '\033_Gi=1,a=q;\033\\'; printf MARK; read g",
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .size(40, 4)
+            .timeout(Duration::from_millis(700)),
+        &["--raw", r"\e_Gi=1,a=q;\e\\", "MARK", "--wait"],
+    )?;
     let err = t
         .wait_until(|s| s.contains("NEVER-APPEARS"))
         .expect_err("must time out");
@@ -153,14 +171,12 @@ fn a_blocked_kitty_graphics_query_is_named_in_the_timeout() -> termlens::Result<
 /// query diagnosis into an unrelated timeout of an application that draws.
 #[test]
 fn a_kitty_transmission_does_not_pollute_the_timeout() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .size(40, 4)
-        .timeout(Duration::from_millis(700))
-        .args([
-            "-c",
-            r"printf '\033_Gf=24,a=T;QUJD\033\\'; printf MARK; read g",
-        ])
-        .spawn("/bin/sh")?;
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .size(40, 4)
+            .timeout(Duration::from_millis(700)),
+        &["--raw", r"\e_Gf=24,a=T;QUJD\e\\", "MARK", "--wait"],
+    )?;
     let err = t
         .wait_until(|s| s.contains("NEVER-APPEARS"))
         .expect_err("must time out");
@@ -180,12 +196,15 @@ fn a_kitty_transmission_does_not_pollute_the_timeout() -> termlens::Result<()> {
 /// count and left it at zero.
 #[test]
 fn a_frame_from_wait_frame_carries_the_repaint_count() -> termlens::Result<()> {
-    let mut t = sh(concat!(
-        r"printf READY; read a; ",
-        r"printf '\033[?2026hone\033[?2026l'; ",
-        r"printf '\033[?2026htwo\033[?2026l'; ",
-        r"read b"
-    ))?;
+    let mut t = emit(&[
+        "READY",
+        "--wait",
+        "--raw",
+        r"\e[?2026hone\e[?2026l",
+        "--raw",
+        r"\e[?2026htwo\e[?2026l",
+        "--wait",
+    ])?;
     t.wait_until(|s| s.contains("READY"))?;
     t.send(Key::Enter)?;
 

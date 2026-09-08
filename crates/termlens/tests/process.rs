@@ -7,16 +7,24 @@ use std::time::{Duration, Instant};
 use termlens::Signal;
 use termlens::{Error, Key, Terminal};
 
+mod common;
+
+/// The `emit` fixture; steps are documented in `fixtures/emit/src/main.rs`.
+fn emit(steps: &[&str]) -> termlens::Result<Terminal> {
+    common::spawn_emit(Terminal::builder().timeout(Duration::from_secs(10)), steps)
+}
+
 #[test]
 fn current_dir_runs_the_child_where_asked() -> termlens::Result<()> {
-    // Canonicalize: /tmp is a symlink on macOS and `pwd` reports the real
+    // Canonicalize: /tmp is a symlink on macOS and `--cwd` reports the real
     // path the kernel put the process in.
     let dir = std::env::temp_dir().canonicalize()?;
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .current_dir(&dir)
-        .args(["-c", "pwd; read _"])
-        .spawn("sh")?;
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .timeout(Duration::from_secs(10))
+            .current_dir(&dir),
+        &["--cwd", "--wait"],
+    )?;
     t.wait_until(|s| s.contains(dir.to_str().expect("utf-8 temp dir")))?;
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
@@ -25,12 +33,9 @@ fn current_dir_runs_the_child_where_asked() -> termlens::Result<()> {
 
 #[test]
 fn pid_reports_the_direct_child() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args(["-c", r#"printf 'pid:%s;' "$$"; read _"#])
-        .spawn("sh")?;
+    let mut t = emit(&["pid:", "--pid", ";", "--wait"])?;
     let pid = t.pid().expect("unix reports pids");
-    // The shell's $$ is the exact process the harness spawned.
+    // The fixture's own id is the exact process the harness spawned.
     t.wait_until(|s| s.contains(&format!("pid:{pid};")))?;
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
@@ -40,6 +45,8 @@ fn pid_reports_the_direct_child() -> termlens::Result<()> {
 #[test]
 #[cfg(unix)]
 fn signal_term_exercises_the_graceful_shutdown_path() -> termlens::Result<()> {
+    // Stays on `/bin/sh`: trapping a signal is what this test is about, and
+    // the std-only fixture has no way to install a handler.
     let mut t = Terminal::builder()
         .timeout(Duration::from_secs(10))
         .args([
@@ -60,11 +67,7 @@ fn signal_term_exercises_the_graceful_shutdown_path() -> termlens::Result<()> {
 #[test]
 #[cfg(unix)]
 fn signal_after_reap_is_a_typed_error_not_a_stray_kill() {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args(["-c", "exit 0"])
-        .spawn("sh")
-        .unwrap();
+    let mut t = emit(&["--exit", "0"]).unwrap();
     t.wait_exit().unwrap();
 
     let err = t.signal(Signal::Term).unwrap_err();
@@ -79,10 +82,10 @@ fn signal_after_reap_is_a_typed_error_not_a_stray_kill() {
 fn wait_until_for_overrides_the_default_timeout_upward() -> termlens::Result<()> {
     // Builder default far below the app's readiness; only the per-call
     // override can see this through.
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_millis(200))
-        .args(["-c", "sleep 1; printf late-bloomer; read _"])
-        .spawn("sh")?;
+    let mut t = common::spawn_emit(
+        Terminal::builder().timeout(Duration::from_millis(200)),
+        &["--sleep", "1s", "late-bloomer", "--wait"],
+    )?;
     t.wait_until_for(|s| s.contains("late-bloomer"), Duration::from_secs(30))?;
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
@@ -91,11 +94,11 @@ fn wait_until_for_overrides_the_default_timeout_upward() -> termlens::Result<()>
 
 #[test]
 fn wait_until_for_overrides_the_default_timeout_downward() {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(30))
-        .args(["-c", "read _"])
-        .spawn("sh")
-        .unwrap();
+    let mut t = common::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(30)),
+        &["--wait"],
+    )
+    .unwrap();
     let start = Instant::now();
     let err = t
         .wait_until_for(|s| s.contains("never shown"), Duration::from_millis(100))
@@ -118,10 +121,7 @@ fn wait_until_for_overrides_the_default_timeout_downward() {
 #[test]
 #[cfg(unix)]
 fn a_signalled_child_reports_no_exit_code() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args(["-c", "printf READY; read guard"])
-        .spawn("/bin/sh")?;
+    let mut t = emit(&["READY", "--wait"])?;
     t.wait_until(|s| s.contains("READY"))?;
 
     t.signal(termlens::Signal::Term)?;
@@ -148,10 +148,7 @@ fn a_signalled_child_reports_no_exit_code() -> termlens::Result<()> {
 /// wrapped in `Some`.
 #[test]
 fn a_normally_exited_child_still_reports_its_code() -> termlens::Result<()> {
-    let mut t = Terminal::builder()
-        .timeout(Duration::from_secs(10))
-        .args(["-c", "exit 7"])
-        .spawn("/bin/sh")?;
+    let mut t = emit(&["--exit", "7"])?;
     let status = t.wait_exit()?;
     assert_eq!(status.code(), Some(7), "status: {status}");
     assert_eq!(status.signal(), None);
