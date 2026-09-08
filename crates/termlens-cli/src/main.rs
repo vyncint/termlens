@@ -92,6 +92,11 @@ fn fail(message: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
+/// The one-line string every `--version` flag prints.
+fn version() -> String {
+    format!("termlens {}\n", env!("CARGO_PKG_VERSION"))
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let Some(command) = args.next() else {
@@ -101,7 +106,7 @@ fn main() -> ExitCode {
     let rest: Vec<String> = args.collect();
     match command.as_str() {
         "-h" | "--help" => print(&format!("{USAGE}\n")),
-        "--version" => print(&format!("termlens {}\n", env!("CARGO_PKG_VERSION"))),
+        "--version" => print(&version()),
         "inspect" => inspect(rest),
         "diff" => diff(&rest),
         "render" => render(&rest),
@@ -164,6 +169,7 @@ fn diff(args: &[String]) -> ExitCode {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return print(&format!("{DIFF_USAGE}\n")),
+            "--version" => return print(&version()),
             "--color" => {
                 color = match args.next().map(String::as_str) {
                     Some("auto") => ColorWhen::Auto,
@@ -281,6 +287,7 @@ fn render(args: &[String]) -> ExitCode {
     for arg in args {
         match arg.as_str() {
             "-h" | "--help" => return print(&format!("{RENDER_USAGE}\n")),
+            "--version" => return print(&version()),
             "--svg" | "--html" | "--ansi" | "--text" => format = Some(arg.as_str()),
             other if other.starts_with('-') && other != "-" => {
                 return fail(&format!(
@@ -349,6 +356,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
         let flag = args.next().unwrap_or_default();
         let parsed = match flag.as_str() {
             "-h" | "--help" => return print(&format!("{INSPECT_USAGE}\n")),
+            "--version" => return print(&version()),
             "--" => break,
             "--size" => take(&mut args, "--size", "COLSxROWS", "120x40", |spec| {
                 let (c, r) = spec.split_once('x')?;

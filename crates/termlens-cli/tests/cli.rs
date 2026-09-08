@@ -213,3 +213,26 @@ fn help_and_version() -> termlens::Result<()> {
     let _: Screen = Screen::parse("size: 1x1  cursor: 0,0\n")?;
     Ok(())
 }
+
+#[test]
+fn subcommand_version_prints_same_string_as_top_level() -> termlens::Result<()> {
+    // The top-level version string is the reference.
+    let mut top = termlens::bin!("termlens", args(["--version"]))?;
+    assert_eq!(top.wait_exit()?.code(), Some(0));
+    let expected = concat!("termlens ", env!("CARGO_PKG_VERSION"));
+
+    for subcommand in ["diff", "render", "inspect"] {
+        let mut t = termlens::bin!("termlens", args([subcommand, "--version"]))?;
+        assert_eq!(
+            t.wait_exit()?.code(),
+            Some(0),
+            "`termlens {subcommand} --version` exited non-zero"
+        );
+        assert!(
+            t.screen().contains(expected),
+            "`termlens {subcommand} --version` output:\n{}",
+            t.screen()
+        );
+    }
+    Ok(())
+}
