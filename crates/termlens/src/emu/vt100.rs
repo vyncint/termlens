@@ -37,6 +37,10 @@ pub(crate) struct Vt100Emulator {
     /// chatty stream). A snapshot then costs one `Arc` clone per row
     /// instead of rebuilding the whole history.
     history: VecDeque<Arc<str>>,
+    /// The same rows as cells, when the terminal was built to retain
+    /// styles in history (#146); `None` otherwise, so a suite that never
+    /// asks pays nothing. Kept in lockstep with `history`, one entry each.
+    history_cells: Option<VecDeque<Arc<[Cell]>>>,
     /// Rows of vt100's own scrollback already copied into `history`, so a
     /// read that scrolled nothing costs one length check.
     captured: usize,
@@ -71,7 +75,13 @@ impl Vt100Emulator {
         }
     }
 
-    pub(crate) fn new(rows: u16, cols: u16, scrollback_len: usize, capture: usize) -> Self {
+    pub(crate) fn new(
+        rows: u16,
+        cols: u16,
+        scrollback_len: usize,
+        capture: usize,
+        styled_history: bool,
+    ) -> Self {
         Self {
             parser: ::vt100::Parser::new_with_callbacks(
                 rows,
@@ -80,7 +90,9 @@ impl Vt100Emulator {
                 Unhandled::default(),
             ),
             tracker: SeqTracker::new(capture, cols),
-            shadow: AttrShadow::new(rows, cols),
+            // The shadow keeps history only when its cells will be read.
+            shadow: AttrShadow::new(rows, cols, if styled_history { scrollback_len } else { 0 }),
+            history_cells: styled_history.then(VecDeque::new),
             colors: ColorNormalizer::new(),
             scrollback_len,
             frame_started: None,
@@ -228,6 +240,9 @@ impl Vt100Emulator {
         }
         let from = if at_cap {
             self.history.clear();
+            if let Some(cells) = &mut self.history_cells {
+                cells.clear();
+            }
             0
         } else {
             self.captured
@@ -245,10 +260,40 @@ impl Vt100Emulator {
                 self.history
                     .push_back(Arc::from(restore_replacement(line.trim_end()).as_ref()));
             }
+            // Styled history: the same rows as cells, the shadow moved to
+            // the same offset so blink, conceal and strikethrough come
+            // along — the correspondence invariant extended from the grid
+            // to history. Cell reads are O(row) each in vt100, so this is
+            // the cost the builder's knob documents.
+            if let Some(cells) = &mut self.history_cells {
+                self.shadow.set_scrollback(len - i);
+                for row in 0..u16::try_from(take).unwrap_or(u16::MAX) {
+                    let mut converted: Vec<Cell> = Vec::with_capacity(usize::from(cols));
+                    for col in 0..cols {
+                        let mut cell = screen.cell(row, col).map_or_else(
+                            || Cell::new(String::new(), Style::default(), false, false),
+                            |cell| convert_cell(cell, self.shadow.cell(row, col)),
+                        );
+                        if col > 0 && cell.is_wide_continuation() {
+                            if let Some(lead) = converted.last() {
+                                cell = Cell::new(String::new(), *lead.style(), false, true);
+                            }
+                        }
+                        converted.push(cell);
+                    }
+                    cells.push_back(converted.into());
+                }
+                self.shadow.set_scrollback(0);
+            }
             i += take;
         }
         while self.history.len() > self.scrollback_len {
             self.history.pop_front();
+        }
+        if let Some(cells) = &mut self.history_cells {
+            while cells.len() > self.scrollback_len {
+                cells.pop_front();
+            }
         }
         self.captured = len;
         screen.set_scrollback(0);
@@ -406,6 +451,10 @@ impl Emulator for Vt100Emulator {
             // Filled in by the terminal, which owns the frame count.
             repaints: 0,
             scrollback: self.history.iter().cloned().collect(),
+            scrollback_cells: self
+                .history_cells
+                .as_ref()
+                .map(|cells| cells.iter().cloned().collect()),
             // The backend's own record of a soft wrap, per row (#265).
             wrapped: (0..rows).map(|row| screen.row_wrapped(row)).collect(),
             insert_mode: self.tracker.insert_mode(),
@@ -622,7 +671,7 @@ mod tests {
     }
 
     fn emu_with(bytes: &[u8]) -> Vt100Emulator {
-        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE);
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
         feed_all(&mut emu, bytes);
         emu
     }
@@ -672,7 +721,7 @@ mod tests {
         assert_eq!(screen.find("done"), Some((0, 5)));
 
         // Scrolled into history, it is still U+FFFD — never the stand-in.
-        let mut emu = Vt100Emulator::new(4, 10, 100, crate::graphics::DEFAULT_CAPTURE);
+        let mut emu = Vt100Emulator::new(4, 10, 100, crate::graphics::DEFAULT_CAPTURE, false);
         feed_all(
             &mut emu,
             "caf\u{FFFD} done\r\n1\r\n2\r\n3\r\n4\r\n5".as_bytes(),
@@ -786,7 +835,7 @@ mod tests {
 
     #[test]
     fn colon_form_colours_support_optional_colour_space_and_chunking() {
-        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE);
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
         emu.feed(b"\x1b[38:2:10:");
         emu.feed(b"20:30mA\x1b[48:5:196mB");
         let s = emu.snapshot();
@@ -864,7 +913,7 @@ mod tests {
     /// designation split across chunks must still apply.
     #[test]
     fn translation_survives_chunk_boundaries_and_frame_stops() {
-        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE);
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
         feed_all(&mut emu, b"\x1b(");
         feed_all(&mut emu, b"0\x1b[?2026hl");
         feed_all(&mut emu, b"q\x1b[?2026lk");
@@ -881,7 +930,7 @@ mod tests {
 
     #[test]
     fn mid_sequence_tracks_partial_escape() {
-        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE);
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
         feed_all(&mut emu, b"text\x1b[3");
         assert!(emu.mid_sequence());
         feed_all(&mut emu, b"1m");
@@ -890,7 +939,7 @@ mod tests {
 
     #[test]
     fn process_stops_at_the_end_of_a_synchronized_update() {
-        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE);
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
         let stream = b"\x1b[?2026hframe1\x1b[?2026lnext";
 
         let first = emu.process(stream);
@@ -915,7 +964,7 @@ mod tests {
 
     #[test]
     fn in_sync_update_is_true_between_bsu_and_esu() {
-        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE);
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
         feed_all(&mut emu, b"\x1b[?2026hpartial");
         assert!(emu.in_sync_update());
         assert!(!emu.mid_sequence()); // the escape itself is finished
@@ -947,7 +996,8 @@ mod tests {
 
     /// Feed a stream into an emulator with `scrollback` rows of history.
     fn emu_with_history(scrollback: usize, bytes: &[u8]) -> Vt100Emulator {
-        let mut emu = Vt100Emulator::new(4, 10, scrollback, crate::graphics::DEFAULT_CAPTURE);
+        let mut emu =
+            Vt100Emulator::new(4, 10, scrollback, crate::graphics::DEFAULT_CAPTURE, false);
         feed_all(&mut emu, bytes);
         emu
     }
@@ -972,7 +1022,7 @@ mod tests {
     fn history_is_bounded_and_drops_its_oldest_rows() {
         // Ten rows, each ending in a newline, on a 4-row screen: seven
         // scroll off (row1..row7) and the cap of 3 keeps the newest three.
-        let mut emu = Vt100Emulator::new(4, 10, 3, crate::graphics::DEFAULT_CAPTURE);
+        let mut emu = Vt100Emulator::new(4, 10, 3, crate::graphics::DEFAULT_CAPTURE, false);
         for n in 1..=10 {
             feed_all(&mut emu, format!("row{n}\r\n").as_bytes());
         }
@@ -990,7 +1040,7 @@ mod tests {
         // The rebuild path: once at the cap vt100's length stops changing,
         // so a naive "did the length grow?" check would freeze the history
         // at its first full window.
-        let mut emu = Vt100Emulator::new(4, 10, 2, crate::graphics::DEFAULT_CAPTURE);
+        let mut emu = Vt100Emulator::new(4, 10, 2, crate::graphics::DEFAULT_CAPTURE, false);
         feed_all(&mut emu, b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\n");
         assert_eq!(emu.snapshot().scrollback_text(), "b\nc");
         feed_all(&mut emu, b"g\r\nh\r\n");
@@ -1026,7 +1076,7 @@ mod tests {
         // and not discarded. Rows captured before a narrowing resize keep
         // their width; rows captured after it have the new one; both sit in
         // the same history.
-        let mut emu = Vt100Emulator::new(2, 10, 100, crate::graphics::DEFAULT_CAPTURE);
+        let mut emu = Vt100Emulator::new(2, 10, 100, crate::graphics::DEFAULT_CAPTURE, false);
         feed_all(&mut emu, b"0123456789\r\nabcdefghij\r\nnext");
         assert_eq!(emu.snapshot().scrollback_text(), "0123456789");
         emu.set_size(2, 4);
@@ -1126,7 +1176,7 @@ mod tests {
 
     /// A 24-column emulator, the width the issue's reproductions use.
     fn wide_emu(bytes: &[u8]) -> Vt100Emulator {
-        let mut emu = Vt100Emulator::new(2, 24, 0, crate::graphics::DEFAULT_CAPTURE);
+        let mut emu = Vt100Emulator::new(2, 24, 0, crate::graphics::DEFAULT_CAPTURE, false);
         feed_all(&mut emu, bytes);
         emu
     }

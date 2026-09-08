@@ -1368,6 +1368,7 @@ pub struct TerminalBuilder {
     graphics: Graphics,
     capture_graphics: usize,
     record_budget: usize,
+    scrollback_styles: bool,
 }
 
 impl Default for TerminalBuilder {
@@ -1388,6 +1389,7 @@ impl Default for TerminalBuilder {
             graphics: Graphics::None,
             capture_graphics: DEFAULT_CAPTURE,
             record_budget: DEFAULT_RECORD_BUDGET,
+            scrollback_styles: false,
         }
     }
 }
@@ -1562,6 +1564,32 @@ impl TerminalBuilder {
     #[must_use]
     pub fn scrollback(mut self, rows: usize) -> Self {
         self.scrollback = rows;
+        self
+    }
+
+    /// Retain **styles** in history as well as text (off by default), so
+    /// [`Screen::scrollback_cell`] answers and a masked-password assertion
+    /// keeps working after the line scrolls off (#146).
+    ///
+    /// Off by default because it is not free, and the cost is in the one
+    /// place a test suite feels it: every read that scrolls captures the
+    /// scrolled rows as cells — one `Cell` per column instead of one string
+    /// per row — and once history is *full* the backend no longer says how
+    /// many rows a read scrolled, so the whole retained window is re-read as
+    /// cells on every read that scrolls. Measured on 20,000 lines through an
+    /// 80x24 screen with the default 1,000-row history, release build: about
+    /// 40 ms text-only, about 90 ms styled — 2.5x on a workload well past
+    /// what a test drives, and one that `scrollback(n)` bounds directly. A
+    /// snapshot pays one refcount per retained row either way, so the cost
+    /// of a wait does not grow with the depth of history.
+    ///
+    /// The attributes only the shadow parser sees — blink, conceal and
+    /// strikethrough — are retained too: the shadow keeps the same history
+    /// and is read in lockstep, so a concealed field is still concealed in
+    /// row 700 of history.
+    #[must_use]
+    pub fn scrollback_styles(mut self, retain: bool) -> Self {
+        self.scrollback_styles = retain;
         self
     }
 
@@ -1838,6 +1866,7 @@ impl TerminalBuilder {
                 self.cols,
                 self.scrollback,
                 self.capture_graphics,
+                self.scrollback_styles,
             )),
             Responder {
                 respond: self.answer_queries,

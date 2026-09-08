@@ -2105,6 +2105,7 @@ expression: s
     },
     "repaints": 0,
     "scrollback": [],
+    "scrollback_cells": null,
     "wrapped": [
       false,
       false,

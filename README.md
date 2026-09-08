@@ -268,7 +268,13 @@ design. termlens's position:
   line that wraps does the same (a one-row terminal that scrolls by newline
   is fine). Larger grids are refused because every snapshot costs one entry
   per cell.
-- Scrollback is **bounded** (1000 rows by default), **text only** — a
+- Scrollback is **bounded** (1000 rows by default) and **text only unless
+  asked**: `scrollback_styles(true)` on the builder retains cells too, so
+  `Screen::scrollback_cell` keeps a masked-password assertion alive after
+  the line scrolls off, at a measured cost the knob's docs quote. Either
+  way `Screen::locate` says which region — grid or history — holds a
+  needle, and a history column is the row's *as captured*: history is not
+  reflowed, so it does not survive a narrowing resize. Otherwise a
   scrolled-off row has no styles and no cell addressing — and is **not
   reflowed** by a `resize`: rows keep the width they were captured at, by
   decision (`Terminal::resize` says why). The visible grid stays the

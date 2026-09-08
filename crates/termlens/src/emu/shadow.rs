@@ -94,14 +94,22 @@ pub(super) struct AttrShadow {
 }
 
 impl AttrShadow {
-    pub(super) fn new(rows: u16, cols: u16) -> Self {
+    /// `scrollback` is zero unless the terminal retains styled history:
+    /// text-only history needs the shadow for the visible grid alone, while
+    /// styled history reads the shadow's scrolled rows in lockstep with the
+    /// primary's (#146).
+    pub(super) fn new(rows: u16, cols: u16, scrollback: usize) -> Self {
         Self {
-            // No scrollback: history is text-only, so the shadow is needed
-            // for the visible grid alone.
-            parser: ::vt100::Parser::new(rows, cols, 0),
+            parser: ::vt100::Parser::new(rows, cols, scrollback),
             state: State::Ground,
             pending: Vec::new(),
         }
+    }
+
+    /// Move the shadow's history view, exactly as the primary's is moved
+    /// while scrolled rows are captured; always restored to 0 afterwards.
+    pub(super) fn set_scrollback(&mut self, rows: usize) {
+        self.parser.screen_mut().set_scrollback(rows);
     }
 
     pub(super) fn set_size(&mut self, rows: u16, cols: u16) {
@@ -331,7 +339,7 @@ mod tests {
 
     /// The real rewriter's output, as a readable string.
     fn shadowed(bytes: &[u8]) -> String {
-        let mut shadow = AttrShadow::new(4, 20);
+        let mut shadow = AttrShadow::new(4, 20, 0);
         let mut out = shadow.rewrite_stream(bytes);
         // Anything still held at the end of the stream is not an SGR.
         out.append(&mut shadow.pending);
@@ -445,7 +453,7 @@ mod tests {
 
     #[test]
     fn a_sequence_split_across_feeds_is_not_lost() {
-        let mut shadow = AttrShadow::new(2, 10);
+        let mut shadow = AttrShadow::new(2, 10, 0);
         shadow.feed(b"\x1b[8");
         // Mid-sequence: nothing applied yet, exactly as the primary sees it.
         assert!(!shadow.cell(0, 0).is_some_and(::vt100::Cell::italic));
