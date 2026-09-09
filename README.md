@@ -12,6 +12,11 @@ terminal.
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-blue)](https://github.com/vyncint/termlens/blob/main/Cargo.toml)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
+Ratatui's [snapshot-testing recipe](https://ratatui.rs/recipes/testing/snapshots/)
+includes a termlens example for testing a compiled application through a PTY.
+Use it alongside `TestBackend` snapshots to cover interactions and process
+behaviour.
+
 ```sh
 cargo add termlens --dev
 cargo add insta --dev    # used by the snapshot assertions below
@@ -91,8 +96,11 @@ finds it without installing anything, through `.claude/skills/termlens`.
 - **Not** an expect-style stream matcher — [rexpect] and [expectrl] already
   do that well. Byte streams can't answer "is the cursor on the third menu
   item?".
-- **Not** an SVG transcript generator for pretty docs — that's
-  [term-transcript].
+- **Not** an SVG transcript generator for documentation — that's
+  [term-transcript]. termlens does render a screen to ANSI, SVG and HTML
+  (`Screen::to_svg`, `termlens render`), for one purpose: so a *failing*
+  screen can be looked at in a CI job summary or a pull request, which is
+  what the [report action](#at-a-shell-prompt-and-in-ci) uses them for.
 - **It is**: a real PTY + an emulated screen + snapshot assertions, so you
   test what a user would *see*.
 
