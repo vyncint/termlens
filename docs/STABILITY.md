@@ -39,7 +39,7 @@ ids, `Terminal::signal`, non-UTF-8 bytes. Each test the platform cannot
 honour is `#[cfg_attr(windows, ignore = "<the probe row>")]`. The
 `windows-latest` leg runs the whole suite on every pull request and is a
 required check; the `windows` workflow re-runs the probe on demand. The
-README's Known limitations carry the user-facing list. A change to what
+[LIMITATIONS.md](LIMITATIONS.md) carries the user-facing list. A change to what
 ConPTY does is a change to this section, not a bug in termlens.
 
 ## 2. Backend — `vt100` stays, and so does the shadow parser (#150)

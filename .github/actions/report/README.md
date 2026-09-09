@@ -10,7 +10,7 @@ as SVG/HTML in an uploaded artifact.
 - run: cargo test
   env:
     TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens
-- uses: vyncint/termlens/.github/actions/report@v0.10.0
+- uses: vyncint/termlens/.github/actions/report@v0.10.1
   if: failure()
 ```
 

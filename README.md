@@ -1,15 +1,15 @@
 # termlens
 
-Integration testing for terminal programs, done the way you'd test a web
-app: spawn the real thing in a **real PTY**, let a VT emulator render its
-output into an in-memory **screen grid**, and **assert or snapshot on the
-rendered screen** instead of scraping raw bytes. Playwright for the
-terminal.
+**Integration testing for terminal programs, the way you would test a web
+app.** termlens spawns your real binary in a real pseudo-terminal, renders
+its output through a VT emulator into an in-memory screen grid, and lets a
+test wait on, assert against and snapshot that grid — what a user would
+*see*, not the bytes that produced it.
 
 [![CI](https://github.com/vyncint/termlens/actions/workflows/ci.yml/badge.svg)](https://github.com/vyncint/termlens/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/termlens.svg)](https://crates.io/crates/termlens)
 [![docs.rs](https://img.shields.io/docsrs/termlens)](https://docs.rs/termlens)
-[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue)](https://github.com/vyncint/termlens/blob/main/Cargo.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue)](#stability-and-versioning)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
 Ratatui's [snapshot-testing recipe](https://ratatui.rs/recipes/testing/snapshots/)
@@ -17,15 +17,36 @@ includes a termlens example for testing a compiled application through a PTY.
 Use it alongside `TestBackend` snapshots to cover interactions and process
 behaviour.
 
+## Why
+
+An in-process widget test renders your `draw` function into a buffer. It is
+fast and precise, and it cannot see anything between `draw` and the user's
+eyes. termlens is the second layer, for a small number of end-to-end flows
+through the real binary:
+
+- **Terminal state** — raw mode and the alternate screen entered and left,
+  the cursor restored after `q` or a panic, the modes the application turned
+  on and whether it turned them off.
+- **What is actually drawn** — box drawing, colours, wide characters, a
+  password field that is *concealed* rather than printed in clear, a stray
+  `println!` or panic message that never went through the framework.
+- **Real input and real signals** — keys, mouse and paste encoded exactly as
+  the terminal encodes them under the modes the application enabled; a
+  `SIGWINCH` that the application must survive.
+- **Behaviour that changes no cell** — a repaint that drew nothing, a bell on
+  a rejected key, an image that went out as pixels when it should have been
+  text.
+
+Every wait is deadline-bounded, and every failure carries the screen: a CI
+log shows what the application was displaying, not `assertion failed:
+false`.
+
+## Quick start
+
 ```sh
 cargo add termlens --dev
 cargo add insta --dev    # used by the snapshot assertions below
 ```
-
-Add `--features decode` if you test an application that draws inline images
-and want to assert on the pixels it transmitted.
-
-## Example
 
 ```rust
 use std::time::Duration;
@@ -49,13 +70,95 @@ fn quits_from_the_main_screen() -> termlens::Result<()> {
 }
 ```
 
-When a wait times out, the error embeds the screen — your CI log shows
-exactly what the app was displaying, not "assertion failed: false".
+That builder chain is what every test of a package's own binary starts
+from, so it has a name: `termlens::bin!("myapp")` spawns
+`CARGO_BIN_EXE_myapp` at 80×24 with a cleared environment and a five-second
+deadline; builder calls after the name override any of it —
+`termlens::bin!("myapp", size(120, 40), env("NO_COLOR", "1"))?`.
 
-A clock in the title bar, a PID in the status line — anything volatile —
-would break that snapshot on every run, and a text filter over the rendering
-shifts every column after it. Mask the **grid** instead, which keeps the
-width, the styles and the cursor:
+Optional features: `decode` (inline images as pixels), `regex` (patterns over
+screen rows), `serde` (a `Screen` as JSON). `insta` is on by default and
+provides `assert_screen_snapshot!`.
+
+## How it works
+
+```mermaid
+flowchart LR
+  subgraph yours["your test · cargo test"]
+    test["test function<br/>drive · wait · assert"]
+  end
+  subgraph lens["termlens"]
+    direction TB
+    api["Terminal<br/>send · click · paste · resize<br/>wait_until · wait_frame · snapshot_after"]
+    reader["reader thread<br/>drains the PTY continuously<br/>answers the queries a terminal answers"]
+    emu["VT emulator<br/>vt100 behind a small internal trait"]
+    screen["Screen<br/>immutable snapshot — cells · styles · cursor<br/>modes · counters · images"]
+    api --- reader
+    reader -->|"under one lock"| emu
+    emu -->|"snapshot"| screen
+  end
+  subgraph os["kernel"]
+    pty["PTY<br/>line discipline · SIGWINCH on resize"]
+  end
+  app["your application, unmodified<br/>it believes it owns a terminal"]
+
+  test -->|"keys · mouse · paste · resize"| api
+  api -->|"xterm byte sequences"| pty
+  pty <-->|"stdin · stdout"| app
+  pty -->|"bytes"| reader
+  screen -->|"predicates · insta snapshots<br/>the screen inside every timeout"| test
+
+  classDef lens fill:#1f6feb,stroke:#0d419d,color:#ffffff,stroke-width:1px
+  classDef yours fill:#57606a,stroke:#32383f,color:#ffffff,stroke-width:1px
+  classDef os fill:#9a6700,stroke:#7d4e00,color:#ffffff,stroke-width:1px
+  class api,reader,emu,screen lens
+  class test,app yours
+  class pty os
+  style yours fill:none,stroke:#8b949e,stroke-dasharray:4 3
+  style lens fill:none,stroke:#1f6feb
+  style os fill:none,stroke:#9a6700,stroke-dasharray:4 3
+```
+
+Four layers. A **reader thread** drains the PTY into the emulator
+continuously, so the kernel buffer never fills and stalls the application,
+and no output is lost between assertions. It also **answers the queries a
+real terminal answers** — cursor position, device attributes, window size,
+background colour, `DECRQM` mode probes, `XTGETTCAP` — so
+capability-probing applications run instead of hanging; anything left
+unanswered is named inside the next timeout. Every **`Screen`** is an
+immutable snapshot taken under the same lock the reader writes through, so
+an assertion sees one consistent instant. The emulator sits behind a small
+internal trait; `vt100` is the backend, with a second parser recovering the
+three style attributes it drops (blink, conceal, strikethrough). The
+mechanics, and the reasoning behind each decision, are in
+[docs/DESIGN.md](docs/DESIGN.md).
+
+## Waiting without flakes
+
+PTYs are asynchronous. There is no `sleep` in termlens, and every wait
+returns either the thing you asked for or a timeout carrying the screen.
+
+| Call | Resolves when | Reach for it when |
+| --- | --- | --- |
+| `wait_until(pred)` | `pred(&screen)` is true — re-checked on every chunk of output | content appears; the default |
+| `wait_frame(pred)` | a **complete** DEC 2026 frame satisfies `pred`; returns that frame, and each call sees a frame no earlier call did | the application brackets repaints in synchronized updates (crossterm's `BeginSynchronizedUpdate`) |
+| `snapshot_after(pred)` | `pred` holds and the picture has then held still; returns that screen | a whole-screen snapshot — what `assert_screen_snapshot!` uses |
+| `wait_stable(quiet)` | no cell, cursor or size change for `quiet`; returns the screen | settling after a resize, or without a predicate |
+| `wait_idle(quiet)` | no **bytes** for `quiet`, not mid-sequence, no update open | output silence is itself the fact; a heuristic, and documented as one |
+| `wait_exit()` | the process ended; returns its `ExitStatus` | the end of every test |
+
+Every wait has a `_for(…, timeout)` twin for one slow step. Input calls are
+bounded too: typing into an application that has stopped reading, or into a
+child that has exited, is an error carrying the screen rather than a hang.
+The three rules for race-free waits — one predicate per instant, wait on
+the last thing painted, settle before whole-screen snapshots — are
+[docs/DESIGN.md](docs/DESIGN.md) §2.
+
+## Snapshots that survive volatile content
+
+A clock in the title bar or a PID in the status line would break a snapshot
+on every run, and a text filter over the rendering shifts every column after
+it. Mask the **grid** instead — width, styles and cursor stay put:
 
 ```rust,ignore
 let s = t.snapshot_after(|s| s.contains("Ready"))?;
@@ -65,127 +168,33 @@ insta::assert_snapshot!(s.mask_rect(70.., ..1));              // …a rectangle�
 insta::assert_snapshot!(s.mask_matches(&regex::Regex::new(r"\d\d:\d\d:\d\d")?, '▒'));
 ```
 
-The builder chain above is what every test of a package's own binary
-starts from, so it has a name: `termlens::bin!("myapp")` spawns
-`CARGO_BIN_EXE_myapp` at 80x24 with a cleared environment and a
-five-second deadline, and builder calls after the name override any of it —
-`termlens::bin!("myapp", size(120, 40), env("NO_COLOR", "1"))?`.
+`Screen::diff(&other)` reports what changed between two screens cell by
+cell; `Screen::parse` reads a saved snapshot back, so the text termlens
+prints — an insta `.snap`, the block a wait error leaves in a log — is also
+its input format.
 
-### AI-Assisted Testing (Claude Code / Cursor / Agents)
+## What a test can see
 
-Coding agents write terminal tests badly in predictable ways: a `sleep`
-where a wait belongs, a snapshot taken mid-repaint, a `1x1` terminal, a
-`(row, col)` handed to a method that wants `(col, row)`. The skill at
-[`skills/termlens/SKILL.md`](skills/termlens/SKILL.md) is the counter to
-each: the model, the rules that keep a PTY test from flaking, the API in one
-page, and four copy-paste recipes — a CLI snapshot, a ratatui navigation
-flow, overriding defaults, targeted cell and style assertions. Every Rust
-block in it is compiled against the crate in CI, so it cannot drift from the
-API. Install it for Claude Code with one command:
+| Question | Accessors |
+| --- | --- |
+| What does the user see? | `text()`, `row_text(row)`, `cell(row, col)`, `contains`, `find`, `find_all`; with `regex`: `matches`, `find_match`, `wait_until_matches` |
+| Is it styled as claimed? | `cell(..).style()` — colours, bold/dim, italic, underline, reverse, **blink**, **conceal**, **strikethrough** |
+| Where is the cursor, and what shape? | `cursor()`, `cursor_shape()`, `cursor_blink()` |
+| Which modes did the application turn on? | `alternate_screen()`, `bracketed_paste()`, `mouse_mode()`, `focus_events()`, `application_cursor()`, `insert_mode()` |
+| What did it tell the terminal out of band? | `title()`, `clipboard()` (`OSC 52`), `links()` (`OSC 8`) |
+| Did something happen that changed no cell? | `repaints()`, `bells()`, `visual_bells()`, `graphics()`, `frame_timings()` |
+| What scrolled off? | `scrollback_text()`, `full_text()`, `locate(needle)`, `logical_text()`, `row_wrapped(row)` |
+| Did the emulator understand everything it was sent? | `unsupported()` — every sequence it did not implement, so a plausible grid can be told from a right one |
 
-```sh
-mkdir -p ~/.claude/skills/termlens && curl -sSL https://raw.githubusercontent.com/vyncint/termlens/main/skills/termlens/SKILL.md -o ~/.claude/skills/termlens/SKILL.md
-```
+**Input is mode-aware.** `send(Key)`, modifier chords, `paste`, `click`,
+`drag` (one motion per cell crossed), `scroll` with modifiers, `focus_in`
+/`focus_out`, `resize` and `signal` are encoded exactly as the application
+configured its terminal — SGR mouse, bracketed paste, DECCKM — because the
+emulator knows which modes it enabled.
 
-Other agents take the same file: add it to a Cursor rule or reference it
-from `.github/copilot-instructions.md`. Inside this repository Claude Code
-finds it without installing anything, through `.claude/skills/termlens`.
-
-## What it is (and is not)
-
-- **Not** an expect-style stream matcher — [rexpect] and [expectrl] already
-  do that well. Byte streams can't answer "is the cursor on the third menu
-  item?".
-- **Not** an SVG transcript generator for documentation — that's
-  [term-transcript]. termlens does render a screen to ANSI, SVG and HTML
-  (`Screen::to_svg`, `termlens render`), for one purpose: so a *failing*
-  screen can be looked at in a CI job summary or a pull request, which is
-  what the [report action](#at-a-shell-prompt-and-in-ci) uses them for.
-- **It is**: a real PTY + an emulated screen + snapshot assertions, so you
-  test what a user would *see*.
-
-## How it works
-
-```mermaid
-flowchart TB
-  test["your test<br/>drive · wait · assert"]
-  subgraph proc["your test process · cargo test"]
-    subgraph tt["termlens"]
-      api["Terminal<br/>send · click · drag · paste · focus · signal · resize · wait_until / wait_frame / wait_idle / wait_exit"]
-      reader["reader thread<br/>drains continuously — output is never lost between waits"]
-      emu["VT emulator<br/>vt100 behind a small internal trait, swappable"]
-      screen["Screen<br/>immutable grid snapshots · cells · cursor · styles · modes · repaints · bells · images"]
-    end
-  end
-  subgraph kernel["kernel"]
-    PTY["real PTY<br/>line discipline · TIOCSWINSZ → SIGWINCH"]
-  end
-  app["your app, unmodified<br/>believes it owns a terminal"]
-
-  test -->|"send(Key) · click · paste"| api
-  api -->|"xterm byte sequences"| PTY
-  api -.->|"resize · kernel delivers SIGWINCH"| PTY
-  PTY -->|stdin| app
-  app -->|"stdout · escape sequences"| PTY
-  PTY -->|bytes| reader
-  reader -->|"process, under one lock"| emu
-  emu -->|"snapshot"| screen
-  screen -->|"predicates · insta snapshots · screen dumps in every timeout"| test
-  classDef ours fill:#2563eb,color:#ffffff,stroke:#1d4ed8,stroke-width:1px;
-  class api,reader,emu,screen ours
-```
-
-The reader thread drains the PTY into the emulator *continuously* — the
-kernel buffer can't fill up and stall your app, and no output is lost
-between assertions. It also **answers the queries real terminals
-answer** — cursor position, device attributes, window size, background
-colour, `DECRQM` mode probes, and terminfo capabilities via `XTGETTCAP` —
-so capability-probing apps run instead of hanging, and anything left
-unanswered is named inside the next timeout error. Every answer is
-truthful or absent: nothing is claimed that the emulator cannot render.
-The grid holds what a user would *see*: DEC Special Graphics — the
-`ESC ( 0` line-drawing set every ncurses border is made of — is translated,
-so a frame reads as `┌───┐` rather than `lqqqk`.
-
-Input is **mode-aware**: mouse clicks and scrolls (with modifiers —
-`Ctrl`-wheel zoom is `scroll_with(Scroll::Up.ctrl(), ..)`), pastes, modifier
-chords, and cursor keys are encoded exactly as the application
-configured its terminal (SGR mouse, bracketed paste, DECCKM) — because
-the emulator knows which modes the app enabled. A `drag` reports one
-motion **per cell crossed**, so an application that paints along the path
-sees the path. The same knowledge is
-readable from every `Screen`: the window title, the alternate-screen
-flag, the input modes, the last `OSC 52` clipboard write, the cursor
-shape the app asked for with `DECSCUSR`, and the `OSC 8` hyperlinks it
-emitted are plain accessors, so "did the app enter the alt screen?",
-"did it copy the right text?", "did it put the terminal into insert
-mode — and put it back?" and "did it link the right URL?" are
-assertions, not inferences. The last two matter because neither changes
-a cell: a hyperlink's label renders as ordinary text with its URL
-nowhere on the screen, so before `links()` a test asserting a link
-passed identically against an application that emitted none. Focus events go the other way:
-`focus_out()` reaches an application that enabled mode 1004, so the
-unfocused branch of a UI can be driven at all.
-
-**Behaviour that leaves the screen identical is still assertable.** A
-repaint that drew nothing, a bell on a rejected key, an inline image — none
-of these change a single cell, so no content predicate can see them. Every
-`Screen` carries the counters instead: `repaints()` (completed DEC 2026
-updates, so *one input became four repaints* is catchable), `bells()`, and
-`graphics()` for kitty and sixel payloads — where the assertion is as often
-the negative one, "this must render as text in every terminal and never go
-out as an image". `frame_timings()` adds the cost of each repaint, so a
-suite can hold a performance line as well as a correctness one.
-
-**And an image is more than a byte count.** `graphics().payloads()` hands
-back the transmissions themselves — where each was placed, the size and
-cell extent it declared, its format and id — so an application that lays
-out in characters and draws in pixels can be held to keeping the two in
-step. Images are counted as *images*: a transmission split across the kitty
-protocol's 4096-byte chunks is one, and a delete is counted apart, under
-`deletes()`, because it carries no picture. With the `decode` feature a
-payload decodes into a `Bitmap`, so the assertion can finally be about the
-picture:
+**Images are captured, not composited.** `graphics()` reports every kitty
+and sixel transmission — placement, declared size and cell extent, format,
+id — and with the `decode` feature a payload decodes into a `Bitmap`:
 
 ```rust
 let seen = screen.graphics();
@@ -195,286 +204,154 @@ assert_eq!(image.at(), (4, 5));                  // at the grid's origin
 assert_eq!(image.decode()?.pixel(9, 9), Some([0x39, 0xd3, 0x53, 0xff]));
 ```
 
-**Scrollback is retained** (1000 rows by default), so an application that
-hands finished output *back* to the terminal — a pager, a log view, a TUI
-that commits completed blocks into native scrollback and keeps a small
-live region — stays testable. `full_text()` spans history and screen, so
-an assertion need not know which region a block currently sits in — and
-`contains`/`find` read the visible grid alone, so when a wait fails while
-rows have scrolled off, the error says how many and points at `full_text`.
+**Scrollback is retained** (1,000 rows by default; text only unless
+`scrollback_styles(true)`), so pagers and log views that hand finished
+output back to the terminal stay testable.
 
-Screens are immutable snapshots taken under the same
-lock the reader writes through, so every assertion sees a consistent
-instant. Four layers, one small internal trait between emulator and screen
-so the backend can be swapped; details in [docs/DESIGN.md](docs/DESIGN.md).
-
-## Comparison
-
-| Tool                  | Real PTY | Screen grid | Snapshots | Notes                                   |
-| --------------------- | :------: | :---------: | :-------: | --------------------------------------- |
-| **termlens**          |    ✔     |      ✔      |     ✔     | this crate                              |
-| [rexpect] / [expectrl] |   ✔     |      ✗      |     ✗     | stream matching, no rendered screen; termlens's `regex` feature gives the same `wait_until_matches(pattern)` over a *row of the screen* |
-| [term-transcript]     |    ✗     |      ~      |   SVG     | transcripts for docs, not assertions    |
-| ratatui `TestBackend` |    ✗     |      ✔      |     ~     | in-process only: your real binary, PTY layer, and non-ratatui output stay untested |
-| [teatest] (Go)        |    ✔     |      ✔      |     ✔     | same idea, Bubble Tea / Go ecosystem    |
-
-### What `TestBackend` cannot see
-
-`TestBackend` renders your widgets into a buffer in-process; it is the right
-tool for layout and rendering logic, and termlens does not replace it. What
-it structurally cannot observe is everything between `draw` and the user's
-eyes — and each item has one termlens assertion that does:
-
-| Invisible to `TestBackend`                      | The assertion that sees it                                         |
-| ----------------------------------------------- | ------------------------------------------------------------------ |
-| raw-mode entry and exit, the alternate screen   | `t.wait_until(\|s\| s.alternate_screen())`, and `!alternate_screen()` after `q` |
-| a resize (`SIGWINCH`) reaching the application  | `t.resize(60, 14)?; t.wait_frame(\|s\| s.contains("60x14"))`      |
-| output printed outside ratatui — a `println!`, a logger, a panic | `s.contains("panicked")`, or a snapshot of the whole grid  |
-| a torn frame — a repaint observed half-drawn    | `wait_frame` returns complete DEC 2026 frames only, and says so when the app never brackets |
-| capability probes and the modes they turn on    | `answer_queries` replies as a terminal would; `s.mouse_mode()`, `s.bracketed_paste()`, `s.focus_events()` say what was asked for |
-| mouse and paste bytes under the enabled modes   | `t.click(col, row)`, `t.scroll(…)`, `t.paste(…)` encode for the mode the app turned on |
-| a masked field that is really printed in clear  | `cell.style().conceal` — identical text, different picture         |
-| the terminal state after exit                   | `t.wait_exit()?` then `t.screen()`: `!alternate_screen()`, cursor visible again |
-
-`fixtures/ratatui-app` is the worked example: a ratatui counter/list whose
-`draw` is rendered through the PTY by termlens and in-process by
-`TestBackend`, and the two diffed cell by cell with `Screen::diff` at two
-sizes with a resize between (`fixtures/ratatui-app/tests/fidelity.rs`). Where
-they disagree the bug is in the terminal layer — crossterm's encoding, the
-PTY, or termlens's emulation — which is the layer nothing else tests.
-
-## At a shell prompt, and in CI
+## Command line and CI
 
 `cargo install termlens-cli` gives the same harness as a command:
-`termlens inspect --size 120x40 myapp` prints what a program shows,
-`termlens diff old.snap new.snap.new` prints the cell diff of two saved
-screens (coloured on a terminal, exit 1 if anything changed), and
-`termlens render --svg failing.snap` turns one into an image. A saved
-screen is the text termlens prints — an insta `.snap`, the block a wait
-error leaves in a log — read back by `Screen::parse`, or the JSON the
-`serde` feature writes.
+
+```sh
+termlens inspect --size 120x40 myapp     # run a program, print its screen
+termlens diff old.snap new.snap.new      # the cell diff; exit 1 if anything changed
+termlens render --svg failing.snap       # a saved screen as SVG, HTML, ANSI or text
+```
 
 In CI, set `TERMLENS_ARTIFACT_DIR` on the test step and every screen a
-failing wait embeds is also written there; then
-`uses: vyncint/termlens/.github/actions/report@v0.10.0` with `if: failure()`
-puts those screens, and every `.snap.new` with its diff, into the pull
-request's step summary:
+failing wait embeds is also written there. The report action then puts
+those screens, and every `.snap.new` with its diff, into the pull request's
+step summary:
 
 ```yaml
 - run: cargo test
   env:
     TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens
-- uses: vyncint/termlens/.github/actions/report@v0.10.0
+- uses: vyncint/termlens/.github/actions/report@v0.10.1
   if: failure()
 ```
 
-## Determinism
+## Comparison
 
-PTYs are asynchronous; a harness that pretends otherwise is flaky by
-design. termlens's position:
+| Tool | Real PTY | Screen grid | Snapshots | Notes |
+| --- | :-: | :-: | :-: | --- |
+| **termlens** | ✔ | ✔ | ✔ | this crate |
+| [rexpect] / [expectrl] | ✔ | ✗ | ✗ | stream matching; termlens's `regex` feature offers `wait_until_matches` over a *row of the screen* |
+| [term-transcript] | ✗ | ~ | SVG | transcripts for documentation, not assertions |
+| ratatui `TestBackend` | ✗ | ✔ | ~ | in-process: the real binary, the PTY layer and non-ratatui output stay untested |
+| [teatest] (Go) | ✔ | ✔ | ✔ | the same idea for Bubble Tea |
 
-- **Prefer `wait_until` on visible content.** It re-checks on every chunk
-  of output and is exact: the condition either becomes true or you get a
-  screen-carrying timeout. The three rules for race-free waits (and the
-  resize stale-frame trap) are in [docs/DESIGN.md](docs/DESIGN.md) §2.
-- **Styles are complete enough to catch a masked field.** `Style` carries
-  `blink`, `conceal` and `strikethrough` alongside the usual attributes, so
-  a test asserting that a password field is masked fails against an
-  application that prints the secret in clear — the two are identical text.
-- **Needles are matched by what the terminal draws, not by how it is
-  spelled.** `contains` and `find` fold both sides to NFC, so a needle typed
-  in an editor still finds text an application normalized the other way —
-  `caf\u{e9}` and `cafe\u{301}` render identically, and so does the failure
-  output, which made the mismatch a trap rather than a limitation. The grid
-  itself keeps exactly the codepoints the application sent.
-- **`wait_frame` gives exact frame boundaries** for apps that bracket
-  repaints in DEC 2026 synchronized updates (crossterm's
-  `BeginSynchronizedUpdate`/`EndSynchronizedUpdate`): the predicate only
-  ever sees complete frames, never a torn repaint, and the call returns
-  the frame it matched. Each call observes a frame no earlier call did, so
-  a burst arriving in one read is assertable step by step in emission
-  order, one repaint cannot satisfy two waits, and a superseded frame
-  cannot answer a wait made after your input. Applications that *probe*
-  for synchronized output before using it get a truthful `DECRQM` answer,
-  so they enable it against termlens unmodified.
-- **Every wait takes a per-call deadline** (`wait_until_for`,
-  `wait_frame_for`, `wait_idle_for`, `wait_exit_for`), so one slow step
-  doesn't force a generous timeout on the whole suite. Writes are bounded
-  too, and every input call returns `Result`: typing into an application
-  that has stopped reading, or into a child that has exited, is an error
-  carrying the screen rather than a hang or a panic.
-- **`wait_idle(quiet)` is an honest heuristic** for everything else. It
-  resolves when nothing arrived for `quiet`, the stream isn't
-  mid-escape-sequence, and no synchronized update is open. Silence is
-  evidence a render finished — not proof. Use it for "the app settled",
-  not for precise sequencing.
-- **`snapshot_after(pred)` is the whole-screen snapshot with the rules
-  built in**: it waits for the predicate, then for the picture to hold
-  still, and returns that screen. `wait_stable(quiet)` is the settle on its
-  own; unlike `wait_idle` it is reset by *changes*, not bytes, so a bell or
-  a repaint that alters no cell does not keep it waiting.
-- **Hermetic environments.** `env_clear()` blocks inheritance,
-  `TERM=xterm-256color` is pinned by default, fixtures draw no clocks and
-  no animations. The CI suite runs a 100-iteration
-  [stress workflow](.github/workflows/stress.yml) on Linux, macOS and
-  Windows — wait/timing changes don't merge without surviving it.
+`TestBackend` is the right tool for layout and rendering logic, and
+termlens does not replace it. What it structurally cannot observe, and the
+termlens assertion that does:
 
-## Known limitations
+| Invisible to `TestBackend` | The assertion that sees it |
+| --- | --- |
+| raw-mode entry and exit, the alternate screen | `t.wait_until(\|s\| s.alternate_screen())`, and `!alternate_screen()` after `q` |
+| a resize reaching the application | `t.resize(60, 14)?; t.wait_frame(\|s\| s.contains("60x14"))` |
+| output outside ratatui — a `println!`, a logger, a panic | `s.contains("panicked")`, or a snapshot of the whole grid |
+| a torn frame | `wait_frame` returns complete DEC 2026 frames only |
+| capability probes and the modes they turn on | `answer_queries` replies as a terminal would; `s.mouse_mode()`, `s.bracketed_paste()` say what was asked for |
+| mouse and paste bytes under the enabled modes | `t.click(col, row)`, `t.scroll(…)`, `t.paste(…)` encode for the mode the app turned on |
+| a masked field that is really printed in clear | `cell.style().conceal` — identical text, different picture |
+| the terminal state after exit | `t.wait_exit()?` then `t.screen()`: `!alternate_screen()`, cursor visible again |
 
-- **Terminal dimensions are 2–1000 cells per axis.** At one column, a
-  double-width character overflows the backend's arithmetic; at one row, a
-  line that wraps does the same (a one-row terminal that scrolls by newline
-  is fine). Larger grids are refused because every snapshot costs one entry
-  per cell.
-- Scrollback is **bounded** (1000 rows by default) and **text only unless
-  asked**: `scrollback_styles(true)` on the builder retains cells too, so
-  `Screen::scrollback_cell` keeps a masked-password assertion alive after
-  the line scrolls off, at a measured cost the knob's docs quote. Either
-  way `Screen::locate` says which region — grid or history — holds a
-  needle, and a history column is the row's *as captured*: history is not
-  reflowed, so it does not survive a narrowing resize. Otherwise a
-  scrolled-off row has no styles and no cell addressing — and is **not
-  reflowed** by a `resize`: rows keep the width they were captured at, by
-  decision (`Terminal::resize` says why). The visible grid stays the
-  fully-featured surface.
-- **Character sets: G0–G3 designation, SO/SI locking shifts, SS2/SS3
-  single shifts, and two sets translated.** `ESC ( ) * + Ps` designations,
-  the `SO`/`SI` locking shifts, and `ESC N`/`ESC O` (SS2/SS3, one character)
-  are modelled; the DEC Special Graphics set (`0`) and the UK set (`A`,
-  `£` at `#`) are translated, and every other designation — the alternate
-  ROMs, the other national sets — is acknowledged and reads as ASCII.
-  `DECSC`/`DECRC` save and restore this state with the cursor. Locking
-  shifts remain G0/G1 only (`LS2`/`LS3` are not modelled).
-- **Insert mode (`IRM`, `CSI 4 h`) pushes the rest of the row right**, as
-  ncurses's `insch` expects on a terminal advertising `smir`; `RIS` and
-  `DECSTR` clear it, and `Screen::insert_mode()` reports an application
-  that left it on. Other ANSI modes the backend drops (`LNM` and the rest)
-  are not modelled — and *say so*: `Screen::unsupported()` lists every
-  sequence the emulator did not implement, in the form `^[[20h`, so a test
-  can tell a plausible-looking wrong grid from a right one.
-- **A soft-wrapped line is two rows.** `contains` and `find` read the grid
-  row by row and do not span the wrap; `Screen::row_wrapped(row)` reports
-  the backend's record of where a line wrapped, and
-  `Screen::logical_text()` joins wrapped rows back together for the
-  assertion that spans one.
-- **Tab stops are the application's to set.** `HTS` (`ESC H`), `TBC`
-  (`CSI g`, `CSI 3 g`), `CHT` (`CSI I`) and `CBT` (`CSI Z`) all work, and a
-  plain `\t` honours whatever stops are set rather than a fixed eight.
-  `RIS` and `DECSTR` restore the every-eighth default, and a resize extends
-  the set into its new columns with that pattern while leaving existing
-  stops alone. Back-tab moves to the nearest stop *strictly* left of the
-  cursor, as xterm does. Only `TBC 0` and `TBC 3` are modelled; the rest of
-  that family clears *line* tab stops, which this crate has no notion of.
-- `wait_frame` needs the application to bracket its repaints in DEC 2026
-  synchronized updates, and only the last 8 completed frames are retained;
-  everything else waits with `wait_until`, under the three rules in
-  [docs/DESIGN.md](docs/DESIGN.md) §2.
-- Some questions stay deliberately unanswered — kitty's `CSI ? u`, DECRQSS,
-  DA3, `OSC 12`, `OSC 52` *reads*, and the non-pixel `CSI … t` reports —
-  because a guessed reply is worse than none. An application blocked on one
-  is **named in the next timeout** rather than left to hang unexplained.
-- **Graphics are captured, not rendered.** termlens can tell an application
-  that kitty or sixel is available (`graphics()`, `cell_size()`), collect
-  what it then transmits, and — with the `decode` feature — decode a payload
-  into pixels. It still draws none: an image never reaches the screen grid,
-  so what a picture looks like *composited over the text under it* is not
-  assertable, and `f=100` (PNG) payloads are reported unsupported rather
-  than decoded, since termlens carries no image codec. Retention is bounded
-  (4 MiB by default, `capture_graphics`); past it a payload is counted and
-  described but its bytes are dropped, and it says so rather than decoding a
-  prefix of itself. Support stays opt-in, so by default an application that
-  probes is truthfully told there is none. Decoding also refuses anything
-  above 4096x4096: every size in a payload is chosen by the program under
-  test, and a sixel `!n` repeat or a declared `65535x65535` would otherwise
-  set the allocation directly.
-- **Hyperlinks are captured, not attributed to cells.** `links()` reports
-  every `OSC 8` span with its target, its `id`, and the text it wrapped, so
-  "did it link the right place?" is assertable — but a `Cell` does not carry
-  its link, so *which* cells sit inside a span is not, and a span whose label
-  was later overwritten is still reported, because this is a record of what
-  the application emitted rather than a property of the grid. Retention is
-  bounded to the most recent 64 spans, and a label longer than the capture
-  bound is reported as unknown rather than as a prefix.
-- **Out-of-band state is what the application last asked for, not what a
-  terminal would infer.** The cursor shape follows `DECSCUSR` and is cleared
-  by a hard reset (`RIS`); the window title is not, because in xterm the
-  title is a window property that `RIS` does not restore, and guessing either
-  way would be the same error. `DECSTR` (soft reset) resets what a `Screen`
-  can observe — cursor keys, bracketed paste, mouse tracking, focus
-  reporting, the cursor's visibility and shape, the character sets — and
-  leaves the alternate screen alone; attributes, margins, origin and insert
-  modes and the keypad are not modelled.
-- **Two SGR style attributes are not modeled.** Overline (`SGR 53`) and double
-  underline (`SGR 21`) do not reach [`Style`](https://docs.rs/termlens/latest/termlens/struct.Style.html),
-  so `with_styles()` cannot distinguish those attributes from a plain cell.
-  And bold and dim are **one intensity state**, not two: the last of
-  `SGR 1`/`SGR 2` written wins, so a cell never reports both.
-- **A reply the terminal's own input queue cannot hold may not arrive.**
-  termlens no longer drops answers of its own accord, but the tty input
-  queue is small (~1 KB on macOS, ~4 KB on Linux), so an application that
-  asks thousands of questions without reading has to read as it asks — as
-  it would against a real terminal. On Linux the kernel discards silently,
-  so that loss is undetectable and goes unreported; macOS blocks instead,
-  where it is counted and named.
-- **Windows: screen assertions yes, frame assertions no.** The crate builds
-  and the whole suite runs on `windows-latest` in CI, over ConPTY through
-  `portable-pty`. ConPTY is not a passthrough — it renders the child's
-  output into a screen of its own and re-emits *that* — so what termlens
-  can honestly claim there is what survives the re-render: the grid (text,
-  cells, styles, cursor, wide characters, box drawing, title, links by URL,
-  clipboard, bracketed paste, cursor shape, bell, the alternate screen),
-  resize, typed input, `wait_until` / `wait_stable` / `snapshot_after`,
-  `bin!`. What it cannot claim, and documents as Unix-only: `wait_frame` and
-  `frame_timings` (ConPTY closes a DEC 2026 bracket *before* the content it
-  wrapped); `GraphicsPayload` and everything under `graphics` (kitty and
-  sixel never arrive); the responder's outbound claims — `Graphics`,
-  `background_rgb`, `foreground_rgb`, `cell_size` — since DA1, OSC 10/11,
-  XTGETTCAP and DECRQM are answered by ConPTY itself and never reach
-  termlens; `mouse_modes` and `mouse_mode`; `focus_events` (ConPTY turns
-  1004 on for itself); link ids (ConPTY assigns its own); `Terminal::signal`;
-  and bytes that are not UTF-8 (Rust's console stdio refuses to write
-  them). The tests for each are `#[cfg_attr(windows, ignore = "…")]` with
-  the reason in the attribute; the probe that measured all of this is
-  `tests/conpty_probe.rs`, and the `windows` workflow re-runs it on demand.
-  The `windows-latest` leg is a required check. This is decision 1 of
-  [docs/STABILITY.md](docs/STABILITY.md).
+`fixtures/ratatui-app` is the worked example: one `draw` rendered through
+the PTY by termlens and in-process by `TestBackend`, diffed cell by cell
+with `Screen::diff` at two sizes with a resize between. Where they disagree,
+the bug is in the terminal layer — the layer nothing else tests.
+
+## Platform support
+
+| | Linux | macOS | Windows (ConPTY) |
+| --- | :-: | :-: | :-: |
+| Screen assertions — grid, styles, cursor, modes, title, links, resize, typed input, `wait_until` / `wait_stable` / `snapshot_after`, `bin!` | ✔ | ✔ | ✔ |
+| Frame assertions — `wait_frame`, `frame_timings`, `record` | ✔ | ✔ | — |
+| Graphics, mouse modes, focus events, `Terminal::signal`, the responder's outbound claims | ✔ | ✔ | — |
+
+ConPTY renders the child's output into a screen of its own and re-emits
+that, so what termlens claims on Windows is what survives the re-render.
+The whole suite runs on `windows-latest` as a required check; each test the
+platform cannot honour is `#[cfg_attr(windows, ignore = "…")]` with the
+reason. The measurement is `tests/conpty_probe.rs`; the decision is
+[docs/STABILITY.md](docs/STABILITY.md) §1.
+
+## Stability and versioning
+
+termlens is `0.x`. [docs/STABILITY.md](docs/STABILITY.md) states what 1.0
+means — three decisions written down with the measurement behind each —
+and which public items the compatibility promise covers. **0.11 is the
+stability candidate**: from that release no promised item changes
+incompatibly before 1.0, and 1.0 follows the readiness criteria tracked in
+[#335](https://github.com/vyncint/termlens/issues/335), not a date.
+
+**MSRV is Rust 1.85**, set by the default `insta` feature's dependency tree
+and checked in CI against the committed lockfile; a bump is a minor
+release. The `ratatui-app` fixture alone needs 1.88 and is not part of the
+published crate.
+
+## Limitations
+
+The short list; the full one, with the reason behind each entry, is
+[docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+
+- Terminal dimensions are 2–1000 cells per axis.
+- `wait_frame` needs the application to bracket repaints in DEC 2026
+  synchronized updates; the last 8 completed frames are retained.
+- Scrollback is bounded (1,000 rows), text-only unless asked, and **not
+  reflowed** on resize.
+- Graphics are captured and decodable, never composited onto the grid;
+  PNG payloads are reported as unsupported rather than decoded.
+- Hyperlinks are recorded as spans, not attributed to cells.
+- Overline and double underline are not modelled; bold and dim are one
+  intensity state.
 - A child that writes and exits within its first milliseconds can lose
-  output to the OS PTY teardown (macOS especially). Long-lived TUIs are
-  unaffected; for run-and-exit programs, end the script with a `read` and
-  release it after asserting — see the "instant-exit caveat" in
-  [docs/DESIGN.md](docs/DESIGN.md).
-- Exotic grapheme clusters render as the vt100 crate renders them; the
-  unicode-torture fixture pins the current behavior.
+  output to PTY teardown (macOS especially); end such scripts with a `read`.
 
-## MSRV
+## For coding agents
 
-Rust **1.85** (driven by the default `insta` feature's dependency tree;
-checked in CI against the committed lockfile). MSRV bumps are minor
-releases. The `ratatui-app` fixture alone needs 1.88, ratatui 0.30's floor;
-it is a workspace member, not part of the published crate, and the MSRV
-check excludes it.
+Agents write terminal tests badly in predictable ways — a `sleep` where a
+wait belongs, a snapshot taken mid-repaint, `(row, col)` handed to a method
+that wants `(col, row)`. [`skills/termlens/SKILL.md`](skills/termlens/SKILL.md)
+is the counter to each: the model, the rules, the API on one page and four
+recipes. Every Rust block in it is compiled against the crate in CI.
+
+```sh
+mkdir -p ~/.claude/skills/termlens && curl -sSL https://raw.githubusercontent.com/vyncint/termlens/main/skills/termlens/SKILL.md -o ~/.claude/skills/termlens/SKILL.md
+```
+
+Other agents take the same file — a Cursor rule, or a reference from
+`.github/copilot-instructions.md`.
+
+## Documentation
+
+| | |
+| --- | --- |
+| [docs/DESIGN.md](docs/DESIGN.md) | the four layers, wait semantics and the three rules, the snapshot text format, why the emulator is where it is |
+| [docs/STABILITY.md](docs/STABILITY.md) | what 1.0 means, and what the promise covers |
+| [docs/LIMITATIONS.md](docs/LIMITATIONS.md) | everything termlens does not model or claim, with reasons |
+| [docs/BACKENDS.md](docs/BACKENDS.md) | the emulator comparison behind keeping `vt100` |
+| [skills/termlens/SKILL.md](skills/termlens/SKILL.md) | the agent skill: rules, API cheat sheet, recipes |
+| [CHANGELOG.md](CHANGELOG.md) | every release, breaking changes under **Changed** / **Removed** |
+| [docs.rs](https://docs.rs/termlens) | the API reference |
 
 ## Contributing
 
-PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) (dev setup, testing
-policy, DCO sign-off, AI tooling policy) and
-[docs/DESIGN.md](docs/DESIGN.md) before touching wait semantics. What 1.0
-means — three decisions written down with their measurements, and which
-public items the promise covers — is [docs/STABILITY.md](docs/STABILITY.md);
-the emulator-backend comparison behind one of them is
-[docs/BACKENDS.md](docs/BACKENDS.md). Security reports:
+Pull requests are welcome — [CONTRIBUTING.md](CONTRIBUTING.md) has the dev
+setup, the testing policy and the DCO sign-off. Three things to know before
+starting: every change lands with tests; anything touching wait semantics
+must pass the 100-iteration [stress workflow](.github/workflows/stress.yml)
+on Linux, macOS and Windows; snapshot updates are reviewed diffs
+(`cargo insta review`), never blind accepts. Security reports go to
 [SECURITY.md](SECURITY.md).
 
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
-[MIT license](LICENSE-MIT) at your option — the Rust ecosystem's standard
-dual license. Apache-2.0 carries an express patent grant; MIT is maximally
-simple and GPLv2-compatible. Offering both lets every downstream user pick
-whichever their project or policy needs. Unless you explicitly state
+[MIT license](LICENSE-MIT) at your option. Unless you explicitly state
 otherwise, any contribution intentionally submitted for inclusion in the
-work by you, as defined in the Apache-2.0 license, shall be dual licensed
-as above, without any additional terms or conditions.
+work by you, as defined in the Apache-2.0 license, shall be dual licensed as
+above, without any additional terms or conditions.
 
 [rexpect]: https://crates.io/crates/rexpect
 [expectrl]: https://crates.io/crates/expectrl
