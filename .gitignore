@@ -1,3 +1,5 @@
 /target
 **/*.pending-snap
 .DS_Store
+/tools/semver-gate-selftest/*/target
+/tools/semver-gate-selftest/*/Cargo.lock

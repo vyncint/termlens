@@ -5,9 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Until 1.0, minor versions (0.x) may contain breaking changes; they are always
-listed under a **Changed** or **Removed** heading.
+listed under a **Changed** or **Removed** heading, in a bullet that begins
+**Breaking:** — the semver gate in CI reads that marker.
 
 ## [Unreleased]
+
+### Added
+
+- **A semver gate on every pull request, forced and per feature view**
+  (#323). The only check was in `release.yml`, on the tag, and it let the
+  version number decide how much to check: a `0.10 -> 0.11` bump is
+  inferred as a major release and every check is skipped, so a public
+  function removed in the same PR as the bump passed. And `--all-features`
+  cannot see an item moved behind a feature — that view never loses the
+  item — while Cargo calls exactly that a major change.
+
+  `ci.yml` now runs `cargo-semver-checks` against the last published
+  release with the release type forced to `patch`, three times: default
+  features, only explicit features, all features. A deliberate break
+  carries the `breaking` pull-request label and is recorded in this file as
+  a `- **Breaking` bullet, which is what keeps `main` green after the merge
+  where no label exists; either declaration switches the run to `major`
+  (`minor` still fails a removed item on a 0.x crate — measured, and pinned).
+  `tools/semver-gate-selftest/` holds three one-file model crates and a
+  script that asserts the gate fails on a removed item and on a gated item,
+  and passes the baseline against itself, so the gate was seen to fail
+  before it was trusted to pass. The baseline is a literal in `ci.yml`,
+  moved after each publish (`docs/RELEASING.md`).
+
+- **The MSRV job compiles every feature configuration** (#325). It ran
+  `--all-targets` under the default set only, so `decode`, `regex` and the
+  library's `serde` code had never met Rust 1.85 in CI while the README
+  advertised one MSRV for the crate. Both ends of the feature axis compile
+  at the floor today, without a bump.
+
+### Fixed
+
+- **The minimal library build is now actually tested** (#324). Cargo
+  unifies features across every package in one invocation, and
+  `termlens-cli` depends on the library with `features = ["serde"]`, so
+  `cargo test --workspace --no-default-features` tested a library with
+  `serde` on. The `features` job selects the library alone for each
+  reduced configuration and asserts the isolation
+  (`.github/scripts/check-feature-isolation.sh`). It was not hypothetical:
+  `tests/record.rs` used `serde_json` unconditionally, and
+  `cargo test -p termlens --no-default-features` did not build until this
+  release added it as a dev-dependency.
 
 ## [0.10.3] - 2026-09-10
 
