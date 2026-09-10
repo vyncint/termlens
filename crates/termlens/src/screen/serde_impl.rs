@@ -7,6 +7,15 @@
 //! and there are exactly `rows` of them — through a validating constructor
 //! rather than a bare derive, so a hand-edited or truncated file is an
 //! error and never a screen that panics on its first `cell()`.
+//!
+//! The JSON is a persisted artifact, not a wire between two copies of one
+//! version: `termlens diff` and `termlens render` read it back as a saved
+//! screen, and consumers commit it. So it carries a **format number**
+//! (#329). `"format": 1` is the shape specified in `docs/DESIGN.md` §3;
+//! a file written before the field existed (0.10) reads as format 1, since
+//! that is what it is; a number this build does not know is refused with
+//! a message naming it rather than read as far as the fields happen to
+//! line up.
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -21,9 +30,16 @@ struct Cursor {
     visible: bool,
 }
 
-/// What a [`Screen`] is on the wire.
+/// The one shape this build writes and reads. A new number is a new
+/// stability candidate or a major version, never a silent change
+/// (`docs/STABILITY.md`).
+const JSON_FORMAT: u32 = 1;
+
+/// What a [`Screen`] is on the wire. `format` first, so a reader sees it
+/// before the grid.
 #[derive(Serialize)]
 struct Wire<'a> {
+    format: u32,
     cols: u16,
     rows: u16,
     cursor: Cursor,
@@ -31,8 +47,15 @@ struct Wire<'a> {
     state: &'a TermState,
 }
 
+/// 0.10 wrote no `format` field; its shape is format 1.
+fn format_when_absent() -> u32 {
+    JSON_FORMAT
+}
+
 #[derive(Deserialize)]
 struct OwnedWire {
+    #[serde(default = "format_when_absent")]
+    format: u32,
     cols: u16,
     rows: u16,
     cursor: Cursor,
@@ -44,6 +67,7 @@ impl Serialize for Screen {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let width = usize::from(self.cols).max(1);
         Wire {
+            format: JSON_FORMAT,
             cols: self.cols,
             rows: self.rows,
             cursor: Cursor {
@@ -61,6 +85,13 @@ impl Serialize for Screen {
 impl<'de> Deserialize<'de> for Screen {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = OwnedWire::deserialize(deserializer)?;
+        if wire.format != JSON_FORMAT {
+            return Err(D::Error::custom(format!(
+                "saved-screen JSON format {} is not one this termlens reads (it reads format {JSON_FORMAT}); \
+                 a newer termlens wrote this file",
+                wire.format
+            )));
+        }
         if wire.cells.len() != usize::from(wire.rows) {
             return Err(D::Error::custom(format!(
                 "a {}x{} screen needs {} rows of cells, not {}",

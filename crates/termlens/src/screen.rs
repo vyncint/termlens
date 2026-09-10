@@ -46,6 +46,25 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
+impl fmt::Display for Color {
+    /// The token the `styles:` block of the snapshot format writes
+    /// (`docs/DESIGN.md` §3): a palette index as decimal (`4`), an RGB
+    /// colour as `#rrggbb` (`#1e1e2e`). [`Color::Default`] renders as
+    /// `default`, which the block itself never writes — a default-styled
+    /// span is omitted, so absence means default — but a message that
+    /// prints a cell's colour needs a word for it.
+    ///
+    /// `Screen::parse` reads the indexed and RGB forms back, so a colour
+    /// printed this way round-trips through a saved screen.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Color::Default => f.write_str("default"),
+            Color::Indexed(i) => write!(f, "{i}"),
+            Color::Rgb(r, g, b) => write!(f, "#{r:02x}{g:02x}{b:02x}"),
+        }
+    }
+}
+
 /// Visual attributes of a [`Cell`].
 ///
 /// Inspect them per cell via [`Cell::style`], or snapshot them wholesale
@@ -562,6 +581,40 @@ pub enum Location {
     },
 }
 
+impl Location {
+    /// True when the needle is on the visible grid.
+    ///
+    /// ```text
+    /// assert!(s.locate("total").is_some_and(Location::is_on_screen));
+    /// ```
+    #[must_use]
+    pub fn is_on_screen(self) -> bool {
+        matches!(self, Location::Screen { .. })
+    }
+
+    /// True when the needle has scrolled off into the retained history.
+    #[must_use]
+    pub fn is_in_history(self) -> bool {
+        matches!(self, Location::History { .. })
+    }
+
+    /// The column, in either region: a real terminal column on the grid,
+    /// the display column of the row *as it was captured* in history.
+    /// Both are zero-based and both answer "how far along the row".
+    ///
+    /// There is deliberately no `row()`. The two rows are different
+    /// things — a grid row counted from the top of the screen, a history
+    /// row counted from the oldest retained line — and one accessor
+    /// returning either would invite exactly the confusion this enum
+    /// exists to prevent. Match on the variant when the row matters.
+    #[must_use]
+    pub fn col(self) -> u16 {
+        match self {
+            Location::Screen { col, .. } | Location::History { col, .. } => col,
+        }
+    }
+}
+
 /// An immutable snapshot of the terminal screen.
 ///
 /// Cheap to clone (the grid is shared behind an [`Arc`]); every clone
@@ -669,9 +722,29 @@ impl Screen {
     }
 
     /// Cursor position and visibility: `(row, col, visible)`.
+    ///
+    /// The position is what most callers want; for the visibility alone,
+    /// [`cursor_visible`](Self::cursor_visible) says so at the call site
+    /// instead of `.2`.
     #[must_use]
     pub fn cursor(&self) -> (u16, u16, bool) {
         (self.cursor_row, self.cursor_col, self.cursor_visible)
+    }
+
+    /// Whether the cursor is shown (`DECTCEM`, `CSI ? 25 h`/`l`) — the
+    /// third element of [`cursor`](Self::cursor), on its own, so an
+    /// assertion reads as what it checks:
+    ///
+    /// ```text
+    /// assert!(!s.cursor_visible(), "a list view hides the cursor: {s}");
+    /// ```
+    ///
+    /// The snapshot header renders this as `cursor: hidden`; a hidden
+    /// cursor's position is still reported by `cursor()` but is not part
+    /// of the picture [`diff`](Self::diff) compares.
+    #[must_use]
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor_visible
     }
 
     /// The cursor shape the application asked for with `DECSCUSR`
@@ -2001,11 +2074,11 @@ impl Style {
 
     /// Fixed-order tokens for the `styles:` block (see `docs/DESIGN.md` §3).
     pub(crate) fn tokens(&self) -> String {
+        // `Display for Color` is the token; the block only ever writes a
+        // non-default one, since absence means default.
         fn color(prefix: &str, color: Color, out: &mut Vec<String>) {
-            match color {
-                Color::Default => {}
-                Color::Indexed(i) => out.push(format!("{prefix}={i}")),
-                Color::Rgb(r, g, b) => out.push(format!("{prefix}=#{r:02x}{g:02x}{b:02x}")),
+            if color != Color::Default {
+                out.push(format!("{prefix}={color}"));
             }
         }
         let mut tokens = Vec::new();
@@ -2033,6 +2106,21 @@ impl Style {
 }
 
 /// [`Screen`] rendered with its styles — see [`Screen::with_styles`].
+///
+/// Nameable, so it can be stored, returned from a helper or taken as a
+/// parameter rather than only passed straight to a snapshot macro:
+///
+/// ```
+/// use termlens::{Screen, ScreenWithStyles};
+///
+/// fn styled(screen: &Screen) -> ScreenWithStyles<'_> {
+///     screen.with_styles()
+/// }
+///
+/// let screen = Screen::parse("size: 4x1  cursor: 0,0\nhi")?;
+/// assert!(styled(&screen).to_string().ends_with("styles:\n(none)"));
+/// # Ok::<(), termlens::Error>(())
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenWithStyles<'a> {
     screen: &'a Screen,
