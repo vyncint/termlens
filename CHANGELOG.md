@@ -9,6 +9,8 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-09-10
+
 ### Fixed
 
 - **Every link on the crates.io page pointed at a 404** (#341). The root
