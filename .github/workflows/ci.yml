@@ -71,6 +71,11 @@ jobs:
       # to fail on the pull request rather than after the publish.
       - run: cargo build -p termlens-cli
       - run: .github/scripts/check-cli-contract.sh target/debug/termlens
+      # The README is shipped as this crate's readme, and crates.io rewrites
+      # a relative link against crates/termlens/ rather than the repo root.
+      # Every relative link on the 0.10.2 page was a 404 and nothing here
+      # could see it, because the same file renders correctly on GitHub.
+      - run: .github/scripts/check-readme-links.sh
       # The screens of whatever failed, in the step summary (#251). The
       # suite dogfoods the action with the CLI from this tree.
       - uses: ./.github/actions/report

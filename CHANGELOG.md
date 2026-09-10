@@ -9,6 +9,29 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every link on the crates.io page pointed at a 404** (#341). The root
+  README is shipped as this crate's readme (`readme = "../../README.md"`),
+  and crates.io rewrites a *relative* link against the crate's directory in
+  the repository rather than the repository root — so `docs/DESIGN.md`
+  became `…/blob/HEAD/crates/termlens/docs/DESIGN.md`, and all ten relative
+  links on the 0.10.2 page were dead: the design, stability, limitations and
+  backends documents, the skill, the changelog, contributing, security, both
+  licences and the stress workflow.
+
+  Nothing here could see it. The same file renders correctly on GitHub,
+  where it really is at the root, so the bug existed only on the surface
+  most new readers arrive at.
+
+  The links are absolute now, and `.github/scripts/check-readme-links.sh`
+  (in `ci.yml`) refuses a relative one — and separately checks that every
+  absolute target still exists in the repository, offline, which catches a
+  renamed file that a link checker asking GitHub would miss.
+
+  Fixed for future releases only: crates.io renders each version's readme as
+  published, so the 0.10.2 page and earlier stay as they are.
+
 ## [0.10.2] - 2026-09-10
 
 ### Added
