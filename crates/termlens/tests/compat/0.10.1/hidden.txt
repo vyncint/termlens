@@ -1,0 +1,7 @@
+size: 20x3  cursor: hidden
+cursor gone
+
+
+
+styles:
+(none)

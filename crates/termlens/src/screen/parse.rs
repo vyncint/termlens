@@ -401,6 +401,30 @@ mod tests {
         assert!(many.cell(0, 3).unwrap().is_wide_continuation());
     }
 
+    /// `Display for Color` is the forward half of the token `parse_color`
+    /// reads (#315): the two halves of one documented format agree.
+    #[test]
+    fn a_colour_displays_as_the_token_the_parser_reads() {
+        for color in [
+            Color::Indexed(0),
+            Color::Indexed(4),
+            Color::Indexed(208),
+            Color::Indexed(255),
+            Color::Rgb(0x1e, 0x1e, 0x2e),
+            Color::Rgb(0, 0, 0),
+            Color::Rgb(255, 0, 7),
+        ] {
+            let token = color.to_string();
+            assert_eq!(parse_color(&token), Some(color), "{token}");
+        }
+        assert_eq!(Color::Indexed(4).to_string(), "4");
+        assert_eq!(Color::Rgb(0x1e, 0x1e, 0x2e).to_string(), "#1e1e2e");
+        // The block never writes a default colour — absence means default —
+        // so the parser does not read the word back; it is for messages.
+        assert_eq!(Color::Default.to_string(), "default");
+        assert_eq!(parse_color("default"), None);
+    }
+
     #[test]
     fn combining_marks_join_the_cell_before_them() {
         let screen = Screen::parse("size: 3x1  cursor: 0,0\ne\u{301}x").unwrap();

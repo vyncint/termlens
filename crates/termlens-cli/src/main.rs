@@ -11,8 +11,9 @@
 //! Exit codes: 0 ran; `diff` exits 1 when the screens differ; 2 means the
 //! command itself could not run — bad arguments, an unreadable file, a
 //! program that could not be spawned. `inspect` is a viewer, not a gate:
-//! the program's own exit status is reported under the screen, not
-//! propagated.
+//! the program's own exit status is reported on stderr under the screen,
+//! not propagated — and the screen alone goes to stdout, so `inspect … >
+//! file` is a saved screen `diff` and `render` read back (#340).
 
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
@@ -29,9 +30,10 @@ commands:
   diff [--color WHEN] <a> <b>          compare two saved screens; exit 1 when they differ
   render --svg|--html|--ansi|--text <a>  render a saved screen
 
-A saved screen is the snapshot text format termlens prints — an insta .snap
-with or without its header, the block a wait error prints, a
-TERMLENS_ARTIFACT_DIR file — or the JSON the crate's `serde` feature writes.
+A saved screen is the snapshot text format termlens prints — what `inspect`
+writes to stdout, an insta .snap with or without its header, the block a
+wait error prints, a TERMLENS_ARTIFACT_DIR file — or the JSON the crate's
+`serde` feature writes.
 
 Exit code 0: the command ran (diff: the screens are the same picture).
 Exit code 1: diff found a difference. Exit code 2: termlens itself could not
@@ -52,8 +54,10 @@ The child environment is cleared by default except for PATH; --inherit-env
 keeps the caller's environment, and repeatable --env sets selected values.
 --ansi paints the screen in colour instead of the plain text format.
 
-The trailer under the screen says what the program did — its exit status,
-or that it was still running at the deadline. Exit code 2 means inspect
+The screen goes to stdout and nothing else does, so `inspect … > file`
+saves a screen that `termlens diff` and `termlens render` read back. The
+trailer that says what the program did — its exit status, or that it was
+still running at the deadline — goes to stderr. Exit code 2 means inspect
 itself could not run: bad arguments, or a program that could not be spawned.";
 
 const DIFF_USAGE: &str = "\
@@ -117,7 +121,11 @@ fn main() -> ExitCode {
 // ---------------------------------------------------------------- saved screens
 
 /// Read a saved screen: an insta `.snap` (its `---` header dropped), the
-/// text format, or JSON.
+/// text format (an `inspect` trailer from before 0.11 dropped), or JSON.
+///
+/// The two decorations this skips are the two termlens itself writes
+/// around a screen, and `Screen::parse` accepts neither — the library
+/// reads the format, the tool knows its own wrappers (`docs/DESIGN.md` §3).
 fn load(path: &Path) -> Result<Screen, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     // A checkout on Windows may have given the file CRLF endings; the
@@ -128,7 +136,7 @@ fn load(path: &Path) -> Result<Screen, String> {
         return serde_json::from_str(body)
             .map_err(|e| format!("{}: not a termlens Screen: {e}", path.display()));
     }
-    Screen::parse(body).map_err(|e| format!("{}: {e}", path.display()))
+    Screen::parse(strip_inspect_trailer(body)).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// insta writes `---\n<metadata>\n---\n` above the content; the content is
@@ -137,6 +145,31 @@ fn strip_insta_header(text: &str) -> &str {
     text.strip_prefix("---\n")
         .and_then(|rest| rest.find("\n---\n").map(|end| &rest[end + 5..]))
         .unwrap_or(text)
+}
+
+/// `inspect` before 0.11 wrote its `--- exited: … ---` trailer to stdout,
+/// so a screen saved with `> file` then carried it (#340). The trailer now
+/// goes to stderr, and a file saved that way still reads: the last
+/// non-blank line is dropped when it is one of the three trailers
+/// `inspect` writes — exactly those, so a grid row that happens to start
+/// with `---` is left alone.
+fn strip_inspect_trailer(text: &str) -> &str {
+    let trimmed = text.trim_end_matches('\n');
+    let start = trimmed.rfind('\n').map_or(0, |at| at + 1);
+    let last = &trimmed[start..];
+    let is_trailer = last.ends_with(" ---")
+        && [
+            "--- exited: ",
+            "--- still running at the deadline",
+            "--- waiting for the program failed: ",
+        ]
+        .iter()
+        .any(|prefix| last.starts_with(prefix));
+    if is_trailer {
+        &trimmed[..start]
+    } else {
+        text
+    }
 }
 
 // ------------------------------------------------------------------------ diff
@@ -413,24 +446,23 @@ fn inspect(args: Vec<String>) -> ExitCode {
         Err(e) => return fail(&e.to_string()),
     };
 
-    let mut out = String::new();
-    match t.wait_exit() {
-        Ok(status) => {
-            out.push_str(&inspect_render(&t.screen(), ansi));
-            out.push_str(&format!("\n--- exited: {status} ---\n"));
-        }
+    // The screen to stdout, the trailer to stderr (#340): `inspect … > file`
+    // then saves exactly a screen, which `diff` and `render` read back,
+    // while a human at a terminal still sees both. Before 0.11 the trailer
+    // followed the screen on stdout and no CLI route produced a file the
+    // CLI would accept.
+    let trailer = match t.wait_exit() {
+        Ok(status) => format!("--- exited: {status} ---"),
         Err(termlens::Error::Timeout { .. }) => {
             // Still running at the deadline: settle on a quiet screen
             // instead, bounded by the deadline too unless the silence window
             // asked for is itself longer.
             let _ = t.wait_idle_for(idle, timeout.max(idle));
-            out.push_str(&inspect_render(&t.screen(), ansi));
-            out.push_str("\n--- still running at the deadline (killed on exit) ---\n");
+            "--- still running at the deadline (killed on exit) ---".to_owned()
         }
-        Err(e) => {
-            out.push_str(&inspect_render(&t.screen(), ansi));
-            out.push_str(&format!("\n--- waiting for the program failed: {e} ---\n"));
-        }
-    }
-    print(&out)
+        Err(e) => format!("--- waiting for the program failed: {e} ---"),
+    };
+    let code = print(&format!("{}\n", inspect_render(&t.screen(), ansi)));
+    eprintln!("{trailer}");
+    code
 }

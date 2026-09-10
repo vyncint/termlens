@@ -28,7 +28,7 @@ fn hello_tui_draws_a_static_alt_screen_frame() -> termlens::Result<()> {
 
     let screen = t.screen();
     assert!(screen.contains("status: ready"), "{screen}");
-    let (_, _, cursor_visible) = screen.cursor();
+    let cursor_visible = screen.cursor_visible();
     assert!(!cursor_visible, "hello-tui hides the cursor");
     assert_eq!(screen.find("hello-tui"), Some((1, 2)));
     insta::assert_snapshot!(t.screen());

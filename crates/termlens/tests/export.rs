@@ -59,6 +59,17 @@ fn a_diff_shows_only_what_changed_and_where() -> termlens::Result<()> {
     );
     assert!(a.diff(&a).is_empty());
     assert_eq!(a.diff(&a).to_string(), "no difference");
+    // #308: which rows changed, and which style runs, as an API rather
+    // than a substring of the rendering. Row 0 lost a digit under the
+    // same style; row 1 lost its reverse-video highlight.
+    assert_eq!(diff.changed_rows().collect::<Vec<_>>(), [0, 1], "{diff}");
+    assert_eq!(
+        diff.style_changes().collect::<Vec<_>>(),
+        [(1, "0-5 reverse", "(none)")],
+        "{diff}"
+    );
+    assert!(a.diff(&a).changed_rows().next().is_none());
+    assert!(a.diff(&a).style_changes().next().is_none());
     insta::assert_snapshot!("diff_rendering", diff.to_string());
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
@@ -165,6 +176,43 @@ mod json {
         Ok(())
     }
 
+    /// The JSON is a persisted artifact, so it says which shape it is
+    /// (#329): `"format": 1`, first. A 0.10 file has no such field and is
+    /// format 1 by definition; a number this build does not know is
+    /// refused with a message that names it.
+    #[test]
+    fn the_json_carries_its_format_and_reads_a_file_without_one() -> termlens::Result<()> {
+        let mut t = emit(&["ab\nDONE", "--wait"])?;
+        t.wait_until(|s| s.contains("DONE"))?;
+        let screen = t.screen();
+        let json = serde_json::to_string(&screen).expect("serializes");
+        assert!(
+            json.starts_with("{\"format\":1,"),
+            "the format number leads the document: {}",
+            &json[..40]
+        );
+
+        // What 0.10 wrote: the same document without the field.
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value.as_object_mut().unwrap().remove("format").is_some());
+        let old: termlens::Screen =
+            serde_json::from_value(value.clone()).expect("a 0.10 file reads");
+        assert_eq!(old, screen, "and is the same screen");
+
+        // What a later termlens might write.
+        value["format"] = serde_json::json!(2);
+        let err = serde_json::from_value::<termlens::Screen>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("format 2") && err.contains("reads format 1"),
+            "refused with the numbers: {err}"
+        );
+        t.send(Key::Enter)?;
+        assert!(t.wait_exit()?.success());
+        Ok(())
+    }
+
     #[test]
     fn a_screen_that_does_not_hold_together_is_refused() -> termlens::Result<()> {
         let mut t = emit(&["ab\nDONE", "--wait"])?;
@@ -259,9 +307,10 @@ fn a_wide_character_with_a_combining_mark_round_trips() -> termlens::Result<()> 
 )]
 fn a_hidden_cursor_round_trips_as_the_same_picture() -> termlens::Result<()> {
     let mut t = emit(&["--raw", r"hello\e[2;3H\e[?25l", "--wait"])?;
-    t.wait_until(|s| s.contains("hello") && !s.cursor().2)?;
+    t.wait_until(|s| s.contains("hello") && !s.cursor_visible())?;
     let screen = t.screen();
     assert_eq!(screen.cursor(), (1, 2, false));
+    assert!(!screen.cursor_visible(), "the tuple and the accessor agree");
 
     let parsed = Screen::parse(&screen.with_styles().to_string())?;
     assert_eq!(

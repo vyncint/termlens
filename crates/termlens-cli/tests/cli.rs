@@ -236,3 +236,117 @@ fn subcommand_version_prints_same_string_as_top_level() -> termlens::Result<()> 
     }
     Ok(())
 }
+
+/// `inspect … > file` is a saved screen (#340): the screen alone goes to
+/// stdout and the trailer to stderr, so the file a redirect captures is
+/// what `render` and `diff` read. Driven without a PTY here on purpose —
+/// through one, both streams land on the same screen and the split is
+/// invisible.
+#[test]
+#[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
+fn inspect_stdout_is_a_saved_screen_and_the_trailer_is_on_stderr() -> termlens::Result<()> {
+    use std::process::Command;
+    let bin = env!("CARGO_BIN_EXE_termlens");
+    let out = Command::new(bin)
+        .args(["inspect", "--size", "20x3", "sh", "-c", "printf 'hi there'"])
+        .output()?;
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let stderr = String::from_utf8(out.stderr).expect("utf-8");
+    assert!(stdout.starts_with("size: 20x3  cursor: "), "{stdout:?}");
+    assert!(stdout.contains("hi there"), "{stdout:?}");
+    assert!(!stdout.contains("---"), "no trailer on stdout: {stdout:?}");
+    assert_eq!(
+        stderr.trim_end(),
+        "--- exited: exit code 0 ---",
+        "{stderr:?}"
+    );
+    // What the library reads from it is the screen inspect saw.
+    let parsed = Screen::parse(&stdout)?;
+    assert_eq!(parsed.size(), (20, 3));
+    assert_eq!(parsed.find("hi there"), Some((0, 0)));
+
+    // And the CLI reads its own output back: render, and diff against itself.
+    let path =
+        std::env::temp_dir().join(format!("termlens-cli-inspect-{}.txt", std::process::id()));
+    std::fs::write(&path, &stdout)?;
+    let file = path.to_str().unwrap();
+    let render = Command::new(bin)
+        .args(["render", "--text", file])
+        .output()?;
+    assert_eq!(render.status.code(), Some(0), "{render:?}");
+    let diff = Command::new(bin).args(["diff", file, file]).output()?;
+    assert_eq!(diff.status.code(), Some(0), "{diff:?}");
+
+    // A file a 0.10 inspect saved — trailer on stdout — still reads.
+    let old = path.with_extension("old.txt");
+    std::fs::write(&old, format!("{stdout}--- exited: exit code 0 ---\n"))?;
+    let render = Command::new(bin)
+        .args(["render", "--text", old.to_str().unwrap()])
+        .output()?;
+    assert_eq!(render.status.code(), Some(0), "{render:?}");
+    let diff = Command::new(bin)
+        .args(["diff", file, old.to_str().unwrap()])
+        .output()?;
+    assert_eq!(
+        diff.status.code(),
+        Some(0),
+        "the trailer is not a row: {diff:?}"
+    );
+    // …while a grid row that merely starts with `---` is content.
+    let dashes = path.with_extension("dashes.txt");
+    std::fs::write(&dashes, "size: 20x2  cursor: 0,0\n--- not a trailer\n")?;
+    let render = Command::new(bin)
+        .args(["render", "--text", dashes.to_str().unwrap()])
+        .output()?;
+    assert_eq!(render.status.code(), Some(0), "{render:?}");
+    assert!(
+        String::from_utf8_lossy(&render.stdout).contains("--- not a trailer"),
+        "{render:?}"
+    );
+    for p in [path, old, dashes] {
+        let _ = std::fs::remove_file(p);
+    }
+    Ok(())
+}
+
+/// The compatibility corpus (#327): every saved screen a published release
+/// wrote — text and JSON — is a file this CLI reads. The library's
+/// `tests/compat.rs` holds the round trips; this is the fourth check it
+/// names, from the tool's side.
+#[test]
+fn every_corpus_file_renders() -> termlens::Result<()> {
+    use std::process::Command;
+    let bin = env!("CARGO_BIN_EXE_termlens");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../termlens/tests/compat");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&root)?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .flat_map(|dir| std::fs::read_dir(dir).expect("a version directory"))
+        .map(|entry| entry.expect("a corpus file").path())
+        .filter(|p| p.extension().is_some_and(|e| e == "txt" || e == "json"))
+        .collect();
+    files.sort();
+    assert!(
+        files.len() >= 12,
+        "the 0.10.1 corpus alone is twelve files, found {}",
+        files.len()
+    );
+    for file in files {
+        let out = Command::new(bin)
+            .args(["render", "--text", file.to_str().unwrap()])
+            .output()?;
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}: {}",
+            file.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.starts_with("size: "), "{}: {text}", file.display());
+    }
+    Ok(())
+}

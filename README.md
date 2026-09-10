@@ -169,9 +169,10 @@ insta::assert_snapshot!(s.mask_matches(&regex::Regex::new(r"\d\d:\d\d:\d\d")?, '
 ```
 
 `Screen::diff(&other)` reports what changed between two screens cell by
-cell; `Screen::parse` reads a saved snapshot back, so the text termlens
-prints — an insta `.snap`, the block a wait error leaves in a log — is also
-its input format.
+cell — `changed_rows()`, `style_changes()`, and a rendering of only the rows
+that changed; `Screen::parse` reads a saved snapshot back, so the text
+termlens prints — an insta `.snap`, the block a wait error leaves in a log,
+what `termlens inspect` writes to stdout — is also its input format.
 
 ## What a test can see
 
@@ -179,7 +180,7 @@ its input format.
 | --- | --- |
 | What does the user see? | `text()`, `row_text(row)`, `cell(row, col)`, `contains`, `find`, `find_all`; with `regex`: `matches`, `find_match`, `wait_until_matches` |
 | Is it styled as claimed? | `cell(..).style()` — colours, bold/dim, italic, underline, reverse, **blink**, **conceal**, **strikethrough** |
-| Where is the cursor, and what shape? | `cursor()`, `cursor_shape()`, `cursor_blink()` |
+| Where is the cursor, and what shape? | `cursor()`, `cursor_visible()`, `cursor_shape()`, `cursor_blink()` |
 | Which modes did the application turn on? | `alternate_screen()`, `bracketed_paste()`, `mouse_mode()`, `focus_events()`, `application_cursor()`, `insert_mode()` |
 | What did it tell the terminal out of band? | `title()`, `clipboard()` (`OSC 52`), `links()` (`OSC 8`) |
 | Did something happen that changed no cell? | `repaints()`, `bells()`, `visual_bells()`, `graphics()`, `frame_timings()` |

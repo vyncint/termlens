@@ -178,6 +178,30 @@ impl ScreenDiff {
     pub fn cells(&self) -> impl Iterator<Item = (u16, u16, &Cell, &Cell)> {
         self.cells.iter().map(|(r, c, a, b)| (*r, *c, a, b))
     }
+
+    /// The rows with at least one changed cell, ascending, each once —
+    /// so "the highlight moved from row 1 to row 2 and nothing else
+    /// changed" is `assert_eq!(diff.changed_rows().collect::<Vec<_>>(),
+    /// [1, 2])` rather than a dedup over [`cells`](Self::cells).
+    ///
+    /// Within the overlap of the two grids, like `cells`; a size or cursor
+    /// change alone leaves this empty while [`is_empty`](Self::is_empty)
+    /// is false.
+    pub fn changed_rows(&self) -> impl Iterator<Item = u16> + '_ {
+        self.rows.iter().map(|(row, ..)| *row)
+    }
+
+    /// The `styles:` runs of each changed row whose runs differ, as
+    /// `(row, before, after)` in the tokens [`Screen::with_styles`]
+    /// writes (`(none)` for an all-default row), ascending by row. A row
+    /// whose text changed under unchanged styles is not listed; a row
+    /// whose styles changed under unchanged text is, since a changed
+    /// style is a changed cell.
+    pub fn style_changes(&self) -> impl Iterator<Item = (u16, &str, &str)> {
+        self.style_changes
+            .iter()
+            .map(|(row, before, after)| (*row, before.as_str(), after.as_str()))
+    }
 }
 
 /// `a → b` when they differ, `a` alone when they do not.

@@ -1,0 +1,3 @@
+size: 16x2  cursor: 0,13
+red and plain
+

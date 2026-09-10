@@ -539,7 +539,8 @@ Rules:
    is `<row>: <spans>` with spans joined by `; `. A span is an inclusive,
    0-based column range (`start-end`, or just `start` for one column)
    followed by style tokens in fixed order: `fg=`, `bg=` (indexed colors
-   as decimal, RGB as `#rrggbb`), then `bold`, `dim`, `italic`,
+   as decimal, RGB as `#rrggbb` — the token `Color`'s `Display` writes and
+   `Screen::parse` reads), then `bold`, `dim`, `italic`,
    `underline`, `blink`, `reverse`, `conceal`, `strikethrough` — SGR order,
    which is the order the original five were already in, so an existing
    span's tokens are unchanged unless the cell carries one of the three
@@ -680,6 +681,79 @@ Rules:
 The `insta` feature (default) re-exports `insta` and ships
 `assert_screen_snapshot!` so the snapshotting insta version can't drift
 from the one the macro targets.
+
+### What a reader skips, and what it does not
+
+The format proper begins at the `size:` header and ends with the grid or
+the `styles:` block. `Screen::parse` accepts exactly that — every other
+line is an `Error::Parse` naming it. termlens itself writes two things
+*around* a screen, and its own reader, the `termlens` CLI, skips both:
+
+- **Above:** the insta header, `---` / `source: …` / `---`, which a `.snap`
+  file carries over the content that was snapshotted.
+- **Below:** the trailer `termlens inspect` wrote to stdout before 0.11 —
+  `--- exited: … ---`, `--- still running at the deadline … ---`,
+  `--- waiting for the program failed: … ---`. Since 0.11 the trailer goes
+  to **stderr** and stdout carries the screen alone, so `termlens inspect
+  prog > file` saves a screen `diff` and `render` read back (#340); the
+  CLI still drops exactly those three shapes when they are the last line of
+  a file, so a file saved by a 0.10 `inspect` reads too. Nothing else
+  trailing is skipped: a grid row that merely begins with `---` is content.
+
+The split is deliberate. The library reads the *format*; the tool knows
+its own *wrappers*. A consumer parsing a file with `Screen::parse` sees
+the strict format and nothing else, and the list of decorations is the
+CLI's to extend.
+
+### The JSON shape (`serde` feature)
+
+With the `serde` feature a `Screen` serialises to JSON, and the CLI reads
+that JSON back as a saved screen — so it is a persisted artifact, and it
+is specified here next to the text format (#329). Format **1**:
+
+```json
+{
+  "format": 1,
+  "cols": 30, "rows": 4,
+  "cursor": { "row": 2, "col": 4, "visible": true },
+  "cells": [ [ { "contents": "m", "style": { … }, "wide": false, "wide_continuation": false }, … ], … ],
+  "state": { "title": "", "alternate_screen": false, … }
+}
+```
+
+- `format` — the shape number, first. A file without it was written by
+  0.10 and *is* format 1; a reader that meets a number it does not know
+  refuses the file and names both numbers rather than reading as far as
+  the fields line up. A new number is a new stability candidate or a
+  major version, never a silent change.
+- `cols`, `rows` — the geometry, in the terminal's order.
+- `cursor` — three named fields. A hidden cursor keeps its position here
+  (`"visible": false`), unlike the text format, where `cursor: hidden`
+  drops it; `Screen::diff` treats a hidden cursor's position as not part
+  of the picture either way.
+- `cells` — **rows of cells**, `rows` arrays of exactly `cols` objects, so
+  a JSON diff reads by row. A cell is `contents` (a string: one grapheme,
+  possibly with combining marks; `""` for an erased cell and for the
+  continuation half of a wide character), `style`, `wide` and
+  `wide_continuation`. A style is `fg`, `bg` and the eight attribute
+  booleans in SGR order; a colour is `"default"`, `{"indexed": 4}` or
+  `{"rgb": [30, 30, 46]}`.
+- `state` — the out-of-band state the text format omits, every field the
+  accessors on `Screen` expose: the title, the mode flags, the mouse
+  protocol and the tracking-mode set, the clipboard, the counters, the
+  cursor style, the links, the graphics record, the scrollback (text, and
+  cells when retained), the wrap flags, insert mode, the unsupported
+  sequences with their overflow count, the visual bells.
+
+Nothing is omitted that a `Screen` holds, which is why reading the JSON
+back gives a `Screen` that is `==` to the original where the text format
+gives one that only `diff`s empty. Every row must hold `cols` cells and
+there must be `rows` of them; a file that does not hold together is an
+error, never a screen that panics on its first `cell()`.
+
+The compatibility corpus under `crates/termlens/tests/compat/` holds both
+formats as written by each published release, and `tests/compat.rs`
+holds every later release to reading them (#327).
 
 ### Masks
 

@@ -141,6 +141,16 @@ fn locate_says_which_region_holds_the_needle() -> termlens::Result<()> {
         matches!(s.locate("line 1"), Some(Location::Screen { .. })),
         "{s}"
     );
+    // #306: the one-fact questions without a match. The column is the
+    // same number either region reports; the row deliberately is not
+    // offered, since a grid row and a history row are different things.
+    let ready = s.locate("READY").expect("on the grid");
+    assert!(ready.is_on_screen() && !ready.is_in_history());
+    assert_eq!(ready.col(), 0);
+    let secret = s.locate("SECRET").expect("in history");
+    assert!(secret.is_in_history() && !secret.is_on_screen());
+    assert_eq!(secret.col(), 4);
+    assert!(s.locate("line 1").is_some_and(Location::is_on_screen));
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())

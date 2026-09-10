@@ -74,18 +74,28 @@ for sub in inspect diff render; do
   fi
 done
 
-# --- inspect drives a real PTY and prints a screen with its trailer.
+# --- inspect drives a real PTY: the screen on stdout, the trailer on stderr.
 expect "inspect a program"         0 "$BIN" inspect sh -c 'printf hi'
-"$BIN" inspect sh -c 'printf hi' > "$WORK/raw.txt" 2>/dev/null || true
-contains "inspect prints the screen"  "hi"            "$WORK/raw.txt"
-contains "inspect prints the header"  "size: "        "$WORK/raw.txt"
-contains "inspect prints the trailer" "--- exited: "  "$WORK/raw.txt"
+"$BIN" inspect sh -c 'printf hi' > "$WORK/a.snap" 2> "$WORK/a.err" || true
+contains "inspect prints the screen"          "hi"            "$WORK/a.snap"
+contains "inspect prints the header"          "size: "        "$WORK/a.snap"
+contains "inspect's trailer goes to stderr"   "--- exited: "  "$WORK/a.err"
+if grep -q '^--- ' "$WORK/a.snap"; then
+  printf '  FAIL  %-46s stdout carries a trailer line\n' "inspect > file is a screen" >&2
+  status=1
+else
+  printf '  ok    %-46s no trailer on stdout\n' "inspect > file is a screen"
+fi
 
-# A saved screen is that output without the human trailer (see the note in
-# `install.yml`: the trailer is not part of the snapshot format).
-sed '/^--- exited:/d' "$WORK/raw.txt" > "$WORK/a.snap"
-"$BIN" inspect sh -c 'printf bye' 2>/dev/null | sed '/^--- exited:/d' > "$WORK/b.snap"
+# `inspect … > file` is a saved screen: what stdout carried, unedited, is
+# what render and diff read below (#340). Before 0.11 the trailer followed
+# the screen on stdout and nothing the CLI wrote was a file it would read.
+"$BIN" inspect sh -c 'printf bye' > "$WORK/b.snap" 2>/dev/null || true
 printf 'not a saved screen at all\n' > "$WORK/junk.txt"
+# A file saved by a 0.10 inspect, trailer and all, still reads.
+{ cat "$WORK/a.snap"; echo "--- exited: exit code 0 ---"; } > "$WORK/old.snap"
+expect "a 0.10 inspect file, trailer included" 0 "$BIN" render --text "$WORK/old.snap"
+expect "diff, inspect output against itself" 0 "$BIN" diff "$WORK/a.snap" "$WORK/a.snap"
 
 # --- render, every format, from a saved screen.
 expect "render --text"             0 "$BIN" render --text "$WORK/a.snap"

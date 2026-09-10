@@ -12,6 +12,61 @@ listed under a **Changed** or **Removed** heading, in a bullet that begins
 
 ### Added
 
+- **A frozen saved-screen corpus** (#327). Nothing pinned that a file
+  written by 0.10.1 still parses: the insta snapshots are re-recorded when
+  output changes, so a change to the header, the `styles:` block or the
+  JSON shape would have updated them and passed.
+  `crates/termlens/tests/compat/0.10.1/` holds six shapes — plain text,
+  every style token, a hidden cursor, wide and combining characters, a
+  masked screen, and the style-blind text of a styled screen — each with
+  its JSON twin, written by the **published** 0.10.1 through a registry
+  dependency. A file there is never edited; a new version adds a
+  directory. `tests/compat.rs` parses every text file and re-renders it
+  byte for byte, reads every JSON twin as the same picture and
+  re-serialises it to its own document, and the CLI suite renders each
+  file with `termlens render --text`. Editing a corpus file was observed
+  to fail the test.
+
+- **The JSON a `Screen` serialises to carries `"format": 1`** (#329),
+  first in the document. `termlens diff` and `termlens render` read that
+  JSON back as a saved artifact, so it is a persisted format, not a wire
+  between two copies of one version, and it now says which shape it is.
+  A file written by 0.10 has no such field and reads as format 1, since
+  that is what it is; a number this build does not know is refused with a
+  message naming both numbers. The shape is specified in
+  `docs/DESIGN.md` §3 beside the text format: field names, the cursor
+  object, how a hidden cursor and wide/continuation cells are encoded,
+  and that nothing a `Screen` holds is omitted.
+
+- **`Screen::cursor_visible()`** (#331). The tuple `cursor()` returns is
+  unchanged; the new accessor is for the assertion that reads
+  `s.cursor().2` today and says nothing at the call site.
+
+- **`termlens::ScreenWithStyles` is exported** (#332). `Screen::with_styles`
+  returned it, but the type lived in a private module and was not in the
+  crate's re-export list — reachable but unnameable, so it could not be
+  stored in a field or returned from a helper. A doctest names it from a
+  consumer.
+
+- **`Location::is_on_screen()`, `is_in_history()` and `col()`** (#306),
+  for the one-fact questions `Screen::locate` is asked most — "still
+  visible?" and "what column?" — without a `match`. Deliberately no
+  `row()`: a grid row and a history row are different things, and the
+  rustdoc says so.
+
+- **`ScreenDiff::changed_rows()` and `style_changes()`** (#308). The diff
+  computed both and exposed neither, so a test that wanted "the highlight
+  moved from row 1 to row 2 and nothing else changed" dedup'd `cells()` or
+  matched a substring of the rendering. Both read fields already stored;
+  the rendering is unchanged.
+
+- **`Color` implements `Display`** (#315), producing exactly the `styles:`
+  block token — `4` for an indexed colour, `#1e1e2e` for RGB, and the word
+  `default` for [`Color::Default`], which the block never writes because a
+  default-styled span is omitted. The block now uses it, so the two
+  halves of the documented format — this and `Screen::parse` — sit
+  together; every existing snapshot is unchanged.
+
 - **A semver gate on every pull request, forced and per feature view**
   (#323). The only check was in `release.yml`, on the tag, and it let the
   version number decide how much to check: a `0.10 -> 0.11` bump is
@@ -40,6 +95,22 @@ listed under a **Changed** or **Removed** heading, in a bullet that begins
   at the floor today, without a bump.
 
 ### Fixed
+
+- **`termlens inspect … > file` saves a screen `diff` and `render` read**
+  (#340). `inspect` was the only command that produced a screen and the
+  only two that consumed one refused its output: the `--- exited: … ---`
+  trailer went to stdout under the screen, so a redirect captured it and
+  `render` exited 2 on line 26. Measured against the published 0.10.2; no
+  flag suppressed it, and the workaround was a `sed` a user had to
+  invent. The trailer now goes to **stderr** — a human at a terminal
+  still sees both — and stdout carries the screen alone. The CLI also
+  drops exactly those three trailer shapes when they are the last line of
+  a file, so a screen saved by a 0.10 `inspect` reads too; a grid row
+  that merely begins with `---` is content. `docs/DESIGN.md` §3 now says
+  what a reader skips at each end of a file and that `Screen::parse`
+  skips neither. `.github/scripts/check-cli-contract.sh` asserts the
+  round trip against the published binary on every release; run against
+  the published 0.10.3 it fails on exactly this.
 
 - **The minimal library build is now actually tested** (#324). Cargo
   unifies features across every package in one invocation, and

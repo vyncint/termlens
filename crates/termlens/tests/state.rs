@@ -234,7 +234,7 @@ fn a_soft_reset_returns_the_modes_a_screen_can_observe() -> termlens::Result<()>
             && s.bracketed_paste()
             && s.mouse_mode() == MouseMode::PressRelease
             && s.focus_events()
-            && !s.cursor().2
+            && !s.cursor_visible()
             && s.cursor_shape() == CursorShape::Bar
     })?;
 
@@ -249,7 +249,10 @@ fn a_soft_reset_returns_the_modes_a_screen_can_observe() -> termlens::Result<()>
     assert!(!s.bracketed_paste(), "{s}");
     assert_eq!(s.mouse_mode(), MouseMode::None, "{s}");
     assert!(!s.focus_events(), "{s}");
-    assert!(s.cursor().2, "DECTCEM: the cursor is visible again: {s}");
+    assert!(
+        s.cursor_visible(),
+        "DECTCEM: the cursor is visible again: {s}"
+    );
     assert_eq!(s.cursor_shape(), CursorShape::Default, "{s}");
     assert_eq!(s.cursor_blink(), None, "{s}");
 
