@@ -2113,10 +2113,7 @@ expression: s
       false
     ],
     "insert_mode": false,
-    "unsupported": [
-      "^[[8m",
-      "^[[28m"
-    ],
+    "unsupported": [],
     "unsupported_overflow": 0,
     "visual_bells": 0
   }

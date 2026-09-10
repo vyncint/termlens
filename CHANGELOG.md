@@ -32,6 +32,36 @@ listed under a **Changed** or **Removed** heading.
 
 ### Fixed
 
+- **`unsupported()` no longer names the four SGR parameters the attribute
+  shadow implements** (#320). `5`/`25` (blink), `9`/`29` (strikethrough),
+  and `6`/`8`/`28` with them are exactly what `emu/shadow.rs` exists to
+  recover: vt100 drops them, the shadow parser puts the attribute on the
+  cell, and the tracker then reported the *backend's* gap under an accessor
+  documented as naming the emulator's.
+
+  The consequence was the one the accessor was added to prevent, inverted: a
+  screen said `Style::blink` was true and `unsupported()` said `^[[5m` had
+  been dropped, at the same instant — so a reader checking the list before
+  trusting a blink or masked-password assertion concluded a correct
+  assertion was unreliable, and
+  `assert!(screen.unsupported().is_empty())` could never pass for an
+  application that uses either attribute.
+
+  Found by `termlens-demo` driving a real ratatui application against the
+  published 0.10.1, which is what the testing tier is for.
+
+  **What still gets named.** An SGR with one parameter nobody models keeps
+  the whole sequence: `^[[59m` (underline colour) alone, and `^[[5;59m`,
+  where blink is recovered and `59` is not. Dropping a mixed sequence
+  because part of it is implemented would hide a real gap.
+
+  **The residue, measured rather than assumed.** `^[[1;5;31m` is still
+  named although bold, red *and* blink all reach the cell — `1` and `31`
+  are vt100's to implement, and this tracker knows what the shadow
+  recovers, not what the backend does. Narrowing that needs vt100's own SGR
+  surface enumerated, which is more than a patch should claim; a test
+  records the behaviour so it is a documented edge rather than a surprise.
+
 - **`termlens <subcommand> --version` is no longer an unknown option.**
   The flag was handled only in the top-level dispatch, so `termlens inspect
   --version` exited 2 while `-h`/`--help` worked in that position. All three

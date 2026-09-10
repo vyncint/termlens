@@ -94,6 +94,19 @@ fn params_text(params: &[&[u16]]) -> String {
 /// console's handshake in every Windows snapshot's list (#149).
 const TRACKED_PRIVATE_MODES: &[u16] = &[9, 1000, 1002, 1003, 1005, 1006, 1015, 1004, 2026, 9001];
 
+/// The SGR parameters [`shadow`](super::shadow) recovers: blink, conceal,
+/// strikethrough and their three "off" forms.
+///
+/// vt100 drops these, so they arrive here as unhandled — and the shadow
+/// parser then puts the attribute on the cell anyway, which is the whole
+/// reason it exists. Recording them said the emulator did not implement a
+/// sequence whose effect `Style::blink` reports on the same `Screen`
+/// (#320): the accessor names *the emulator's* gaps, and this is the
+/// backend's, in front of which termlens does the work.
+///
+/// Kept in step with `shadow::sgr_substitute` by a test.
+pub(super) const SHADOW_SGR_PARAMS: &[u16] = &[5, 6, 8, 9, 25, 28, 29];
+
 impl Callbacks for Unhandled {
     fn visual_bell(&mut self, _: &mut vt100::Screen) {
         self.visual_bells = self.visual_bells.saturating_add(1);
@@ -166,6 +179,19 @@ impl Callbacks for Unhandled {
                 .iter()
                 .flat_map(|p| p.iter())
                 .all(|m| TRACKED_PRIVATE_MODES.contains(m)),
+            // An SGR every one of whose parameters the shadow recovers is
+            // implemented, and naming it here would contradict the cell
+            // (#320). One parameter outside the set and the whole sequence
+            // is still recorded: dropping it would hide a genuine gap, and
+            // `^[[5;59m` — blink recovered, underline colour modelled by
+            // nobody — is exactly that shape.
+            (None, None, 'm') => {
+                let mut seen = false;
+                params.iter().flat_map(|p| p.iter()).all(|p| {
+                    seen = true;
+                    SHADOW_SGR_PARAMS.contains(p)
+                }) && seen
+            }
             _ => false,
         };
         if handled {
