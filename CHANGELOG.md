@@ -10,6 +10,43 @@ listed under a **Changed** or **Removed** heading, in a bullet that begins
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `Screen::unsupported()` returns an [`Unsupported`] view
+  instead of `&[Arc<str>]`, and `Screen::unsupported_overflow()` is
+  removed — the view carries the count (#330). The one breaking change of
+  the 0.11 stability candidate, and the last before 1.0.
+
+  The old return type was the storage: `Arc<str>` is how the screen keeps
+  the list cheap to clone, and exposing the slice locked that
+  representation into the public API for good. The ergonomics showed it —
+  consumers wrote `.iter().map(|q| &**q)` to get at plain strings, and
+  "nothing was dropped" took two calls. The view is `Copy`, borrows the
+  screen, and compares equal to an array or slice of `&str` when the
+  retained shapes match in order *and* nothing overflowed, so a pin is one
+  line: `assert_eq!(s.unsupported(), ["^[[59m"]);`.
+
+  | 0.10 | 0.11 |
+  | --- | --- |
+  | `s.unsupported().is_empty()` | unchanged (and now also false when shapes overflowed) |
+  | `s.unsupported().len()` | unchanged — the retained count, at most 32 |
+  | `s.unsupported().iter().map(\|q\| &**q)` | `s.unsupported().iter()` |
+  | `s.unsupported().iter().map(\|q\| q.to_string()).collect::<Vec<_>>()` | `s.unsupported().iter().map(str::to_owned).collect::<Vec<_>>()` |
+  | `s.unsupported().iter().any(\|q\| &**q == "^[[5m")` | `s.unsupported().contains("^[[5m")` |
+  | `&*s.unsupported()[0]` | `s.unsupported().iter().next()` |
+  | `s.unsupported_overflow()` | `s.unsupported().overflow()` |
+  | `assert!(s.unsupported().is_empty()); assert_eq!(s.unsupported_overflow(), 0);` | `assert_eq!(s.unsupported(), []);` or `assert!(s.unsupported().is_empty())` |
+
+  `Debug` prints `["^[[59m"]`, or `["^[[20h", …] (+8 more)` when shapes
+  overflowed. `UnsupportedIter` is the view's `IntoIterator` type.
+
+  What the semver gate saw, forced to `patch` against 0.10.3, in all three
+  feature views: `inherent_method_missing: Screen::unsupported_overflow`.
+  The changed return type of `unsupported()` itself is *not* a lint
+  `cargo-semver-checks` 0.50.0 has, which is worth knowing about the gate:
+  it catches a removed or gated item, not a re-typed one; the in-tree tests
+  and every consumer's compile do.
+
 ### Added
 
 - **A frozen saved-screen corpus** (#327). Nothing pinned that a file

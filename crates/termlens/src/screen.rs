@@ -277,6 +277,125 @@ pub enum CursorShape {
 
 /// What an application copied with `OSC 52`, as observed at one snapshot.
 ///
+/// What the emulator did not implement while producing a [`Screen`] — the
+/// view [`Screen::unsupported`] returns.
+///
+/// Distinct sequence shapes, first seen first, in the form the timeout
+/// messages use (`^[[20h` for `CSI 20 h`), at most 32 retained;
+/// [`overflow`](Self::overflow) counts the distinct shapes beyond those, so
+/// a stream that invents thousands cannot grow a snapshot and "nothing was
+/// dropped" is one check, [`is_empty`](Self::is_empty).
+///
+/// A view rather than a slice, so how the screen stores the list — cheap to
+/// clone, today — is not part of the public API. `Copy`, borrowing the
+/// screen; compares equal to an array or slice of `&str` when the retained
+/// shapes match in order and nothing overflowed, so a pin reads
+/// `assert_eq!(s.unsupported(), ["^[[59m"])`.
+#[derive(Clone, Copy)]
+pub struct Unsupported<'a> {
+    retained: &'a [Arc<str>],
+    overflow: u64,
+}
+
+impl<'a> Unsupported<'a> {
+    /// True when nothing unsupported was seen at all — no retained shape
+    /// and no overflow.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.retained.is_empty() && self.overflow == 0
+    }
+
+    /// Distinct shapes retained (at most 32). Not the total: add
+    /// [`overflow`](Self::overflow) for that.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.retained.len()
+    }
+
+    /// The retained shapes, first seen first.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &'a str> + 'a {
+        self.retained.iter().map(|shape| &**shape)
+    }
+
+    /// Whether `sequence` — in the same form, e.g. `"^[[5m"` — is among the
+    /// retained shapes. A shape past the retention bound is counted in
+    /// [`overflow`](Self::overflow) and cannot be found here.
+    #[must_use]
+    pub fn contains(&self, sequence: &str) -> bool {
+        self.retained.iter().any(|shape| &**shape == sequence)
+    }
+
+    /// Distinct shapes seen beyond the 32 retained, counted only.
+    #[must_use]
+    pub fn overflow(&self) -> u64 {
+        self.overflow
+    }
+}
+
+impl<'a> IntoIterator for Unsupported<'a> {
+    type Item = &'a str;
+    type IntoIter = UnsupportedIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        UnsupportedIter(self.retained.iter())
+    }
+}
+
+/// The iterator over an [`Unsupported`] view's retained shapes.
+#[derive(Debug, Clone)]
+pub struct UnsupportedIter<'a>(std::slice::Iter<'a, Arc<str>>);
+
+impl<'a> Iterator for UnsupportedIter<'a> {
+    type Item = &'a str;
+    fn next(&mut self) -> Option<&'a str> {
+        self.0.next().map(|shape| &**shape)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl ExactSizeIterator for UnsupportedIter<'_> {}
+
+impl fmt::Debug for Unsupported<'_> {
+    /// `["^[[59m"]`, or `["^[[20h", …] (+8 more)` when shapes overflowed.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()?;
+        if self.overflow > 0 {
+            write!(f, " (+{} more)", self.overflow)?;
+        }
+        Ok(())
+    }
+}
+
+impl PartialEq for Unsupported<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.overflow == other.overflow && self.iter().eq(other.iter())
+    }
+}
+
+impl Eq for Unsupported<'_> {}
+
+/// Equal to a slice of shapes when the retained shapes match in order and
+/// nothing overflowed — so `assert_eq!(s.unsupported(), ["^[[59m"])` pins
+/// the whole record, and an empty array pins "nothing unsupported".
+impl PartialEq<[&str]> for Unsupported<'_> {
+    fn eq(&self, other: &[&str]) -> bool {
+        self.overflow == 0 && self.iter().eq(other.iter().copied())
+    }
+}
+
+impl<const N: usize> PartialEq<[&str; N]> for Unsupported<'_> {
+    fn eq(&self, other: &[&str; N]) -> bool {
+        *self == other[..]
+    }
+}
+
+impl PartialEq<&[&str]> for Unsupported<'_> {
+    fn eq(&self, other: &&[&str]) -> bool {
+        *self == **other
+    }
+}
+
 /// Read it from a snapshot via [`Screen::clipboard`]. A toast on screen
 /// proves the copy path ran; this proves the payload, which is usually the
 /// behaviour actually under test.
@@ -1007,32 +1126,45 @@ impl Screen {
     }
 
     /// Escape sequences the emulator did not implement, so the grid below
-    /// them is not what a terminal would show. Distinct shapes, first seen
-    /// first, in the form the timeout messages use (`^[[20h` for
-    /// `CSI 20 h`), at most 32 — [`unsupported_overflow`](Self::unsupported_overflow)
-    /// counts the rest.
+    /// them is not what a terminal would show — as an [`Unsupported`] view:
+    /// distinct shapes, first seen first, in the form the timeout messages
+    /// use (`^[[20h` for `CSI 20 h`), at most 32 retained, with
+    /// [`overflow`](Unsupported::overflow) counting the rest.
     ///
     /// Empty for an application that uses only what the emulator renders,
     /// which is what makes it worth asserting: the failure this catches is
     /// the one where a test passes against a plausible-looking wrong screen
     /// because the sequence that would have made it right was dropped.
     /// Sequences termlens handles itself — the character sets, tab stops,
-    /// insert mode, the queries it answers or names, the modes it tracks —
-    /// are not listed, since the screen does show their effect. A request to
-    /// resize the window (`CSI 8 ; rows ; cols t`) *is* listed: the grid's
-    /// size is the test's to set, so the request is recorded rather than
-    /// honoured.
+    /// insert mode, the queries it answers or names, the modes it tracks,
+    /// the SGR attributes the shadow parser recovers — are not listed,
+    /// since the screen does show their effect. A request to resize the
+    /// window (`CSI 8 ; rows ; cols t`) *is* listed: the grid's size is the
+    /// test's to set, so the request is recorded rather than honoured.
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder()
+    /// #     .args(["-c", "printf '\\033[20htext'; read q"]).spawn("sh")?;
+    /// # t.wait_until(|s| s.contains("text"))?;
+    /// let s = t.screen();
+    /// assert_eq!(s.unsupported(), ["^[[20h"]);
+    /// assert!(s.unsupported().contains("^[[20h"));
+    /// assert_eq!(s.unsupported().overflow(), 0);
+    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # }
+    /// ```
+    ///
+    /// (`no_run` because the doctest suite also runs on Windows, where
+    /// ConPTY drops the sequence before termlens sees it and the record is
+    /// the console's — the behaviour is pinned in `tests/unsupported.rs`,
+    /// which is `ignore`d there with that reason.)
     #[must_use]
-    pub fn unsupported(&self) -> &[Arc<str>] {
-        &self.state.unsupported
-    }
-
-    /// Distinct unsupported sequences beyond the 32 that
-    /// [`unsupported`](Self::unsupported) keeps, counted so a stream that
-    /// emits thousands cannot grow a snapshot.
-    #[must_use]
-    pub fn unsupported_overflow(&self) -> u64 {
-        self.state.unsupported_overflow
+    pub fn unsupported(&self) -> Unsupported<'_> {
+        Unsupported {
+            retained: &self.state.unsupported,
+            overflow: self.state.unsupported_overflow,
+        }
     }
 
     /// Visual bells (`ESC g`) the application requested — a flash rather
