@@ -257,7 +257,7 @@ jobs:
         with:
           tool: cargo-semver-checks
       - run: tools/semver-gate-selftest/run.sh
-      - run: .github/scripts/check-semver.sh 0.10.3
+      - run: .github/scripts/check-semver.sh 0.11.0
         env:
           BREAKING_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'breaking') }}
 

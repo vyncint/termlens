@@ -47,7 +47,7 @@ cargo +1.85 check -p termlens --all-features --all-targets --locked           # 
 cargo +1.85 check -p termlens --no-default-features --all-targets --locked
 cargo clippy --workspace --all-targets --all-features --target x86_64-pc-windows-msvc -- -D warnings   # the Windows build, from any host: `rustup target add x86_64-pc-windows-msvc` once
 tools/semver-gate-selftest/run.sh                       # the semver gate can fail (cargo install cargo-semver-checks)…
-.github/scripts/check-semver.sh 0.10.3                  # …and the public API is compatible with the last published release
+.github/scripts/check-semver.sh 0.11.0                  # …and the public API is compatible with the last published release
 ```
 
 The list is written out here rather than left as a pointer because a first
