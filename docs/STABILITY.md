@@ -1,11 +1,14 @@
 # What 1.0 means
 
-termlens is `0.x`, and every minor is allowed to break a consumer. 1.0 is
-not a feature list — it is **three decisions written down with the
-measurement that decided each**, plus a statement of which public items
-the promise covers. A 1.0 tag requires all three sections below to be
-filled in ([RELEASING.md](RELEASING.md) says so), and each was allowed to
-come out *no*: an honest no is a 1.0 that means something.
+termlens is `0.x`. Until 0.11 every minor was allowed to break a consumer;
+**from 0.11.0, the stability candidate, no promised item changes
+incompatibly before 1.0** — the promise is the last section of this page.
+1.0 is not a feature list — it is **three decisions written down with the
+measurement that decided each**, plus that statement of which public items
+the promise covers and what checks each part of it. A 1.0 tag requires all
+three sections below to be filled in ([RELEASING.md](RELEASING.md) says
+so), and each was allowed to come out *no*: an honest no is a 1.0 that
+means something.
 
 Decided in 0.10 (September 2026). The issue each was decided in links
 back here.
@@ -98,28 +101,110 @@ because the one assertion that needs it can ask.
 
 ## What the promise covers
 
-Once the three sections above stand, 1.0 promises semver over:
+**0.11.0 is the stability candidate**: from that release no promised item
+changes incompatibly before 1.0. A change that must break one ships as a
+new candidate (0.12.0) with a migration table and restarts the observation
+window in [#335](https://github.com/vyncint/termlens/issues/335); a patch
+release does not. 1.0 follows the readiness criteria in that issue, not a
+date.
 
-- every `pub` item exported from `lib.rs` without a feature gate: the
-  `Terminal`/`TerminalBuilder` surface, `Screen` and its accessors,
-  `Cell`, `Style`, `Color`, the mode enums, `Error` (`#[non_exhaustive]`,
-  so variants may be *added*), `bin!`;
-- the snapshot text format of [DESIGN.md](DESIGN.md) §3, which
-  `Screen::parse` reads back — a snapshot file recorded under 1.0 stays
-  valid;
-- the coordinate conventions: `(row, col)` for cells, `(cols, rows)` for
-  geometry.
+The criteria are an external pilot, eight weeks of stable use counted from
+its first green run, every maintained consumer on the candidate from
+crates.io, and the daily fresh-install evidence. The README and the
+CHANGELOG header carry the statement above in the same words, and
+`.github/scripts/check-candidate-statement.sh` fails when one drifts.
 
-Behind features, versioned with the feature's dependency rather than with
-termlens: `insta` (the macro follows insta), `decode`, `regex`, `serde`
-(the JSON shape follows the types' derives).
+Additive change is not a break: a new item, a new variant of a
+`#[non_exhaustive]` enum such as `Error`, a new field of a
+`#[non_exhaustive]` struct such as `Style`, a new CLI flag, a new key in
+the JSON `state` object.
 
-Documented as heuristics, promised to keep their *shape* and not their
-timing: `wait_idle` and `wait_stable` (a quiet window is a judgement),
-`snapshot_after`'s 100 ms settle, and the frame-history and record
-budgets, whose defaults may move.
+Every sentence below names the job or test that checks it, or says that
+nothing does. The jobs are in `.github/workflows/ci.yml`; a sentence with
+no check is a promise kept by review alone, and the list of those is meant
+to be short.
 
-Not covered: the `Emulator` trait and everything under `emu/` (internal),
-the exact text of error messages (they carry screens; the prefixes in the
-skill's failure table are kept stable, the rest is prose), the fixtures,
-and `termlens-cli`'s output format beyond its exit codes.
+### Promised
+
+- **The documented public Rust API of every item termlens owns, in every
+  supported feature configuration** — `default` (`insta`),
+  `--no-default-features`, each single feature (`decode`, `regex`, `serde`)
+  and all features together. Semver over all of it: an item is not removed,
+  renamed, re-typed or moved behind a feature in any of those
+  configurations without a new candidate. *Checked by* the `semver` job
+  (`.github/scripts/check-semver.sh`: cargo-semver-checks against the last
+  published release, release type forced to `patch`, in the default,
+  explicit-only and all-features views; `tools/semver-gate-selftest/` proves
+  the gate fails on a removed and on a gated item) and by the `features`
+  job, which builds and tests each reduced configuration for the library
+  alone (`.github/scripts/check-feature-isolation.sh`). *Not checked, and
+  said so:* a method whose signature changes under the same name — the
+  0.11 change to `unsupported()` was exactly that, and cargo-semver-checks
+  0.50.0 reported only the removed `unsupported_overflow()` beside it. That
+  class is caught by the crate's own tests and every consumer's compile,
+  and by review.
+- **The snapshot text format** of [DESIGN.md](DESIGN.md) §3, which
+  `Screen::parse` reads back: the header, the grid, the `styles:` block and
+  its tokens. A file written by any release from 0.10.1 on parses in every
+  later release and renders back byte for byte. *Checked by*
+  `crates/termlens/tests/compat.rs` over the frozen corpus in
+  `tests/compat/<version>/` — the definition of "the format stays valid" —
+  and by `crates/termlens-cli/tests/cli.rs`, which renders every corpus
+  file through the CLI.
+- **The JSON shape** (`serde` feature), format `1`, specified in DESIGN §3.
+  JSON written by 0.10 or later is readable by every later release; a new
+  format number is a new candidate, never a silent change. *Checked by* the
+  same corpus test (every JSON twin reads as the same picture as its text
+  and re-serialises to its own document) and by `tests/export.rs`.
+- **The CLI's contract**: the commands `inspect`, `diff` and `render`, their
+  accepted flags, the exit-code meanings (0 ran, 1 `diff` found a
+  difference, 2 the tool could not run) and the saved-screen input formats
+  — the text format with or without an insta header or a pre-0.11 `inspect`
+  trailer, and the JSON. Flags may be added; `inspect`'s stdout is a saved
+  screen. *Checked by* `.github/scripts/check-cli-contract.sh` against the
+  tree on every pull request (`test` job) and against the **published**
+  binary on every release and every day (`install.yml`, `cli` job).
+- **The coordinate conventions**: `(row, col)` for cells, `(cols, rows)` for
+  geometry, both zero-based. *Checked by* the crate's own suite; there is no
+  separate gate, since every accessor test encodes them.
+- **The platform list** of §1: Linux and macOS in full, Windows for what
+  survives ConPTY's re-render, each exclusion named in
+  [LIMITATIONS.md](LIMITATIONS.md). *Checked by* the `test` matrix and the
+  required `windows` leg on every pull request, and `stress.yml` on all
+  three before a release.
+- **The MSRV policy**: `rust-version` in `Cargo.toml` is real for every
+  supported feature configuration, and a bump is a minor release. *Checked
+  by* the `msrv` job, which compiles the workspace, `-p termlens
+  --all-features` and `-p termlens --no-default-features` at that toolchain
+  against the committed lockfile.
+
+### Third-party boundaries, named as such
+
+Three things follow a dependency's versioning rather than termlens's, and
+nothing else is delegated:
+
+- the `termlens::insta` re-export and what `assert_screen_snapshot!`
+  expands to follow **`insta`**'s versioning;
+- the `regex::Regex` parameter type of `matches`, `find_match`,
+  `find_all_matches`, `mask_matches` and `wait_until_matches` follows
+  **`regex`**'s major version;
+- the `Serialize`/`Deserialize` impls follow **`serde`** 1.x. The JSON
+  *shape* does not: it is termlens's, format-numbered above.
+
+### Not promised
+
+- Human-readable prose: timeout and error messages (the prefixes in the
+  skill's failure table are kept, the rest is prose), `inspect`'s trailer,
+  the painting of `termlens diff` on a terminal, `Debug` output.
+- Internal representation: the `Emulator` trait and everything under
+  `emu/`, the storage behind any accessor (which is why `unsupported()`
+  returns a view), the fixtures.
+- The *timing* of the heuristics: `wait_idle`, `wait_stable` and
+  `snapshot_after`'s settle are judgements about a quiet window; their
+  shape is promised, their thresholds are not. The frame-history and
+  record budgets keep their shape and their defaults may move.
+- The SVG, HTML and ANSI renderings' exact bytes: what they show is what
+  the screen shows, and the markup may change.
+
+*Nothing checks these, by construction — they are the room the crate keeps
+for itself.*

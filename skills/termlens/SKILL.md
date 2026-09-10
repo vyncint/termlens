@@ -5,10 +5,12 @@ description: Write, fix or review headless terminal tests for a Rust CLI or TUI 
 
 # Testing terminal programs with termlens
 
-Written against **termlens 0.10.1**. Every `rust` block below is a complete
-integration test that is compiled against the crate in CI, so the API it
-shows is the API that exists. The recipes spawn a binary called `myapp`
-that draws a list with a `> ` highlight, a status line ending in
+Written against **termlens 0.11.0**, the stability candidate: from 0.11.0
+no promised public item changes incompatibly before 1.0, so the API below
+is one to build on, not one to expect to move. Every `rust` block below is
+a complete integration test that is compiled against the crate in CI, so
+the API it shows is the API that exists. The recipes spawn a binary called
+`myapp` that draws a list with a `> ` highlight, a status line ending in
 `Ready: j/k move, q quits`, and prints usage on `--help`; substitute your
 application's own texts where the comments say so.
 
@@ -21,6 +23,13 @@ Playwright for the terminal. Linux and macOS in full; on Windows (ConPTY)
 screen assertions work and frame assertions do not — `wait_frame`,
 `record`, graphics and mouse modes are Unix-only there, and a test that
 needs one is `#[cfg_attr(windows, ignore = "…")]` with the reason.
+
+**The API is stable.** 0.11.0 is the stability candidate: the documented
+public API in every feature configuration, the snapshot text format, the
+JSON shape and the CLI's contract do not change incompatibly before 1.0
+(the crate's `docs/STABILITY.md` says exactly what is promised and what
+checks it). Write against it as you would against a 1.x crate; do not
+pin a patch version or hedge for the next minor.
 
 Use it for the things an in-process mock cannot see:
 
@@ -96,7 +105,8 @@ your test ── send(Key) · click · paste · resize ──▶ PTY     └─�
 
 6. **Two coordinate orders exist; do not mix them.** Everything that
    addresses a cell is **row-first**: `find` → `(row, col)`, `cell(row,
-   col)`, `row_text(row)`, `cursor()` → `(row, col, visible)`. Everything
+   col)`, `row_text(row)`, `cursor()` → `(row, col, visible)` (and
+   `cursor_visible()` for the flag alone). Everything
    that speaks of terminal geometry or a pointer is **column-first**:
    `size()` → `(cols, rows)`, `resize(cols, rows)`, `click(col, row)`,
    `scroll(col, row, …)`, `drag(button, from_col, from_row, to_col,
@@ -154,7 +164,7 @@ your test ── send(Key) · click · paste · resize ──▶ PTY     └─�
 
 ```toml
 [dev-dependencies]
-termlens = "0.10"
+termlens = "0.11"
 insta = "1"          # for the snapshot recipes; termlens also re-exports it as `termlens::insta`
 ```
 
@@ -326,8 +336,7 @@ fn cells_styles_and_wide_characters() -> termlens::Result<()> {
     // Regions and the cursor. rect_text is (cols, rows), like size().
     let list_pane = s.rect_text(0..20, 0..6);
     assert!(list_pane.contains("Gamma"), "{list_pane}");
-    let (_, _, visible) = s.cursor();
-    assert!(!visible, "a list view hides the cursor: {s}");
+    assert!(!s.cursor_visible(), "a list view hides the cursor: {s}");
 
     t.send(termlens::Key::Char('q'))?;
     assert!(t.wait_exit()?.success());
@@ -458,13 +467,14 @@ from_r, to_c, to_r)`, `scroll(col, row, Scroll::Down)`, `resize(cols, rows)`,
 | `full_text()` / `scrollback_text()` / `scrollback_rows()` | history + screen / history / count |
 | `scrollback_cell(row, col)` / `styled_scrollback()` | history as cells, with `scrollback_styles(true)` |
 | `size()` / `cols()` / `rows()` | `(cols, rows)` |
-| `cursor()` | `(row, col, visible)`; `cursor_shape()`, `cursor_blink()` |
+| `cursor()` / `cursor_visible()` | `(row, col, visible)` / the flag alone; `cursor_shape()`, `cursor_blink()` |
 | `alternate_screen()`, `bracketed_paste()`, `application_cursor()`, `focus_events()` | mode flags |
 | `mouse_mode()` / `mouse_modes()` | reporting protocol / the set the app enabled |
 | `title()`, `clipboard()`, `links()`, `bells()`, `repaints()`, `graphics()` | out-of-band state |
-| `unsupported()` / `insert_mode()` | sequences the emulator did not implement (`^[[20h`…), so a plausible grid can be told from a right one / IRM left on |
-| `with_styles()` | `Display` with a `styles:` block; snapshot this to catch colour regressions |
-| `diff(&other)` | `ScreenDiff`: `is_empty()`, `cells()`, and a `Display` of only the rows that changed |
+| `unsupported()` / `insert_mode()` | an `Unsupported` view of the sequences the emulator did not implement (`^[[20h`…) — `is_empty()`, `contains("^[[5m")`, `iter()`, `overflow()`, and `assert_eq!(s.unsupported(), ["^[[59m"])` pins it — so a plausible grid can be told from a right one / IRM left on |
+| `with_styles()` | `ScreenWithStyles`, a `Display` with a `styles:` block; snapshot this to catch colour regressions |
+| `diff(&other)` | `ScreenDiff`: `is_empty()`, `cells()`, `changed_rows()`, `style_changes()`, and a `Display` of only the rows that changed |
+| `locate(needle)` | `Option<Location>`: `is_on_screen()`, `is_in_history()`, `col()` |
 | `mask_rect(cols, rows)` / `mask_matching(literal, fill)` / `mask_cells(pred)` | a new `Screen` with those cells replaced, styles and columns intact. `mask_matching` is a literal (rows included — it spans a wrap the way `find_all` does); `mask_cells` blanks by predicate |
 | `to_ansi()` / `to_svg()` / `to_html()` | renderings a person can see; `Screen::parse(text)` reads the text format back |
 
@@ -532,9 +542,11 @@ directory (see §9b).
   colour), `termlens diff old.snap new.snap.new` prints the cell diff of two
   saved screens and exits 1 if anything changed, `termlens render --svg
   failing.snap` makes an image. A saved screen is any text termlens prints
-  — an insta `.snap`, the grid a wait error leaves in a log.
+  — what `inspect` writes to stdout (`termlens inspect myapp > before.txt`;
+  its trailer goes to stderr), an insta `.snap`, the grid a wait error
+  leaves in a log — or the JSON the `serde` feature writes.
 - In CI, set `TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens` on the
-  test step and add `uses: vyncint/termlens/.github/actions/report@v0.10.0`
+  test step and add `uses: vyncint/termlens/.github/actions/report@v0.10.1`
   with `if: failure()` after it: every screen a failing wait embedded, and
   every `.snap.new` with its diff, lands in the pull request's step summary.
 

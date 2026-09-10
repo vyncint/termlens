@@ -279,12 +279,20 @@ reason. The measurement is `tests/conpty_probe.rs`; the decision is
 
 ## Stability and versioning
 
-termlens is `0.x`. [docs/STABILITY.md](https://github.com/vyncint/termlens/blob/main/docs/STABILITY.md) states what 1.0
-means — three decisions written down with the measurement behind each —
-and which public items the compatibility promise covers. **0.11 is the
-stability candidate**: from that release no promised item changes
-incompatibly before 1.0, and 1.0 follows the readiness criteria tracked in
-[#335](https://github.com/vyncint/termlens/issues/335), not a date.
+**0.11.0 is the stability candidate**: from that release no promised item
+changes incompatibly before 1.0. A change that must break one ships as a
+new candidate (0.12.0) with a migration table and restarts the observation
+window in [#335](https://github.com/vyncint/termlens/issues/335); a patch
+release does not. 1.0 follows the readiness criteria in that issue, not a
+date.
+
+[docs/STABILITY.md](https://github.com/vyncint/termlens/blob/main/docs/STABILITY.md)
+states what is promised — the documented public API in every supported
+feature configuration, the snapshot text format, the versioned JSON, the
+CLI's commands, flags, exit codes and input formats — which job or test
+checks each part, what follows a dependency's versioning instead, and what
+is deliberately not promised; and the three decisions, with their
+measurements, that 1.0 rests on.
 
 **MSRV is Rust 1.85**, set by the default `insta` feature's dependency tree
 and checked in CI against the committed lockfile; a bump is a minor

@@ -4,9 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-Until 1.0, minor versions (0.x) may contain breaking changes; they are always
-listed under a **Changed** or **Removed** heading, in a bullet that begins
-**Breaking:** — the semver gate in CI reads that marker.
+**0.11.0 is the stability candidate**: from that release no promised item
+changes incompatibly before 1.0. A change that must break one ships as a
+new candidate (0.12.0) with a migration table and restarts the observation
+window in [#335](https://github.com/vyncint/termlens/issues/335); a patch
+release does not. 1.0 follows the readiness criteria in that issue, not a
+date.
+
+A breaking change is always listed under a **Changed** or **Removed**
+heading, in a bullet that begins **Breaking:** — the semver gate in CI
+reads that marker.
 
 ## [Unreleased]
 
@@ -46,6 +53,36 @@ listed under a **Changed** or **Removed** heading, in a bullet that begins
   `cargo-semver-checks` 0.50.0 has, which is worth knowing about the gate:
   it catches a removed or gated item, not a re-typed one; the in-tree tests
   and every consumer's compile do.
+
+- **`docs/STABILITY.md` now states the contract the candidate freezes
+  under** (#328), and every sentence of it names the job or test that
+  checks it or says that nothing does. Promised: the documented public API
+  of every termlens-owned item in every supported feature configuration
+  (`semver` and `features` jobs), the snapshot text format and the
+  versioned JSON (the compatibility corpus), the CLI's commands, flags,
+  exit codes and input formats (`check-cli-contract.sh` against the tree
+  and the published binary), the coordinate conventions, the platform list
+  and the MSRV policy. Named as third-party boundaries, and nothing else
+  delegated: the `insta` re-export and macro, the `regex::Regex` parameter
+  type, the serde traits. Not promised: diagnostic prose, internal
+  representation, the *timing* of the settle heuristics, the budgets'
+  defaults, the renderers' exact bytes. The former "versioned with the
+  feature's dependency" clause — which exempted termlens-owned items such
+  as `Bitmap`, `find_match` and the JSON shape from termlens's own
+  versioning — is gone. The README and this header carry the candidate
+  statement in the same words, and
+  `.github/scripts/check-candidate-statement.sh` fails when one drifts.
+
+- **The release and contribution process for the candidate is written
+  down** (#334). `docs/RELEASING.md`: what may break and how a break is
+  declared (the `breaking` label, the pasted diagnostics, the
+  `- **Breaking:**` bullet), release candidates as `v1.0.0-rc.N`
+  pre-releases, the stress workflow on the exact commit to be tagged, the
+  corpus directory frozen at each release, and the semver baseline moved
+  after publish. `CONTRIBUTING.md` §1 lists every new gate and §7 says the
+  API is frozen. The skill describes 0.11: the stability statement, the
+  `Unsupported` view, `cursor_visible()`, the new accessors, and that
+  `inspect`'s stdout is a saved screen.
 
 ### Added
 
