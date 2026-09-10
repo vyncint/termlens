@@ -9,6 +9,8 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-09-10
+
 ### Added
 
 - **The published CLI is installed and held to its documented contract**
