@@ -22,9 +22,18 @@
 #     shapes are verified (#238).
 #
 # The consumer is a real crate in an empty directory, and the test it runs is
-# a real PTY — which is the whole product, so nothing else would do. Nothing
-# here checks this repository out: the version and the feature list come from
+# a real PTY — which is the whole product, so nothing else would do. The
+# `consume` job checks nothing out: the version and the feature list come from
 # the registry, because the registry is what a consumer gets.
+#
+# The `cli` job answers the same question for the *binary*, which had no
+# answer at all until #326: this workflow verified `cargo add termlens` and
+# never `cargo install termlens-cli`, so #310 — `termlens inspect --version`
+# exiting 2 — shipped in 0.10.0, shipped again in 0.10.1, and was found by a
+# user of the published binary rather than by anything here. It checks the
+# repository out for one file, `.github/scripts/check-cli-contract.sh`: the
+# subject still comes from the registry, only the harness comes from here,
+# which is also what lets the same assertions run against a path build.
 name: install
 
 on:
@@ -244,3 +253,67 @@ jobs:
             fi
           fi
           cargo test --tests -- --nocapture
+
+  # The published CLI, installed the way a user installs it, held to the
+  # three exit codes `termlens --help` documents and STABILITY.md promises.
+  cli:
+    name: cli (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Ask the registry what was published
+        id: crate
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          WANTED: ${{ inputs.version }}
+        run: |
+          api="https://crates.io/api/v1/crates/termlens-cli"
+          agent="termlens-install-check (github actions)"
+          version="${WANTED#v}"
+          version="${version:-${TAG#v}}"
+          if [ -z "$version" ]; then
+            version=$(curl -sSf -H "User-Agent: $agent" "$api" | jq -r .crate.max_stable_version)
+          fi
+
+          # `termlens-cli` is published after `termlens` in the same release,
+          # so the index can trail the release event by longer here than for
+          # the library. Wait rather than fail.
+          for attempt in $(seq 30); do
+            body=$(curl -sS -H "User-Agent: $agent" "$api/$version") || body=""
+            if [ "$(printf '%s' "$body" | jq -r '.version.num // empty')" = "$version" ]; then
+              break
+            fi
+            echo "waiting for termlens-cli $version to appear on crates.io (${attempt}/30)"
+            sleep 10
+          done
+
+          num=$(printf '%s' "$body" | jq -r '.version.num // empty')
+          if [ "$num" != "$version" ]; then
+            echo "::error::termlens-cli $version never appeared on crates.io"
+            exit 1
+          fi
+          if [ "$(printf '%s' "$body" | jq -r .version.yanked)" != "false" ]; then
+            echo "::error::termlens-cli $version is yanked"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "verifying termlens-cli $version"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      # From the registry, every run, never from a cache: a cached binary is
+      # evidence about whatever crates.io served the day the cache was
+      # filled, and this job exists to be evidence about what it serves now.
+      - name: Install the published CLI
+        env:
+          VERSION: ${{ steps.crate.outputs.version }}
+        run: cargo install termlens-cli --version "=$VERSION" --locked --force
+      - name: Hold it to its documented contract
+        run: .github/scripts/check-cli-contract.sh "$(command -v termlens)"

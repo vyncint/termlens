@@ -320,6 +320,11 @@ fn rewrite_sgr(seq: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The shadow parameter carrying `param`, if any.
+///
+/// Every `Some` here except `0` is a parameter vt100 drops and this parser
+/// recovers, so `unhandled::SHADOW_SGR_PARAMS` must list exactly those —
+/// otherwise `Screen::unsupported()` names a sequence whose effect is on
+/// the cell (#320). A test in this module holds the two in step.
 fn carrier(param: u32) -> Option<u32> {
     match param {
         0 => Some(0),     // reset all: means the same in both streams
@@ -336,6 +341,29 @@ fn carrier(param: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two lists that describe the same set, held together (#320).
+    ///
+    /// `carrier` decides what this parser recovers; `SHADOW_SGR_PARAMS`
+    /// decides what the unhandled tracker declines to record. They were
+    /// written apart and can drift apart, and the drift is silent in both
+    /// directions: a parameter added here and not there is named as
+    /// unimplemented while its attribute reaches the cell, and one added
+    /// there and not here is dropped from the record while nothing carries
+    /// it.
+    #[test]
+    fn the_recovered_parameters_are_exactly_what_the_tracker_declines() {
+        let recovered: Vec<u16> = (0..=255u32)
+            .filter(|&p| p != 0 && carrier(p).is_some())
+            .map(|p| p as u16)
+            .collect();
+        let mut declined = crate::emu::unhandled::SHADOW_SGR_PARAMS.to_vec();
+        declined.sort_unstable();
+        assert_eq!(
+            recovered, declined,
+            "shadow::carrier recovers {recovered:?}, unhandled declines {declined:?}"
+        );
+    }
 
     /// The real rewriter's output, as a readable string.
     fn shadowed(bytes: &[u8]) -> String {

@@ -64,6 +64,13 @@ jobs:
       - run: cargo test --workspace --all-features
         env:
           TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens
+      # The CLI's documented exit codes, against this tree. `install.yml`
+      # runs the same script against the *published* binary, which is the
+      # net; this is the fast feedback. #310 was a `--version` that exited 2
+      # in two published releases and was found by a user, so the point is
+      # to fail on the pull request rather than after the publish.
+      - run: cargo build -p termlens-cli
+      - run: .github/scripts/check-cli-contract.sh target/debug/termlens
       # The screens of whatever failed, in the step summary (#251). The
       # suite dogfoods the action with the CLI from this tree.
       - uses: ./.github/actions/report

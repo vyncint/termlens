@@ -9,7 +9,60 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-09-10
+
+### Added
+
+- **The published CLI is installed and held to its documented contract**
+  (#326). `install.yml` verified `cargo add termlens` and never
+  `cargo install termlens-cli`, so #310 — `termlens inspect --version`
+  exiting 2 — shipped in 0.10.0, shipped again in 0.10.1, and was found by a
+  user of the published binary rather than by anything here.
+
+  A `cli` job installs `termlens-cli` from crates.io on Linux and macOS —
+  every run, never from a cache — and asserts every exit code
+  `termlens --help` documents: `--version` in all four positions returning
+  the same string, `inspect` printing a screen with its header and trailer,
+  `render` in all four formats, and `diff` returning **0** for the same
+  picture, **1** for a different one and **2** for input it cannot read.
+
+  The assertions live in `.github/scripts/check-cli-contract.sh` and take
+  the binary to exercise, so the same script runs against a path build. `ci.yml`
+  does exactly that on every pull request: the published check is the net,
+  the tree check is the fast feedback. Re-introducing #310 locally was
+  observed to fail it.
+
 ### Fixed
+
+- **`unsupported()` no longer names the four SGR parameters the attribute
+  shadow implements** (#320). `5`/`25` (blink), `9`/`29` (strikethrough),
+  and `6`/`8`/`28` with them are exactly what `emu/shadow.rs` exists to
+  recover: vt100 drops them, the shadow parser puts the attribute on the
+  cell, and the tracker then reported the *backend's* gap under an accessor
+  documented as naming the emulator's.
+
+  The consequence was the one the accessor was added to prevent, inverted: a
+  screen said `Style::blink` was true and `unsupported()` said `^[[5m` had
+  been dropped, at the same instant — so a reader checking the list before
+  trusting a blink or masked-password assertion concluded a correct
+  assertion was unreliable, and
+  `assert!(screen.unsupported().is_empty())` could never pass for an
+  application that uses either attribute.
+
+  Found by `termlens-demo` driving a real ratatui application against the
+  published 0.10.1, which is what the testing tier is for.
+
+  **What still gets named.** An SGR with one parameter nobody models keeps
+  the whole sequence: `^[[59m` (underline colour) alone, and `^[[5;59m`,
+  where blink is recovered and `59` is not. Dropping a mixed sequence
+  because part of it is implemented would hide a real gap.
+
+  **The residue, measured rather than assumed.** `^[[1;5;31m` is still
+  named although bold, red *and* blink all reach the cell — `1` and `31`
+  are vt100's to implement, and this tracker knows what the shadow
+  recovers, not what the backend does. Narrowing that needs vt100's own SGR
+  surface enumerated, which is more than a patch should claim; a test
+  records the behaviour so it is a documented edge rather than a surprise.
 
 - **`termlens <subcommand> --version` is no longer an unknown option.**
   The flag was handled only in the top-level dispatch, so `termlens inspect
