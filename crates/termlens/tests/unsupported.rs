@@ -17,11 +17,7 @@ fn emit(steps: &[&str]) -> termlens::Result<Terminal> {
 }
 
 fn shapes(t: &Terminal) -> Vec<String> {
-    t.screen()
-        .unsupported()
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    t.screen().unsupported().iter().map(str::to_owned).collect()
 }
 
 /// A sequence nobody honours is named, in the form the timeout messages
@@ -37,7 +33,20 @@ fn an_unimplemented_sequence_is_listed_once() -> termlens::Result<()> {
     ])?;
     t.wait_until(|s| s.contains("text"))?;
     assert_eq!(shapes(&t), ["^[[20h", "^[D"]);
-    assert_eq!(t.screen().unsupported_overflow(), 0);
+    // The view pins the whole record in one comparison (#330): the shapes
+    // in order, and that nothing overflowed.
+    let s = t.screen();
+    assert_eq!(s.unsupported(), ["^[[20h", "^[D"]);
+    assert_eq!(s.unsupported().overflow(), 0);
+    assert_eq!(s.unsupported().len(), 2);
+    assert!(!s.unsupported().is_empty());
+    assert!(s.unsupported().contains("^[D"));
+    assert!(!s.unsupported().contains("^[[20l"));
+    assert_eq!(format!("{:?}", s.unsupported()), r#"["^[[20h", "^[D"]"#);
+    assert_eq!(
+        s.unsupported().into_iter().collect::<Vec<_>>(),
+        ["^[[20h", "^[D"]
+    );
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
@@ -61,6 +70,10 @@ fn an_application_using_only_what_is_implemented_reports_nothing() -> termlens::
     ])?;
     t.wait_until(|s| s.contains("DONE"))?;
     assert_eq!(shapes(&t), Vec::<String>::new(), "{}", t.screen());
+    // The one-line pin for "nothing unsupported": an empty array compares
+    // equal only when nothing was retained and nothing overflowed.
+    assert_eq!(t.screen().unsupported(), [], "{}", t.screen());
+    assert!(t.screen().unsupported().is_empty());
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
@@ -101,9 +114,21 @@ fn the_record_is_bounded() -> termlens::Result<()> {
     let mut t = emit(&["--raw", &stream, "DONE", "--wait"])?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
-    assert_eq!(s.unsupported().len(), 32, "{s}");
-    assert_eq!(s.unsupported_overflow(), 8, "{s}");
-    assert_eq!(&*s.unsupported()[0], "^[[20h");
+    let unsupported = s.unsupported();
+    assert_eq!(unsupported.len(), 32, "{s}");
+    assert_eq!(unsupported.overflow(), 8, "{s}");
+    assert_eq!(unsupported.iter().next(), Some("^[[20h"));
+    // Overflow is part of the record: a view that dropped shapes is not
+    // empty and does not equal the list of what it kept.
+    assert!(!unsupported.is_empty());
+    let kept: Vec<&str> = unsupported.iter().collect();
+    assert_ne!(unsupported, kept.as_slice(), "8 shapes were dropped");
+    let debug = format!("{unsupported:?}");
+    assert!(debug.ends_with("] (+8 more)"), "{debug}");
+    assert!(
+        !unsupported.contains("^[[59h"),
+        "a shape past the bound is counted, not findable"
+    );
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
