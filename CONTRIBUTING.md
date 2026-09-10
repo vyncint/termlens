@@ -39,6 +39,7 @@ cargo build -p termlens-cli                              # then the CLI's docume
 .github/scripts/check-cli-contract.sh target/debug/termlens
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features
+.github/scripts/check-candidate-statement.sh              # README, CHANGELOG and STABILITY state the candidate in the same words
 cargo deny check                          # cargo install cargo-deny
 pipx run zizmor==1.29.0 --persona=pedantic .github/workflows/   # workflow audit; needs GH_TOKEN for the online checks
 cargo +1.85 check --workspace --exclude ratatui-app --locked --all-targets    # the MSRV: `rust-version` in Cargo.toml (the ratatui fixture needs 1.88)
@@ -221,6 +222,15 @@ allowlist is a list on purpose, so that widening it is a visible decision.
 - Review: expect actionable review within a few days. Small, focused PRs get
   reviewed faster. Update `CHANGELOG.md` under `[Unreleased]` for any
   user-facing change.
+- **The public API is frozen.** 0.11.0 is the stability candidate
+  ([docs/STABILITY.md](docs/STABILITY.md)): the `semver` job checks every
+  PR against the last published release with the release type forced to
+  `patch`, so removing, renaming, re-typing or feature-gating a promised
+  item fails CI. If a change genuinely must break one, say so in the PR and
+  a maintainer decides whether it becomes a new candidate — the `breaking`
+  label, the pasted diagnostics and the `- **Breaking:**` CHANGELOG bullet
+  are described in [docs/RELEASING.md](docs/RELEASING.md). Additive
+  changes need none of that.
 
 ## 8. Release process
 

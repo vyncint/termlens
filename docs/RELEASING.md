@@ -19,19 +19,55 @@ One page, copy-pasteable. Maintainers only.
   minted from a branch. (Optionally set the environment name `release`
   on the crates.io side too, for the server-side binding.)
 
+## The stability candidate, and what may break
+
+0.11.0 is the **stability candidate** ([STABILITY.md](STABILITY.md), "What
+the promise covers"). From it, no promised item changes incompatibly
+before 1.0. What that means for a release:
+
+- **A patch or minor release breaks nothing.** The `semver` job holds it:
+  every pull request is checked against the last published release with
+  the release type forced to `patch`, in three feature views. A red
+  `semver` on a PR is the answer, not an obstacle.
+- **A necessary break is a new candidate** — `0.12.0`, never a patch — and
+  restarts the observation window in
+  [#335](https://github.com/vyncint/termlens/issues/335). Its pull request
+  carries the **`breaking` label** (a maintainer applies it; the gate then
+  runs with `--release-type major`), its description pastes the
+  diagnostics the *forced* run produced (run
+  `.github/scripts/check-semver.sh <baseline>` without the label to get
+  them), and its CHANGELOG entry is a bullet beginning **`- **Breaking:**`**
+  under **Changed** or **Removed** whose text matches those diagnostics and
+  carries a migration table. The marker is what keeps `main` green after
+  the merge, where no label exists, and what lets the release tag pass the
+  same gate — so a break without the marker is a break the gate refuses,
+  on the PR and again on the tag.
+- **Release candidates for 1.0** are tagged `v1.0.0-rc.N` and publish to
+  crates.io as pre-releases; a consumer opts in with an exact requirement
+  (`termlens = "=1.0.0-rc.1"`), and Cargo never resolves a pre-release
+  from `"0.11"` or `"1"`. The `v1.0.0` tag follows the readiness criteria
+  in #335 — an external pilot, eight weeks of stable use from its first
+  green run, every maintained consumer on the candidate, the daily
+  fresh-install evidence — and **a date is never one of them**.
+
 ## Before a 1.0 tag
 
 `v1.0.0` requires all three sections of [STABILITY.md](STABILITY.md) —
 Windows, backend, styled history — to be filled in with their decision
-and the measurement behind it, and the "What the promise covers" list to
-match `lib.rs`. A 1.0 with an open section is a 0.x with a bigger number.
+and the measurement behind it, the "What the promise covers" section to
+match `lib.rs`, and every criterion in #335 to be recorded as met, with
+its evidence. A 1.0 with an open section is a 0.x with a bigger number.
 
 ## Cutting vX.Y.Z
 
 ```sh
-# 0. Green main + no flakes: run the stress workflow and wait for it.
+# 0. Green main + no flakes: run the stress workflow on the exact commit
+#    that will be tagged — not an older main — and wait for it. All three
+#    OSes, all five shards, must pass. A release PR that lands after the
+#    stress run is a different tree; run it again on the merged commit
+#    before tagging.
 gh workflow run stress.yml --ref main
-gh run watch                                  # both OSes must pass
+gh run watch                                  # ubuntu, macos, windows × 5 shards
 
 # 1. Bump the version (workspace.package.version in root Cargo.toml), and
 #    the same number in crates/termlens-cli/Cargo.toml's `termlens = { version
@@ -39,9 +75,16 @@ gh run watch                                  # both OSes must pass
 $EDITOR Cargo.toml crates/termlens-cli/Cargo.toml
 cargo check --workspace                       # refreshes Cargo.lock
 
-# 2. Move the CHANGELOG section.
+# 2. Move the CHANGELOG section. A `- **Breaking:**` bullet moves with it,
+#    which is what lets the tag's semver run pass (see above).
 $EDITOR CHANGELOG.md                          # [Unreleased] -> [X.Y.Z] - YYYY-MM-DD
                                               # add a fresh empty [Unreleased] above
+
+# 2b. Freeze this release's saved-screen shapes into the compatibility
+#     corpus (crates/termlens/tests/compat/README.md), from this tree:
+TERMLENS_WRITE_CORPUS=X.Y.Z cargo test -p termlens --features serde \
+    --test compat write_corpus -- --ignored
+cargo test -p termlens --all-features --test compat   # the new directory passes
 
 # 3. Land it.
 git checkout -b chore/release-vX.Y.Z
