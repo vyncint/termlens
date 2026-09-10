@@ -546,7 +546,7 @@ directory (see §9b).
   its trailer goes to stderr), an insta `.snap`, the grid a wait error
   leaves in a log — or the JSON the `serde` feature writes.
 - In CI, set `TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens` on the
-  test step and add `uses: vyncint/termlens/.github/actions/report@v0.10.1`
+  test step and add `uses: vyncint/termlens/.github/actions/report@v0.11.0`
   with `if: failure()` after it: every screen a failing wait embedded, and
   every `.snap.new` with its diff, lands in the pull request's step summary.
 

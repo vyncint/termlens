@@ -17,6 +17,8 @@ reads that marker.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-11
+
 ### Changed
 
 - **Breaking:** `Screen::unsupported()` returns an [`Unsupported`] view

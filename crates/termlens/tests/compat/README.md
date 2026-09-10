@@ -28,6 +28,11 @@ Each directory holds six shapes, as `<name>.txt` and its JSON twin
 `0.10.1/` was written by the published 0.10.1 through a registry
 dependency (`termlens = "=0.10.1"`), not a path — the JSON there has no
 `format` field and, for `styled`, lists the SGR parameters 0.10.1 wrongly
-named as unsupported (#320), because that is what 0.10.1 wrote. Later
-directories are written by the release they are named after, from a
-consumer of the published crate.
+named as unsupported (#320), because that is what 0.10.1 wrote.
+
+`0.11.0/` and every later directory are written **by the release tree at
+the release commit**, with the `write_corpus` writer in `tests/compat.rs`
+(`docs/RELEASING.md`, step 2b) — the crate is not on crates.io yet when
+its release PR is cut, and the tree at the tag is byte for byte what gets
+published. Its six text files are identical to 0.10.1's, which is the
+point; its JSON carries `"format": 1` and the #320 fix.
