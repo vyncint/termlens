@@ -34,6 +34,8 @@ cargo test --workspace --no-default-features --features decode
 cargo test --workspace --no-default-features --features regex
 cargo test --workspace --no-default-features --features serde
 cargo test --workspace                                   # default features
+cargo build -p termlens-cli                              # then the CLI's documented exit codes:
+.github/scripts/check-cli-contract.sh target/debug/termlens
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features
 cargo deny check                          # cargo install cargo-deny

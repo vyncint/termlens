@@ -9,6 +9,27 @@ listed under a **Changed** or **Removed** heading.
 
 ## [Unreleased]
 
+### Added
+
+- **The published CLI is installed and held to its documented contract**
+  (#326). `install.yml` verified `cargo add termlens` and never
+  `cargo install termlens-cli`, so #310 — `termlens inspect --version`
+  exiting 2 — shipped in 0.10.0, shipped again in 0.10.1, and was found by a
+  user of the published binary rather than by anything here.
+
+  A `cli` job installs `termlens-cli` from crates.io on Linux and macOS —
+  every run, never from a cache — and asserts every exit code
+  `termlens --help` documents: `--version` in all four positions returning
+  the same string, `inspect` printing a screen with its header and trailer,
+  `render` in all four formats, and `diff` returning **0** for the same
+  picture, **1** for a different one and **2** for input it cannot read.
+
+  The assertions live in `.github/scripts/check-cli-contract.sh` and take
+  the binary to exercise, so the same script runs against a path build. `ci.yml`
+  does exactly that on every pull request: the published check is the net,
+  the tree check is the fast feedback. Re-introducing #310 locally was
+  observed to fail it.
+
 ### Fixed
 
 - **`termlens <subcommand> --version` is no longer an unknown option.**
