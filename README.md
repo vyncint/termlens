@@ -131,7 +131,7 @@ an assertion sees one consistent instant. The emulator sits behind a small
 internal trait; `vt100` is the backend, with a second parser recovering the
 three style attributes it drops (blink, conceal, strikethrough). The
 mechanics, and the reasoning behind each decision, are in
-[docs/DESIGN.md](docs/DESIGN.md).
+[docs/DESIGN.md](https://github.com/vyncint/termlens/blob/main/docs/DESIGN.md).
 
 ## Waiting without flakes
 
@@ -152,7 +152,7 @@ bounded too: typing into an application that has stopped reading, or into a
 child that has exited, is an error carrying the screen rather than a hang.
 The three rules for race-free waits — one predicate per instant, wait on
 the last thing painted, settle before whole-screen snapshots — are
-[docs/DESIGN.md](docs/DESIGN.md) §2.
+[docs/DESIGN.md](https://github.com/vyncint/termlens/blob/main/docs/DESIGN.md) §2.
 
 ## Snapshots that survive volatile content
 
@@ -274,11 +274,11 @@ that, so what termlens claims on Windows is what survives the re-render.
 The whole suite runs on `windows-latest` as a required check; each test the
 platform cannot honour is `#[cfg_attr(windows, ignore = "…")]` with the
 reason. The measurement is `tests/conpty_probe.rs`; the decision is
-[docs/STABILITY.md](docs/STABILITY.md) §1.
+[docs/STABILITY.md](https://github.com/vyncint/termlens/blob/main/docs/STABILITY.md) §1.
 
 ## Stability and versioning
 
-termlens is `0.x`. [docs/STABILITY.md](docs/STABILITY.md) states what 1.0
+termlens is `0.x`. [docs/STABILITY.md](https://github.com/vyncint/termlens/blob/main/docs/STABILITY.md) states what 1.0
 means — three decisions written down with the measurement behind each —
 and which public items the compatibility promise covers. **0.11 is the
 stability candidate**: from that release no promised item changes
@@ -293,7 +293,7 @@ published crate.
 ## Limitations
 
 The short list; the full one, with the reason behind each entry, is
-[docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+[docs/LIMITATIONS.md](https://github.com/vyncint/termlens/blob/main/docs/LIMITATIONS.md).
 
 - Terminal dimensions are 2–1000 cells per axis.
 - `wait_frame` needs the application to bracket repaints in DEC 2026
@@ -312,7 +312,7 @@ The short list; the full one, with the reason behind each entry, is
 
 Agents write terminal tests badly in predictable ways — a `sleep` where a
 wait belongs, a snapshot taken mid-repaint, `(row, col)` handed to a method
-that wants `(col, row)`. [`skills/termlens/SKILL.md`](skills/termlens/SKILL.md)
+that wants `(col, row)`. [`skills/termlens/SKILL.md`](https://github.com/vyncint/termlens/blob/main/skills/termlens/SKILL.md)
 is the counter to each: the model, the rules, the API on one page and four
 recipes. Every Rust block in it is compiled against the crate in CI.
 
@@ -327,28 +327,28 @@ Other agents take the same file — a Cursor rule, or a reference from
 
 | | |
 | --- | --- |
-| [docs/DESIGN.md](docs/DESIGN.md) | the four layers, wait semantics and the three rules, the snapshot text format, why the emulator is where it is |
-| [docs/STABILITY.md](docs/STABILITY.md) | what 1.0 means, and what the promise covers |
-| [docs/LIMITATIONS.md](docs/LIMITATIONS.md) | everything termlens does not model or claim, with reasons |
-| [docs/BACKENDS.md](docs/BACKENDS.md) | the emulator comparison behind keeping `vt100` |
-| [skills/termlens/SKILL.md](skills/termlens/SKILL.md) | the agent skill: rules, API cheat sheet, recipes |
-| [CHANGELOG.md](CHANGELOG.md) | every release, breaking changes under **Changed** / **Removed** |
+| [docs/DESIGN.md](https://github.com/vyncint/termlens/blob/main/docs/DESIGN.md) | the four layers, wait semantics and the three rules, the snapshot text format, why the emulator is where it is |
+| [docs/STABILITY.md](https://github.com/vyncint/termlens/blob/main/docs/STABILITY.md) | what 1.0 means, and what the promise covers |
+| [docs/LIMITATIONS.md](https://github.com/vyncint/termlens/blob/main/docs/LIMITATIONS.md) | everything termlens does not model or claim, with reasons |
+| [docs/BACKENDS.md](https://github.com/vyncint/termlens/blob/main/docs/BACKENDS.md) | the emulator comparison behind keeping `vt100` |
+| [skills/termlens/SKILL.md](https://github.com/vyncint/termlens/blob/main/skills/termlens/SKILL.md) | the agent skill: rules, API cheat sheet, recipes |
+| [CHANGELOG.md](https://github.com/vyncint/termlens/blob/main/CHANGELOG.md) | every release, breaking changes under **Changed** / **Removed** |
 | [docs.rs](https://docs.rs/termlens) | the API reference |
 
 ## Contributing
 
-Pull requests are welcome — [CONTRIBUTING.md](CONTRIBUTING.md) has the dev
+Pull requests are welcome — [CONTRIBUTING.md](https://github.com/vyncint/termlens/blob/main/CONTRIBUTING.md) has the dev
 setup, the testing policy and the DCO sign-off. Three things to know before
 starting: every change lands with tests; anything touching wait semantics
-must pass the 100-iteration [stress workflow](.github/workflows/stress.yml)
+must pass the 100-iteration [stress workflow](https://github.com/vyncint/termlens/blob/main/.github/workflows/stress.yml)
 on Linux, macOS and Windows; snapshot updates are reviewed diffs
 (`cargo insta review`), never blind accepts. Security reports go to
-[SECURITY.md](SECURITY.md).
+[SECURITY.md](https://github.com/vyncint/termlens/blob/main/SECURITY.md).
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
-[MIT license](LICENSE-MIT) at your option. Unless you explicitly state
+Licensed under either of [Apache License, Version 2.0](https://github.com/vyncint/termlens/blob/main/LICENSE-APACHE) or
+[MIT license](https://github.com/vyncint/termlens/blob/main/LICENSE-MIT) at your option. Unless you explicitly state
 otherwise, any contribution intentionally submitted for inclusion in the
 work by you, as defined in the Apache-2.0 license, shall be dual licensed as
 above, without any additional terms or conditions.
