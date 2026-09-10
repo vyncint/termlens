@@ -43,13 +43,25 @@ fn wait_frame_for_overrides_the_builder_default() -> termlens::Result<()> {
 #[test]
 fn wait_idle_for_overrides_the_builder_default() -> termlens::Result<()> {
     let mut t = slow_app(&["busy", "--wait"]);
-    // A 200ms quiet period cannot be observed under the 150ms builder
-    // deadline at all — the wait would expire before the silence does.
+    // Let the child's first output land before measuring the silence.
+    // `wait_idle` counts quiet from the call, and a child that has not
+    // started writing yet is trivially quiet: the stress workflow saw this
+    // resolve after 200 ms of *nothing* on a loaded Windows runner (ConPTY
+    // holds the child until its startup handshake is answered), and the
+    // screen assertion below then failed on an empty grid — a race in this
+    // test, not in the wait. The per-call override is still what is under
+    // test: a 200 ms quiet period cannot be observed under the 150 ms
+    // builder deadline at all.
+    t.wait_until_for(|s| s.contains("busy"), Duration::from_secs(30))?;
     let start = Instant::now();
     t.wait_idle_for(Duration::from_millis(200), Duration::from_secs(30))?;
+    // The quiet window counts from the last byte, which landed a moment
+    // before `start`, so the elapsed time is a hair under 200 ms; what the
+    // test needs is that it is past the 150 ms builder deadline, under
+    // which the same call would have errored instead.
     assert!(
-        start.elapsed() >= Duration::from_millis(200),
-        "resolved before the quiet period elapsed: {:?}",
+        start.elapsed() > Duration::from_millis(150),
+        "resolved inside the builder deadline, so the override did not apply: {:?}",
         start.elapsed()
     );
     assert!(t.screen().contains("busy"), "{}", t.screen());
