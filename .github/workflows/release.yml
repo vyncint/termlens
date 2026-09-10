@@ -36,37 +36,20 @@ jobs:
             exit 1
           fi
 
-  # Re-run the exact CI gates (fmt, clippy, test matrix, msrv, docs, deny).
+  # Re-run the exact CI gates (fmt, clippy, test matrix, msrv, docs, deny),
+  # the semver gate included: ci.yml's `semver` job checks the tree against
+  # the last published release with the release type forced, in three
+  # feature views (#323). A release with a declared break passes because
+  # its CHANGELOG section records it (`- **Breaking`); an undeclared one
+  # fails here before anything is published.
   ci:
     name: ci
     needs: verify-version
     uses: ./.github/workflows/ci.yml
 
-  semver:
-    name: cargo-semver-checks
-    needs: verify-version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Look for a published baseline on crates.io
-        id: published
-        run: |
-          status="$(curl -sS -o /dev/null -w '%{http_code}' https://crates.io/api/v1/crates/termlens)"
-          echo "crates.io responded ${status}"
-          echo "found=$([ "$status" = "200" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-      - name: Skip (first release, no baseline)
-        if: steps.published.outputs.found != 'true'
-        run: echo "termlens is not on crates.io yet; skipping semver checks gracefully."
-      - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
-        if: steps.published.outputs.found == 'true'
-        with:
-          package: termlens
-
   publish:
     name: publish to crates.io
-    needs: [ci, semver]
+    needs: ci
     runs-on: ubuntu-latest
     # The `release` environment only deploys from v* tags, so an OIDC
     # publish token can never be minted from a branch.

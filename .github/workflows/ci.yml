@@ -41,8 +41,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
-      - run: cargo clippy --workspace --all-targets --no-default-features --features decode -- -D warnings
+      # The reduced sets select the library alone: with --workspace the CLI's
+      # `features = ["serde"]` is unified into the library and the "minimal"
+      # build being linted is not minimal (#324).
+      - run: cargo clippy -p termlens --all-targets --no-default-features -- -D warnings
+      - run: cargo clippy -p termlens --all-targets --no-default-features --features decode -- -D warnings
 
   # CI runners have no TTY; termlens creates its own PTYs. This suite passing
   # headless is the proof of the crate's core value claim.
@@ -90,6 +93,14 @@ jobs:
   # Additivity makes a gap there unlikely, not impossible, and the cell
   # costs about ninety seconds.
   #
+  # Each reduced configuration selects the library alone (#324). Cargo
+  # unifies features across every package in one invocation, and
+  # termlens-cli depends on the library with `features = ["serde"]`, so the
+  # `--workspace` form of these tested a "minimal" library that had serde on
+  # — and `tests/record.rs` used serde_json unconditionally without anything
+  # here noticing. `check-feature-isolation.sh` asserts the selection really
+  # is isolated, so the --workspace form cannot come back quietly.
+  #
   # Priced and deferred, deliberately (#226): the default set on the macOS
   # leg — a second full suite per PR for a fault class the stress workflow
   # is better placed to find. The other half #226 deferred, a
@@ -108,10 +119,11 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test --workspace --no-default-features
-      - run: cargo test --workspace --no-default-features --features decode
-      - run: cargo test --workspace --no-default-features --features regex
-      - run: cargo test --workspace --no-default-features --features serde
+      - run: .github/scripts/check-feature-isolation.sh
+      - run: cargo test -p termlens --no-default-features
+      - run: cargo test -p termlens --no-default-features --features decode
+      - run: cargo test -p termlens --no-default-features --features regex
+      - run: cargo test -p termlens --no-default-features --features serde
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -205,6 +217,49 @@ jobs:
       - run: cargo check --workspace --exclude ratatui-app --locked --all-targets
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.msrv }}
+      # --all-targets does not enable optional features, so `decode`, `regex`
+      # and the library's `serde` code had never met 1.85 in CI while the
+      # README advertised one MSRV for the crate (#325). Both ends of the
+      # feature axis, for the library alone so nothing is unified in.
+      - run: cargo check -p termlens --all-features --all-targets --locked
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.msrv }}
+      - run: cargo check -p termlens --no-default-features --all-targets --locked
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.msrv }}
+
+  # The public API against the last published release, on every pull request
+  # and every push to main (#323). Two things a naive run gets wrong, both
+  # measured and both pinned by the self-test that runs first: a version bump
+  # in the same PR as a break makes the inferred release type "major" and
+  # skips every check, so the type is forced; and --all-features cannot see
+  # an item moved behind a feature, so three views run. A deliberate break
+  # carries the `breaking` label (the release type becomes `major`, and the
+  # diagnostics go in the PR description) — and is recorded in CHANGELOG.md
+  # as a `- **Breaking` bullet, which is what keeps main green after the
+  # merge, where no label exists. `.github/scripts/check-semver.sh` has the
+  # rules; docs/RELEASING.md says when the baseline literal below moves.
+  #
+  # The checker is a prebuilt binary downloaded every run: never built from
+  # source and never restored from a cache, so a green run is evidence about
+  # this tree and today's checker rather than about the day a cache filled.
+  semver:
+    name: semver
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@fa23953489c080190314742a9b907f8e97c6767c # v2.87.10
+        with:
+          tool: cargo-semver-checks
+      - run: tools/semver-gate-selftest/run.sh
+      - run: .github/scripts/check-semver.sh 0.10.3
+        env:
+          BREAKING_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'breaking') }}
 
   docs:
     name: docs
@@ -279,7 +334,7 @@ jobs:
   required-green:
     name: required-green
     if: always()
-    needs: [fmt, clippy, test, features, windows-check, windows, msrv, docs, deny, zizmor, gates-listed, skill]
+    needs: [fmt, clippy, test, features, windows-check, windows, msrv, semver, docs, deny, zizmor, gates-listed, skill]
     runs-on: ubuntu-latest
     steps:
       - name: Verify every needed job succeeded

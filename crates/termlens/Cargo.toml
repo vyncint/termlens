@@ -61,6 +61,11 @@ libc.workspace = true
 [dev-dependencies]
 insta.workspace = true
 anyhow.workspace = true
+# `tests/record.rs` reads an asciicast event back as JSON whatever features
+# are on. It compiled without this only because `--workspace` unified the
+# CLI's `serde` feature into the library (#324); `cargo test -p termlens
+# --no-default-features` did not build.
+serde_json.workspace = true
 
 [lints]
 workspace = true

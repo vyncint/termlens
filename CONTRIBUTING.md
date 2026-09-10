@@ -26,13 +26,14 @@ nothing in CI should surprise you:
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo clippy --workspace --all-targets --no-default-features -- -D warnings
-cargo clippy --workspace --all-targets --no-default-features --features decode -- -D warnings
+cargo clippy -p termlens --all-targets --no-default-features -- -D warnings                    # the library alone: --workspace would unify the CLI's `serde` in
+cargo clippy -p termlens --all-targets --no-default-features --features decode -- -D warnings
 cargo clippy --workspace --all-targets -- -D warnings    # default features: what `cargo add termlens --dev` gives you
-cargo test --workspace --no-default-features
-cargo test --workspace --no-default-features --features decode
-cargo test --workspace --no-default-features --features regex
-cargo test --workspace --no-default-features --features serde
+.github/scripts/check-feature-isolation.sh              # the minimal library tree really is minimal
+cargo test -p termlens --no-default-features
+cargo test -p termlens --no-default-features --features decode
+cargo test -p termlens --no-default-features --features regex
+cargo test -p termlens --no-default-features --features serde
 cargo test --workspace                                   # default features
 cargo build -p termlens-cli                              # then the CLI's documented exit codes:
 .github/scripts/check-cli-contract.sh target/debug/termlens
@@ -41,7 +42,11 @@ RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features
 cargo deny check                          # cargo install cargo-deny
 pipx run zizmor==1.29.0 --persona=pedantic .github/workflows/   # workflow audit; needs GH_TOKEN for the online checks
 cargo +1.85 check --workspace --exclude ratatui-app --locked --all-targets    # the MSRV: `rust-version` in Cargo.toml (the ratatui fixture needs 1.88)
+cargo +1.85 check -p termlens --all-features --all-targets --locked           # …and every optional feature at the same floor
+cargo +1.85 check -p termlens --no-default-features --all-targets --locked
 cargo clippy --workspace --all-targets --all-features --target x86_64-pc-windows-msvc -- -D warnings   # the Windows build, from any host: `rustup target add x86_64-pc-windows-msvc` once
+tools/semver-gate-selftest/run.sh                       # the semver gate can fail (cargo install cargo-semver-checks)…
+.github/scripts/check-semver.sh 0.10.3                  # …and the public API is compatible with the last published release
 ```
 
 The list is written out here rather than left as a pointer because a first

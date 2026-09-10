@@ -52,21 +52,41 @@ gh pr create --fill && gh pr merge --squash --auto
 git checkout main && git pull
 git tag vX.Y.Z
 git push origin vX.Y.Z
+
+# 5. Once release.yml has published: move the semver gate's baseline to the
+#    version that is now on crates.io. One literal, in one place — the
+#    `.github/scripts/check-semver.sh X.Y.Z` step of ci.yml's `semver` job
+#    (and the same line in CONTRIBUTING.md §1, or `gates-listed` fails).
+#    After the release PR and not in it: a version that is not on crates.io
+#    yet cannot be a baseline, and left at the old release the gate would
+#    compare every later PR against a version nobody installs any more.
+git checkout -b ci/semver-baseline-vX.Y.Z
+$EDITOR .github/workflows/ci.yml CONTRIBUTING.md
+git commit -s -am "ci: move the semver baseline to vX.Y.Z"
+gh pr create --fill && gh pr merge --squash --auto
 ```
+
+Between the release merge and step 5, `main` compares `X.Y.Z` against the
+previous release. That is green when the release broke nothing, and green
+for a release whose CHANGELOG section records its break as a `- **Breaking`
+bullet — the gate reads that marker (`.github/scripts/check-semver.sh`), so
+a break that was declared stays declared after the label on its pull
+request is out of sight.
 
 Pushing the tag runs `release.yml`, which:
 
 1. fails unless tag == `crates/termlens` version,
-2. re-runs the full CI gates (`workflow_call` into ci.yml),
-3. runs `cargo-semver-checks` against the last published release
-   (skipped gracefully on the first release),
-4. `cargo publish -p termlens` then `cargo publish -p termlens-cli`, both
+2. re-runs the full CI gates (`workflow_call` into ci.yml) — the semver
+   gate among them, against the last published release with the release
+   type forced (`.github/scripts/check-semver.sh`),
+3. `cargo publish -p termlens` then `cargo publish -p termlens-cli`, both
    via Trusted Publishing (OIDC); each crate needs its own publisher
    link, and the step says so if one is missing,
-5. creates the GitHub Release with notes extracted from the CHANGELOG
+4. creates the GitHub Release with notes extracted from the CHANGELOG
    section for that version (`.github/scripts/extract-changelog.sh`), and
-6. runs the registry-consumer check against that published version on Linux
-   and macOS.
+5. runs the registry-consumer check — the library as `cargo add termlens`
+   and the CLI as `cargo install termlens-cli`, held to its exit-code
+   contract — against that published version on Linux and macOS.
 
 ## Bootstrapping a brand-new crate
 
