@@ -500,13 +500,18 @@ fn inspect_runs_the_program_where_cwd_says() -> termlens::Result<()> {
     let dir = std::env::temp_dir().join(format!("termlens-cwd-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let real = std::fs::canonicalize(&dir)?;
+    // Wide enough that the path is one row. At 60 columns this went red on
+    // the macOS leg and nowhere else: the temp directory there is
+    // `/private/var/folders/36/tjdph2t965j8snz9_vkdnw0r0000gn/T/…`, which
+    // wraps, and a wrapped needle is a test about the width rather than
+    // about --cwd.
     let mut t = termlens::bin!(
         "termlens",
         env("PATH", &path),
         args([
             "inspect",
             "--size",
-            "60x3",
+            "200x3",
             "--cwd",
             dir.to_str().expect("utf-8 path"),
             "sh",
