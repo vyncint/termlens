@@ -23,6 +23,11 @@ result="$(awk -v ver="$version" '
     if (found) exit
     if (index($0, "[" ver "]") > 0) { found = 1; next }
   }
+  # Keep a Changelog ends with link reference definitions, which sit below
+  # the oldest version heading and therefore inside its section as far as
+  # the slice above is concerned. They belong to the file, not to any one
+  # release, so collecting stops at the first of them (#319).
+  found && /^\[[^]]+\]:[[:space:]]+http/ { exit }
   found { lines[++n] = $0 }
   END {
     start = 1; while (start <= n && lines[start] ~ /^[[:space:]]*$/) start++

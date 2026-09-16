@@ -682,6 +682,40 @@ The `insta` feature (default) re-exports `insta` and ships
 `assert_screen_snapshot!` so the snapshotting insta version can't drift
 from the one the macro targets.
 
+### Reading it back
+
+`Screen::parse` (0.10.0) is the reader for everything above: it accepts
+exactly what `Display` and `with_styles` write — the header, the grid, and
+optionally the blank line, `styles:` and its spans — and every other line is
+an `Error::Parse` naming it. The `termlens` CLI is built on it: `diff` and
+`render` take saved screens, so a snapshot outlives the test run that
+produced it.
+
+The round trip is exact **for what the format carries**. A parsed screen
+renders to the same text, with the same `styles:` block, and `diff`s empty
+against the original. It is not `==` to the original, and rule 5's last
+paragraph is why: equality is "the same observation" and the text format is
+deliberately blind to most of it. What does not survive is exactly what the
+rules above never wrote down — an erased cell and a written blank are one
+character either way; the out-of-band state, the title, the mode flags, the
+counters and the history, comes back default; and a hidden cursor's position
+is not recorded, so `cursor: hidden` parses back to a hidden cursor at
+`0,0`. `diff` reports none of those as a difference, which is the same claim
+from the other side: the text format is the *picture*, and two screens that
+render alike are the same picture.
+
+The header's row count is what decides where the grid ends — not a search
+for the `styles:` marker — so a grid may hold the words `styles:` or
+`(none)` as ordinary content. The one ambiguous input is a snapshot whose
+trailing blank rows were trimmed by hand *and* which carries a styles block:
+its block falls inside the declared row count and is read as content.
+Content wins on purpose, because a wrong row of text shows up in a diff and
+a silently dropped one does not.
+
+The JSON shape below is the format for the other job — carrying a `Screen`
+whole, out-of-band state included, so that reading it back gives one that
+compares `==`.
+
 ### What a reader skips, and what it does not
 
 The format proper begins at the `size:` header and ends with the grid or

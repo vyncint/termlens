@@ -53,6 +53,18 @@ reads that marker.
   could not (#312). A path that is not an existing directory is refused by
   name, in one line, with exit 2.
 
+### Changed
+
+- Every version heading in this file now links to its compare view, as
+  [Keep a Changelog] specifies and this file's own header claimed (#319).
+  `[Unreleased]` compares the newest tag to `HEAD`. Release notes are
+  unaffected: `extract-changelog.sh` stops collecting at the definitions,
+  so the notes for every published version are byte-identical to before.
+
+- `docs/DESIGN.md` §3 now names `Screen::parse` and says what a round trip
+  through the text format preserves and what it does not (#305). The spec
+  had never mentioned its own reader.
+
 ## [0.11.0] - 2026-09-11
 
 ### Changed
@@ -1801,3 +1813,26 @@ in the worst of them — hung itself.
   instant-exit caveat in `docs/DESIGN.md`) an output-loss race in the OS
   pty teardown, found by the stress workflow at roughly 1 in 80
   instant-exit spawns on macOS.
+
+[Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
+[`Unsupported`]: https://docs.rs/termlens/0.11.0/termlens/struct.Unsupported.html
+
+[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/vyncint/termlens/compare/v0.10.3...v0.11.0
+[0.10.3]: https://github.com/vyncint/termlens/compare/v0.10.2...v0.10.3
+[0.10.2]: https://github.com/vyncint/termlens/compare/v0.10.1...v0.10.2
+[0.10.1]: https://github.com/vyncint/termlens/compare/v0.10.0...v0.10.1
+[0.10.0]: https://github.com/vyncint/termlens/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/vyncint/termlens/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/vyncint/termlens/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/vyncint/termlens/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/vyncint/termlens/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/vyncint/termlens/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/vyncint/termlens/compare/v0.4.2...v0.5.0
+[0.4.2]: https://github.com/vyncint/termlens/compare/v0.4.0...v0.4.2
+[0.4.0]: https://github.com/vyncint/termlens/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/vyncint/termlens/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/vyncint/termlens/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/vyncint/termlens/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/vyncint/termlens/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/vyncint/termlens/releases/tag/v0.1.0

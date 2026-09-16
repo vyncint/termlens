@@ -76,9 +76,20 @@ $EDITOR Cargo.toml crates/termlens-cli/Cargo.toml
 cargo check --workspace                       # refreshes Cargo.lock
 
 # 2. Move the CHANGELOG section. A `- **Breaking:**` bullet moves with it,
-#    which is what lets the tag's semver run pass (see above).
+#    which is what lets the tag's semver run pass (see above). Then add the
+#    new version's link definition at the foot of the file and repoint
+#    [Unreleased] at the tag about to be cut — a Keep a Changelog convention
+#    that is not in this checklist decays on its first release (#319):
+#
+#      [Unreleased]: …/compare/vX.Y.Z...HEAD     <- was vPREV...HEAD
+#      [X.Y.Z]:      …/compare/vPREV...vX.Y.Z    <- new line, under it
+#
 $EDITOR CHANGELOG.md                          # [Unreleased] -> [X.Y.Z] - YYYY-MM-DD
                                               # add a fresh empty [Unreleased] above
+                                              # and two lines at the foot
+# Release notes stop above the link definitions, so they are unchanged by
+# this; `extract-changelog.sh X.Y.Z` prints exactly the section.
+.github/scripts/extract-changelog.sh X.Y.Z    # what the GitHub Release will say
 
 # 2b. Freeze this release's saved-screen shapes into the compatibility
 #     corpus (crates/termlens/tests/compat/README.md), from this tree:
