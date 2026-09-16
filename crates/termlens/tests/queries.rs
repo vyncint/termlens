@@ -24,6 +24,33 @@ fn probe(steps: &[&str]) -> termlens::Result<Terminal> {
     emit(Duration::from_secs(10), steps)
 }
 
+/// A program that is *alive* and then blocks on a query nobody answers,
+/// for the tests whose subject is the timeout that follows.
+///
+/// The short deadline those tests need belongs on the wait that must
+/// expire and nowhere else — the split `probe` and
+/// `a_query_the_app_moved_past_is_context_not_a_cause` already make. Put
+/// on the first wait, it also had to cover the spawn, and on a loaded
+/// Windows runner ConPTY holds the child through its startup handshake for
+/// longer than 500 ms: the stress workflow saw four of these time out with
+/// an **empty grid**, no query yet on the wire for the error to name
+/// (#360). So the child prints `READY` first and this waits for it with a
+/// generous deadline; the query follows in the next write, microseconds
+/// later once the process is running, and the caller's own short wait then
+/// expires for the reason the test is about.
+///
+/// `READY` comes *before* the query on purpose: output after an unanswered
+/// probe is what turns the diagnosis from "cause" into "context", and
+/// these tests assert the cause.
+fn alive_then_blocked(builder: termlens::TerminalBuilder, query: &[&str]) -> Terminal {
+    let mut steps = vec!["READY"];
+    steps.extend_from_slice(query);
+    let mut t = common::spawn_emit(builder, &steps).unwrap();
+    t.wait_until_for(|s| s.contains("READY"), Duration::from_secs(30))
+        .unwrap();
+    t
+}
+
 #[test]
 #[cfg_attr(
     windows,
@@ -152,11 +179,10 @@ fn text_area_size_reports_the_real_grid() -> termlens::Result<()> {
 fn unanswerable_queries_turn_timeouts_into_diagnoses() {
     // CSI 14 t (pixel size) is recognized as a question termlens cannot
     // answer; the app blocks, and the timeout error names the query.
-    let mut t = emit(
-        Duration::from_millis(500),
+    let mut t = alive_then_blocked(
+        Terminal::builder().timeout(Duration::from_millis(500)),
         &["--csi", "14t", "--wait", "never"],
-    )
-    .unwrap();
+    );
     let err = t.wait_until(|s| s.contains("never")).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("^[[14t"), "query not named in: {msg}");
@@ -166,13 +192,12 @@ fn unanswerable_queries_turn_timeouts_into_diagnoses() {
 
 #[test]
 fn the_responder_can_be_disabled_and_says_what_went_unanswered() {
-    let mut t = common::spawn_emit(
+    let mut t = alive_then_blocked(
         Terminal::builder()
             .timeout(Duration::from_millis(500))
             .answer_queries(false),
         &["--csi", "6n", "--wait", "never"],
-    )
-    .unwrap();
+    );
     let err = t.wait_until(|s| s.contains("never")).unwrap_err();
     assert!(matches!(err, Error::Timeout { .. }));
     let msg = err.to_string();
@@ -225,11 +250,10 @@ fn a_query_the_app_moved_past_is_context_not_a_cause() {
 /// Every unanswered query is named, not just the most recent one.
 #[test]
 fn all_unanswered_queries_are_named() {
-    let mut t = emit(
-        Duration::from_millis(400),
+    let mut t = alive_then_blocked(
+        Terminal::builder().timeout(Duration::from_millis(400)),
         &["--raw", r"\e[?u\e[14t", "--wait", "never"],
-    )
-    .unwrap();
+    );
     let err = t.wait_until(|s| s.contains("never")).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("^[[?u"), "first query missing from: {msg}");
@@ -242,11 +266,10 @@ fn all_unanswered_queries_are_named() {
 /// then blames the app for not emitting frames.
 #[test]
 fn wait_frame_timeouts_carry_the_query_note() {
-    let mut t = emit(
-        Duration::from_millis(400),
+    let mut t = alive_then_blocked(
+        Terminal::builder().timeout(Duration::from_millis(400)),
         &["--csi", "14t", "--wait", "never"],
-    )
-    .unwrap();
+    );
     let err = t.wait_frame(|s| s.contains("never")).unwrap_err();
     let msg = err.to_string();
     assert!(
