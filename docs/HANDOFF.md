@@ -189,9 +189,8 @@ published, so the badges are live. The ruleset still enforces, secret
 scanning and push protection are on, and Discussions stayed off. Two items
 resolved differently from the plan: required approvals are deliberately
 still **0**, because a solo maintainer cannot approve their own pull
-request and requiring one approval would block every release; and the
-announcements are still in flight, with the draft in
-`docs/announce-r-rust.md`.
+request and requiring one approval would block every release; announcements
+are still in flight and should be written fresh when the release is ready.
 
 ## 4. Deviations from the build brief, and why
 
