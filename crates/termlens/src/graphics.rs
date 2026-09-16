@@ -1483,6 +1483,74 @@ mod tests {
         assert!(!rendered.contains("AAAA"), "the data must not be in it");
     }
 
+    /// The `Display` strings are the crate's contract with its callers, and the
+    /// `f={value}` arm of `GraphicsFormat` had no coverage at all — a value
+    /// other than 24/32/100 is the only input that reaches it.
+    #[test]
+    fn protocols_and_formats_render_as_their_names() {
+        assert_eq!(GraphicsProtocol::Kitty.to_string(), "kitty");
+        assert_eq!(GraphicsProtocol::Sixel.to_string(), "sixel");
+        assert_eq!(GraphicsFormat::Rgb.to_string(), "rgb");
+        assert_eq!(GraphicsFormat::Rgba.to_string(), "rgba");
+        assert_eq!(GraphicsFormat::Png.to_string(), "png");
+        assert_eq!(GraphicsFormat::Sixel.to_string(), "sixel");
+        assert_eq!(GraphicsFormat::Other(99).to_string(), "f=99");
+    }
+
+    /// An unrecognized `f=` value must survive the parser as `Other`, never be
+    /// guessed into a named format — driven through the real builder rather
+    /// than hand-constructed, so a broken `f=` parse fails here.
+    #[test]
+    fn an_unknown_kitty_format_survives_named_and_rendered() {
+        let payload = kitty_payload(b"a=T,f=99,s=1,v=1", b"AAAA");
+        assert_eq!(payload.format(), GraphicsFormat::Other(99));
+        assert_eq!(payload.format().to_string(), "f=99");
+    }
+
+    /// These are the strings a user actually reads when a decode is refused,
+    /// so their exact wording is load-bearing (#181); the `assert_error`
+    /// function pins the `std::error::Error` impl at compile time.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn every_decode_error_names_its_reason_and_is_an_error() {
+        fn assert_error<E: std::error::Error>() {}
+        assert_error::<DecodeError>();
+
+        assert_eq!(
+            DecodeError::NotCaptured.to_string(),
+            "the payload was counted but not kept — raise TerminalBuilder::capture_graphics"
+        );
+        assert_eq!(
+            DecodeError::NoImage(GraphicsAction::Delete).to_string(),
+            "a Delete action carries no image data"
+        );
+        assert_eq!(
+            DecodeError::Unsupported("kitty f=100 (PNG)").to_string(),
+            "termlens does not decode kitty f=100 (PNG)"
+        );
+        assert_eq!(
+            DecodeError::Malformed("bad base64").to_string(),
+            "the payload carries bad base64"
+        );
+        assert_eq!(
+            DecodeError::TooLarge("a sixel wider than 4096 pixels").to_string(),
+            "termlens will not decode a sixel wider than 4096 pixels"
+        );
+    }
+
+    /// The terse form is deliberate — a `Screen` is embedded in every error,
+    /// and a derived `Debug` would dump the pixels into the log. This test is
+    /// the fence against a `#[derive(Debug)]` being restored over the manual impl.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn a_bitmap_debugs_as_dimensions_only() {
+        let raw = [0x40u8; 8];
+        let bitmap = kitty_payload(b"a=T,f=32,s=2,v=1", base64(&raw).as_bytes())
+            .decode()
+            .expect("decodes");
+        assert_eq!(format!("{bitmap:?}"), "Bitmap 2x1");
+    }
+
     /// The encoder side of what `decode_base64` undoes — tests only.
     #[cfg(feature = "decode")]
     fn base64(data: &[u8]) -> String {
