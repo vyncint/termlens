@@ -363,12 +363,20 @@ fn with_stdin(args: &[&str], input: &str) -> std::process::Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn termlens");
-    child
-        .stdin
-        .take()
-        .expect("a stdin pipe")
-        .write_all(input.as_bytes())
-        .expect("write to the child's stdin");
+    // A broken pipe here is a *result*, not a failure. `diff - -` refuses its
+    // arguments before reading anything, so the child can exit and close the
+    // pipe before this write lands — the faster the refusal, the likelier it
+    // is. The stress workflow found it on both Linux shards while it never
+    // reproduced locally, because on an idle machine the bytes reach the
+    // pipe buffer first. The child's exit code and stderr are what the
+    // callers assert; whether it read the input is the child's business.
+    let mut pipe = child.stdin.take().expect("a stdin pipe");
+    match pipe.write_all(input.as_bytes()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(e) => panic!("write to the child's stdin: {e}"),
+    }
+    drop(pipe);
     child.wait_with_output().expect("the child's output")
 }
 
