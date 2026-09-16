@@ -190,7 +190,23 @@ fn unanswerable_queries_turn_timeouts_into_diagnoses() {
     // Drop kills the blocked child.
 }
 
+/// Off Windows only, and for a reason that only showed once the test had
+/// something to render. ConPTY opens every child with a handshake to its
+/// host that includes a DSR `6n`, and holds the child's output until it is
+/// answered (`timeouts.rs` records the same fact). With the responder off
+/// nothing answers it, so not a byte the child writes ever reaches the
+/// grid: the stress workflow saw `READY` fail to appear in 30 s on all five
+/// Windows shards, deterministically, with `^[[6n` the query named as
+/// unanswered — ConPTY's, not the child's. Before the marker, the test
+/// passed there by that coincidence: the 500 ms wait timed out on an empty
+/// grid and the error named a `6n` the child never sent. What the test is
+/// about — the *child's* query going unanswered because the responder is
+/// off — cannot be observed under ConPTY at all.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "with answer_queries(false) ConPTY's own startup 6n goes unanswered and it holds every byte of the child's output, so nothing can be observed (#149)"
+)]
 fn the_responder_can_be_disabled_and_says_what_went_unanswered() {
     let mut t = alive_then_blocked(
         Terminal::builder()
