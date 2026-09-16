@@ -117,7 +117,20 @@ cargo insta review            # inspect and accept/reject each diff
   `wait_idle`) must pass the **stress workflow** (`stress.yml` — the suite in
   a 100-iteration loop on Ubuntu, macOS and Windows, sharded across five
   `--test-threads` values). Trigger it from the Actions tab on your branch,
-  or ask a maintainer to.
+  or ask a maintainer to. So must a test that *adds* PTY spawns: three of
+  the tests added on one day in September 2026 passed locally and went red
+  only under stress, and stress on `main` is what told one author's flake
+  apart from an inherited one.
+- **A short deadline belongs on the wait that must expire, and nowhere
+  else.** A test about a 500 ms timeout gives the builder 500 ms and then
+  waits — and that first wait also covers the spawn, which on a loaded
+  Windows runner ConPTY stretches past 500 ms (#360; the same class hit
+  `wait_idle_for_overrides_the_builder_default` before it). Have the child
+  print a marker first, wait for it with a generous `wait_until_for`, and
+  only then make the wait that is under test. Put the marker *before* any
+  query the test expects to be blamed: output after an unanswered probe
+  turns the diagnosis from cause into context. `queries.rs`'s
+  `alive_then_blocked` is the shape.
 - Snapshot updates must be **reviewed diffs**: run `cargo insta review` and
   look at every change. Never blind-accept with `cargo insta accept` or
   `INSTA_UPDATE=always`. A snapshot diff you can't explain is a bug report.

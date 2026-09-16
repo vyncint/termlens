@@ -110,6 +110,43 @@ else
   status=1
 fi
 
+# --- the three flags 0.11.1 added (#312, #313, #317). Here and not only in
+# tests/cli.rs because this script runs against the *published* binary.
+expect "render --out"              0 "$BIN" render --svg --out "$WORK/out2.svg" "$WORK/a.snap"
+if cmp -s "$WORK/out.svg" "$WORK/out2.svg"; then
+  printf '  ok    %-46s same bytes as stdout\n' "render --out"
+else
+  printf '  FAIL  %-46s differs from the stdout rendering\n' "render --out" >&2
+  status=1
+fi
+expect "render --out, unreadable input" 2 "$BIN" render --svg --out "$WORK/never.svg" "$WORK/junk.txt"
+if [ -e "$WORK/never.svg" ]; then
+  printf '  FAIL  %-46s left a file behind\n' "render --out, unreadable input" >&2
+  status=1
+else
+  printf '  ok    %-46s no partial file\n' "render --out, unreadable input"
+fi
+got=0
+"$BIN" render --text - < "$WORK/a.snap" > "$WORK/stdin.txt" 2> "$WORK/err" || got=$?
+"$BIN" render --text "$WORK/a.snap" > "$WORK/path.txt" 2>/dev/null || true
+if [ "$got" = 0 ] && cmp -s "$WORK/stdin.txt" "$WORK/path.txt"; then
+  printf '  ok    %-46s exit 0, same as the path\n' "render reads - as stdin"
+else
+  printf '  FAIL  %-46s exit %s, or differs from the path\n' "render reads - as stdin" "$got" >&2
+  status=1
+fi
+got=0
+"$BIN" diff - - < "$WORK/a.snap" > "$WORK/out" 2> "$WORK/err" || got=$?
+if [ "$got" = 2 ] && grep -qF -- 'stdin is read once' "$WORK/err"; then
+  printf '  ok    %-46s exit 2, says why\n' "diff - -"
+else
+  printf '  FAIL  %-46s exit %s, expected 2 naming stdin\n' "diff - -" "$got" >&2
+  status=1
+fi
+expect "inspect --cwd, missing directory" 2 "$BIN" inspect --cwd "$WORK/no-such-dir" true
+"$BIN" inspect --size 200x3 --cwd "$WORK" sh -c pwd > "$WORK/cwd.snap" 2>/dev/null || true
+contains "inspect --cwd runs the program there" "$(basename "$WORK")" "$WORK/cwd.snap"
+
 # --- diff, which is the one command with three meaningful exit codes.
 expect "diff, same picture"        0 "$BIN" diff "$WORK/a.snap" "$WORK/a.snap"
 expect "diff, different pictures"  1 "$BIN" diff "$WORK/a.snap" "$WORK/b.snap"

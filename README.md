@@ -217,6 +217,7 @@ output back to the terminal stay testable.
 termlens inspect --size 120x40 myapp     # run a program, print its screen
 termlens diff old.snap new.snap.new      # the cell diff; exit 1 if anything changed
 termlens render --svg failing.snap       # a saved screen as SVG, HTML, ANSI or text
+termlens render --svg --out shot.svg -   # …to a file, from a screen on stdin
 ```
 
 In CI, set `TERMLENS_ARTIFACT_DIR` on the test step and every screen a
@@ -228,7 +229,7 @@ step summary:
 - run: cargo test
   env:
     TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens
-- uses: vyncint/termlens/.github/actions/report@v0.11.0
+- uses: vyncint/termlens/.github/actions/report@v0.11.1
   if: failure()
 ```
 

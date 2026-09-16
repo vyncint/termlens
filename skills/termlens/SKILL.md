@@ -5,8 +5,8 @@ description: Write, fix or review headless terminal tests for a Rust CLI or TUI 
 
 # Testing terminal programs with termlens
 
-Written against **termlens 0.11.0**, the stability candidate: from 0.11.0
-no promised public item changes incompatibly before 1.0, so the API below
+Written against **termlens 0.11.1**. 0.11.0 is the stability candidate:
+from it no promised public item changes incompatibly before 1.0, so the API below
 is one to build on, not one to expect to move. Every `rust` block below is
 a complete integration test that is compiled against the crate in CI, so
 the API it shows is the API that exists. The recipes spawn a binary called
@@ -440,7 +440,7 @@ Read the first line for the cause:
 | `wait_frame(\|s\| bool)` | `Screen` | complete DEC 2026 frames only (rule 8) |
 | `wait_exit()` | `ExitStatus` | the child's exit; `success()`, `code() -> Option<u32>`, `signal() -> Option<&str>` |
 | `wait_until_matches(&Regex)` | `Screen` | feature `regex`: a pattern over a row of the screen — the expect-style wait, on the grid |
-| `record()` … `.stop()` | `Recording` | every complete DEC 2026 frame with its time; `frames()`, `write_asciicast(path)` for a file `asciinema` plays |
+| `record()` … `.stop()` | `Recording` | every complete DEC 2026 frame with its time; `frames()`, `duration()` (to the last frame), `write_asciicast(path)` for a file `asciinema` plays — its header carries when and what was recorded |
 
 **Drive**: `send(Key)`, `send_str("text")` (no Enter — send `Key::Enter`
 yourself; `"\n"` would send LF, not CR), `paste("text")` (bracketed if the
@@ -476,7 +476,7 @@ from_r, to_c, to_r)`, `scroll(col, row, Scroll::Down)`, `resize(cols, rows)`,
 | `diff(&other)` | `ScreenDiff`: `is_empty()`, `cells()`, `changed_rows()`, `style_changes()`, and a `Display` of only the rows that changed |
 | `locate(needle)` | `Option<Location>`: `is_on_screen()`, `is_in_history()`, `col()` |
 | `mask_rect(cols, rows)` / `mask_matching(literal, fill)` / `mask_cells(pred)` | a new `Screen` with those cells replaced, styles and columns intact. `mask_matching` is a literal (rows included — it spans a wrap the way `find_all` does); `mask_cells` blanks by predicate |
-| `to_ansi()` / `to_svg()` / `to_html()` | renderings a person can see; `Screen::parse(text)` reads the text format back |
+| `to_ansi()` / `to_svg()` / `to_html()` | renderings a person can see — the SVG carries `role="img"` and a `<title>` naming its size and the app's title; `Screen::parse(text)` reads the text format back |
 
 **Style** (`Copy`, public fields): `fg`, `bg` (`Color::Default` /
 `Color::Indexed(u8)` / `Color::Rgb(u8, u8, u8)`), `bold`, `dim`, `italic`,
@@ -541,12 +541,15 @@ directory (see §9b).
   inspect --size 120x40 myapp` prints what a program shows (`--ansi` for
   colour), `termlens diff old.snap new.snap.new` prints the cell diff of two
   saved screens and exits 1 if anything changed, `termlens render --svg
-  failing.snap` makes an image. A saved screen is any text termlens prints
-  — what `inspect` writes to stdout (`termlens inspect myapp > before.txt`;
-  its trailer goes to stderr), an insta `.snap`, the grid a wait error
-  leaves in a log — or the JSON the `serde` feature writes.
+  failing.snap` makes an image (`--out shot.svg` writes it to a file and
+  leaves none behind if the render fails). A saved screen is any text
+  termlens prints — what `inspect` writes to stdout (`termlens inspect myapp
+  > before.txt`; its trailer goes to stderr), an insta `.snap`, the grid a
+  wait error leaves in a log — or the JSON the `serde` feature writes.
+  `diff` and `render` read `-` as stdin (one operand of `diff` at most), and
+  `inspect --cwd DIR` runs the program somewhere other than here.
 - In CI, set `TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens` on the
-  test step and add `uses: vyncint/termlens/.github/actions/report@v0.11.0`
+  test step and add `uses: vyncint/termlens/.github/actions/report@v0.11.1`
   with `if: failure()` after it: every screen a failing wait embedded, and
   every `.snap.new` with its diff, lands in the pull request's step summary.
 

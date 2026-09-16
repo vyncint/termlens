@@ -17,6 +17,8 @@ reads that marker.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-09-16
+
 ### Added
 
 - `Recording::duration()` — how long a recording spans, `Duration::ZERO`
@@ -64,6 +66,19 @@ reads that marker.
 - `docs/DESIGN.md` §3 now names `Screen::parse` and says what a round trip
   through the text format preserves and what it does not (#305). The spec
   had never mentioned its own reader.
+
+- The `report` action writes each SVG and HTML rendering with `render
+  --out` instead of a shell redirect, so a screen the CLI cannot read
+  leaves no empty file in the uploaded artifact. Pin the action at the same
+  tag as the CLI it installs (`report@v0.11.1`); the flag is new in 0.11.1.
+
+### Fixed
+
+- Four `queries.rs` tests, and the class they belong to, no longer put a
+  sub-second deadline on the wait that also had to cover the spawn (#360).
+  On a loaded Windows runner ConPTY holds a child through its startup
+  handshake for longer than 500 ms, and the stress workflow saw them time
+  out with an empty grid. Test-only; nothing a consumer installs changed.
 
 ## [0.11.0] - 2026-09-11
 
@@ -1817,7 +1832,8 @@ in the worst of them — hung itself.
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [`Unsupported`]: https://docs.rs/termlens/0.11.0/termlens/struct.Unsupported.html
 
-[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/vyncint/termlens/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/vyncint/termlens/compare/v0.10.3...v0.11.0
 [0.10.3]: https://github.com/vyncint/termlens/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/vyncint/termlens/compare/v0.10.1...v0.10.2

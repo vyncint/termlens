@@ -92,9 +92,12 @@ runs:
           n=$((n + 1))
           base="$(basename "$file")"
           stem="${n}-${base}"
-          # Renderings for the artifact; the summary holds the text.
-          termlens render --svg "$file" > "${out}/${stem}.svg" || true
-          termlens render --html "$file" > "${out}/${stem}.html" || true
+          # Renderings for the artifact; the summary holds the text. --out
+          # rather than a redirect (0.11.1, #313): the shell truncates the
+          # file before termlens runs, so a screen the CLI could not read
+          # used to leave an empty .svg in the artifact. Now it leaves none.
+          termlens render --svg  --out "${out}/${stem}.svg"  "$file" || true
+          termlens render --html --out "${out}/${stem}.html" "$file" || true
           {
             echo "<details><summary><code>${file}</code></summary>"
             echo
