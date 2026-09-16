@@ -186,6 +186,12 @@ jobs:
       # misspelled org repository and a deleted in-repo target are both
       # asserted to go red, so today's green run means something.
       - run: tools/link-gate-selftest/run.sh
+      # The emit fixture's documented steps against the ones it implements
+      # (#318). It lives in this job because it needs no toolchain — it is
+      # two greps and a `comm` — and the fixture is what almost every
+      # integration test drives, so a step that is documented and not
+      # implemented (or the reverse) costs a test author an afternoon.
+      - run: .github/scripts/check-emit-steps.sh
 
   msrv:
     name: msrv
