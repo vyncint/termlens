@@ -9,13 +9,17 @@
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+// The asciicast header is assembled key by key because two of its keys
+// are optional (#309); `write!` into a String needs this in scope, and the
+// anonymous import keeps `Write` meaning `io::Write` everywhere else.
+use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 
@@ -713,6 +717,9 @@ impl RecordingState {
 pub struct Recorder {
     state: Arc<Mutex<RecordingState>>,
     shared: Arc<Monitor<EmuState>>,
+    /// The command being recorded, for the asciicast `title` (#309). Carried
+    /// from the terminal because `stop` has no other way back to it.
+    title: String,
 }
 
 impl fmt::Debug for Recorder {
@@ -755,6 +762,7 @@ impl Recorder {
         Ok(Recording {
             frames: state.frames.iter().cloned().collect(),
             dropped: state.dropped,
+            title: self.title.clone(),
         })
     }
 }
@@ -765,6 +773,7 @@ impl Recorder {
 pub struct Recording {
     frames: Vec<(Duration, Screen)>,
     dropped: u64,
+    title: String,
 }
 
 impl Recording {
@@ -794,6 +803,19 @@ impl Recording {
         self.dropped
     }
 
+    /// How long the recording spans: the timestamp of its last frame, and
+    /// [`Duration::ZERO`] when no frame was recorded.
+    ///
+    /// The span is measured between [`Terminal::record`] and the end of the
+    /// last **complete** frame — not the program's lifetime. A program that
+    /// draws its final repaint and then sits at a prompt for a second has a
+    /// recording a second shorter than its run, and one whose last repaint
+    /// was never bracketed by DEC 2026 markers has no frame to end at.
+    #[must_use]
+    pub fn duration(&self) -> Duration {
+        self.frames.last().map_or(Duration::ZERO, |(at, _)| *at)
+    }
+
     /// The recording as an [asciicast v2] document: a header line, then one
     /// event per frame at its timestamp, each a full repaint — clear, home,
     /// then the frame through [`Screen::to_ansi`] — which is what the format
@@ -807,10 +829,23 @@ impl Recording {
             .frames
             .first()
             .map_or((80, 24), |(_, frame)| frame.size());
-        let mut out = format!(
-            "{{\"version\": 2, \"width\": {cols}, \"height\": {rows}, \
-             \"env\": {{\"TERM\": \"xterm-256color\"}}}}\n"
-        );
+        // The header is one line of JSON, assembled key by key because two of
+        // the four optional keys the v2 spec defines may be absent (#309).
+        // Without them a player shows a recording with no date and no name,
+        // which is the first question asked of a file attached to a bug
+        // report. Order follows the spec's own listing.
+        let mut out = format!("{{\"version\": 2, \"width\": {cols}, \"height\": {rows}");
+        // A clock set before the epoch has no honest unix timestamp, so the
+        // key is omitted rather than written as 0 — a reader that meets no
+        // timestamp shows none, where one that meets 1970 shows a wrong date.
+        if let Ok(since_epoch) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+            let _ = write!(out, ", \"timestamp\": {}", since_epoch.as_secs());
+        }
+        let _ = write!(out, ", \"duration\": {:.6}", self.duration().as_secs_f64());
+        if !self.title.is_empty() {
+            let _ = write!(out, ", \"title\": {}", json_string(&self.title));
+        }
+        out.push_str(", \"env\": {\"TERM\": \"xterm-256color\"}}\n");
         for (at, frame) in &self.frames {
             let mut data = String::from("\x1b[H\x1b[2J");
             // `to_ansi` ends every row with a newline, the bottom one
@@ -2579,6 +2614,7 @@ impl Terminal {
         Recorder {
             state,
             shared: Arc::clone(&self.shared),
+            title: self.command_desc.clone(),
         }
     }
 

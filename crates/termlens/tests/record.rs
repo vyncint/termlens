@@ -198,3 +198,111 @@ fn the_asciicast_replays_every_row_of_every_frame() -> termlens::Result<()> {
     }
     Ok(())
 }
+
+/// `duration()` is the span a recording covers, and the arithmetic every
+/// caller was writing by hand over `frames().last()` (#307).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so a recorded frame never holds what was drawn (#149)"
+)]
+fn a_recording_spans_up_to_its_last_frame() -> termlens::Result<()> {
+    let mut t = emit(
+        Terminal::builder(),
+        &["READY", "--wait", "--raw", BURST, " DONE", "--wait"],
+    )?;
+    t.wait_until(|s| s.contains("READY"))?;
+    let rec = t.record();
+    t.send(Key::Enter)?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let frames = rec.stop()?;
+
+    let last = frames.frames().last().expect("three frames").0;
+    assert_eq!(frames.duration(), last, "the span ends at the last frame");
+    assert!(
+        frames
+            .frames()
+            .iter()
+            .all(|(at, _)| *at <= frames.duration()),
+        "no frame lands after the span ends: {:?}",
+        frames
+            .frames()
+            .iter()
+            .map(|(at, _)| *at)
+            .collect::<Vec<_>>()
+    );
+
+    // A recorder that starts after the last repaint has nothing to span.
+    // The refusal in `stop` is about the *application* never bracketing an
+    // update, not about this recorder having missed them all, so this is a
+    // recording with no frames rather than an error.
+    let empty = t.record().stop()?;
+    assert!(empty.is_empty());
+    assert_eq!(empty.duration(), Duration::ZERO, "no frames, no span");
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// The asciicast header carries the optional keys a player shows: when the
+/// recording was taken and what was recorded (#309). Without them a file
+/// attached to a bug report answers neither question.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so a recorded frame never holds what was drawn (#149)"
+)]
+fn the_asciicast_header_dates_and_names_the_recording() -> termlens::Result<()> {
+    let mut t = emit(
+        Terminal::builder(),
+        &["READY", "--wait", "--raw", BURST, " DONE", "--wait"],
+    )?;
+    t.wait_until(|s| s.contains("READY"))?;
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_secs();
+    let rec = t.record();
+    t.send(Key::Enter)?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let frames = rec.stop()?;
+
+    let cast = frames.to_asciicast();
+    let header = cast.lines().next().expect("a header line");
+    let parsed: serde_json::Value =
+        serde_json::from_str(header).expect("the header is still one line of valid JSON");
+
+    let timestamp = parsed["timestamp"].as_u64().expect("unix seconds");
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_secs();
+    assert!(
+        (before..=after).contains(&timestamp),
+        "exported now, not at some other time: {timestamp} outside {before}..={after}"
+    );
+
+    // The title is the command, which here carries the fixture's own
+    // backslash escapes — so it also proves the key is JSON-escaped rather
+    // than pasted in.
+    let title = parsed["title"].as_str().expect("a title");
+    assert!(title.contains("emit"), "the command recorded: {title}");
+    assert!(title.contains(BURST), "its arguments too: {title}");
+
+    let duration = parsed["duration"].as_f64().expect("a duration");
+    assert!(
+        (duration - frames.duration().as_secs_f64()).abs() < 1e-6,
+        "the header's duration is the recording's: {duration}"
+    );
+
+    // The keys the header always had are unchanged.
+    assert_eq!(parsed["version"], 2);
+    assert_eq!(parsed["width"], 40);
+    assert_eq!(parsed["height"], 6);
+    assert_eq!(parsed["env"]["TERM"], "xterm-256color");
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
