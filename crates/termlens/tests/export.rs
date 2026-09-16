@@ -19,8 +19,17 @@ fn emit(steps: &[&str]) -> termlens::Result<Terminal> {
 /// A small styled screen every rendering below is made from: a bold cyan
 /// title, a reverse-video highlight, a dim note, a concealed field, a wide
 /// character and an RGB background.
+///
+/// It sets its window title too, and to something holding `<` and `&`: the
+/// SVG names itself with it (#316), so the rendering has to escape it. The
+/// title is set explicitly rather than left unset because ConPTY sets one of
+/// its own when the application does not, and the snapshots below are shared
+/// with the Windows leg — an application that sets its own title reads back
+/// exactly as set there (`observe.rs` asserts that on every platform).
 fn styled() -> termlens::Result<Terminal> {
     emit(&[
+        "--raw",
+        r"\e]0;myapp <2> & co\a",
         "--raw",
         r"\e[1;36mmyapp\e[0m  \e[7m> Alpha\e[0m  汉字\n",
         "--raw",
@@ -115,6 +124,19 @@ fn the_three_renderings_are_pure_functions_of_the_screen() -> termlens::Result<(
     assert!(
         svg.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"270\" height=\"72\""),
         "{svg}"
+    );
+    // The accessible name (#316): the root is a single image, and its first
+    // child says what the image is — the size, and the application's own
+    // title after it, escaped like any other arbitrary text.
+    assert!(svg.contains(" role=\"img\">"), "{svg}");
+    let title_at = svg.find("<title>").expect("a <title>");
+    assert!(
+        svg[..title_at].ends_with(">\n"),
+        "the title is the first child, not buried: {svg}"
+    );
+    assert!(
+        svg.contains("<title>termlens screen, 30x4: myapp &lt;2&gt; &amp; co</title>"),
+        "the title is escaped, not pasted: {svg}"
     );
     assert!(
         svg.contains("汉字</text>"),

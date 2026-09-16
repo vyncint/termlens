@@ -2,7 +2,8 @@
 source: crates/termlens/tests/export.rs
 expression: svg
 ---
-<svg xmlns="http://www.w3.org/2000/svg" width="270" height="72" viewBox="0 0 270 72" font-family="'JetBrains Mono', 'Fira Code', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="14">
+<svg xmlns="http://www.w3.org/2000/svg" width="270" height="72" viewBox="0 0 270 72" font-family="'JetBrains Mono', 'Fira Code', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="14" role="img">
+<title>termlens screen, 30x4: myapp &lt;2&gt; &amp; co</title>
 <rect width="270" height="72" fill="#1e1e1e"/>
 <text x="0" y="14" fill="#11a8cd" xml:space="preserve" font-weight="bold">myapp</text>
 <rect x="63" y="0" width="63" height="18" fill="#d4d4d4"/>

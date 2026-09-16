@@ -173,6 +173,12 @@ impl Screen {
     /// monospace fallback font stack and no font embedding — enough for a
     /// bug report or a README, not a typeset transcript. Concealed text is
     /// drawn as blanks, as a terminal shows it; dim is opacity.
+    ///
+    /// The root carries `role="img"` and a `<title>` naming the picture —
+    /// `termlens screen, 80x24`, and the application's own
+    /// [`title`](Self::title) after it when one was set. These files are made
+    /// to be attached to a pull request or a bug report, where an image with
+    /// no accessible name is announced as nothing at all.
     #[must_use]
     pub fn to_svg(&self) -> String {
         const CELL_W: u32 = 9;
@@ -184,8 +190,21 @@ impl Screen {
             out,
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
              viewBox=\"0 0 {width} {height}\" font-family=\"'JetBrains Mono', 'Fira Code', \
-             Menlo, Consolas, 'DejaVu Sans Mono', monospace\" font-size=\"14\">"
+             Menlo, Consolas, 'DejaVu Sans Mono', monospace\" font-size=\"14\" \
+             role=\"img\">"
         );
+        // The accessible name, and the first child because that is where a
+        // reader looks for it (#316). The size alone is a poor name but an
+        // honest one; the application's own title is the better one when it
+        // set one, and it is arbitrary text, so it is escaped like any cell.
+        out.push_str("<title>");
+        let mut name = format!("termlens screen, {}x{}", self.cols(), self.rows());
+        if !self.title().is_empty() {
+            name.push_str(": ");
+            name.push_str(self.title());
+        }
+        escape_xml(&name, &mut out);
+        out.push_str("</title>\n");
         let _ = writeln!(
             out,
             "<rect width=\"{width}\" height=\"{height}\" fill=\"{DEFAULT_BG}\"/>"

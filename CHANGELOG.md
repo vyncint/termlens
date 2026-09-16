@@ -17,6 +17,27 @@ reads that marker.
 
 ## [Unreleased]
 
+### Added
+
+- `Recording::duration()` — how long a recording spans, `Duration::ZERO`
+  when it holds no frame (#307). The span runs from `Terminal::record` to
+  the end of the last *complete* frame, not the program's lifetime; it is
+  the `frames().last()` arithmetic every caller was writing by hand.
+
+- The asciicast header carries `timestamp`, `duration` and `title` (#309).
+  A `.cast` attached to a bug report or a CI artifact now has a date and a
+  name in `asciinema` and in the web player, where before it had neither.
+  The title is the command the terminal spawned; the timestamp is taken at
+  export, and is omitted rather than written as `0` if the clock is set
+  before the epoch.
+
+- `Screen::to_svg` gives the image an accessible name: `role="img"` on the
+  root and a `<title>` first child reading `termlens screen, 80x24`, with
+  the application's own `Screen::title` after it when one was set (#316).
+  These files exist to be attached to a pull request, where an image with
+  no accessible name is announced as nothing at all. The title is escaped
+  with the same helper the text rows use.
+
 ## [0.11.0] - 2026-09-11
 
 ### Changed
