@@ -9,51 +9,7 @@
 //! decode. Steps apply left to right:
 //!
 //! ```text
-//! TEXT             literal text — any argument that is not a step below
-//! NL  CR           a newline / a carriage return
-//! --text WORD      literal text that happens to spell a step name
-//! --esc BYTES      ESC followed by BYTES          `--esc '(0'`  is  ESC ( 0
-//! --csi BYTES      ESC [ followed by BYTES         `--csi '?2026h'`
-//! --raw SPEC       bytes with escapes: \e \n \r \t \a \\ and \xNN
-//! --sleep DUR      pause for DUR: `250ms`, `1.5s`, `2s`
-//! --wait           read one line from stdin and discard it — "hold the
-//!                  terminal open until the test sends Enter"
-//! --wait-for WORD  read lines until one is exactly WORD
-//! --echo-line      read one line from stdin and write it back, without
-//!                  its newline
-//! --echo           copy stdin to stdout, line by line, until EOF
-//! --seq N          the integers 1..=N, one per line
-//! --cwd            the current directory, as the process sees it
-//! --pid            this process's id, in decimal
-//! --env NAME       the value of environment variable NAME, or `unset`
-//! --environ        every environment variable as NAME=VALUE, one per
-//!                  line, sorted
-//! --exit CODE      exit now with CODE
-//! --loop           run the steps before it once, then the steps after it
-//!                  forever
-//! ```
-//!
-//! And the steps that read what the terminal *typed back* — a query's reply,
-//! a mouse report, a paste — which need the line discipline out of the way:
-//!
-//! ```text
-//! --raw-mode       ICANON and ECHO off: bytes arrive as sent, unechoed
-//!                  (what `stty -icanon -echo` did); ICRNL is left on, so
-//!                  --wait still ends at Enter
-//! --no-icrnl       ICRNL off too, so a CR arrives as CR (what raw mode
-//!                  does in an application) — --wait then needs a LF
-//! --read N         read exactly N bytes and write them, ESC as `E` and
-//!                  BEL as `G` so a reply is legible on the grid
-//! --skip N         read exactly N bytes and write nothing
-//! --read-hex N     read exactly N bytes and write them as lowercase hex
-//! --read-quiet N   read up to N bytes, stopping after 2s without one,
-//!                  and write them as --read does
-//! --read-count N C read exactly N bytes and write how many were C
-//! --winsize        the tty's size as the kernel reports it:
-//!                  `COLSxROWS px WIDTHxHEIGHT`
-//! --kill-self      raise SIGTERM against this process
-//! --on-term TEXT CODE  on SIGTERM, write TEXT and exit CODE …
-//! --idle           … and sit here until that happens
+#![doc = include_str!("steps.txt")]
 //! ```
 //!
 //! Every emitting step is one `write_all` and a flush, so a test that wants
@@ -71,12 +27,30 @@ use std::io::{self, BufRead, Write};
 use std::process;
 use std::time::Duration;
 
+/// The step language, and the only copy of it: the module header above
+/// includes this same file, so `emit --help` and the doc a test author
+/// reads cannot say different things (#304). `check-emit-steps.sh` holds
+/// it against the match arms below.
+const STEPS: &str = include_str!("steps.txt");
+
+/// What `-h`/`--help` prints. Only the banner is written here; every step
+/// comes from [`STEPS`].
+fn help() -> String {
+    format!(
+        "usage: emit [STEP]...\n\n\
+         A termlens fixture: writes exactly the bytes its steps describe, in\n\
+         order, then waits, sleeps, reads or exits as told. Steps apply left\n\
+         to right.\n\n{STEPS}"
+    )
+}
+
 #[derive(Debug, Clone)]
 enum Step {
     Write(Vec<u8>),
     Sleep(Duration),
     Wait,
     WaitFor(String),
+    Panic(String),
     EchoLine,
     Echo,
     Seq(u64),
@@ -100,7 +74,7 @@ enum Step {
 
 fn usage(reason: &str) -> ! {
     eprintln!("emit: {reason}");
-    eprintln!("see the crate doc in fixtures/emit/src/main.rs for the steps");
+    eprintln!("emit --help lists every step");
     process::exit(2)
 }
 
@@ -169,6 +143,13 @@ fn parse(args: impl Iterator<Item = String>) -> (Vec<Step>, Option<usize>) {
                 .unwrap_or_else(|| usage(&format!("{flag} needs a value")))
         };
         let step = match arg.as_str() {
+            // Before anything is parsed, so `emit --help` explains itself
+            // whatever follows it. Not a Step: it never reaches `run`.
+            "-h" | "--help" => {
+                print!("{}", help());
+                let _ = io::stdout().flush();
+                process::exit(0);
+            }
             "NL" => Step::Write(b"\n".to_vec()),
             "CR" => Step::Write(b"\r".to_vec()),
             "--text" => Step::Write(next("--text").into_bytes()),
@@ -202,6 +183,7 @@ fn parse(args: impl Iterator<Item = String>) -> (Vec<Step>, Option<usize>) {
                     .parse()
                     .unwrap_or_else(|_| usage("--exit needs an exit code")),
             ),
+            "--panic" => Step::Panic(next("--panic")),
             "--loop" => {
                 loop_from = Some(steps.len());
                 continue;
@@ -293,6 +275,10 @@ fn run(
                     process::exit(0);
                 }
             }
+            // Every step before this one ended in a flush, so what was
+            // drawn is already on the terminal; the panic message follows
+            // it on stderr, which in a PTY is the same screen (#311).
+            Step::Panic(message) => panic!("{message}"),
             Step::WaitFor(word) => loop {
                 match line(stdin)? {
                     Some(l) if l == *word => break,

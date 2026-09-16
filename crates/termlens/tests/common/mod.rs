@@ -9,7 +9,9 @@ use termlens::{Terminal, TerminalBuilder};
 /// Spawn the `emit` fixture with `steps` from a builder the caller has
 /// already sized and timed: what `sh -c 'printf …; read _'` used to be,
 /// with no shell deciding how `printf` reads an escape (#249). The steps
-/// are documented in `fixtures/emit/src/main.rs`.
+/// are documented in `fixtures/emit/src/steps.txt`, which is both the
+/// fixture's module header and its `--help`; `check-emit-steps.sh` holds
+/// that list against the steps the fixture implements.
 ///
 /// This module is compiled into every test binary that declares it, and
 /// not every one of them uses every helper.

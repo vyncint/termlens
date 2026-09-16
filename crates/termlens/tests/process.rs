@@ -147,3 +147,92 @@ fn a_normally_exited_child_still_reports_its_code() -> termlens::Result<()> {
     assert_eq!(status.to_string(), "exit code 7");
     Ok(())
 }
+
+/// The README's "What `TestBackend` cannot see" table promises a panic is
+/// assertable with `s.contains("panicked")`, and `skills/termlens/SKILL.md`
+/// §1 says the same; until #311 nothing in `fixtures/` ever panicked, so
+/// neither claim had a test. This is the case users reach for when their
+/// TUI dies in CI, and the alternate screen is the part that could have
+/// eaten the message.
+///
+/// **Measured, not assumed**: the message survives both ways. A panic
+/// raised inside the alternate screen lands in that buffer, next to what
+/// the application had drawn; a panic raised after the application tore the
+/// alternate screen down lands on the restored primary screen. The exit
+/// status is an exit *code* of 101 — the value the Rust runtime uses — and
+/// not a signal.
+#[test]
+fn a_panicking_child_puts_its_message_on_the_screen() -> termlens::Result<()> {
+    // Wide enough that the message is one row: the runtime's own
+    // `panicked at <file>:<line>` line wraps on a narrow grid, and a
+    // wrapped needle is a test about the width, not about the panic.
+    let wide = || {
+        Terminal::builder()
+            .size(100, 10)
+            .timeout(Duration::from_secs(10))
+    };
+
+    // 1. A plain child, which is what the README's table is about.
+    let mut t = common::spawn_emit(wide(), &["drew this ", "--panic", "plain panic here"])?;
+    t.wait_until(|s| s.contains("panicked"))?;
+    let s = t.screen();
+    assert!(
+        s.contains("plain panic here"),
+        "the message reaches the grid: {s}"
+    );
+    assert!(s.contains("drew this"), "and what was drawn before it: {s}");
+    let status = t.wait_exit()?;
+    assert_eq!(
+        status.code(),
+        Some(101),
+        "the Rust runtime's code: {status}"
+    );
+    assert!(!status.success(), "{status}");
+
+    // 2. Dying inside the alternate screen, with no panic hook to leave it
+    // — the shape a TUI that panics mid-draw actually has.
+    let mut t = common::spawn_emit(
+        wide(),
+        &[
+            "--csi",
+            "?1049h",
+            "TUI drawing here",
+            "--panic",
+            "boom in the alt screen",
+        ],
+    )?;
+    t.wait_until(|s| s.contains("panicked"))?;
+    let s = t.screen();
+    assert!(s.alternate_screen(), "nothing tore it down: {s}");
+    assert!(s.contains("boom in the alt screen"), "{s}");
+    assert!(
+        s.contains("TUI drawing here"),
+        "the message joins the frame it died on: {s}"
+    );
+    assert_eq!(t.wait_exit()?.code(), Some(101));
+
+    // 3. And after the teardown a panic hook would do, where the message
+    // lands on the restored primary screen instead.
+    let mut t = common::spawn_emit(
+        wide(),
+        &[
+            "--csi",
+            "?1049h",
+            "TUI drawing here",
+            "--csi",
+            "?1049l",
+            "--panic",
+            "boom after teardown",
+        ],
+    )?;
+    t.wait_until(|s| s.contains("panicked"))?;
+    let s = t.screen();
+    assert!(!s.alternate_screen(), "the child left it: {s}");
+    assert!(s.contains("boom after teardown"), "{s}");
+    assert!(
+        !s.contains("TUI drawing here"),
+        "what the alternate screen held went with it: {s}"
+    );
+    assert_eq!(t.wait_exit()?.code(), Some(101));
+    Ok(())
+}

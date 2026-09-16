@@ -1,0 +1,45 @@
+TEXT             literal text — any argument that is not a step below
+NL  CR           a newline / a carriage return
+--text WORD      literal text that happens to spell a step name
+--esc BYTES      ESC followed by BYTES          `--esc '(0'`  is  ESC ( 0
+--csi BYTES      ESC [ followed by BYTES         `--csi '?2026h'`
+--raw SPEC       bytes with escapes: \e \n \r \t \a \\ and \xNN
+--sleep DUR      pause for DUR: `250ms`, `1.5s`, `2s`
+--wait           read one line from stdin and discard it — "hold the
+                 terminal open until the test sends Enter"
+--wait-for WORD  read lines until one is exactly WORD
+--echo-line      read one line from stdin and write it back, without
+                 its newline
+--echo           copy stdin to stdout, line by line, until EOF
+--seq N          the integers 1..=N, one per line
+--cwd            the current directory, as the process sees it
+--pid            this process's id, in decimal
+--env NAME       the value of environment variable NAME, or `unset`
+--environ        every environment variable as NAME=VALUE, one per
+                 line, sorted
+--exit CODE      exit now with CODE
+--panic MESSAGE  panic with MESSAGE, so the harness has a child that
+                 dies the way a Rust program dies
+--loop           run the steps before it once, then the steps after it
+                 forever
+
+and the steps that read what the terminal typed back — a query's reply, a
+mouse report, a paste — which need the line discipline out of the way:
+
+--raw-mode       ICANON and ECHO off: bytes arrive as sent, unechoed
+                 (what `stty -icanon -echo` did); ICRNL is left on, so
+                 --wait still ends at Enter
+--no-icrnl       ICRNL off too, so a CR arrives as CR (what raw mode
+                 does in an application) — --wait then needs a LF
+--read N         read exactly N bytes and write them, ESC as `E` and
+                 BEL as `G` so a reply is legible on the grid
+--skip N         read exactly N bytes and write nothing
+--read-hex N     read exactly N bytes and write them as lowercase hex
+--read-quiet N   read up to N bytes, stopping after 2s without one,
+                 and write them as --read does
+--read-count N C read exactly N bytes and write how many were C
+--winsize        the tty's size as the kernel reports it:
+                 `COLSxROWS px WIDTHxHEIGHT`
+--kill-self      raise SIGTERM against this process
+--on-term TEXT CODE  on SIGTERM, write TEXT and exit CODE …
+--idle           … and sit here until that happens
