@@ -166,6 +166,16 @@ fn a_panicking_child_puts_its_message_on_the_screen() -> termlens::Result<()> {
     // Wide enough that the message is one row: the runtime's own
     // `panicked at <file>:<line>` line wraps on a narrow grid, and a
     // wrapped needle is a test about the width, not about the panic.
+    //
+    // And every wait below names the *message*, never the word "panicked".
+    // The runtime writes the location line and the message as separate
+    // writes, so `contains("panicked")` is true one line before the message
+    // exists — which went red on CI with the grid holding `panicked at
+    // …:281:37:` and nothing under it. Waiting for the message is rule 3 of
+    // the wait-semantics contract (docs/DESIGN.md §2): name the last thing
+    // the application paints, so that its truth implies the rest arrived.
+    // "panicked" is then asserted rather than waited on — it cannot be
+    // absent once the line after it is there.
     let wide = || {
         Terminal::builder()
             .size(100, 10)
@@ -174,8 +184,9 @@ fn a_panicking_child_puts_its_message_on_the_screen() -> termlens::Result<()> {
 
     // 1. A plain child, which is what the README's table is about.
     let mut t = common::spawn_emit(wide(), &["drew this ", "--panic", "plain panic here"])?;
-    t.wait_until(|s| s.contains("panicked"))?;
+    t.wait_until(|s| s.contains("plain panic here"))?;
     let s = t.screen();
+    assert!(s.contains("panicked"), "the word the README promises: {s}");
     assert!(
         s.contains("plain panic here"),
         "the message reaches the grid: {s}"
@@ -201,10 +212,10 @@ fn a_panicking_child_puts_its_message_on_the_screen() -> termlens::Result<()> {
             "boom in the alt screen",
         ],
     )?;
-    t.wait_until(|s| s.contains("panicked"))?;
+    t.wait_until(|s| s.contains("boom in the alt screen"))?;
     let s = t.screen();
+    assert!(s.contains("panicked"), "{s}");
     assert!(s.alternate_screen(), "nothing tore it down: {s}");
-    assert!(s.contains("boom in the alt screen"), "{s}");
     assert!(
         s.contains("TUI drawing here"),
         "the message joins the frame it died on: {s}"
@@ -225,10 +236,10 @@ fn a_panicking_child_puts_its_message_on_the_screen() -> termlens::Result<()> {
             "boom after teardown",
         ],
     )?;
-    t.wait_until(|s| s.contains("panicked"))?;
+    t.wait_until(|s| s.contains("boom after teardown"))?;
     let s = t.screen();
+    assert!(s.contains("panicked"), "{s}");
     assert!(!s.alternate_screen(), "the child left it: {s}");
-    assert!(s.contains("boom after teardown"), "{s}");
     assert!(
         !s.contains("TUI drawing here"),
         "what the alternate screen held went with it: {s}"
