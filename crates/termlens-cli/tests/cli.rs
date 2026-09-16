@@ -350,3 +350,204 @@ fn every_corpus_file_renders() -> termlens::Result<()> {
     }
     Ok(())
 }
+
+/// Run the CLI with `input` on standard input, and without a PTY: a pipe is
+/// the whole point of `-`, and through a PTY there is no EOF to read to.
+fn with_stdin(args: &[&str], input: &str) -> std::process::Output {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_termlens"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn termlens");
+    child
+        .stdin
+        .take()
+        .expect("a stdin pipe")
+        .write_all(input.as_bytes())
+        .expect("write to the child's stdin");
+    child.wait_with_output().expect("the child's output")
+}
+
+/// A saved screen most often arrives on a pipe — out of a CI log, or from
+/// the tool that made it a moment earlier — and `-` is the convention for
+/// that (#317).
+#[test]
+fn render_and_diff_read_a_screen_from_stdin() -> termlens::Result<()> {
+    let before = std::fs::read_to_string(data("before.snap"))?;
+    let after = std::fs::read_to_string(data("after.snap.new"))?;
+
+    // `render --text -` is `render --text before.snap`, byte for byte.
+    let piped = with_stdin(&["render", "--text", "-"], &before);
+    assert_eq!(piped.status.code(), Some(0), "{piped:?}");
+    let from_file = std::process::Command::new(env!("CARGO_BIN_EXE_termlens"))
+        .args(["render", "--text", &data("before.snap")])
+        .output()?;
+    assert_eq!(
+        piped.stdout, from_file.stdout,
+        "the pipe and the path are the same screen"
+    );
+
+    // `diff` takes it as either operand, and the direction is the argument
+    // order, not which one came off the pipe.
+    let right = with_stdin(
+        &["diff", "--color", "never", &data("before.snap"), "-"],
+        &after,
+    );
+    assert_eq!(right.status.code(), Some(1), "{right:?}");
+    let left = with_stdin(
+        &["diff", "--color", "never", "-", &data("after.snap.new")],
+        &before,
+    );
+    assert_eq!(left.status.code(), Some(1), "{left:?}");
+    assert_eq!(right.stdout, left.stdout, "same two screens, same diff");
+    assert!(
+        String::from_utf8_lossy(&right.stdout).contains("Counter: 1"),
+        "{}",
+        String::from_utf8_lossy(&right.stdout)
+    );
+
+    // And a pipe that is not a screen is named as stdin, not as a file `-`.
+    let junk = with_stdin(&["render", "--text", "-"], "not a saved screen\n");
+    assert_eq!(junk.status.code(), Some(2), "{junk:?}");
+    let stderr = String::from_utf8_lossy(&junk.stderr);
+    assert!(stderr.contains("<stdin>"), "{stderr}");
+    Ok(())
+}
+
+/// Standard input is read once, so it can be one of `diff`'s operands and
+/// not both — said plainly rather than left to look like an empty screen.
+#[test]
+fn diff_refuses_two_stdin_operands() -> termlens::Result<()> {
+    let out = with_stdin(&["diff", "-", "-"], "size: 1x1  cursor: 0,0\n\n");
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("only one of the two screens can be `-`"),
+        "one line, naming the reason: {stderr}"
+    );
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    Ok(())
+}
+
+/// `render --out` exists because every caller was writing `> file.svg`, and
+/// a redirect truncates the file before termlens runs — so a failing render
+/// leaves an empty file where a bug report expected an image (#313).
+#[test]
+fn render_out_writes_the_file_and_creates_none_when_the_render_fails() -> termlens::Result<()> {
+    use std::process::Command;
+    let bin = env!("CARGO_BIN_EXE_termlens");
+    let dir = std::env::temp_dir().join(format!("termlens-render-out-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+
+    let written = dir.join("screen.svg");
+    let out = Command::new(bin)
+        .args([
+            "render",
+            "--svg",
+            "--out",
+            written.to_str().expect("utf-8 path"),
+            &data("before.snap"),
+        ])
+        .output()?;
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(out.stdout.is_empty(), "--out means not stdout: {out:?}");
+    let to_stdout = Command::new(bin)
+        .args(["render", "--svg", &data("before.snap")])
+        .output()?;
+    assert_eq!(
+        std::fs::read(&written)?,
+        to_stdout.stdout,
+        "the same bytes stdout would have carried"
+    );
+
+    // An unreadable input: exit 2, and nothing where the file would go.
+    let junk = dir.join("junk.txt");
+    std::fs::write(&junk, "not a saved screen\n")?;
+    let missing = dir.join("never-written.svg");
+    let out = Command::new(bin)
+        .args([
+            "render",
+            "--svg",
+            "--out",
+            missing.to_str().expect("utf-8 path"),
+            junk.to_str().expect("utf-8 path"),
+        ])
+        .output()?;
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        !missing.exists(),
+        "a failing render left a file behind: {}",
+        missing.display()
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// The working directory is part of "how the program is normally run", and
+/// `TerminalBuilder::current_dir` had no way through to the command line
+/// (#312).
+#[test]
+#[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
+fn inspect_runs_the_program_where_cwd_says() -> termlens::Result<()> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    // A directory made here, so the assertion is not about /tmp's own name
+    // on a platform that symlinks it (macOS: /tmp -> /private/tmp).
+    let dir = std::env::temp_dir().join(format!("termlens-cwd-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let real = std::fs::canonicalize(&dir)?;
+    let mut t = termlens::bin!(
+        "termlens",
+        env("PATH", &path),
+        args([
+            "inspect",
+            "--size",
+            "60x3",
+            "--cwd",
+            dir.to_str().expect("utf-8 path"),
+            "sh",
+            "-c",
+            "pwd"
+        ])
+    )?;
+    assert_eq!(t.wait_exit()?.code(), Some(0), "{}", t.screen());
+    let s = t.screen();
+    assert!(
+        s.contains(real.to_str().expect("utf-8 path")),
+        "the program ran in {}: {s}",
+        real.display()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// A directory that is not there is a one-line diagnostic naming the flag,
+/// and exit 2 — not a panic, and not the builder's message about a
+/// `current_dir` the caller never wrote.
+#[test]
+fn inspect_refuses_a_cwd_that_is_not_a_directory() -> termlens::Result<()> {
+    use std::process::Command;
+    let missing = std::env::temp_dir().join("termlens-no-such-directory-here");
+    let _ = std::fs::remove_dir_all(&missing);
+    let out = Command::new(env!("CARGO_BIN_EXE_termlens"))
+        .args([
+            "inspect",
+            "--cwd",
+            missing.to_str().expect("utf-8 path"),
+            "true",
+        ])
+        .output()?;
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.lines().count(), 1, "one line: {stderr}");
+    assert!(stderr.contains("--cwd"), "it names the flag: {stderr}");
+    assert!(
+        stderr.contains("not an existing directory"),
+        "and what was wrong with it: {stderr}"
+    );
+    Ok(())
+}

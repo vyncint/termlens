@@ -6,7 +6,8 @@
 //! insta `.snap` with or without its header, the block a wait error prints,
 //! a `TERMLENS_ARTIFACT_DIR` file — or the JSON the crate's `serde` feature
 //! writes. `Screen::parse` reads the first back; this binary only decides
-//! which of the two a file is.
+//! which of the two a file is. `diff` and `render` take `-` for standard
+//! input, and `render --out PATH` writes there instead of to stdout.
 //!
 //! Exit codes: 0 ran; `diff` exits 1 when the screens differ; 2 means the
 //! command itself could not run — bad arguments, an unreadable file, a
@@ -15,7 +16,7 @@
 //! not propagated — and the screen alone goes to stdout, so `inspect … >
 //! file` is a saved screen `diff` and `render` read back (#340).
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -28,12 +29,13 @@ usage: termlens <command> [options]
 commands:
   inspect [options] <program> [args…]  run a program in a PTY and print its screen
   diff [--color WHEN] <a> <b>          compare two saved screens; exit 1 when they differ
-  render --svg|--html|--ansi|--text <a>  render a saved screen
+  render --svg|--html|--ansi|--text [--out PATH] <a>  render a saved screen
 
 A saved screen is the snapshot text format termlens prints — what `inspect`
 writes to stdout, an insta .snap with or without its header, the block a
 wait error prints, a TERMLENS_ARTIFACT_DIR file — or the JSON the crate's
-`serde` feature writes.
+`serde` feature writes. `diff` and `render` read `-` as standard input; only
+one of diff's two operands can be, since stdin is read once.
 
 Exit code 0: the command ran (diff: the screens are the same picture).
 Exit code 1: diff found a difference. Exit code 2: termlens itself could not
@@ -44,7 +46,8 @@ run — bad arguments, an unreadable file, a program that could not be spawned.
 
 const INSPECT_USAGE: &str = "\
 usage: termlens inspect [--size COLSxROWS] [--timeout SECONDS] [--idle MILLIS]
-                        [--inherit-env] [--ansi] [--env KEY=VALUE]... <program> [args…]
+                        [--cwd PATH] [--inherit-env] [--ansi]
+                        [--env KEY=VALUE]... <program> [args…]
 
 Runs <program> in an 80x24 pseudo-terminal (or --size), waits for it to
 exit or for the deadline (--timeout, default 5 seconds), and prints the
@@ -52,6 +55,7 @@ rendered screen. A program still running at the deadline is snapshotted
 after --idle milliseconds (default 300) of output silence, then killed.
 The child environment is cleared by default except for PATH; --inherit-env
 keeps the caller's environment, and repeatable --env sets selected values.
+--cwd runs the program in PATH, which must be an existing directory.
 --ansi paints the screen in colour instead of the plain text format.
 
 The screen goes to stdout and nothing else does, so `inspect … > file`
@@ -63,6 +67,9 @@ itself could not run: bad arguments, or a program that could not be spawned.";
 const DIFF_USAGE: &str = "\
 usage: termlens diff [--color auto|always|never] <a> <b>
 
+Either <a> or <b> may be `-`, meaning standard input — not both, since
+stdin is read once.
+
 Parses two saved screens and prints what changed from <a> to <b>: the rows
 that differ side by side, the size and cursor deltas, the style runs before
 and after. On a terminal the changed cells are coloured (red in <a>, green
@@ -71,10 +78,14 @@ the plain one Screen::diff prints in a CI log. Exit code 0 when the two are
 the same picture, 1 when they differ, 2 when a file could not be read.";
 
 const RENDER_USAGE: &str = "\
-usage: termlens render (--svg | --html | --ansi | --text) <a>
+usage: termlens render (--svg | --html | --ansi | --text) [--out PATH] <a>
 
 Prints a saved screen as an SVG image, an HTML fragment, the screen in ANSI
-colour for a terminal, or the plain text format with its styles: block.";
+colour for a terminal, or the plain text format with its styles: block.
+
+<a> may be `-`, meaning standard input. --out writes to PATH instead of
+stdout, and creates nothing when the render fails — unlike a shell
+redirect, which truncates the file before termlens runs.";
 
 /// Where a rendering goes, so a reader that closed early (`termlens … |
 /// head`) is a clean exit rather than a panic on a broken pipe.
@@ -126,17 +137,44 @@ fn main() -> ExitCode {
 /// The two decorations this skips are the two termlens itself writes
 /// around a screen, and `Screen::parse` accepts neither — the library
 /// reads the format, the tool knows its own wrappers (`docs/DESIGN.md` §3).
-fn load(path: &Path) -> Result<Screen, String> {
-    let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+///
+/// `-` is standard input, the universal convention (#317): a saved screen
+/// most often arrives on a pipe, out of a CI log or from the tool that made
+/// it a moment earlier. Only the reading changes; the parser already took a
+/// `&str` rather than a path.
+fn load(path: &str) -> Result<Screen, String> {
+    let raw = if path == STDIN {
+        let mut raw = String::new();
+        io::stdin()
+            .read_to_string(&mut raw)
+            .map_err(|e| format!("{STDIN_NAME}: {e}"))?;
+        raw
+    } else {
+        std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?
+    };
     // A checkout on Windows may have given the file CRLF endings; the
     // formats are line-based and neither cares.
     let raw = raw.replace("\r\n", "\n");
     let body = strip_insta_header(&raw).trim_start_matches('\n');
     if body.starts_with('{') {
         return serde_json::from_str(body)
-            .map_err(|e| format!("{}: not a termlens Screen: {e}", path.display()));
+            .map_err(|e| format!("{}: not a termlens Screen: {e}", name_of(path)));
     }
-    Screen::parse(strip_inspect_trailer(body)).map_err(|e| format!("{}: {e}", path.display()))
+    Screen::parse(strip_inspect_trailer(body)).map_err(|e| format!("{}: {e}", name_of(path)))
+}
+
+/// The operand that means standard input.
+const STDIN: &str = "-";
+/// What a diagnostic calls it, since `-: ...` reads as a stray flag.
+const STDIN_NAME: &str = "<stdin>";
+
+/// A file operand as a diagnostic should name it.
+fn name_of(path: &str) -> &str {
+    if path == STDIN {
+        STDIN_NAME
+    } else {
+        path
+    }
 }
 
 /// insta writes `---\n<metadata>\n---\n` above the content; the content is
@@ -237,7 +275,15 @@ fn diff(args: &[String]) -> ExitCode {
         eprintln!("{DIFF_USAGE}");
         return ExitCode::from(2);
     };
-    let (before, after) = match (load(Path::new(a)), load(Path::new(b))) {
+    // Standard input can be consumed once, so it can be one operand and not
+    // both — said plainly here rather than left to look like an empty second
+    // screen further down (#317).
+    if a.as_str() == STDIN && b.as_str() == STDIN {
+        return fail("only one of the two screens can be `-`: stdin is read once");
+    }
+    // Left first, so `diff a.snap -` and `diff - b.snap` both read the pipe
+    // at the point the argument order says they do.
+    let (before, after) = match (load(a), load(b)) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => return fail(&e),
     };
@@ -317,24 +363,31 @@ fn colored(before: &Screen, after: &Screen, diff: &ScreenDiff) -> String {
 fn render(args: &[String]) -> ExitCode {
     let mut format: Option<&str> = None;
     let mut file = None;
-    for arg in args {
+    let mut out_path: Option<&str> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => return print(&format!("{RENDER_USAGE}\n")),
             "--version" => return print(&version()),
             "--svg" | "--html" | "--ansi" | "--text" => format = Some(arg.as_str()),
-            other if other.starts_with('-') && other != "-" => {
+            "--out" => match args.next() {
+                Some(path) => out_path = Some(path.as_str()),
+                None => return fail("--out needs a PATH argument"),
+            },
+            other if other.starts_with("--out=") => out_path = Some(&other["--out=".len()..]),
+            other if other.starts_with('-') && other != STDIN => {
                 return fail(&format!(
                     "unknown option {other:?} (try `termlens render --help`)"
                 ));
             }
-            _ => file = Some(arg),
+            _ => file = Some(arg.as_str()),
         }
     }
     let (Some(format), Some(file)) = (format, file) else {
         eprintln!("{RENDER_USAGE}");
         return ExitCode::from(2);
     };
-    let screen = match load(Path::new(file)) {
+    let screen = match load(file) {
         Ok(screen) => screen,
         Err(e) => return fail(&e),
     };
@@ -344,7 +397,17 @@ fn render(args: &[String]) -> ExitCode {
         "--ansi" => screen.to_ansi(),
         _ => format!("{}\n", screen.with_styles()),
     };
-    print(&out)
+    // The file is created here, after the screen parsed, and not before
+    // (#313): `termlens render … > out.svg` truncates out.svg in the shell
+    // before the process runs, so a failing render leaves an empty file
+    // behind. --out cannot, because nothing is opened until there are bytes.
+    match out_path {
+        Some(path) => match std::fs::write(path, &out) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(&format!("{path}: {e}")),
+        },
+        None => print(&out),
+    }
 }
 
 // --------------------------------------------------------------------- inspect
@@ -382,6 +445,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
     let mut inherit_env = false;
     let mut ansi = false;
     let mut env = Vec::new();
+    let mut cwd: Option<String> = None;
 
     // Options come before the program; everything after it is the
     // program's own, however flag-like it looks.
@@ -407,6 +471,19 @@ fn inspect(args: Vec<String>) -> ExitCode {
             "--ansi" => {
                 ansi = true;
                 Ok(())
+            }
+            // Checked here rather than left to the builder so the diagnostic
+            // names the flag the user typed; the builder refuses it too, with
+            // a message about `current_dir` the caller never wrote (#312).
+            "--cwd" => {
+                take(&mut args, "--cwd", "PATH", "/tmp", |s| Some(s.to_owned())).and_then(|dir| {
+                    if Path::new(&dir).is_dir() {
+                        cwd = Some(dir);
+                        Ok(())
+                    } else {
+                        Err(format!("bad --cwd {dir:?}, not an existing directory"))
+                    }
+                })
             }
             "--env" => take(&mut args, "--env", "KEY=VALUE", "NO_COLOR=1", |s| {
                 let (key, value) = s.split_once('=')?;
@@ -439,6 +516,9 @@ fn inspect(args: Vec<String>) -> ExitCode {
     }
     for (key, value) in env {
         builder = builder.env(key, value);
+    }
+    if let Some(dir) = cwd {
+        builder = builder.current_dir(dir);
     }
 
     let mut t = match builder.spawn(&program) {

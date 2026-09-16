@@ -38,6 +38,21 @@ reads that marker.
   no accessible name is announced as nothing at all. The title is escaped
   with the same helper the text rows use.
 
+- `termlens diff` and `termlens render` read `-` as standard input (#317).
+  A saved screen most often arrives on a pipe, and `-` is the convention
+  for that. Only one of `diff`'s two operands may be `-`; both is a
+  one-line diagnostic and exit 2, since stdin is read once.
+
+- `termlens render --out PATH` writes the rendering to a file instead of
+  stdout, and creates nothing when the render fails (#313). A shell
+  redirect cannot promise that: `> file.svg` truncates before termlens
+  runs, so a failed render leaves an empty image behind.
+
+- `termlens inspect --cwd PATH` runs the program in `PATH`, which
+  `TerminalBuilder::current_dir` could already do and the command line
+  could not (#312). A path that is not an existing directory is refused by
+  name, in one line, with exit 2.
+
 ## [0.11.0] - 2026-09-11
 
 ### Changed
