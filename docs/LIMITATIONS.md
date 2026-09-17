@@ -67,9 +67,10 @@ CHANGELOG entry.
   everything else waits with `wait_until`, under the three rules in
   [docs/DESIGN.md](docs/DESIGN.md) §2.
 - Some questions stay deliberately unanswered — kitty's `CSI ? u`, DECRQSS,
-  DA3, `OSC 12`, `OSC 52` *reads*, and the non-pixel `CSI … t` reports —
-  because a guessed reply is worse than none. An application blocked on one
-  is **named in the next timeout** rather than left to hang unexplained.
+  DA3, XTVERSION, the `OSC 4` palette query, `OSC 12`, `OSC 52` *reads*, and
+  the non-pixel `CSI … t` reports — because a guessed reply is worse than
+  none. An application blocked on one is **named in the next timeout** rather
+  than left to hang unexplained.
 
 ## Graphics and hyperlinks
 
