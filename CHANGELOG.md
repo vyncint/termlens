@@ -43,6 +43,13 @@ reads that marker.
   use. `src/`, `examples/inspect.rs` and the README are unchanged, and
   the doctests still run.
 
+- `termlens render` refuses anything but one file operand, printing its
+  usage and exiting 2, instead of silently rendering the last one (#364).
+  With `--out` the wrong screen was written and nothing printed to reveal
+  it, and a stale path left on the line after an edit went unseen. Two
+  operands were never a documented form — the usage has always said `<a>`
+  — but a script that passed them saw exit 0 and now sees 2.
+
 ### Fixed
 
 - The `inspect` example now keeps `termlens inspect`'s promised contract.
@@ -128,15 +135,19 @@ reads that marker.
   the same column. Tab stops still read the raw column, so `HTS` at the
   margin is dropped rather than clamped onto the last cell.
 
-- The JSON reader refuses a cursor one column past the right edge, as the
-  text parser always did (#375). The column bound was `>` where the row
-  bound beside it was `>=`, so `col == cols` — a column that does not
-  exist — passed validation, and `termlens render --text` turned a JSON
-  file it had accepted into a text file its own parser then refused. The
-  shape this stops reading is the pending-wrap position (`col == cols`),
-  which a screen taken from a live terminal can carry after a write fills
-  the last column; no file in the compatibility corpus holds one. The
-  writers that emit it are not touched here.
+- The JSON reader clamps a cursor one column past the right edge onto the
+  last cell, instead of reading a column the grid does not have (#375).
+  The column bound was `>` where the row bound beside it was `>=`, so
+  `col == cols` passed validation, and `termlens render --text` turned a
+  JSON file it had accepted into a text file its own parser then refused.
+  That column is the pending-wrap position a screen carries after a write
+  fills the last row, and every release up to 0.11.1 wrote it — so
+  refusing the file, the first fix considered, would have made JSON those
+  releases saved unreadable, which the format promise in
+  `docs/STABILITY.md` forbids. Clamping reads it onto the cell #401 now
+  reports it on; a cursor anywhere else off the grid is refused as before,
+  and `tests/compat/0.11.1/pending-wrap.json`, written by the published
+  0.11.1, holds every later reader to it.
 
 - A hard reset (`ESC c`, RIS) no longer drops scrollback rows. The reset
   rebuilt the backend's screen and emptied its history while the
@@ -195,10 +206,6 @@ reads that marker.
   and the ANSI rendering all put blink first. Serde reads by key, so every
   existing document still deserialises; only the emitted key order and the
   `Debug` order moved, and a test pins the order now (#381).
-- `termlens render` refuses anything but one file operand, printing its
-  usage and exiting 2, instead of silently rendering the last one. With
-  `--out` the wrong screen was written and nothing printed to reveal it,
-  and a stale path left on the line after an edit went unseen (#364).
 - `termlens diff --color always` prints the line saying a comparison of
   differently sized screens was partial (#365). `colored()` took exactly
   one header line and its prefix filter then dropped the overlap note,

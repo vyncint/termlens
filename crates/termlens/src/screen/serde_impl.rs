@@ -113,7 +113,20 @@ impl<'de> Deserialize<'de> for Screen {
                 cells.len()
             )));
         }
-        if wire.cursor.row >= wire.rows.max(1) || wire.cursor.col >= wire.cols.max(1) {
+        // `col == cols` is the pending-wrap position a terminal parks at
+        // after a write fills the last row. Every release up to 0.11.1 wrote
+        // it (#401 stops the emulator producing it), so refusing it here
+        // would make JSON those releases saved unreadable -- which the format
+        // promise in docs/STABILITY.md forbids. Clamp it onto the last cell
+        // instead, which is where #401 now reports it, so such a file also
+        // round-trips through `render --text` (#375). Any other position off
+        // the grid is a file nothing wrote, and is refused.
+        let cursor_col = if wire.cols > 0 && wire.cursor.col == wire.cols {
+            wire.cols - 1
+        } else {
+            wire.cursor.col
+        };
+        if wire.cursor.row >= wire.rows.max(1) || cursor_col >= wire.cols.max(1) {
             return Err(D::Error::custom(format!(
                 "cursor {},{} is outside a {}x{} screen",
                 wire.cursor.row, wire.cursor.col, wire.cols, wire.rows
@@ -123,7 +136,7 @@ impl<'de> Deserialize<'de> for Screen {
             wire.cols,
             wire.rows,
             wire.cursor.row,
-            wire.cursor.col,
+            cursor_col,
             wire.cursor.visible,
             wire.cells.into_iter().flatten().collect(),
             wire.state,

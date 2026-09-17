@@ -773,7 +773,11 @@ is specified here next to the text format (#329). Format **1**:
 - `cursor` — three named fields. A hidden cursor keeps its position here
   (`"visible": false`), unlike the text format, where `cursor: hidden`
   drops it; `Screen::diff` treats a hidden cursor's position as not part
-  of the picture either way.
+  of the picture either way. A `col` equal to `cols` — the pending-wrap
+  position releases before 0.11.2 wrote after a write filled the last row
+  (#401) — is read onto the last cell rather than refused, so those files
+  stay readable (#375); any other position off the grid is refused with
+  both numbers named.
 - `cells` — **rows of cells**, `rows` arrays of exactly `cols` objects, so
   a JSON diff reads by row. A cell is `contents` (a string: one grapheme,
   possibly with combining marks; `""` for an erased cell and for the

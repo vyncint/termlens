@@ -354,13 +354,29 @@ mod json {
     /// The column bound was `>` where the row bound was `>=`, so
     /// `col == cols` — a column that does not exist — passed validation
     /// and `render --text` wrote a header the text parser then refused
-    /// (#375).
+    /// (#375). Refusing it outright would make JSON that 0.10 and 0.11
+    /// wrote unreadable, which the format promise forbids, so that one
+    /// column — the pending-wrap position — is clamped onto the last cell
+    /// instead, and every other cursor off the grid is refused.
     #[test]
-    fn a_cursor_past_the_grids_edge_is_refused() {
+    fn a_pending_wrap_cursor_is_clamped_and_a_cursor_off_the_grid_is_refused() {
         let screen = Screen::parse("size: 4x2  cursor: 1,3\nab\ncd").expect("a 4x2 screen");
         assert_eq!(screen.cursor(), (1, 3, true));
 
-        for (row, col) in [(0_u16, 4_u16), (2, 0)] {
+        // `col == cols`: read, clamped onto the last real cell, and the
+        // text it renders to parses again — the round trip #375 was about.
+        let mut value = serde_json::to_value(&screen).unwrap();
+        value["cursor"]["row"] = 0.into();
+        value["cursor"]["col"] = 4.into();
+        let clamped: termlens::Screen =
+            serde_json::from_value(value).expect("the pending-wrap column reads");
+        assert_eq!(clamped.cursor(), (0, 3, true), "clamped onto the last cell");
+        assert!(
+            Screen::parse(&clamped.with_styles().to_string()).is_ok(),
+            "…and the text it renders to parses"
+        );
+
+        for (row, col) in [(0_u16, 5_u16), (2, 0)] {
             let mut value = serde_json::to_value(&screen).unwrap();
             value["cursor"]["row"] = row.into();
             value["cursor"]["col"] = col.into();

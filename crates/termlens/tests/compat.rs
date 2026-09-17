@@ -183,6 +183,42 @@ mod json {
         }
     }
 
+    /// `0.11.1/pending-wrap.json` was written by the published 0.11.1 from
+    /// a screen whose last write filled the final column: the emulator then
+    /// parked the cursor at `col == cols`, a column the grid does not have,
+    /// and the JSON carried it (#401). A reader that refused that column
+    /// would make a file a published release wrote unreadable — the one
+    /// thing the format promise forbids — so it is clamped onto the last
+    /// cell instead (#375). The six shapes cannot pin this: the writer no
+    /// longer produces the column, so the file exists only for the release
+    /// that did. `cli.rs::every_corpus_file_renders` holds `render --text`
+    /// to it as well.
+    #[test]
+    fn a_pending_wrap_cursor_written_by_0_11_1_still_reads() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/compat/0.11.1/pending-wrap.json");
+        let raw = read(&path);
+        let file: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let cols = file["cols"].as_u64().expect("cols");
+        assert_eq!(
+            file["cursor"]["col"].as_u64(),
+            Some(cols),
+            "the frozen file really carries col == cols"
+        );
+        let screen: Screen =
+            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!(
+            screen.cursor(),
+            (0, 11, false),
+            "clamped onto the last cell, visibility kept"
+        );
+        assert!(screen.contains("fills 12 col"), "{screen}");
+        assert!(
+            Screen::parse(&screen.with_styles().to_string()).is_ok(),
+            "and the text it renders to parses"
+        );
+    }
+
     #[test]
     fn a_0_10_json_file_has_no_format_field_and_a_0_11_one_does() {
         for dir in versions() {

@@ -155,7 +155,8 @@ to be short.
   JSON written by 0.10 or later is readable by every later release; a new
   format number is a new candidate, never a silent change. *Checked by* the
   same corpus test (every JSON twin reads as the same picture as its text
-  and re-serialises to its own document) and by `tests/export.rs`.
+  and re-serialises to its own document, and the pending-wrap file the
+  published 0.11.1 wrote still reads) and by `tests/export.rs`.
 - **The CLI's contract**: the commands `inspect`, `diff` and `render`, their
   accepted flags, the exit-code meanings (0 ran, 1 `diff` found a
   difference, 2 the tool could not run) and the saved-screen input formats

@@ -36,3 +36,12 @@ the release commit**, with the `write_corpus` writer in `tests/compat.rs`
 its release PR is cut, and the tree at the tag is byte for byte what gets
 published. Its six text files are identical to 0.10.1's, which is the
 point; its JSON carries `"format": 1` and the #320 fix.
+
+`0.11.1/pending-wrap.json` is a seventh file, in that directory only: a
+screen the published 0.11.1 wrote after a write filled its last column,
+so the JSON carries the cursor at `col == cols` — the pending-wrap
+position no grid has (#401). Every later reader clamps that column onto
+the last cell rather than refusing the file (#375), and this file is what
+holds it to that; the six shapes cannot, because the writer no longer
+produces the column. It is JSON only: the text format drops a hidden
+cursor's position, so only the JSON ever carried the column.
