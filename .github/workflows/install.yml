@@ -34,6 +34,15 @@
 # repository out for one file, `.github/scripts/check-cli-contract.sh`: the
 # subject still comes from the registry, only the harness comes from here,
 # which is also what lets the same assertions run against a path build.
+#
+# That harness is checked out **at the tag of the version it is testing**,
+# not at `main`. Both are "here", but `main` runs ahead of the newest
+# release: an assertion added in the same pull request as the CLI fix it
+# covers is correct against the tree and false against the published binary,
+# so this job went red for a fix that was merged and not yet shipped (#435,
+# then #447 the same day). Pinning the checkout keeps subject and harness in
+# step. A new assertion is then exercised here from the release that ships
+# the behaviour it asserts, which is the only release where it can hold.
 name: install
 
 on:
@@ -302,8 +311,15 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "verifying termlens-cli $version"
+      # The contract the published binary is held to is the one that shipped
+      # with it (see the note at the top of this file). Every published
+      # version has a `v<version>` tag because release.yml is tag-driven, so
+      # this always resolves; a missing tag fails the checkout by name, which
+      # is the honest outcome for a version that was published from nothing
+      # this repository can point at.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: v${{ steps.crate.outputs.version }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
