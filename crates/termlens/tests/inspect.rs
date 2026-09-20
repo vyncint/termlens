@@ -1,4 +1,5 @@
-//! End-to-end coverage for the `inspect` debugging example.
+//! End-to-end coverage for the `inspect` debugging example, and for its
+//! agreement with `termlens inspect`, the command it mirrors (#480).
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -388,4 +389,262 @@ fn inspect_resolves_a_relative_program_path_from_its_working_directory() {
         !stdout.contains("---"),
         "the trailer belongs on stderr:\n{stdout}"
     );
+}
+
+// ------------------------------------------------- parity with the command
+//
+// `examples/inspect.rs` is kept in step with `termlens inspect` by hand: the
+// two files carry separate copies of the flag parser, the usage text,
+// `REAP_GRACE` and the wait, and it has already drifted twice (#443, #465).
+// The tests below run both binaries on the same program and compare what the
+// contract promises — the screen on stdout, the trailer on stderr, the exit
+// code — so a change to one that the other did not follow fails here rather
+// than in review.
+//
+// The usage text and the diagnostics are deliberately not compared: they
+// name the tool (`inspect` vs `termlens inspect`) and may legitimately differ
+// in prose (#453). Exit codes and the stream a failure uses are the contract.
+
+/// `termlens inspect`, built once per test process for the same reason
+/// `inspect_bin` is (#278). It lives in `termlens-cli`, so `cargo test -p
+/// termlens` does not build it; the test asks for it by name.
+fn command_bin() -> &'static PathBuf {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let status = Command::new(cargo)
+            .args(["build", "-p", "termlens-cli", "--bin", "termlens"])
+            .status()
+            .expect("failed to run cargo build for the termlens command");
+        assert!(status.success(), "cargo build --bin termlens failed");
+
+        let test_exe = std::env::current_exe().expect("test executable path is available");
+        let profile_dir = test_exe
+            .parent()
+            .and_then(|deps| deps.parent())
+            .expect("test executable is under target/<profile>/deps");
+        profile_dir.join(format!("termlens{}", std::env::consts::EXE_SUFFIX))
+    })
+}
+
+/// The example and `termlens inspect` run on the same arguments, side by
+/// side: both children are alive at once, so a pair costs the slower of the
+/// two rather than the sum.
+fn run_both(args: &[&str]) -> (Output, Output) {
+    let example = inspect_bin();
+    let command = command_bin();
+    std::thread::scope(|scope| {
+        let example = scope.spawn(|| run_inspect(example, args));
+        let command = scope.spawn(|| {
+            Command::new(command)
+                .arg("inspect")
+                .args(args)
+                .output()
+                .expect("failed to run termlens inspect")
+        });
+        (
+            example.join().expect("the example run panicked"),
+            command.join().expect("the command run panicked"),
+        )
+    })
+}
+
+/// Run both on `args` and require the same screen, the same trailer and the
+/// same exit code. Returns the shared `(stdout, stderr)` so a caller can also
+/// pin what they are — two binaries that agree on nothing useful (both
+/// failing to spawn, say) must not pass as agreeing.
+fn agree(args: &[&str]) -> (String, String) {
+    let (example, command) = run_both(args);
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    let (ex_out, ex_err) = (text(&example.stdout), text(&example.stderr));
+    let (cmd_out, cmd_err) = (text(&command.stdout), text(&command.stderr));
+    assert_eq!(
+        example.status.code(),
+        command.status.code(),
+        "exit codes differ for {args:?}\nexample stderr:\n{ex_err}\ncommand stderr:\n{cmd_err}"
+    );
+    assert_eq!(
+        ex_out, cmd_out,
+        "the screens on stdout differ for {args:?}\nexample:\n{ex_out}\ncommand:\n{cmd_out}"
+    );
+    assert_eq!(
+        ex_err, cmd_err,
+        "the trailers on stderr differ for {args:?}\nexample: {ex_err:?}\ncommand: {cmd_err:?}"
+    );
+    (ex_out, ex_err)
+}
+
+/// A program that exits has one trailer, and the screen holds its finished
+/// output. Nothing here waits on a clock: the EOF that says the child is
+/// gone ends the wait.
+#[test]
+#[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
+fn inspect_example_and_command_agree_on_a_program_that_exits() {
+    for (args, screen, trailer) in [
+        (
+            &["--size", "30x3", "sh", "-c", "printf hello"][..],
+            "hello",
+            "--- exited: exit code 0 ---\n",
+        ),
+        // A non-zero status is reported in the trailer, not propagated.
+        (
+            &["--size", "30x3", "sh", "-c", "printf bye; exit 3"][..],
+            "bye",
+            "--- exited: exit code 3 ---\n",
+        ),
+        // Styled output: a redirect is a saved screen, colour kept in a
+        // `styles:` block, on both sides (#454, #478).
+        (
+            &[
+                "--size",
+                "30x3",
+                "--ansi",
+                "sh",
+                "-c",
+                r#"printf '\033[1;31mred\033[0m'"#,
+            ][..],
+            "red",
+            "--- exited: exit code 0 ---\n",
+        ),
+        // The `--flag=value` spelling, which both gained together (#366).
+        (
+            &["--size=12x3", "sh", "-c", "stty size"][..],
+            "3 12",
+            "--- exited: exit code 0 ---\n",
+        ),
+    ] {
+        let (stdout, stderr) = agree(args);
+        assert!(
+            stdout.contains(screen),
+            "{args:?}: {screen:?} missing from the screen:\n{stdout}"
+        );
+        assert_eq!(stderr, trailer, "{args:?}");
+        termlens::Screen::parse(&stdout).expect("stdout is a saved screen");
+    }
+}
+
+/// The wait ends on whichever comes first — the program exits, or its output
+/// has been silent for `--idle` — under one deadline (#465). A program that
+/// paints and then sits still is resolved by the silence, long before the
+/// deadline, and says so: "still running", without claiming the deadline.
+///
+/// This is the case the sequential wait got wrong: it spent the whole
+/// `--timeout` first, so it reported the deadline for a screen that had been
+/// complete for a second. The silence window is far above what a loaded
+/// runner needs to start `sh` and print a word (CONTRIBUTING §3), and the
+/// deadline far above the window, so neither is what the test measures.
+#[test]
+#[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
+fn inspect_example_and_command_agree_when_the_silence_window_ends_the_wait() {
+    let (stdout, stderr) = agree(&[
+        "--size",
+        "30x3",
+        "--idle",
+        "1000",
+        "--timeout",
+        "10",
+        "sh",
+        "-c",
+        "echo painted; sleep 30",
+    ]);
+    assert!(stdout.contains("painted"), "{stdout}");
+    assert_eq!(
+        stderr, "--- still running (killed on exit) ---\n",
+        "the silence window, not the deadline, ended the wait"
+    );
+}
+
+/// The other way a wait can end: output that never goes quiet for `--idle`
+/// runs into the deadline, and only that trailer says so (#465). Here the
+/// silence window is the larger of the two, so the deadline is the only thing
+/// that can end it.
+#[test]
+#[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
+fn inspect_example_and_command_agree_when_the_deadline_ends_the_wait() {
+    let (stdout, stderr) = agree(&[
+        "--size",
+        "30x3",
+        "--idle",
+        "30000",
+        "--timeout",
+        "3",
+        "sh",
+        "-c",
+        "echo painted; sleep 30",
+    ]);
+    assert!(stdout.contains("painted"), "{stdout}");
+    assert_eq!(
+        stderr, "--- still running at the deadline (killed on exit) ---\n",
+        "the deadline ended the wait"
+    );
+}
+
+/// A child that closes its terminal but keeps running is not an exited
+/// child: the EOF ends the wait, the reap that would say "exited" never
+/// comes, and the reap grace both sides give a genuinely exited child must
+/// not mislabel this one (#374, #465). The EOF is immediate, so nothing here
+/// depends on a clock.
+#[test]
+#[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
+fn inspect_example_and_command_agree_on_a_child_that_closes_its_terminal() {
+    let (_, stderr) = agree(&[
+        "--size",
+        "20x3",
+        "--timeout",
+        "30",
+        "sh",
+        "-c",
+        "exec 0<&- 1>&- 2>&-; exec sleep 30",
+    ]);
+    assert_eq!(stderr, "--- still running (killed on exit) ---\n");
+}
+
+/// Inspect itself failing is exit code 2 with nothing on stdout, whichever
+/// way it fails: a flag it does not know, a value it cannot read, a flag
+/// missing its value, no program at all, or a program that cannot be spawned.
+/// The wording is each tool's own and is not compared.
+#[test]
+fn inspect_example_and_command_agree_on_exit_codes_when_inspect_cannot_run() {
+    for args in [
+        &["--bogus", "sh"][..],
+        &["--inherit-env=nonsense", "sh"][..],
+        &["--size", "12", "sh"][..],
+        &["--timeout", "abc", "sh"][..],
+        &["--idle"][..],
+        &["--cwd", "/definitely/not/a/directory", "sh"][..],
+        &[][..],
+        &["/definitely/not/a/program"][..],
+    ] {
+        let (example, command) = run_both(args);
+        assert_eq!(example.status.code(), Some(2), "example on {args:?}");
+        assert_eq!(command.status.code(), Some(2), "command on {args:?}");
+        assert!(example.stdout.is_empty(), "example stdout on {args:?}");
+        assert!(command.stdout.is_empty(), "command stdout on {args:?}");
+        assert!(!example.stderr.is_empty(), "example stderr on {args:?}");
+        assert!(!command.stderr.is_empty(), "command stderr on {args:?}");
+    }
+}
+
+/// `--help` and `--version` succeed on stdout with nothing on stderr, and
+/// `--version` is the one line both print. The usage text itself is not
+/// compared: it names the tool, and the two legitimately differ (#453).
+#[test]
+fn inspect_example_and_command_agree_on_help_and_version() {
+    for flag in ["--help", "-h"] {
+        let (example, command) = run_both(&[flag]);
+        assert_eq!(example.status.code(), Some(0), "example {flag}");
+        assert_eq!(command.status.code(), Some(0), "command {flag}");
+        assert!(example.stderr.is_empty(), "example {flag} wrote to stderr");
+        assert!(command.stderr.is_empty(), "command {flag} wrote to stderr");
+        assert!(
+            String::from_utf8_lossy(&example.stdout).starts_with("usage: inspect "),
+            "example {flag}"
+        );
+        assert!(
+            String::from_utf8_lossy(&command.stdout).starts_with("usage: termlens inspect "),
+            "command {flag}"
+        );
+    }
+    let (stdout, _) = agree(&["--version"]);
+    assert_eq!(stdout, format!("termlens {}\n", env!("CARGO_PKG_VERSION")));
 }
