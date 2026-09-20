@@ -30,22 +30,8 @@
 # Usage:
 #   .github/scripts/check-no-ai-attribution.sh <base>..<head>
 #
-# tests: exercise locally on a scratch branch before trusting it in CI —
-#   git checkout -b scratch/attribution
-#   git commit --allow-empty -s -m "test: clean commit"
-#   git commit --allow-empty -s -m "test: bad commit" \
-#     -m "Co-Authored-By: Example Bot <example[bot]@users.noreply.github.com>"
-#   .github/scripts/check-no-ai-attribution.sh main..HEAD  # must fail once
-#   # and the dependency-bot carve-out, which must pass on identity but still
-#   # fail on a watermark in the message:
-#   git -c user.name='dependabot[bot]' \
-#       -c user.email='49699333+dependabot[bot]@users.noreply.github.com' \
-#       commit --allow-empty -m "build(deps): bump x" -m "Signed-off-by: dependabot[bot] <support@github.com>"
-#   .github/scripts/check-no-ai-attribution.sh main..HEAD  # still just the one failure
-#   git checkout - && git branch -D scratch/attribution
-#   # and a range git cannot read must FAIL, never report OK on nothing:
-#   .github/scripts/check-no-ai-attribution.sh main..deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
-#   .github/scripts/check-no-ai-attribution.sh HEAD..HEAD
+# Self-test: tools/attribution-gate-selftest/run.sh exercises each failure
+# mode and the Dependabot carve-out against a scratch repository (#470).
 set -euo pipefail
 
 range="${1:?usage: check-no-ai-attribution.sh <range>}"

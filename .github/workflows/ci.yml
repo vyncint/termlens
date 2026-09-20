@@ -196,6 +196,9 @@ jobs:
       # listed file that lost its ref, and one stale ref among two are all
       # asserted to go red.
       - run: tools/report-pin-gate-selftest/run.sh
+      # …and the AI-attribution gate (#470): proves each pattern and failure
+      # mode goes red before trusting it in commit-policy.yml.
+      - run: tools/attribution-gate-selftest/run.sh
       # …and the preflight runner (#368): a fixture whose first gate fails
       # and whose second passes must report both and exit non-zero, and an
       # all-passing fixture must exit zero. Needs no toolchain, so it lives
