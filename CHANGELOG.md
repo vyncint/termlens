@@ -17,6 +17,8 @@ reads that marker.
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-09-23
+
 ### Changed
 
 - `termlens render` refuses a second format flag or a second `--out`,
@@ -31,17 +33,20 @@ reads that marker.
   format with one `--out` behaves exactly as before. Neither form was ever
   documented — the usage has always read `(--svg | --html | …) [--out
   PATH]` — but a script that passed two saw exit 0 and now sees 2.
+
 - The 1.0 readiness criteria are a section of `docs/STABILITY.md` — "The
   1.0 readiness criteria", the seven of #335 verbatim — instead of an issue
   (#472). #335 closed on 2026-09-16 while the candidate statement in the
   README, this file and STABILITY.md, and three places in
   `docs/RELEASING.md`, still cited it as the live record; all of them now
   link the section, which is where a criterion is recorded as met.
+
 - `skills/termlens/SKILL.md`'s reference tables: `locate` has one row
   instead of two that disagreed, with its accessors and why there is no
   `row()` (#459); `Screen::visual_bells()` and `Terminal::frame_timings()`
   have rows (#460); `.record_budget(cells)` states its unit and its default,
   2,000,000 cells (#476). §9b names every `render` format, not only SVG.
+
 - CONTRIBUTING §3 states the rule the skill gives agents first — no `sleep`
   as a wait — and names the suite's two sleeps as its exceptions, each with
   a comment where it sits saying why (#474).
@@ -55,9 +60,11 @@ reads that marker.
   `examples/inspect.rs` has documented it since 0.9.0; the command now
   says the same thing, and a test tells a flag-shaped program name from an
   option by which failure comes back.
+
 - `examples/inspect.rs --help` says what `--ansi` does, in the command's
   words (#473). The two usage texts were each missing a line the other
   had.
+
 - `termlens-cli`'s crates.io description names every format `render`
   writes — SVG, HTML, ANSI, the text format and JSON — instead of the
   three that are not byte-promised (#458). The two it left out, `--text`
@@ -69,22 +76,27 @@ reads that marker.
   command (#475). The exit is still 2 and the hint is still `--help`.
   `termlens nonesuch` is unchanged, and so is a bare `termlens -`: every
   subcommand reads `-` as standard input, not as an option.
+
 - `termlens render --out -` writes to stdout, the same stream every other
   `-` operand already is, instead of creating a file named `-` (#469).
   Both spellings (`--out -` and `--out=-`) do; a file named `-` is still
   `./-`. A failing render still creates nothing (#313).
+
 - `termlens inspect --ansi > file` writes a saved screen — the text format
   with its `styles:` block — instead of raw ANSI escapes that `diff` and
   `render` refused as a control character (#478). On a terminal `--ansi`
   still paints. `examples/inspect.rs` mirrors the command, so it moves
   with it.
+
 - `termlens inspect > file` writes the `with_styles` rendering, so a
   colour-only change is a difference `diff` names, instead of the plain
   text that made bold red and bold green compare as the same picture
   (#454). `render --text` already wrote the block; the two text
   renderings now agree. At a terminal `inspect` prints exactly what it
   printed before — the block is what a *saved* screen needs, not what a
-  person reading one does, and `is_terminal` tells the two apart.
+  person reading one does, and `is_terminal` tells the two apart. A golden
+  an earlier `inspect` saved has no block, so `diff` against a new one names
+  every styled cell as changed: save it again once, with this release.
 
 - `termlens diff --color` with no WHEN after it says `--color needs a WHEN
   argument`, the diagnostic every other flag's missing value gets, instead of
@@ -105,7 +117,9 @@ reads that marker.
   `--- still running at the deadline (killed on exit) ---` when the
   deadline did. Both are stripped from a saved screen, as is the single
   form every release up to 0.11.2 wrote. `examples/inspect.rs` mirrors the
-  command, so it moves with it.
+  command, so it moves with it. A test that matched `still running at the
+  deadline` against a TUI that goes quiet now sees the first form; match
+  `still running`, which both carry.
 
   The silence window starts at the program's **first output**, not at its
   spawn. As first written it started at the spawn, so a program slower than
@@ -2148,7 +2162,8 @@ in the worst of them — hung itself.
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [`Unsupported`]: https://docs.rs/termlens/0.11.0/termlens/struct.Unsupported.html
 
-[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.2...HEAD
+[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.3...HEAD
+[0.11.3]: https://github.com/vyncint/termlens/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/vyncint/termlens/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/vyncint/termlens/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/vyncint/termlens/compare/v0.10.3...v0.11.0
