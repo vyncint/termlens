@@ -14,20 +14,9 @@
 # main. See the web-flow block below for why that commit is treated
 # differently, and why naming it explicitly is what keeps the check honest.
 #
-# tests: exercise locally on a scratch branch before trusting it in CI —
-#   git checkout -b scratch/dco
-#   git commit --allow-empty -m "test: signed"  -s
-#   git commit --allow-empty -m "test: unsigned"
-#   .github/scripts/check-dco.sh main..HEAD   # must fail on the 2nd commit
-#   # and the composed-squash path, which must pass only when named:
-#   git -c user.email=noreply@github.com commit --allow-empty \
-#       -m "test: composed (#1)"
-#   .github/scripts/check-dco.sh main..HEAD            # must fail
-#   .github/scripts/check-dco.sh main..HEAD "$(git rev-parse HEAD)"  # passes
-#   # and a range git cannot read must FAIL, never report OK on nothing:
-#   .github/scripts/check-dco.sh main..deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
-#   .github/scripts/check-dco.sh HEAD..HEAD
-#   git checkout - && git branch -D scratch/dco
+# Self-test: tools/dco-gate-selftest/run.sh builds a scratch history and
+# holds every rule here to failing when it should (#471) — above all the
+# composed-squash exemption, which must stay exactly one named commit wide.
 set -euo pipefail
 
 range="${1:?usage: check-dco.sh <range> [composed-sha]}"

@@ -199,6 +199,10 @@ jobs:
       # …and the AI-attribution gate (#470): proves each pattern and failure
       # mode goes red before trusting it in commit-policy.yml.
       - run: tools/attribution-gate-selftest/run.sh
+      # …and the DCO gate (#471): its squash-merge exemption is a deliberate
+      # hole, and each way it could widen — unnamed, a second commit, a
+      # subject without "(#N)", a commit GitHub did not make — must go red.
+      - run: tools/dco-gate-selftest/run.sh
       # …and the preflight runner (#368): a fixture whose first gate fails
       # and whose second passes must report both and exit non-zero, and an
       # all-passing fixture must exit zero. Needs no toolchain, so it lives
