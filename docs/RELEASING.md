@@ -30,11 +30,11 @@ before 1.0. What that means for a release:
   the release type forced to `patch`, in three feature views. A red
   `semver` on a PR is the answer, not an obstacle.
 - **A necessary break is a new candidate** — `0.12.0`, never a patch — and
-  restarts the observation window in
-  [#335](https://github.com/vyncint/termlens/issues/335). Its pull request
-  carries the **`breaking` label** (a maintainer applies it; the gate then
-  runs with `--release-type major`), its description pastes the
-  diagnostics the *forced* run produced (run
+  restarts the observation window of the
+  [1.0 readiness criteria](STABILITY.md#the-10-readiness-criteria). Its
+  pull request carries the **`breaking` label** (a maintainer applies it;
+  the gate then runs with `--release-type major`), its description pastes
+  the diagnostics the *forced* run produced (run
   `.github/scripts/check-semver.sh <baseline>` without the label to get
   them), and its CHANGELOG entry is a bullet beginning **`- **Breaking:**`**
   under **Changed** or **Removed** whose text matches those diagnostics and
@@ -45,18 +45,21 @@ before 1.0. What that means for a release:
 - **Release candidates for 1.0** are tagged `v1.0.0-rc.N` and publish to
   crates.io as pre-releases; a consumer opts in with an exact requirement
   (`termlens = "=1.0.0-rc.1"`), and Cargo never resolves a pre-release
-  from `"0.11"` or `"1"`. The `v1.0.0` tag follows the readiness criteria
-  in #335 — an external pilot, eight weeks of stable use from its first
-  green run, every maintained consumer on the candidate, the daily
-  fresh-install evidence — and **a date is never one of them**.
+  from `"0.11"` or `"1"`. The `v1.0.0` tag follows the
+  [readiness criteria](STABILITY.md#the-10-readiness-criteria) — an
+  external pilot, eight weeks of stable use from its first green run,
+  every maintained consumer on the candidate, the daily fresh-install
+  evidence — and **a date is never one of them**.
 
 ## Before a 1.0 tag
 
 `v1.0.0` requires all three sections of [STABILITY.md](STABILITY.md) —
 Windows, backend, styled history — to be filled in with their decision
 and the measurement behind it, the "What the promise covers" section to
-match `lib.rs`, and every criterion in #335 to be recorded as met, with
-its evidence. A 1.0 with an open section is a 0.x with a bigger number.
+match `lib.rs`, and every one of its
+[1.0 readiness criteria](STABILITY.md#the-10-readiness-criteria) to be
+recorded there as met, with its evidence. A 1.0 with an open section is
+a 0.x with a bigger number.
 
 ## Cutting vX.Y.Z
 

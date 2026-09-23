@@ -283,9 +283,8 @@ reason. The measurement is `tests/conpty_probe.rs`; the decision is
 **0.11.0 is the stability candidate**: from that release no promised item
 changes incompatibly before 1.0. A change that must break one ships as a
 new candidate (0.12.0) with a migration table and restarts the observation
-window in [#335](https://github.com/vyncint/termlens/issues/335); a patch
-release does not. 1.0 follows the readiness criteria in that issue, not a
-date.
+window of the [1.0 readiness criteria](https://github.com/vyncint/termlens/blob/main/docs/STABILITY.md#the-10-readiness-criteria);
+a patch release does not. 1.0 follows those criteria, not a date.
 
 [docs/STABILITY.md](https://github.com/vyncint/termlens/blob/main/docs/STABILITY.md)
 states what is promised — the documented public API in every supported

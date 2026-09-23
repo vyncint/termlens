@@ -169,6 +169,9 @@ fn wait_stable_does_not_settle_inside_an_open_synchronized_update() -> termlens:
 fn a_screen_that_already_holds_still_settles_at_once() -> termlens::Result<()> {
     let mut t = emit(&["settled", "--wait"])?;
     t.wait_until(|s| s.contains("settled"))?;
+    // The one kind of sleep CONTRIBUTING §3 allows: the subject of the
+    // assertion, not a wait. Stillness has to *elapse* before the call for
+    // this test to mean anything; no predicate can stand in for time passing.
     std::thread::sleep(Duration::from_millis(1200));
     let start = Instant::now();
     let screen = t.wait_stable(Duration::from_secs(1))?;

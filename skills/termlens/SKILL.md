@@ -428,10 +428,10 @@ Read the first line for the cause:
 | `.current_dir(path)` | default: the test process's directory |
 | `.scrollback(rows)` | history retained (default 1000, text only) |
 | `.scrollback_styles(true)` | retain scrolled rows as cells too, so `scrollback_cell` keeps a masked-field assertion alive after it scrolls (measured cost in the rustdoc) |
-| `.record_budget(cells)` | how much `record()` retains before dropping the oldest frames |
+| `.record_budget(cells)` | how much `record()` retains, in cells (frames × grid size), before dropping the oldest frames; default 2,000,000, about a thousand 80x24 frames — `Recording::dropped()` counts what went |
 | `.spawn(program) -> Result<Terminal>` | program is a path or a name on `PATH` |
 
-**Wait** (all return `termlens::Result`, all embed the screen on failure, all have a `_for(…, timeout)` twin):
+**Wait** (the waits all return `termlens::Result`, all embed the screen on failure, all have a `_for(…, timeout)` twin; the last two rows are about frames over time rather than waits):
 
 | Method | Returns | Use for |
 |---|---|---|
@@ -443,6 +443,7 @@ Read the first line for the cause:
 | `wait_exit()` | `ExitStatus` | the child's exit; `success()`, `code() -> Option<u32>`, `signal() -> Option<&str>` |
 | `wait_until_matches(&Regex)` | `Screen` | feature `regex`: a pattern over a row of the screen — the expect-style wait, on the grid |
 | `record()` … `.stop()` | `Recording` | every complete DEC 2026 frame with its time; `frames()`, `duration()` (to the last frame), `write_asciicast(path)` for a file `asciinema` plays — its header carries when and what was recorded |
+| `frame_timings()` | `Vec<FrameTiming>` | not a wait: what each of the last 512 repaints cost, span and size between its DEC 2026 markers, kept apart from the eight frames `wait_frame` retains — measured through a PTY, so a trend to hold a line on, not a render benchmark |
 
 **Drive**: `send(Key)`, `send_str("text")` (no Enter — send `Key::Enter`
 yourself; `"\n"` would send LF, not CR), `paste("text")` (bracketed if the
@@ -461,7 +462,7 @@ from_r, to_c, to_r)`, `scroll(col, row, Scroll::Down)`, `resize(cols, rows)`,
 | Accessor | Returns |
 |---|---|
 | `contains(&str)` / `find(&str)` / `find_all(&str)` | `bool` / `Option<(row, col)>` / `Vec<(row, col)>` — visible grid, NFC-folded |
-| `locate(&str)` | `Option<Location>`: `Screen { row, col }` or `History { row, col }` |
+| `locate(&str)` | `Option<Location>`: `Screen { row, col }` or `History { row, col }`, with `is_on_screen()`, `is_in_history()` and `col()` — and deliberately **no** `row()`: a grid row and a history row are different things, so match on the variant when the row matters |
 | `logical_text()` / `row_wrapped(row)` | wrapped rows joined back into lines / where the backend wrapped |
 | `find_by(\|&Cell\| bool)` | `Option<(row, col)>` |
 | `cell(row, col)` | `Option<&Cell>`: `contents()`, `style()`, `is_wide()`, `is_wide_continuation()` |
@@ -472,11 +473,10 @@ from_r, to_c, to_r)`, `scroll(col, row, Scroll::Down)`, `resize(cols, rows)`,
 | `cursor()` / `cursor_visible()` | `(row, col, visible)` / the flag alone; `cursor_shape()`, `cursor_blink()` |
 | `alternate_screen()`, `bracketed_paste()`, `application_cursor()`, `focus_events()` | mode flags |
 | `mouse_mode()` / `mouse_modes()` | reporting protocol / the set the app enabled |
-| `title()`, `clipboard()`, `links()`, `bells()`, `repaints()`, `graphics()` | out-of-band state |
+| `title()`, `clipboard()`, `links()`, `bells()`, `visual_bells()`, `repaints()`, `graphics()` | out-of-band state. `bells()` counts BEL; `visual_bells()` counts `ESC g`, a flash — a different event, so a test asserting on `bells()` alone passes against an app that complained the other way |
 | `unsupported()` / `insert_mode()` | an `Unsupported` view of the sequences the emulator did not implement (`^[[20h`…) — `is_empty()`, `contains("^[[5m")`, `iter()`, `overflow()`, and `assert_eq!(s.unsupported(), ["^[[59m"])` pins it — so a plausible grid can be told from a right one / IRM left on |
 | `with_styles()` | `ScreenWithStyles`, a `Display` with a `styles:` block; snapshot this to catch colour regressions |
 | `diff(&other)` | `ScreenDiff`: `is_empty()`, `cells()`, `changed_rows()`, `style_changes()`, and a `Display` of only the rows that changed |
-| `locate(needle)` | `Option<Location>`: `is_on_screen()`, `is_in_history()`, `col()` |
 | `mask_rect(cols, rows)` / `mask_matching(literal, fill)` / `mask_cells(pred)` | a new `Screen` with those cells replaced, styles and columns intact. `mask_matching` is a literal (rows included — it spans a wrap the way `find_all` does); `mask_cells` blanks by predicate |
 | `to_ansi()` / `to_svg()` / `to_html()` | renderings a person can see — the SVG carries `role="img"` and a `<title>` naming its size and the app's title; `Screen::parse(text)` reads the text format back |
 
@@ -543,11 +543,13 @@ directory (see §9b).
   inspect --size 120x40 myapp` prints what a program shows (`--ansi` for
   colour), `termlens diff old.snap new.snap.new` prints the cell diff of two
   saved screens and exits 1 if anything changed, `termlens render --svg
-  failing.snap` makes an image (`--out shot.svg` writes it to a file and
-  leaves none behind if the render fails). A saved screen is any text
-  termlens prints — what `inspect` writes to stdout (`termlens inspect myapp
-  > before.txt`; its trailer goes to stderr), an insta `.snap`, the grid a
-  wait error leaves in a log — or the JSON the `serde` feature writes.
+  failing.snap` makes an image (`--html`, `--ansi`, `--text` and `--json`
+  are the other formats — the last two are the ones another program can
+  parse; `--out shot.svg` writes to a file and leaves none behind if the
+  render fails). A saved screen is any text termlens prints — what
+  `inspect` writes to stdout (`termlens inspect myapp > before.txt`; its
+  trailer goes to stderr), an insta `.snap`, the grid a wait error leaves
+  in a log — or the JSON the `serde` feature writes.
   `diff` and `render` read `-` as stdin (one operand of `diff` at most), and
   `inspect --cwd DIR` runs the program somewhere other than here.
 - In CI, set `TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens` on the

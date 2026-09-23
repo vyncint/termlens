@@ -104,9 +104,8 @@ because the one assertion that needs it can ask.
 **0.11.0 is the stability candidate**: from that release no promised item
 changes incompatibly before 1.0. A change that must break one ships as a
 new candidate (0.12.0) with a migration table and restarts the observation
-window in [#335](https://github.com/vyncint/termlens/issues/335); a patch
-release does not. 1.0 follows the readiness criteria in that issue, not a
-date.
+window of the [1.0 readiness criteria](https://github.com/vyncint/termlens/blob/main/docs/STABILITY.md#the-10-readiness-criteria);
+a patch release does not. 1.0 follows those criteria, not a date.
 
 The criteria are an external pilot, eight weeks of stable use counted from
 its first green run, every maintained consumer on the candidate from
@@ -209,3 +208,42 @@ nothing else is delegated:
 
 *Nothing checks these, by construction — they are the room the crate keeps
 for itself.*
+
+## The 1.0 readiness criteria
+
+1.0 is tagged when **all** of the following hold, and not before. **No
+calendar date is a criterion.**
+
+1. **Contract published** — STABILITY.md states the promised API, feature
+   configurations, formats, CLI contract, platform limits and MSRV policy,
+   and every statement names the job or test that checks it.
+2. **Enforcement proven** — the PR gate has been seen to fail on a
+   deliberate break and on an item hidden behind a feature (the
+   self-test), and has been green on every PR since the candidate.
+3. **Consumers migrated** — every maintained downstream repository depends
+   on the candidate from crates.io (no path or patch overrides) and has
+   been green on it for the whole observation window.
+4. **An external pilot** — at least one repository the maintainer does not
+   own has tests on a published release candidate (`1.0.0-rc.N`) covering
+   one real user flow, has caught at least one regression with them, and
+   has run them in its own CI repeatedly. Internal green runs do not count.
+5. **No known correctness blocker** in the promised scope.
+6. **Eight weeks of stable pilot usage**, counted from the external
+   pilot's first green run on the candidate — not from the candidate's
+   publication date. Recorded here: pilot start, installed version,
+   consumer SHA, runs, blockers, upgrades.
+7. **Fresh-install evidence** — the daily `install.yml` (library and CLI)
+   green throughout the window.
+
+If a criterion cannot be met, this section records why, and 0.11 stays the
+current release. A candidate that is never promoted is a smaller failure
+than a 1.0 that is broken by 1.1.
+
+The criteria were agreed in
+[#335](https://github.com/vyncint/termlens/issues/335) and copied here as
+they stood when it closed on 2026-09-16, because a closed issue is not
+where anyone looks for a live requirement and cannot be amended as the
+criteria move (#472). Two words changed with the move and none of the
+meaning: criterion 6 and the paragraph above said *this issue*, and now
+say *here* and *this section*. Change them here, in a pull request, so
+the change is reviewed.

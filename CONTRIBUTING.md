@@ -133,6 +133,18 @@ cargo insta review            # inspect and accept/reject each diff
   the tests added on one day in September 2026 passed locally and went red
   only under stress, and stress on `main` is what told one author's flake
   apart from an inherited one.
+- **No `sleep` as a wait.** A sleep is either too short and flaky under
+  load, or too long and slow on every run, and it names nothing: when it
+  fails, the log says only that time passed. Wait on what you mean —
+  `wait_until`, `wait_frame`, `wait_stable`, `wait_exit` — so a failure says
+  what never happened. This is rule 1 of `skills/termlens/SKILL.md`, and it
+  holds here too. Two sleeps are allowed, and each says so where it sits: a
+  sleep that is the *subject* of the assertion (`stable.rs` lets stillness
+  elapse to prove `wait_stable` returns at once on a grid already still —
+  remove the sleep and you remove the test), and the drain window in
+  `conpty_probe.rs`, a diagnostic on a raw PTY with no condition to wait on.
+  A sleep inside the *program under inspection* — a child that must outlive
+  a wait — is the program's behaviour, not the test's, and is fine.
 - **A short deadline belongs on the wait that must expire, and nowhere
   else.** A test about a 500 ms timeout gives the builder 500 ms and then
   waits — and that first wait also covers the spawn, which on a loaded
