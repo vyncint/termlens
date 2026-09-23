@@ -53,7 +53,8 @@ reads that marker.
 - `termlens --verbose` and `termlens -v` report an unknown option, the same
   word every subcommand uses for a `-`-prefixed token, instead of an unknown
   command (#475). The exit is still 2 and the hint is still `--help`.
-  `termlens nonesuch` is unchanged.
+  `termlens nonesuch` is unchanged, and so is a bare `termlens -`: every
+  subcommand reads `-` as standard input, not as an option.
 - `termlens render --out -` writes to stdout, the same stream every other
   `-` operand already is, instead of creating a file named `-` (#469).
   Both spellings (`--out -` and `--out=-`) do; a file named `-` is still

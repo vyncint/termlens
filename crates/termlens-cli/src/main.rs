@@ -65,7 +65,7 @@ a program whose name does.
 
 What goes to stdout depends on where stdout goes. A terminal gets what
 you came to look at: the plain text, or the painted screen with --ansi.
-Anything else -- a redirect, a pipe -- gets a saved screen with its
+Anything else — a redirect, a pipe — gets a saved screen with its
 styles: block, because that is the rendering that carries colour and the
 one `termlens diff` and `termlens render` read back. So a redirect never
 loses a style, and never writes an escape those two would refuse.
@@ -141,8 +141,12 @@ fn main() -> ExitCode {
         "render" => render(&rest),
         // A leading `-` is a flag, not a command name. Calling `--verbose`
         // an unknown command sent people to the subcommand list for the
-        // two guesses this CLI does not have (#475).
-        other if other.starts_with('-') => fail(&format!("unknown option {other:?} (try --help)")),
+        // two guesses this CLI does not have (#475). A bare `-` is not a
+        // flag anywhere in this CLI — every subcommand reads it as standard
+        // input — so it stays an unknown command.
+        other if other.starts_with('-') && other != STDIN => {
+            fail(&format!("unknown option {other:?} (try --help)"))
+        }
         other => fail(&format!("unknown command {other:?} (try --help)")),
     }
 }
