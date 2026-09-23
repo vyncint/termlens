@@ -703,6 +703,60 @@ fn inspect_stdout_is_a_saved_screen_and_the_trailer_is_on_stderr() -> termlens::
     Ok(())
 }
 
+/// `inspect --` ends the options, and it changes the outcome in exactly one
+/// case: a program named like a flag (#453). Options already stop at the
+/// first argument that does not begin with `-`, so without `--` such a name
+/// is read as an option and refused before anything is spawned.
+///
+/// The two cases are told apart by *which* failure comes back. `-weird` is
+/// not on PATH either way; with `--` it is looked up as a program and fails
+/// to spawn, without it it never gets that far. A deleted `"--" => break`
+/// arm turns the first into the second.
+#[test]
+fn inspect_double_dash_ends_the_options() {
+    use std::process::Command;
+    let bin = env!("CARGO_BIN_EXE_termlens");
+
+    let with = Command::new(bin)
+        .args(["inspect", "--size", "20x2", "--", "-weird", "ok"])
+        .output()
+        .expect("termlens runs");
+    assert_eq!(with.status.code(), Some(2), "{with:?}");
+    let stderr = String::from_utf8_lossy(&with.stderr);
+    assert!(
+        stderr.contains("failed to spawn") && stderr.contains("-weird"),
+        "after `--` a flag-shaped name is a program: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unknown option"),
+        "`--` must stop option parsing: {stderr}"
+    );
+
+    let without = Command::new(bin)
+        .args(["inspect", "--size", "20x2", "-weird", "ok"])
+        .output()
+        .expect("termlens runs");
+    assert_eq!(without.status.code(), Some(2), "{without:?}");
+    assert!(
+        String::from_utf8_lossy(&without.stderr).contains("unknown option \"-weird\""),
+        "without `--` the same name is an option: {without:?}"
+    );
+
+    // And the everyday case: a program after `--` runs.
+    let echo = Command::new(bin)
+        .args(["inspect", "--size", "20x2", "--", "sh", "-c", "printf hi"])
+        .output()
+        .expect("termlens runs");
+    #[cfg(not(windows))]
+    {
+        assert_eq!(echo.status.code(), Some(0), "{echo:?}");
+        let screen = Screen::parse(&String::from_utf8_lossy(&echo.stdout)).expect("a saved screen");
+        assert_eq!(screen.find("hi"), Some((0, 0)), "{}", screen.text());
+    }
+    #[cfg(windows)]
+    let _ = echo; // no POSIX shell to run; the two refusals above are the contract
+}
+
 /// `inspect --ansi > file` is still a saved screen (#478). `--ansi` paints
 /// on a terminal; a pipe writes `with_styles` so `render` and `diff` read
 /// the file back, including the colour the flag was asked to keep.
@@ -786,6 +840,15 @@ fn inspect_ansi_paints_on_a_terminal() -> termlens::Result<()> {
     assert!(
         !s.contains("styles:"),
         "a terminal is painted, not described: {s}"
+    );
+    // This branch builds its header by hand, from the first line of the
+    // plain rendering, and only then hands the grid to `to_ansi()` (#477).
+    // The header is what a person scanning a CI log looks for first, and
+    // nothing else pins that it survives the hand-built path.
+    assert!(
+        s.row_text(0).starts_with("size: 30x3"),
+        "the header must lead the painted screen: {}",
+        s.with_styles()
     );
     let (row, col) = s.find("red").expect("the painted word");
     let cell = s.cell(row, col).expect("the painted cell");
@@ -1281,6 +1344,79 @@ fn render_refuses_a_second_operand() -> termlens::Result<()> {
         "{out:?}"
     );
 
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// One format and one `--out` (#450): the flag-position twin of #364. Two
+/// formats are a contradiction, not a preference — `--svg --html` asked for
+/// an SVG and got HTML at exit 0 — and two `--out`s wrote the last and said
+/// nothing about the first. Refused like a second operand, with the
+/// conflict named, and before anything is opened.
+#[test]
+fn render_refuses_a_second_format_or_a_second_out() -> termlens::Result<()> {
+    use std::process::Command;
+    let bin = env!("CARGO_BIN_EXE_termlens");
+    let dir = std::env::temp_dir().join(format!("termlens-render-twice-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let a = dir.join("a.snap");
+    std::fs::write(&a, "size: 10x1  cursor: 0,0\nhi\n")?;
+    let a = a.to_str().expect("utf-8 path").to_string();
+
+    // Two formats, different and identical.
+    for (first, second, named) in [
+        ("--svg", "--html", "--svg and --html are two formats"),
+        ("--text", "--json", "--text and --json are two formats"),
+        ("--svg", "--svg", "--svg is given twice"),
+    ] {
+        let out = Command::new(bin)
+            .args(["render", first, second, &a])
+            .output()?;
+        assert_eq!(out.status.code(), Some(2), "{first} {second}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(named),
+            "{first} {second} must name the conflict: {stderr}"
+        );
+        assert!(stderr.contains("usage: termlens render"), "{stderr}");
+        assert!(out.stdout.is_empty(), "nothing is rendered: {out:?}");
+    }
+
+    // Two `--out`s, in every mix of the two spellings, write neither file.
+    let first = dir.join("first.svg");
+    let second = dir.join("second.svg");
+    let (f, s) = (first.to_str().unwrap(), second.to_str().unwrap());
+    let eq = |p: &str| format!("--out={p}");
+    for args in [
+        vec!["render", "--svg", "--out", f, "--out", s, &a],
+        vec!["render", "--svg", &eq(f), "--out", s, &a],
+        vec!["render", "--svg", "--out", f, &eq(s), &a],
+        vec!["render", "--svg", &eq(f), &eq(s), &a],
+    ] {
+        let out = Command::new(bin).args(&args).output()?;
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--out is given twice"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            !first.exists() && !second.exists(),
+            "a refused render wrote a file: {args:?}"
+        );
+    }
+
+    // And one of each is exactly the command it was, in both spellings.
+    for args in [
+        vec!["render", "--svg", "--out", f, &a],
+        vec!["render", "--svg", &eq(f), &a],
+    ] {
+        let _ = std::fs::remove_file(&first);
+        let out = Command::new(bin).args(&args).output()?;
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {out:?}");
+        let svg = std::fs::read_to_string(&first)?;
+        assert!(svg.contains("<svg"), "{args:?} wrote: {svg}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }

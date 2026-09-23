@@ -1,6 +1,6 @@
 [package]
 name = "termlens-cli"
-description = "The termlens command: run a program in a PTY and print its screen, diff two saved screens, render one as ANSI, SVG or HTML"
+description = "The termlens command: run a program in a PTY and print its screen, diff two saved screens, render one as SVG, HTML, ANSI, the text format or JSON"
 keywords = ["pty", "terminal", "testing", "tui", "snapshot"]
 categories = ["development-tools::testing", "command-line-interface"]
 readme = "README.md"
