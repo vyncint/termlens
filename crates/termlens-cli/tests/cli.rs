@@ -377,7 +377,9 @@ fn a_file_that_is_not_a_screen_exits_two_and_names_it() -> termlens::Result<()> 
 /// A flag typed in place of a subcommand is an unknown option, not an
 /// unknown command (#475). `-v` and `--verbose` are the two most likely
 /// wrong guesses at this CLI, and both are flags. `nonesuch` stays a
-/// command — `check-cli-contract.sh` pins the exit, this pins the word.
+/// command — `check-cli-contract.sh` pins the exit, this pins the word —
+/// and so does a bare `-`, which every subcommand reads as standard input
+/// rather than as an option.
 #[test]
 fn a_top_level_flag_is_an_unknown_option_not_a_command() {
     use std::process::Command;
@@ -393,12 +395,15 @@ fn a_top_level_flag_is_an_unknown_option_not_a_command() {
         );
     }
 
-    let out = Command::new(bin).arg("nonesuch").output().expect("spawn");
-    assert_eq!(out.status.code(), Some(2), "{out:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "termlens: unknown command \"nonesuch\" (try --help)\n"
-    );
+    for command in ["nonesuch", "-"] {
+        let out = Command::new(bin).arg(command).output().expect("spawn");
+        assert_eq!(out.status.code(), Some(2), "{command}: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!("termlens: unknown command {command:?} (try --help)\n"),
+            "{command}"
+        );
+    }
 }
 
 #[test]

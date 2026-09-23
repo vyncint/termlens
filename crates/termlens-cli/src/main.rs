@@ -137,8 +137,12 @@ fn main() -> ExitCode {
         "render" => render(&rest),
         // A leading `-` is a flag, not a command name. Calling `--verbose`
         // an unknown command sent people to the subcommand list for the
-        // two guesses this CLI does not have (#475).
-        other if other.starts_with('-') => fail(&format!("unknown option {other:?} (try --help)")),
+        // two guesses this CLI does not have (#475). A bare `-` is not a
+        // flag anywhere in this CLI — every subcommand reads it as standard
+        // input — so it stays an unknown command.
+        other if other.starts_with('-') && other != STDIN => {
+            fail(&format!("unknown option {other:?} (try --help)"))
+        }
         other => fail(&format!("unknown command {other:?} (try --help)")),
     }
 }
