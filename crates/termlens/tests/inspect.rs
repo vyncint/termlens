@@ -611,23 +611,37 @@ fn inspect_example_and_command_agree_when_the_deadline_ends_the_wait() {
 }
 
 /// A child that closes its terminal but keeps running is not an exited
-/// child: the EOF ends the wait, the reap that would say "exited" never
-/// comes, and the reap grace both sides give a genuinely exited child must
-/// not mislabel this one (#374, #465). The EOF is immediate, so nothing here
-/// depends on a clock.
+/// child: the reap that would say "exited" never comes, and the reap grace
+/// both sides give a genuinely exited child must not mislabel this one
+/// (#374, #465).
+///
+/// What ends the wait is the platform's. On Linux, closing the last
+/// descriptor on the terminal is an EOF at once, and the EOF ends it. On
+/// macOS no EOF comes while the child lives — the terminal is still its
+/// controlling terminal — and a child that never printed starts no silence
+/// window, so the deadline ends it. There the deadline is the wait that must
+/// expire, and so the only one given a short value (CONTRIBUTING §3).
 #[test]
 #[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
 fn inspect_example_and_command_agree_on_a_child_that_closes_its_terminal() {
+    let (timeout, trailer) = if cfg!(target_os = "macos") {
+        (
+            "2",
+            "--- still running at the deadline (killed on exit) ---\n",
+        )
+    } else {
+        ("30", "--- still running (killed on exit) ---\n")
+    };
     let (_, stderr) = agree(&[
         "--size",
         "20x3",
         "--timeout",
-        "30",
+        timeout,
         "sh",
         "-c",
         "exec 0<&- 1>&- 2>&-; exec sleep 30",
     ]);
-    assert_eq!(stderr, "--- still running (killed on exit) ---\n");
+    assert_eq!(stderr, trailer);
 }
 
 /// Inspect itself failing is exit code 2 with nothing on stdout, whichever

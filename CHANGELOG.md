@@ -52,7 +52,14 @@ reads that marker.
   that never exits paid the full deadline on every run, however complete
   the screen already was: 6.07s for a screen done in 1ms in the issue's
   reproduction, 0.76s now. The exit codes are unchanged and the wait is
-  still bounded by `--timeout`.
+  still bounded by `--timeout`. A child that outlives the wait now has two
+  trailers rather than one, because the wait can end two ways and only one
+  of them is the deadline: `--- still running (killed on exit) ---` when
+  the silence window or an EOF ended it, and the existing
+  `--- still running at the deadline (killed on exit) ---` when the
+  deadline did. Both are stripped from a saved screen, as is the single
+  form every release up to 0.11.2 wrote. `examples/inspect.rs` mirrors the
+  command, so it moves with it.
 
   The silence window starts at the program's **first output**, not at its
   spawn. As first written it started at the spawn, so a program slower than
@@ -61,15 +68,9 @@ reads that marker.
   killed as still running: `sh -c 'sleep 1; echo late'` showed nothing,
   where 0.11.2 showed `late`. That was caught before release, by the
   Windows leg, where ConPTY makes `sh` slow enough to trip it. A program
-  that never paints and never exits still ends at `--timeout`, and one
-  that exits without painting (`inspect true`) is still instant. A child that outlives the wait now has two
-  trailers rather than one, because the wait can end two ways and only one
-  of them is the deadline: `--- still running (killed on exit) ---` when
-  the silence window or an EOF ended it, and the existing
-  `--- still running at the deadline (killed on exit) ---` when the
-  deadline did. Both are stripped from a saved screen, as is the single
-  form every release up to 0.11.2 wrote. `examples/inspect.rs` mirrors the
-  command, so it moves with it.
+  that never paints and never exits still ends at `--timeout`, as it did in
+  0.11.2, and one that exits without painting (`inspect true`) is still
+  instant.
 
 - `termlens render --out=` with nothing after the `=` says `--out needs a
   PATH argument`, the diagnostic the spelled-out `--out` already gave,
