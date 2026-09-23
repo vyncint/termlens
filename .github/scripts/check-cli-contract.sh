@@ -191,6 +191,120 @@ contains "inspect clears the env by default"   "[]"    "$WORK/cleared.snap"
 TERMLENS_CONTRACT=zzz "$BIN" inspect --size 60x3 --inherit-env sh -c 'echo "[$TERMLENS_CONTRACT]"' > "$WORK/inherited.snap" 2>/dev/null || true
 contains "inspect --inherit-env keeps the caller's" "[zzz]" "$WORK/inherited.snap"
 
+# --- `--flag=value`, for every inspect flag that takes one (#366, #457).
+# Covered in tests/cli.rs against the tree; here against what users
+# install, which is where #310 was found. Each `=` spelling must produce the
+# same screen as the spelled-out form, not merely exit 0.
+same_as_spelled_out() {
+  label=$1
+  eq=$2
+  spelled=$3
+  shift 3
+  got=0
+  "$BIN" inspect $eq "$@" > "$WORK/eq.snap" 2>/dev/null || got=$?
+  "$BIN" inspect $spelled "$@" > "$WORK/sp.snap" 2>/dev/null || true
+  if [ "$got" = 0 ] && cmp -s "$WORK/eq.snap" "$WORK/sp.snap"; then
+    printf '  ok    %-46s same screen as the spelled-out form\n' "$label"
+  else
+    printf '  FAIL  %-46s exit %s, or differs from %s\n' "$label" "$got" "$spelled" >&2
+    status=1
+  fi
+}
+same_as_spelled_out "inspect --size="    "--size=30x3"   "--size 30x3"   sh -c 'printf hi'
+same_as_spelled_out "inspect --timeout=" "--timeout=2"   "--timeout 2"   sh -c 'printf hi'
+same_as_spelled_out "inspect --idle="    "--idle=300"    "--idle 300"    sh -c 'printf hi'
+"$BIN" inspect --size 200x3 --cwd="$WORK" sh -c pwd > "$WORK/cwd-eq.snap" 2>/dev/null || true
+contains "inspect --cwd= runs the program there" "$(basename "$WORK")" "$WORK/cwd-eq.snap"
+"$BIN" inspect --size 60x3 --env=TERMLENS_CONTRACT=eq sh -c 'echo "[$TERMLENS_CONTRACT]"' > "$WORK/env-eq.snap" 2>/dev/null || true
+contains "inspect --env= sets a variable"      "[eq]"  "$WORK/env-eq.snap"
+# The flag's `=` is the first one; the pair then splits on *its* first. A
+# last-`=` parse would read `--env=A=b=c` as a flag called `--env=A=b` and
+# refuse it, so this is the line that tells the two apart.
+"$BIN" inspect --size 60x3 --env=TERMLENS_CONTRACT=b=c sh -c 'echo "[$TERMLENS_CONTRACT]"' > "$WORK/env-eq2.snap" 2>/dev/null || true
+contains "inspect --env=K=a=b splits on the first =" "[b=c]" "$WORK/env-eq2.snap"
+expect "inspect --inherit-env=, a value on a bare flag" 2 "$BIN" inspect --inherit-env=nonsense true
+
+# --- a program that outlives the wait (#374, #479). The wait ends two ways,
+# so a still-running child has two trailers, and both must be stripped from
+# a saved screen that carries one -- `strip_inspect_trailer` names them,
+# and nothing else ran that list against an installed binary.
+#
+# The sleeps are in the *program under inspection*: it has to outlive the
+# wait for the trailer to exist at all. The deadlines are generous against
+# what each run measures: the first ends on 300ms of silence well inside a
+# 20s ceiling; the second prints every second, so a 3s silence window can
+# never close and only the 2s deadline can end it.
+got=0
+"$BIN" inspect --size 20x2 --idle 300 --timeout 20 sh -c 'printf hi; sleep 30' \
+  > "$WORK/idle.snap" 2> "$WORK/idle.err" || got=$?
+if [ "$got" = 0 ] && grep -qF -- '--- still running (killed on exit) ---' "$WORK/idle.err"; then
+  printf '  ok    %-46s exit 0, trailer on stderr\n' "inspect, silence ends the wait"
+else
+  printf '  FAIL  %-46s exit %s, or no still-running trailer\n' "inspect, silence ends the wait" "$got" >&2
+  sed 's/^/        /' "$WORK/idle.err" >&2 || true
+  status=1
+fi
+got=0
+"$BIN" inspect --size 20x2 --idle 3000 --timeout 2 sh -c 'while :; do printf .; sleep 1; done' \
+  > "$WORK/deadline.snap" 2> "$WORK/deadline.err" || got=$?
+if [ "$got" = 0 ] && grep -qF -- '--- still running at the deadline (killed on exit) ---' "$WORK/deadline.err"; then
+  printf '  ok    %-46s exit 0, the at-the-deadline form\n' "inspect, the deadline ends the wait"
+else
+  printf '  FAIL  %-46s exit %s, or not the deadline trailer\n' "inspect, the deadline ends the wait" "$got" >&2
+  sed 's/^/        /' "$WORK/deadline.err" >&2 || true
+  status=1
+fi
+for run in idle deadline; do
+  if grep -q '^--- ' "$WORK/$run.snap"; then
+    printf '  FAIL  %-46s stdout carries a trailer line\n' "inspect, $run: stdout is a screen" >&2
+    status=1
+  else
+    printf '  ok    %-46s no trailer on stdout\n' "inspect, $run: stdout is a screen"
+  fi
+  # A screen saved with its trailer attached -- `2>&1 > file`, or a log --
+  # is what exercises the strip, since stdout alone never carries it.
+  cat "$WORK/$run.snap" "$WORK/$run.err" > "$WORK/$run.with-trailer.snap"
+  expect "a screen saved with the $run trailer reads" 0 \
+    "$BIN" render --text "$WORK/$run.with-trailer.snap"
+done
+# And the strip is specific: an arbitrary `---` line is not a trailer, so a
+# check that accepted anything would be no check at all.
+{ cat "$WORK/idle.snap"; echo "--- something else entirely ---"; } > "$WORK/not-a-trailer.snap"
+expect "a --- line that is no trailer is refused" 2 "$BIN" render --text "$WORK/not-a-trailer.snap"
+
+# --- `--` ends inspect's options (#453): the one way to run a program
+# whose name begins with `-`, and nothing in the help said so.
+expect "inspect -- <program>"      0 "$BIN" inspect -- sh -c 'printf hi'
+got=0
+"$BIN" inspect -- -termlens-contract-no-such-program > "$WORK/out" 2> "$WORK/err" || got=$?
+if [ "$got" = 2 ] && grep -qF -- 'failed to spawn' "$WORK/err" && ! grep -qF -- 'unknown option' "$WORK/err"; then
+  printf '  ok    %-46s a flag-shaped name is a program\n' "inspect -- -name"
+else
+  printf '  FAIL  %-46s exit %s, or read as an option\n' "inspect -- -name" "$got" >&2
+  sed 's/^/        /' "$WORK/err" >&2 || true
+  status=1
+fi
+
+# --- one format and one --out (#450), the flag-position twin of the
+# two-operand refusal above.
+got=0
+"$BIN" render --svg --html "$WORK/a.snap" > "$WORK/out" 2> "$WORK/err" || got=$?
+if [ "$got" = 2 ] && [ ! -s "$WORK/out" ] && grep -qF -- 'usage: termlens render' "$WORK/err"; then
+  printf '  ok    %-46s exit 2, nothing rendered\n' "render, two formats"
+else
+  printf '  FAIL  %-46s exit %s, expected 2 and no output\n' "render, two formats" "$got" >&2
+  status=1
+fi
+got=0
+"$BIN" render --svg --out "$WORK/one.svg" --out="$WORK/two.svg" "$WORK/a.snap" \
+  > "$WORK/out" 2> "$WORK/err" || got=$?
+if [ "$got" = 2 ] && [ ! -e "$WORK/one.svg" ] && [ ! -e "$WORK/two.svg" ]; then
+  printf '  ok    %-46s exit 2, neither file\n' "render, two --out"
+else
+  printf '  FAIL  %-46s exit %s, or wrote a file\n' "render, two --out" "$got" >&2
+  status=1
+fi
+
 # --- diff, which is the one command with three meaningful exit codes.
 expect "diff, same picture"        0 "$BIN" diff "$WORK/a.snap" "$WORK/a.snap"
 expect "diff, different pictures"  1 "$BIN" diff "$WORK/a.snap" "$WORK/b.snap"
