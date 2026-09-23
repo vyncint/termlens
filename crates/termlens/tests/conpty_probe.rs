@@ -234,6 +234,12 @@ fn through_pty(mut cmd: CommandBuilder) -> io::Result<Vec<u8>> {
     let mut child = pair.slave.spawn_command(cmd).map_err(other)?;
     drop(pair.slave);
     child.wait()?;
+    // A drain window, and not a wait on a condition: this file is a
+    // diagnostic (see its header), talking to a raw PTY with none of the
+    // crate's waits. Under ConPTY the child exiting is not EOF, so bytes can
+    // still be in flight after `wait()` returns, and the reader cannot see an
+    // end until the master drops — which is the next line. CONTRIBUTING §3
+    // names this file as the one other place a sleep is allowed.
     thread::sleep(Duration::from_millis(500));
     drop(pair.master);
     collector

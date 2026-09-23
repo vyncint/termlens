@@ -4,12 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
 **0.11.0 is the stability candidate**: from that release no promised item
 changes incompatibly before 1.0. A change that must break one ships as a
 new candidate (0.12.0) with a migration table and restarts the observation
-window in [#335](https://github.com/vyncint/termlens/issues/335); a patch
-release does not. 1.0 follows the readiness criteria in that issue, not a
-date.
+window of the [1.0 readiness criteria](https://github.com/vyncint/termlens/blob/main/docs/STABILITY.md#the-10-readiness-criteria);
+a patch release does not. 1.0 follows those criteria, not a date.
 
 A breaking change is always listed under a **Changed** or **Removed**
 heading, in a bullet that begins **Breaking:** — the semver gate in CI
@@ -31,6 +31,20 @@ reads that marker.
   format with one `--out` behaves exactly as before. Neither form was ever
   documented — the usage has always read `(--svg | --html | …) [--out
   PATH]` — but a script that passed two saw exit 0 and now sees 2.
+- The 1.0 readiness criteria are a section of `docs/STABILITY.md` — "The
+  1.0 readiness criteria", the seven of #335 verbatim — instead of an issue
+  (#472). #335 closed on 2026-09-16 while the candidate statement in the
+  README, this file and STABILITY.md, and three places in
+  `docs/RELEASING.md`, still cited it as the live record; all of them now
+  link the section, which is where a criterion is recorded as met.
+- `skills/termlens/SKILL.md`'s reference tables: `locate` has one row
+  instead of two that disagreed, with its accessors and why there is no
+  `row()` (#459); `Screen::visual_bells()` and `Terminal::frame_timings()`
+  have rows (#460); `.record_budget(cells)` states its unit and its default,
+  2,000,000 cells (#476). §9b names every `render` format, not only SVG.
+- CONTRIBUTING §3 states the rule the skill gives agents first — no `sleep`
+  as a wait — and names the suite's two sleeps as its exceptions, each with
+  a comment where it sits saying why (#474).
 
 ### Fixed
 
