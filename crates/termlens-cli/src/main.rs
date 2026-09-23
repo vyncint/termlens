@@ -61,7 +61,7 @@ repeatable --env sets selected values.
 
 What goes to stdout depends on where stdout goes. A terminal gets what
 you came to look at: the plain text, or the painted screen with --ansi.
-Anything else -- a redirect, a pipe -- gets a saved screen with its
+Anything else — a redirect, a pipe — gets a saved screen with its
 styles: block, because that is the rendering that carries colour and the
 one `termlens diff` and `termlens render` read back. So a redirect never
 loses a style, and never writes an escape those two would refuse.
