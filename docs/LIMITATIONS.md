@@ -151,8 +151,13 @@ CHANGELOG entry.
   XTGETTCAP and DECRQM are answered by ConPTY itself and never reach
   termlens; `mouse_modes` and `mouse_mode`; `focus_events` (ConPTY turns
   1004 on for itself); link ids (ConPTY assigns its own); `Terminal::signal`;
-  and bytes that are not UTF-8 (Rust's console stdio refuses to write
-  them). The tests for each are `#[cfg_attr(windows, ignore = "…")]` with
+  the tab-stop extension a `resize` performs (ConPTY applies
+  `ResizePseudoConsole` on its own thread, so a program's output written
+  right after a resize can be laid out at the old width — after `resize()`
+  on Windows, wait for the program's own repaint before asserting on
+  layout — and its re-render never forwards the program's HT); and bytes
+  that are not UTF-8 (Rust's console stdio refuses to write them). The
+  tests for each are `#[cfg_attr(windows, ignore = "…")]` with
   the reason in the attribute; the probe that measured all of this is
   `tests/conpty_probe.rs`, and the `windows` workflow re-runs it on demand.
   The `windows-latest` leg is a required check. This is decision 1 of

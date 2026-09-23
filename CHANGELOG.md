@@ -51,6 +51,14 @@ reads that marker.
   as a wait — and names the suite's two sleeps as its exceptions, each with
   a comment where it sits saying why (#474).
 
+- `docs/LIMITATIONS.md` names one more Unix-only assertion: the tab-stop
+  extension a `resize` performs. ConPTY applies `ResizePseudoConsole` on its
+  own thread, so a program's output written right after a resize can be laid
+  out at the old width; the stress run for this release caught the test that
+  pins the rule doing exactly that, once in 300 Windows iterations. On
+  Windows, wait for the program's own repaint after `resize()` before
+  asserting on layout. `resize` itself is unchanged and still claimed there.
+
 ### Fixed
 
 - `termlens inspect --help` documents `--`, the end-of-options marker it
