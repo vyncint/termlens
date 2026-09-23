@@ -7,7 +7,7 @@
 //! the test waits for. The marker appearing proves the app was unblocked,
 //! and the reply is on the grid with ESC drawn as `E` and BEL as `G`.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use termlens::{Error, Key, Terminal};
 
@@ -210,8 +210,30 @@ fn unanswerable_queries_turn_timeouts_into_diagnoses() {
         Terminal::builder().timeout(Duration::from_millis(500)),
         &["--csi", "14t", "--wait", "never"],
     );
-    let err = t.wait_until(|s| s.contains("never")).unwrap_err();
-    let msg = err.to_string();
+    // The marker proves the child is running; it cannot prove that the
+    // query written *after* it has been read. On a loaded Windows runner it
+    // sometimes had not: the 500 ms wait under test expired first and its
+    // message named no query (#445, three stress dispatches). A second
+    // marker after the query is not the fix — output after an unanswered
+    // probe turns the diagnosis from cause into context, which is the thing
+    // this test asserts is *not* happening (CONTRIBUTING §3).
+    //
+    // So the short wait — the one that must expire, and still the only
+    // short deadline here — is repeated until its message names the query:
+    // one 500 ms iteration on a quiet machine, a few where the bytes have
+    // not crossed ConPTY yet. Nothing about the assertion loosens, and the
+    // budget is bounded, so a query that never registers still fails, with
+    // the last message it produced.
+    let budget = Instant::now() + Duration::from_secs(30);
+    let msg = loop {
+        let msg = t
+            .wait_until(|s| s.contains("never"))
+            .unwrap_err()
+            .to_string();
+        if msg.contains("^[[14t") || Instant::now() >= budget {
+            break msg;
+        }
+    };
     assert!(msg.contains("^[[14t"), "query not named in: {msg}");
     assert!(msg.contains("received no answer"), "no diagnosis in: {msg}");
     // Drop kills the blocked child.
