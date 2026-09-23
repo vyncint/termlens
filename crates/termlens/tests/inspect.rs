@@ -39,6 +39,10 @@ fn run_inspect(bin: &PathBuf, args: &[&str]) -> Output {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "the program under inspection is a POSIX shell: MSYS sh can outlive its last output by more than the silence window and the reap grace, so the trailer reads still running (#149)"
+)]
 fn inspect_runs_and_reports_cli_failures() {
     let bin = inspect_bin();
 

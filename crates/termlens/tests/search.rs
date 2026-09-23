@@ -324,12 +324,22 @@ mod patterns {
 fn a_mask_covers_a_needle_that_spans_rows() -> termlens::Result<()> {
     // Two occurrences, one of them crossing a wide character, and a row that
     // must survive untouched between them.
+    // Two writes with a pause between them, the way a read boundary once
+    // split the one write this used to be: the 0.11.3 release stress run
+    // (ubuntu, 4 threads) snapshotted after `KEEP ME` with row 4 still
+    // unpainted, and the needle spanning rows 3–4 had nothing to match.
     let mut t = emit(&[
         "--raw",
-        r"abc\r\ndef\r\nKEEP ME\r\nab東\r\ndef\r\n",
+        r"abc\r\ndef\r\nKEEP ME\r\nab東\r\n",
+        "--sleep",
+        "300ms",
+        "--raw",
+        r"def\r\n",
         "--wait",
     ])?;
-    t.wait_until(|s| s.contains("KEEP ME"))?;
+    // `KEEP ME` is the third line, not the last: the last thing painted is
+    // the final `\r\n`, which parks the cursor on row 5 (DESIGN §2).
+    t.wait_until(|s| s.cursor().0 == 5)?;
     let screen = t.screen();
 
     assert_eq!(screen.find_all("abc\ndef"), vec![(0, 0)]);
