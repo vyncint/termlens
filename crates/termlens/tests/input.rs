@@ -919,10 +919,18 @@ fn a_typed_tab_is_echoed_onto_the_next_tab_stop() -> termlens::Result<()> {
             .timeout(Duration::from_secs(10)),
         // `NL` after READY, so the echo starts a row of its own at column 0
         // and the tab stop it lands on is the first one, not whichever is
-        // next after the marker.
-        &["READY", "NL", "--echo-line"],
+        // next after the marker. The pause between the two is the program
+        // being slow to move to its input line: the release stress run for
+        // 0.11.3 caught this test typing between the marker and the newline
+        // (ubuntu, 8 threads, iteration 3), so the echoes of `a` and the Tab
+        // landed on the marker's row and the newline swallowed the tab stop.
+        // With the pause, a wait that returns on the marker alone fails every
+        // time instead of once in a few hundred.
+        &["READY", "--sleep", "300ms", "NL", "--echo-line"],
     )?;
-    t.wait_until(|s| s.contains("READY"))?;
+    // The last thing painted before typing is the newline, not the marker
+    // (DESIGN §2): the cursor on row 1 is what says the input line is ready.
+    t.wait_until(|s| s.contains("READY") && s.cursor().0 == 1)?;
 
     t.send_str("a")?;
     t.send(Key::Tab)?;
