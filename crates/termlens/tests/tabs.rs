@@ -188,7 +188,18 @@ fn a_soft_reset_restores_the_default_stops() -> termlens::Result<()> {
 /// This is the rule most likely to be broken by a later change and the one
 /// nothing else pins end to end — a set rebuilt from scratch on resize would
 /// lose the custom stop and pass every other test in this file.
+///
+/// Unix-only: ConPTY applies `ResizePseudoConsole` on its own thread, so
+/// what the program prints right after the resize can be laid out at the
+/// old width — the 0.11.3 release stress run saw `b` on the last column of
+/// the 24-wide grid, once in 300 Windows iterations — and its re-render
+/// never forwards the program's HT, so the rule under test is not exercised
+/// there in the first place (LIMITATIONS.md, "Windows").
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY applies a resize on its own thread, so output written right after one can be laid out at the old width, and its re-render never forwards HT (#149)"
+)]
 fn a_resize_extends_the_stops_and_keeps_the_ones_it_had() -> termlens::Result<()> {
     // The stop at column 4 is set before the resize; `READY` parks the
     // child so the widen lands between the two halves.
