@@ -55,6 +55,7 @@ when it ends is killed.
 The child environment is cleared by default except for PATH; --inherit-env
 keeps the caller's environment, and repeatable --env sets selected values.
 --cwd runs the program in PATH, which must be an existing directory.
+--ansi paints the screen in colour on a terminal.
 
 The screen goes to stdout and nothing else does, so `inspect … > file`
 saves a screen; the trailer that says what the program did — its exit

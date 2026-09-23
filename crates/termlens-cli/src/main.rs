@@ -1,6 +1,7 @@
 //! `termlens` — the harness at a shell prompt (#255): `inspect` runs a
 //! program in a PTY and prints its screen, `diff` compares two saved
-//! screens cell by cell, `render` turns one into ANSI, SVG or HTML.
+//! screens cell by cell, `render` turns one into SVG, HTML, ANSI, the text
+//! format or JSON.
 //!
 //! A saved screen is the snapshot text format of `docs/DESIGN.md` §3 — an
 //! insta `.snap` with or without its header, the block a wait error prints,
@@ -47,7 +48,7 @@ run — bad arguments, an unreadable file, a program that could not be spawned.
 const INSPECT_USAGE: &str = "\
 usage: termlens inspect [--size COLSxROWS] [--timeout SECONDS] [--idle MILLIS]
                         [--cwd PATH] [--inherit-env] [--ansi]
-                        [--env KEY=VALUE]... <program> [args…]
+                        [--env KEY=VALUE]... [--] <program> [args…]
 
 Runs <program> in an 80x24 pseudo-terminal (or --size) and prints the
 rendered screen. The wait ends on whichever comes first: the program
@@ -58,6 +59,9 @@ except for PATH; --inherit-env keeps the caller's environment, and
 repeatable --env sets selected values.
 --cwd runs the program in PATH, which must be an existing directory.
 --ansi paints the screen in colour on a terminal.
+-- ends the options; the program name follows. Options already stop at
+the first argument that does not begin with `-`, so this matters only for
+a program whose name does.
 
 What goes to stdout depends on where stdout goes. A terminal gets what
 you came to look at: the plain text, or the painted screen with --ansi.
@@ -434,6 +438,15 @@ fn colored(before: &Screen, after: &Screen, diff: &ScreenDiff) -> String {
 
 // ---------------------------------------------------------------------- render
 
+/// A contradictory `render` request: the reason on one line, then the usage,
+/// and exit 2 — what a second operand already gets, with the conflict named
+/// so the reader does not have to find it in their own command line.
+/// Returned before anything is opened, so `--out` creates no file.
+fn render_usage_error(reason: &str) -> ExitCode {
+    eprintln!("termlens: {reason}\n\n{RENDER_USAGE}");
+    ExitCode::from(2)
+}
+
 fn render(args: &[String]) -> ExitCode {
     let mut format: Option<&str> = None;
     let mut files = Vec::new();
@@ -443,15 +456,38 @@ fn render(args: &[String]) -> ExitCode {
         match arg.as_str() {
             "-h" | "--help" => return print(&format!("{RENDER_USAGE}\n")),
             "--version" => return print(&version()),
-            "--svg" | "--html" | "--ansi" | "--text" | "--json" => format = Some(arg.as_str()),
+            // One format and one `--out`, for the reason a second operand is
+            // refused below (#364): the last one winning is silent, and in a
+            // script the two usually come from two variables, so the loser
+            // is the one somebody meant (#450). A repeat of the *same* flag
+            // is refused too — it is harmless on its own, but it is the same
+            // shape as the mistake, and one rule is easier to state.
+            "--svg" | "--html" | "--ansi" | "--text" | "--json" => {
+                if let Some(first) = format {
+                    return render_usage_error(&if first == arg {
+                        format!("{arg} is given twice; render writes one format")
+                    } else {
+                        format!("{first} and {arg} are two formats; render writes one")
+                    });
+                }
+                format = Some(arg.as_str());
+            }
             "--out" => match args.next() {
-                Some(path) => out_path = Some(path.as_str()),
+                Some(path) => {
+                    if out_path.is_some() {
+                        return render_usage_error("--out is given twice; render writes one file");
+                    }
+                    out_path = Some(path.as_str());
+                }
                 None => return fail("--out needs a PATH argument"),
             },
             other if other.starts_with("--out=") => {
                 let path = &other["--out=".len()..];
                 if path.is_empty() {
                     return fail("--out needs a PATH argument");
+                }
+                if out_path.is_some() {
+                    return render_usage_error("--out is given twice; render writes one file");
                 }
                 out_path = Some(path);
             }

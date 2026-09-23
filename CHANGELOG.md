@@ -17,7 +17,38 @@ reads that marker.
 
 ## [Unreleased]
 
+### Changed
+
+- `termlens render` refuses a second format flag or a second `--out`,
+  naming the conflict, printing its usage and exiting 2, instead of
+  silently keeping the last one (#450). `render --svg --html screen.snap`
+  asked for an SVG and got HTML at exit 0; `--out first.txt --out
+  second.txt` wrote only `second.txt` and said nothing. This is #364's
+  defect in the other argument position, refused for its reason: in a
+  script the two usually come from two variables, and the loser is the one
+  somebody meant. A repeat of the *same* flag is refused too. Both
+  spellings of `--out` count, a refused render creates no file, and one
+  format with one `--out` behaves exactly as before. Neither form was ever
+  documented — the usage has always read `(--svg | --html | …) [--out
+  PATH]` — but a script that passed two saw exit 0 and now sees 2.
+
 ### Fixed
+
+- `termlens inspect --help` documents `--`, the end-of-options marker it
+  has always accepted (#453). It changes the outcome in exactly one case,
+  a program whose name begins with `-`, which is the one case where a user
+  could not discover it: the help they were pointed at did not have it.
+  `examples/inspect.rs` has documented it since 0.9.0; the command now
+  says the same thing, and a test tells a flag-shaped program name from an
+  option by which failure comes back.
+- `examples/inspect.rs --help` says what `--ansi` does, in the command's
+  words (#473). The two usage texts were each missing a line the other
+  had.
+- `termlens-cli`'s crates.io description names every format `render`
+  writes — SVG, HTML, ANSI, the text format and JSON — instead of the
+  three that are not byte-promised (#458). The two it left out, `--text`
+  and `--json`, are the durable ones another program can parse. The module
+  documentation says the same.
 
 - `termlens --verbose` and `termlens -v` report an unknown option, the same
   word every subcommand uses for a `-`-prefixed token, instead of an unknown
