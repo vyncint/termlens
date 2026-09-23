@@ -52,7 +52,17 @@ reads that marker.
   that never exits paid the full deadline on every run, however complete
   the screen already was: 6.07s for a screen done in 1ms in the issue's
   reproduction, 0.76s now. The exit codes are unchanged and the wait is
-  still bounded by `--timeout`. A child that outlives the wait now has two
+  still bounded by `--timeout`.
+
+  The silence window starts at the program's **first output**, not at its
+  spawn. As first written it started at the spawn, so a program slower than
+  `--idle` to print anything — a cold `sh` under ConPTY, a JVM, anything
+  that works before it paints — came back as a blank screen at exit 0,
+  killed as still running: `sh -c 'sleep 1; echo late'` showed nothing,
+  where 0.11.2 showed `late`. That was caught before release, by the
+  Windows leg, where ConPTY makes `sh` slow enough to trip it. A program
+  that never paints and never exits still ends at `--timeout`, and one
+  that exits without painting (`inspect true`) is still instant. A child that outlives the wait now has two
   trailers rather than one, because the wait can end two ways and only one
   of them is the deadline: `--- still running (killed on exit) ---` when
   the silence window or an EOF ended it, and the existing

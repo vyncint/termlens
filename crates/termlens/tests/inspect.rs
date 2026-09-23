@@ -474,6 +474,37 @@ fn agree(args: &[&str]) -> (String, String) {
     (ex_out, ex_err)
 }
 
+/// A program slower than `--idle` to print its first byte still gets its
+/// screen. `wait_idle_for` measures silence from the last byte, and before
+/// the first one that is the spawn — so when #374 made the silence window
+/// end the wait, a program that spent longer than 300 ms before painting
+/// came back blank at exit 0, killed. 0.11.2 waited for the exit and never
+/// did that; this was caught before 0.11.3 by the Windows leg, where a cold
+/// `sh` under ConPTY is slow enough to trip it, and by nothing on Linux —
+/// which is why the second of delay here is spelled out rather than left to
+/// a slow machine.
+#[test]
+#[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
+fn inspect_example_and_command_wait_for_a_program_slow_to_print() {
+    let (screen, trailer) = agree(&[
+        "--size",
+        "20x2",
+        "--idle",
+        "300",
+        "sh",
+        "-c",
+        "sleep 1; echo late",
+    ]);
+    assert!(
+        screen.contains("late"),
+        "a program quiet for longer than --idle before its first output must not be cut off: {screen}"
+    );
+    assert!(
+        trailer.starts_with("--- exited: "),
+        "it ran to its exit, and was not killed as still running: {trailer}"
+    );
+}
+
 /// A program that exits has one trailer, and the screen holds its finished
 /// output. Nothing here waits on a clock: the EOF that says the child is
 /// gone ends the wait.
