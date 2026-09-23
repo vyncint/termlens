@@ -61,6 +61,17 @@ reads that marker.
   form every release up to 0.11.2 wrote. `examples/inspect.rs` mirrors the
   command, so it moves with it.
 
+  The silence window starts at the program's **first output**, not at its
+  spawn. As first written it started at the spawn, so a program slower than
+  `--idle` to print anything — a cold `sh` under ConPTY, a JVM, anything
+  that works before it paints — came back as a blank screen at exit 0,
+  killed as still running: `sh -c 'sleep 1; echo late'` showed nothing,
+  where 0.11.2 showed `late`. That was caught before release, by the
+  Windows leg, where ConPTY makes `sh` slow enough to trip it. A program
+  that never paints and never exits still ends at `--timeout`, as it did in
+  0.11.2, and one that exits without painting (`inspect true`) is still
+  instant.
+
 - `termlens render --out=` with nothing after the `=` says `--out needs a
   PATH argument`, the diagnostic the spelled-out `--out` already gave,
   instead of passing the empty path to the filesystem and reporting

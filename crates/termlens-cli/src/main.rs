@@ -19,7 +19,7 @@
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use termlens::{Screen, ScreenDiff, Terminal};
 
@@ -543,6 +543,17 @@ fn inspect_render(screen: &Screen, ansi: bool) -> String {
     }
 }
 
+/// Whether the program has put anything on the grid yet: a visible
+/// character, or a cursor that has moved. A blank screen with the cursor at
+/// the origin is what a PTY looks like before its program writes a byte —
+/// and it is also what a program that clears and homes without painting
+/// looks like, which is why that case waits for the exit or the deadline,
+/// exactly as every release up to 0.11.2 did.
+fn shows_something(screen: &termlens::Screen) -> bool {
+    let (row, col, _) = screen.cursor();
+    (row, col) != (0, 0) || !screen.text().trim().is_empty()
+}
+
 fn inspect(args: Vec<String>) -> ExitCode {
     let mut args = args.into_iter().peekable();
     let mut size = (80u16, 24u16);
@@ -671,13 +682,35 @@ fn inspect(args: Vec<String>) -> ExitCode {
     // 200ms into a 30s budget must not claim otherwise.
     let still_running = "--- still running (killed on exit) ---";
     let at_the_deadline = "--- still running at the deadline (killed on exit) ---";
-    let trailer = match t.wait_idle_for(idle, timeout) {
-        Ok(()) => match t.wait_exit_for(REAP_GRACE) {
-            Ok(status) => format!("--- exited: {status} ---"),
-            Err(termlens::Error::Timeout { .. }) => still_running.to_owned(),
-            Err(e) => format!("--- waiting for the program failed: {e} ---"),
-        },
-        // Output never went silent for `idle`: the deadline ended the wait.
+    let reap = |t: &mut termlens::Terminal| match t.wait_exit_for(REAP_GRACE) {
+        Ok(status) => format!("--- exited: {status} ---"),
+        Err(termlens::Error::Timeout { .. }) => still_running.to_owned(),
+        Err(e) => format!("--- waiting for the program failed: {e} ---"),
+    };
+    // The silence window starts at the program's first output, not at its
+    // spawn. `wait_idle_for` measures silence from the last byte, and before
+    // the first byte that is the spawn — so a program slower than `idle` to
+    // print anything (a cold `sh` under ConPTY, a JVM, anything that works
+    // before it paints) came back as a blank screen at exit 0, killed. That
+    // is the one outcome that reads as "this program shows nothing", and
+    // 0.11.2, which waited for the exit, never produced it. So wait first
+    // for something to be silent *after* — or for the program to go, which
+    // is `Eof` and keeps `inspect true` instant — and only then race the
+    // exit against the silence, in whatever is left of the one deadline.
+    let deadline = Instant::now() + timeout;
+    let trailer = match t.wait_until_for(shows_something, timeout) {
+        Ok(()) => {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match t.wait_idle_for(idle, remaining) {
+                Ok(()) => reap(&mut t),
+                // Output never went silent for `idle`: the deadline ended it.
+                Err(termlens::Error::Timeout { .. }) => at_the_deadline.to_owned(),
+                Err(e) => format!("--- waiting for the program failed: {e} ---"),
+            }
+        }
+        // The program went without painting anything, as `true` does.
+        Err(termlens::Error::Eof { .. }) => reap(&mut t),
+        // Nothing appeared before the deadline.
         Err(termlens::Error::Timeout { .. }) => at_the_deadline.to_owned(),
         Err(e) => format!("--- waiting for the program failed: {e} ---"),
     };

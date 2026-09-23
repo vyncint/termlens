@@ -1709,13 +1709,28 @@ fn inspect_chatter_waits_for_the_deadline_and_says_still_running() -> termlens::
 }
 
 /// A child that closes its terminal but keeps running is not an exited
-/// child: the EOF ends the idle wait, but the reap that answers "exited"
-/// never comes, so the trailer must say still running (#374). The reap
-/// grace a genuinely exited child is given must not mislabel this one.
+/// child: the reap that answers "exited" never comes, so the trailer must
+/// say still running (#374). The reap grace a genuinely exited child is
+/// given must not mislabel this one.
+///
+/// On Linux the EOF ends the wait: closing the last descriptor on the
+/// terminal is one, at once. On macOS no EOF comes while the child lives —
+/// the terminal is still its controlling terminal — and a child that never
+/// printed starts no silence window, so the deadline ends it, and says so.
 #[test]
 #[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
 fn inspect_reports_still_running_when_the_child_closes_its_terminal() -> termlens::Result<()> {
     use std::process::Command;
+    // The short deadline goes where it must expire, and only there
+    // (CONTRIBUTING §3).
+    let (timeout, trailer) = if cfg!(target_os = "macos") {
+        (
+            "2",
+            "--- still running at the deadline (killed on exit) ---",
+        )
+    } else {
+        ("30", "--- still running (killed on exit) ---")
+    };
     let bin = env!("CARGO_BIN_EXE_termlens");
     let started = std::time::Instant::now();
     let out = Command::new(bin)
@@ -1724,7 +1739,7 @@ fn inspect_reports_still_running_when_the_child_closes_its_terminal() -> termlen
             "--size",
             "20x3",
             "--timeout",
-            "30",
+            timeout,
             "sh",
             "-c",
             "exec 0<&- 1>&- 2>&-; exec sleep 30",
@@ -1732,18 +1747,15 @@ fn inspect_reports_still_running_when_the_child_closes_its_terminal() -> termlen
         .output()?;
     assert!(out.status.success(), "{out:?}");
     let stderr = String::from_utf8(out.stderr).expect("utf-8");
-    assert_eq!(
-        stderr.trim_end(),
-        "--- still running (killed on exit) ---",
-        "the EOF ended the wait, not the 30s deadline: {stderr:?}"
-    );
-    // It returned on the EOF, not the 30s deadline: the reap grace is the
-    // only wait left, and the ceiling is generous for the spawn
-    // (CONTRIBUTING §3).
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(10),
-        "returned after {:?}: the EOF did not end the wait",
-        started.elapsed()
-    );
+    assert_eq!(stderr.trim_end(), trailer, "{stderr:?}");
+    // On Linux it returned on the EOF, not the 30s deadline: the reap grace
+    // is the only wait left, and the ceiling is generous for the spawn.
+    if !cfg!(target_os = "macos") {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "returned after {:?}: the EOF did not end the wait",
+            started.elapsed()
+        );
+    }
     Ok(())
 }
