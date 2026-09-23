@@ -29,7 +29,7 @@
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use termlens::Terminal;
 
@@ -81,6 +81,17 @@ fn take<T>(
         return Err(format!("{flag} needs a {kind} argument"));
     };
     parse(&raw).ok_or_else(|| format!("bad {flag} {raw:?}, expected e.g. {example}"))
+}
+
+/// Whether the program has put anything on the grid yet: a visible
+/// character, or a cursor that has moved. A blank screen with the cursor at
+/// the origin is what a PTY looks like before its program writes a byte —
+/// and it is also what a program that clears and homes without painting
+/// looks like, which is why that case waits for the exit or the deadline,
+/// exactly as every release up to 0.11.2 did.
+fn shows_something(screen: &termlens::Screen) -> bool {
+    let (row, col, _) = screen.cursor();
+    (row, col) != (0, 0) || !screen.text().trim().is_empty()
 }
 
 /// Two jobs, as in the command this mirrors: a terminal is a person
@@ -227,19 +238,36 @@ fn main() -> ExitCode {
     // an exit lands on its own trailer with the finished screen. Two
     // still-running trailers, because "at the deadline" is true of only one
     // of the two ways the wait can end.
-    let trailer = match t.wait_idle_for(idle, timeout) {
-        Ok(()) => match t.wait_exit_for(REAP_GRACE) {
-            Ok(status) => format!("--- exited: {status} ---"),
-            Err(termlens::Error::Timeout { .. }) => {
-                "--- still running (killed on exit) ---".to_owned()
+    let reap = |t: &mut termlens::Terminal| match t.wait_exit_for(REAP_GRACE) {
+        Ok(status) => format!("--- exited: {status} ---"),
+        Err(termlens::Error::Timeout { .. }) => "--- still running (killed on exit) ---".to_owned(),
+        // Not "still running": the OS wait itself failed, and saying so is
+        // the difference between a slow program and a broken harness.
+        Err(e) => format!("--- waiting for the program failed: {e} ---"),
+    };
+    let at_the_deadline = || "--- still running at the deadline (killed on exit) ---".to_owned();
+    // The silence window starts at the program's first output, not at its
+    // spawn. `wait_idle_for` measures silence from the last byte, and before
+    // the first byte that is the spawn — so a program slower than `idle` to
+    // print anything (a cold `sh` under ConPTY, a JVM, anything that works
+    // before it paints) came back as a blank screen at exit 0, killed. That
+    // is the one outcome that reads as "this program shows nothing", and
+    // 0.11.2, which waited for the exit, never produced it. So wait first
+    // for something to be silent *after* — or for the program to go, which
+    // is `Eof` and keeps `inspect true` instant — and only then race the
+    // exit against the silence, in whatever is left of the one deadline.
+    let deadline = Instant::now() + timeout;
+    let trailer = match t.wait_until_for(shows_something, timeout) {
+        Ok(()) => {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match t.wait_idle_for(idle, remaining) {
+                Ok(()) => reap(&mut t),
+                Err(termlens::Error::Timeout { .. }) => at_the_deadline(),
+                Err(e) => format!("--- waiting for the program failed: {e} ---"),
             }
-            // Not "still running": the OS wait itself failed, and saying so
-            // is the difference between a slow program and a broken harness.
-            Err(e) => format!("--- waiting for the program failed: {e} ---"),
-        },
-        Err(termlens::Error::Timeout { .. }) => {
-            "--- still running at the deadline (killed on exit) ---".to_owned()
         }
+        Err(termlens::Error::Eof { .. }) => reap(&mut t),
+        Err(termlens::Error::Timeout { .. }) => at_the_deadline(),
         Err(e) => format!("--- waiting for the program failed: {e} ---"),
     };
     // One write, and a reader that closed early (`inspect … | head`) is a
