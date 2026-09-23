@@ -73,7 +73,7 @@ tools/report-pin-gate-selftest/run.sh                   # …and the report-pin 
 tools/attribution-gate-selftest/run.sh                  # …and the AI-attribution gate, likewise
 tools/dco-gate-selftest/run.sh                          # …and the DCO gate, its one-commit squash exemption included
 tools/preflight-selftest/run.sh                         # …and the runner accounts for each gate it runs, failures included
-.github/scripts/check-semver.sh 0.11.2                  # …and the public API is compatible with the last published release
+.github/scripts/check-semver.sh 0.11.3                  # …and the public API is compatible with the last published release
 ```
 
 The list is written out here rather than left as a pointer because a first
