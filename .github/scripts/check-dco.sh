@@ -66,8 +66,9 @@ while IFS= read -r sha; do
     # the trailers of the commits it squashed whenever the branch contained
     # a merge commit — someone pressing "Update branch" is enough. A pull
     # request in which every commit was signed off then lands on main
-    # carrying no sign-off at all, and it cannot be repaired: main is linear
-    # history, non-fast-forward, and the ruleset has no bypass actors. The
+    # carrying no sign-off at all, and repairing it means rewriting main:
+    # linear history, non-fast-forward, and only the admin role's ruleset
+    # bypass can force-push it. Short of the owner rewriting history, the
     # branch is red forever over a policy that was, in fact, met.
     #
     # It was met verifiably: `commit-policy` is a required status check on
