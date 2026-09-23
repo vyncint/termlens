@@ -71,6 +71,7 @@ tools/semver-gate-selftest/run.sh                       # the semver gate can fa
 tools/link-gate-selftest/run.sh                         # …and so can the link gate, with no extra tooling
 tools/report-pin-gate-selftest/run.sh                   # …and the report-pin gate, likewise
 tools/attribution-gate-selftest/run.sh                  # …and the AI-attribution gate, likewise
+tools/dco-gate-selftest/run.sh                          # …and the DCO gate, its one-commit squash exemption included
 tools/preflight-selftest/run.sh                         # …and the runner accounts for each gate it runs, failures included
 .github/scripts/check-semver.sh 0.11.2                  # …and the public API is compatible with the last published release
 ```
