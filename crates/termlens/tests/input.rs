@@ -830,3 +830,130 @@ fn a_separated_esc_is_decoded_as_an_esc() -> termlens::Result<()> {
     );
     Ok(())
 }
+
+/// `Key::Tab` was the one key variant no integration test sent (#456). Its
+/// byte is pinned in `keys.rs`'s encoding table, but nothing drove it down
+/// a real PTY — and Tab is how nearly every TUI moves focus, so it is among
+/// the first keys a termlens test is written around.
+///
+/// This pins the byte on the wire, where a changed encoding shows up as
+/// something other than `09` rather than as a timeout.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "the wire is read in raw mode, a tcsetattr, and ConPTY turns typed bytes into console events rather than forwarding them (#149)"
+)]
+fn tab_arrives_as_the_ht_byte() -> termlens::Result<()> {
+    let mut t = util::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "READY",
+            "--read-hex",
+            "1",
+            " WIRE-EOF",
+            // A sentinel, not a bare `--wait`, for the reason the mouse
+            // test above gives: the padding below may or may not be
+            // swallowed by the read, and only QUIT ends this program.
+            "--wait-for",
+            "QUIT",
+        ],
+    )?;
+    t.wait_until(|s| s.contains("READY"))?;
+
+    t.send(Key::Tab)?;
+    // Padding, so a Tab that sent nothing unblocks the one-byte read and
+    // shows `0a` on the wire instead of timing out.
+    t.send_str("\n")?;
+    t.wait_until(|s| s.contains("WIRE-EOF"))?;
+
+    let wire = t.screen().row_text(0);
+    assert!(
+        wire.contains("09 WIRE-EOF") || wire.ends_with("09 WIRE-EOF"),
+        "expected HT (09), got: {wire}"
+    );
+    t.send_str("QUIT\n")?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// The same key, decoded: an application parsing its input with crossterm
+/// names what arrived as a Tab, not as some other key that happens to share
+/// a byte (#456).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
+fn tab_is_decoded_as_tab() -> termlens::Result<()> {
+    let mut t = spawn_form_echo()?;
+    t.wait_frame(|s| s.contains("form-echo ready"))?;
+    t.send(Key::Tab)?;
+    t.wait_frame(|s| s.contains("last: tab"))?;
+    // BackTab is the one it would be confused with, and it has a name of
+    // its own; the two must not collapse into one.
+    t.send(Key::BackTab)?;
+    t.wait_frame(|s| s.contains("last: backtab"))?;
+    t.send(Key::Esc)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// Where the input side meets the tab-stop machinery, which neither this
+/// file nor `tabs.rs` covered (#456): `tabs.rs` tests `HT` an application
+/// *emits*, and every test here sends keys to programs that do not echo.
+///
+/// A Tab typed into a program reading a cooked line is echoed by the line
+/// discipline as `HT`, and the emulator lands it on the next tab stop — so
+/// the character after it sits at column 8, the first default stop, and
+/// the cells in between are blank rather than holding the byte.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY re-renders console input rather than forwarding a cooked echo, so the typed HT never reaches the grid as HT (#149)"
+)]
+fn a_typed_tab_is_echoed_onto_the_next_tab_stop() -> termlens::Result<()> {
+    let mut t = util::spawn_emit(
+        Terminal::builder()
+            .size(40, 4)
+            .timeout(Duration::from_secs(10)),
+        // `NL` after READY, so the echo starts a row of its own at column 0
+        // and the tab stop it lands on is the first one, not whichever is
+        // next after the marker.
+        &["READY", "NL", "--echo-line"],
+    )?;
+    t.wait_until(|s| s.contains("READY"))?;
+
+    t.send_str("a")?;
+    t.send(Key::Tab)?;
+    t.send_str("b")?;
+    // The line discipline echoes as the keys arrive, before the line is
+    // complete; waiting on the `b` waits on the echo, not on the program.
+    t.wait_until(|s| s.row_text(1).trim_end().ends_with('b'))?;
+
+    let s = t.screen();
+    let row = 1;
+    assert_eq!(
+        s.cell(row, 0).map(|c| c.contents()),
+        Some("a"),
+        "{}",
+        s.with_styles()
+    );
+    assert_eq!(
+        s.cell(row, 8).map(|c| c.contents()),
+        Some("b"),
+        "a typed Tab must land the next character on column 8: {}",
+        s.with_styles()
+    );
+    for col in 1..8 {
+        assert_eq!(
+            s.cell(row, col).map(|c| c.contents()),
+            Some(""),
+            "column {col} is the gap the tab stop jumped, not the byte: {}",
+            s.with_styles()
+        );
+    }
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}

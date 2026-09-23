@@ -20,8 +20,21 @@ use termlens::{Key, Terminal};
 mod common;
 
 /// More than any runner has cores, and more than the default `--test-threads`
-/// on the largest machine anyone is likely to be sitting at.
+/// on the largest machine anyone is likely to be sitting at — so the macOS
+/// device queue the module doc describes is forced to recycle.
+///
+/// Fewer on Windows, and for a reason about the subject, not about making a
+/// run green (#445). ConPTY has no `revoke()` queue to exhaust: what 24 buys
+/// there is 24 `conhost.exe` processes on a runner already running up to
+/// sixteen test threads, and the stress workflow saw one of them sit on a
+/// typed Enter for thirty seconds at four and at eight threads. The Windows
+/// run is a check that concurrent ConPTY lifecycles do not interfere, and
+/// eight — still several at once, still more than one runner core — is
+/// what that needs.
+#[cfg(not(windows))]
 const AT_ONCE: usize = 24;
+#[cfg(windows)]
+const AT_ONCE: usize = 8;
 
 #[test]
 fn two_dozen_terminals_open_at_once() {
@@ -37,12 +50,26 @@ fn two_dozen_terminals_open_at_once() {
                         .size(40, 10)
                         .env_clear()
                         .timeout(Duration::from_secs(30)),
-                    // The `--wait` is the instant-exit guard: a child that
+                    // Each `--wait` is an instant-exit guard: a child that
                     // writes and dies inside a millisecond can lose its
-                    // output to the PTY teardown.
-                    &[&format!("terminal {index}\n"), "--wait"],
+                    // output to the PTY teardown. Two of them, with a line
+                    // between, so the first Enter's arrival is on screen.
+                    &[
+                        &format!("terminal {index}\n"),
+                        "--wait",
+                        &format!("heard {index}\n"),
+                        "--wait",
+                    ],
                 )?;
                 terminal.wait_until(|screen| screen.contains(&format!("terminal {index}")))?;
+                // The Windows flake (#445) timed out waiting for the exit
+                // with the cursor still under `terminal N` — a typed Enter in
+                // a cooked read is echoed, so the cursor says it was never
+                // processed. Nothing could say so: the exit was the first
+                // thing waited on after the key. Now the key's arrival is its
+                // own wait, and a timeout names which half stalled.
+                terminal.send(Key::Enter)?;
+                terminal.wait_until(|screen| screen.contains(&format!("heard {index}")))?;
                 terminal.send(Key::Enter)?;
                 terminal.wait_exit()?;
                 Ok(())

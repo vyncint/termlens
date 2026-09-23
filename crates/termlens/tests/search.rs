@@ -126,6 +126,95 @@ fn mask_matching_keeps_the_width_and_masks_both_columns_of_a_wide_character() ->
     Ok(())
 }
 
+/// `rect_text` was the only region reader with no test (#455): every sibling
+/// that takes the same range arguments has one above, and this is the one a
+/// test author reaches for first — one pane of a split layout. Its rustdoc
+/// makes four promises, and each is asserted here.
+///
+/// Row 1 is `ab中cd  `: `a` `b`, the wide `中` across columns 2–3, `c` `d`,
+/// and trailing blanks — the row that carries both the wide-character rule
+/// and the whitespace one.
+#[test]
+fn rect_text_reads_a_rectangle_clamps_and_keeps_a_cut_wide_character() -> termlens::Result<()> {
+    let mut t = emit(&[
+        "--raw",
+        r"left | right\nab中cd  \nrow three\nDONE",
+        "--wait",
+    ])?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+
+    // Inside the grid: exactly its columns, exactly its rows.
+    assert_eq!(s.rect_text(0..4, 0..1), "left");
+    assert_eq!(s.rect_text(7..12, 0..1), "right");
+    assert_eq!(s.rect_text(0..3, 2..4), "row\nDON");
+
+    // Out-of-range bounds clamp rather than panic, on both axes: asking for
+    // more screen than exists is allowed, and means the screen that exists.
+    assert_eq!(s.rect_text(7..999, 0..1), s.rect_text(7.., 0..1));
+    assert_eq!(s.rect_text(0..4, 0..999), s.rect_text(0..4, ..));
+    assert_eq!(
+        s.rect_text(999..1000, ..),
+        "\n\n\n\n\n",
+        "past the right edge: six empty rows"
+    );
+
+    // Trailing whitespace is stripped per row, as `Screen::text` does.
+    assert_eq!(s.rect_text(4.., 1..2), "cd", "the row's trailing blanks go");
+    assert_eq!(
+        s.rect_text(0..3, 0..1),
+        "lef",
+        "no trailing space was invented"
+    );
+
+    // A wide character contributes where its *leading* cell sits, even when
+    // the rectangle cuts it in half — and its continuation cell contributes
+    // nothing at all, not even a space. The case a refactor breaks quietly.
+    assert_eq!(
+        s.rect_text(2..3, 1..2),
+        "中",
+        "leading cell alone: the whole glyph"
+    );
+    assert_eq!(s.rect_text(3..6, 1..2), "cd", "continuation alone: nothing");
+    assert_eq!(
+        s.rect_text(0..6, 1..2),
+        "ab中cd",
+        "both halves: once, not twice"
+    );
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// A backwards range is a mistake in the calling source, not a fact about
+/// the terminal, so it panics the way `&slice[3..0]` does — and the message
+/// names the axis and quotes the caller's own numbers, taken *before*
+/// clamping, so a swapped `(cols, rows)` is recognisable from it (#455).
+///
+/// The bounds are computed rather than written out: clippy's
+/// `reversed_empty_ranges` already refuses a literal `5..2`, which is the
+/// case the rustdoc says this panic exists to cover beyond it.
+#[test]
+#[should_panic(expected = "rect_text: column range starts at 5 but ends at 2")]
+fn rect_text_panics_on_a_backwards_column_range() {
+    let s = termlens::Screen::parse("size: 10x2  cursor: 0,0\nhello\n").expect("a saved screen");
+    let (from, to) = std::hint::black_box((5u16, 2u16));
+    let _ = s.rect_text(from..to, ..);
+}
+
+#[test]
+#[should_panic(expected = "rect_text: row range starts at 5 but ends at 3")]
+fn rect_text_panics_on_a_backwards_row_range() {
+    let s = termlens::Screen::parse("size: 10x2  cursor: 0,0\nhello\n").expect("a saved screen");
+    // Out of range *and* backwards, on a two-row screen. Clamped first,
+    // `5..3` would become `2..2` — not inverted, so no panic, and an empty
+    // string that reads as "this pane is empty". Checked first, as the
+    // rustdoc promises, it panics and quotes the numbers that were written.
+    let (from, to) = std::hint::black_box((5u16, 3u16));
+    let _ = s.rect_text(.., from..to);
+}
+
 #[test]
 fn mask_cells_blanks_by_predicate() -> termlens::Result<()> {
     let mut t = emit(&["--raw", r"keep \e[2mfaint\e[0m keep\nDONE", "--wait"])?;
