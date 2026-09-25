@@ -19,7 +19,7 @@
 # matching the documented command, so a fmt/clippy/test line added to §1 is
 # picked up without touching this script.
 #
-# Usage: tools/preflight.sh [--fast]
+# Usage: tools/preflight.sh [--fast] [-h|--help]
 #   PREFLIGHT_DOC   the document to read; tools/preflight-selftest/run.sh
 #                   points it at a fixture. Default CONTRIBUTING.md.
 # Exit status: 0 when no gate failed, 1 when at least one did, 2 on misuse.
@@ -32,8 +32,13 @@ fast=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --fast) fast=1 ;;
+    -h | --help)
+      printf 'usage: tools/preflight.sh [--fast] [-h|--help]\n'
+      printf '%s\n' '--fast runs only formatting, clippy and tests.'
+      exit 0
+      ;;
     *)
-      echo "usage: tools/preflight.sh [--fast]" >&2
+      echo "usage: tools/preflight.sh [--fast] [-h|--help]" >&2
       exit 2
       ;;
   esac
