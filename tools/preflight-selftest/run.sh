@@ -6,8 +6,13 @@
 #              reported, and the runner to exit non-zero
 #   passing/   both pass — the runner is asserted to exit zero
 #
-# The fixtures are read through the runner's PREFLIGHT_DOC override, so the
-# repository's own CONTRIBUTING.md is never touched.
+# and that `-h` and `--help` print the usage to stdout alone and exit zero
+# (#518).
+#
+# Every case, the help ones included, reads a fixture through the runner's
+# PREFLIGHT_DOC override, so the repository's own CONTRIBUTING.md is never
+# touched. It lists this self-test as a gate: a runner that read it would
+# run the whole suite, this script included.
 #
 # Usage: tools/preflight-selftest/run.sh
 set -euo pipefail
@@ -51,7 +56,10 @@ expect_help() {
   flag=$1
   label=$2
   got=0
-  "$runner" "$flag" > out.log 2> err.log || got=$?
+  # The passing fixture, not the repository's CONTRIBUTING.md: a help flag
+  # that stopped exiting early would otherwise run every real gate — this
+  # self-test among them — instead of failing here in a second.
+  PREFLIGHT_DOC="$PWD/passing/CONTRIBUTING.md" "$runner" "$flag" > out.log 2> err.log || got=$?
   if [ "$got" -ne 0 ]; then
     printf '  FAIL  %-58s exit %s, expected 0\n' "$label" "$got" >&2
     sed 's/^/        /' out.log err.log >&2
