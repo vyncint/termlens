@@ -51,7 +51,7 @@ impl Screen {
     /// let parsed = termlens::Screen::parse(&saved)?;
     /// assert_eq!(parsed.with_styles().to_string(), saved);
     /// assert!(t.screen().diff(&parsed).is_empty());
-    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # t.send(termlens::Key::Enter)?; t.wait_exit()?; Ok(())
     /// # }
     /// ```
     pub fn parse(text: &str) -> Result<Screen> {
