@@ -115,6 +115,13 @@ impl Key {
     /// mode-aware encoding, switching cursor keys to `ESC O _` while the
     /// application has DECCKM set.
     ///
+    /// ```
+    /// # use termlens::Key;
+    /// assert_eq!(Key::Up.encode(), b"\x1b[A");
+    /// assert_eq!(Key::Ctrl('c').encode(), [0x03]);
+    /// assert_eq!(Key::F(5).encode(), b"\x1b[15~");
+    /// ```
+    ///
     /// # Panics
     ///
     /// Panics for `Key::F(0)` / `Key::F(n > 12)` and for `Key::Ctrl(c)`
