@@ -214,12 +214,18 @@ fn send_str_and_enter_round_trip_through_the_line_discipline() -> termlens::Resu
 #[test]
 fn timeout_error_embeds_the_screen_dump() {
     let mut t = common::spawn_emit(
-        Terminal::builder().timeout(Duration::from_millis(400)),
+        Terminal::builder().timeout(Duration::from_secs(30)),
         &["something visible\n", "--echo"],
     )
     .unwrap();
+    // The embedded screen is what is asserted on, so the text has to be
+    // there before the wait that must expire — and only that wait gets the
+    // short deadline.
+    t.wait_until(|s| s.contains("something visible")).unwrap();
     // `--echo` keeps the terminal open forever; the predicate can never hold.
-    let err = t.wait_until(|s| s.contains("never printed")).unwrap_err();
+    let err = t
+        .wait_until_for(|s| s.contains("never printed"), Duration::from_millis(400))
+        .unwrap_err();
 
     let Error::Timeout { ref screen, .. } = err else {
         panic!("expected Error::Timeout, got: {err}");

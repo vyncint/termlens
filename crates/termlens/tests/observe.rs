@@ -159,11 +159,16 @@ fn a_blocked_kitty_graphics_query_is_named_in_the_timeout() -> termlens::Result<
     let mut t = common::spawn_emit(
         Terminal::builder()
             .size(40, 4)
-            .timeout(Duration::from_millis(700)),
+            .timeout(Duration::from_secs(30)),
         &["--raw", r"\e_Gi=1,a=q;\e\\", "MARK", "--wait"],
     )?;
+    // The marker follows the query, so seeing it proves the query was
+    // read; the note then names the query as context rather than cause,
+    // which is still the note this test is about. Only the wait that must
+    // expire gets the short deadline (CONTRIBUTING §3).
+    t.wait_until(|s| s.contains("MARK"))?;
     let err = t
-        .wait_until(|s| s.contains("NEVER-APPEARS"))
+        .wait_until_for(|s| s.contains("NEVER-APPEARS"), Duration::from_millis(700))
         .expect_err("must time out");
     let msg = err.to_string();
     assert!(
@@ -186,11 +191,12 @@ fn a_kitty_transmission_does_not_pollute_the_timeout() -> termlens::Result<()> {
     let mut t = common::spawn_emit(
         Terminal::builder()
             .size(40, 4)
-            .timeout(Duration::from_millis(700)),
+            .timeout(Duration::from_secs(30)),
         &["--raw", r"\e_Gf=24,a=T;QUJD\e\\", "MARK", "--wait"],
     )?;
+    t.wait_until(|s| s.contains("MARK"))?;
     let err = t
-        .wait_until(|s| s.contains("NEVER-APPEARS"))
+        .wait_until_for(|s| s.contains("NEVER-APPEARS"), Duration::from_millis(700))
         .expect_err("must time out");
     assert!(
         !err.to_string().contains("queried the terminal"),

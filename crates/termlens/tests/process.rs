@@ -98,11 +98,23 @@ fn wait_until_for_overrides_the_default_timeout_upward() -> termlens::Result<()>
     // override can see this through.
     let mut t = common::spawn_emit(
         Terminal::builder().timeout(Duration::from_millis(200)),
-        &["--sleep", "1s", "late-bloomer", "--wait"],
+        // The pause after `--wait` stands in for a slow reap, so the 200 ms
+        // default on `wait_exit` fails every time rather than under load.
+        &[
+            "--sleep",
+            "1s",
+            "late-bloomer",
+            "--wait",
+            "--sleep",
+            "300ms",
+        ],
     )?;
     t.wait_until_for(|s| s.contains("late-bloomer"), Duration::from_secs(30))?;
     t.send(Key::Enter)?;
-    assert!(t.wait_exit()?.success());
+    // The exit is not under test either, and it does not always fit in the
+    // 200 ms default: a loaded Windows runner took longer to reap the child
+    // (stress run 35852222516, four threads).
+    assert!(t.wait_exit_for(Duration::from_secs(30))?.success());
     Ok(())
 }
 
