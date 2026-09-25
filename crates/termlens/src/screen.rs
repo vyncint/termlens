@@ -1248,10 +1248,9 @@ impl Screen {
 
     /// The cell at `(row, col)`, or `None` when out of bounds.
     ///
-    /// # Examples
-    ///
-    /// Coordinates are row-first. On a `4x1` screen holding `hi`, `h`
-    /// sits at `(0, 0)` and `i` at `(0, 1)`:
+    /// Coordinates are row-first, the opposite of [`size`](Self::size), which
+    /// is `(cols, rows)` like the `size: 4x1` header below: 4 columns, 1 row.
+    /// On that screen, holding `hi`, `h` sits at `(0, 0)` and `i` at `(0, 1)`:
     ///
     /// ```
     /// use termlens::Screen;
