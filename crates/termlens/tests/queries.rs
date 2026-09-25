@@ -51,6 +51,31 @@ fn alive_then_blocked(builder: termlens::TerminalBuilder, query: &[&str]) -> Ter
     t
 }
 
+/// The wait that must expire, repeated until its message names every
+/// query in `needles` or a 30 s budget runs out — then the last message,
+/// for the assertion to fail on.
+///
+/// The marker proves the child is running; it cannot prove that a query
+/// written *after* it has been read. On a loaded Windows runner it
+/// sometimes had not: the short wait expired first and its message named
+/// no query (#445, three stress dispatches). A second marker after the
+/// query is not the fix — output after an unanswered probe turns the
+/// diagnosis from cause into context, which is the thing these tests
+/// assert is *not* happening (CONTRIBUTING §3). So the short wait — the
+/// one that must expire, and still the only short deadline — is repeated:
+/// one iteration on a quiet machine, a few where the bytes have not
+/// crossed ConPTY yet. Nothing about the assertion loosens, and the
+/// budget is bounded, so a query that never registers still fails.
+fn expire_until_named(needles: &[&str], mut expire: impl FnMut() -> String) -> String {
+    let budget = Instant::now() + Duration::from_secs(30);
+    loop {
+        let msg = expire();
+        if needles.iter().all(|n| msg.contains(n)) || Instant::now() >= budget {
+            return msg;
+        }
+    }
+}
+
 #[test]
 #[cfg_attr(
     windows,
@@ -210,30 +235,11 @@ fn unanswerable_queries_turn_timeouts_into_diagnoses() {
         Terminal::builder().timeout(Duration::from_millis(500)),
         &["--csi", "14t", "--wait", "never"],
     );
-    // The marker proves the child is running; it cannot prove that the
-    // query written *after* it has been read. On a loaded Windows runner it
-    // sometimes had not: the 500 ms wait under test expired first and its
-    // message named no query (#445, three stress dispatches). A second
-    // marker after the query is not the fix — output after an unanswered
-    // probe turns the diagnosis from cause into context, which is the thing
-    // this test asserts is *not* happening (CONTRIBUTING §3).
-    //
-    // So the short wait — the one that must expire, and still the only
-    // short deadline here — is repeated until its message names the query:
-    // one 500 ms iteration on a quiet machine, a few where the bytes have
-    // not crossed ConPTY yet. Nothing about the assertion loosens, and the
-    // budget is bounded, so a query that never registers still fails, with
-    // the last message it produced.
-    let budget = Instant::now() + Duration::from_secs(30);
-    let msg = loop {
-        let msg = t
-            .wait_until(|s| s.contains("never"))
+    let msg = expire_until_named(&["^[[14t"], || {
+        t.wait_until(|s| s.contains("never"))
             .unwrap_err()
-            .to_string();
-        if msg.contains("^[[14t") || Instant::now() >= budget {
-            break msg;
-        }
-    };
+            .to_string()
+    });
     assert!(msg.contains("^[[14t"), "query not named in: {msg}");
     assert!(msg.contains("received no answer"), "no diagnosis in: {msg}");
     // Drop kills the blocked child.
@@ -263,9 +269,11 @@ fn the_responder_can_be_disabled_and_says_what_went_unanswered() {
             .answer_queries(false),
         &["--csi", "6n", "--wait", "never"],
     );
-    let err = t.wait_until(|s| s.contains("never")).unwrap_err();
-    assert!(matches!(err, Error::Timeout { .. }));
-    let msg = err.to_string();
+    let msg = expire_until_named(&["^[[6n"], || {
+        let err = t.wait_until(|s| s.contains("never")).unwrap_err();
+        assert!(matches!(err, Error::Timeout { .. }), "{err}");
+        err.to_string()
+    });
     assert!(msg.contains("^[[6n"), "query not named in: {msg}");
 }
 
@@ -319,8 +327,11 @@ fn all_unanswered_queries_are_named() {
         Terminal::builder().timeout(Duration::from_millis(400)),
         &["--raw", r"\e[?u\e[14t", "--wait", "never"],
     );
-    let err = t.wait_until(|s| s.contains("never")).unwrap_err();
-    let msg = err.to_string();
+    let msg = expire_until_named(&["^[[?u", "^[[14t"], || {
+        t.wait_until(|s| s.contains("never"))
+            .unwrap_err()
+            .to_string()
+    });
     assert!(msg.contains("^[[?u"), "first query missing from: {msg}");
     assert!(msg.contains("^[[14t"), "second query missing from: {msg}");
 }
@@ -335,8 +346,11 @@ fn wait_frame_timeouts_carry_the_query_note() {
         Terminal::builder().timeout(Duration::from_millis(400)),
         &["--csi", "14t", "--wait", "never"],
     );
-    let err = t.wait_frame(|s| s.contains("never")).unwrap_err();
-    let msg = err.to_string();
+    let msg = expire_until_named(&["^[[14t"], || {
+        t.wait_frame(|s| s.contains("never"))
+            .unwrap_err()
+            .to_string()
+    });
     assert!(
         msg.contains("^[[14t") && msg.contains("received no answer"),
         "wait_frame withheld the diagnosis: {msg}"
@@ -424,13 +438,15 @@ fn decrqss_and_palette_queries_are_named() {
         ("OSC 4", r"\e]4;1;?\a", "^[]4;1;?"),
         ("XTVERSION", r"\e[>q", "^[[>q"),
     ] {
-        let mut t = emit(
-            Duration::from_millis(400),
+        let mut t = alive_then_blocked(
+            Terminal::builder().timeout(Duration::from_millis(400)),
             &["--raw", query, "--wait", "never"],
-        )
-        .unwrap();
-        let err = t.wait_until(|s| s.contains("never")).unwrap_err();
-        let msg = err.to_string();
+        );
+        let msg = expire_until_named(&[shape], || {
+            t.wait_until(|s| s.contains("never"))
+                .unwrap_err()
+                .to_string()
+        });
         assert!(msg.contains(shape), "{label} not named in: {msg}");
     }
 }
@@ -480,7 +496,10 @@ fn a_probe_then_enable_application_gets_its_mouse() -> termlens::Result<()> {
     // The program prints the reply it got before it enables tracking, and
     // the wait below asserts the reply *and* the marker together: a
     // regression to "unrecognized" shows up as `;0$y` on the grid and the
-    // wait fails, rather than passing quietly.
+    // wait fails, rather than passing quietly. `CLICK:` is the last thing
+    // painted before the read, and it follows the enable in the stream, so
+    // both `?1000h` and the SGR `?1006h` have been seen once it shows
+    // (#502) — `?1000h` alone would already satisfy `mouse_mode()`.
     let mut t = probe(&[
         "--raw-mode",
         "--csi",
@@ -500,7 +519,7 @@ fn a_probe_then_enable_application_gets_its_mouse() -> termlens::Result<()> {
     // and the wait covers the enable that follows the marker, since the
     // click below is refused until the terminal has seen `CSI ?1000 h`.
     t.wait_until(|s| {
-        s.contains("MOUSE-ON:E[?1000;2$y|") && s.mouse_mode() != termlens::MouseMode::None
+        s.contains("MOUSE-ON:E[?1000;2$y|CLICK:") && s.mouse_mode() != termlens::MouseMode::None
     })?;
 
     t.click(9, 4)?;
@@ -631,11 +650,12 @@ fn cell_size_answers_the_pixel_reports_and_the_ioctl() -> termlens::Result<()> {
     let mut mute = common::spawn_emit(
         Terminal::builder()
             .size(80, 6)
-            .timeout(Duration::from_millis(700)),
+            .timeout(Duration::from_secs(30)),
         &["--csi", "16t", "MARK", "--wait"],
     )?;
+    mute.wait_until(|s| s.contains("MARK"))?;
     let err = mute
-        .wait_until(|s| s.contains("NEVER"))
+        .wait_until_for(|s| s.contains("NEVER"), Duration::from_millis(700))
         .expect_err("must time out");
     assert!(err.to_string().contains("^[[16t"), "named: {err}");
     mute.send(Key::Enter)?;
@@ -694,12 +714,9 @@ fn tiocgwinsz_agrees_with_the_declared_cell_size() -> termlens::Result<()> {
             "--wait",
         ],
     )?;
-    t.wait_until(|s| s.contains("px"))?;
-    assert!(
-        t.screen().contains("80x24 px 800x480"),
-        "the ioctl must carry the declared geometry:\n{}",
-        t.screen()
-    );
+    // The whole report, not `px`: that fires partway through the 16-byte
+    // line (#502).
+    t.wait_until(|s| s.contains("80x24 px 800x480"))?;
 
     t.resize(40, 12)?;
     t.send(Key::Enter)?;

@@ -133,7 +133,7 @@ fn apps_without_synchronized_output_time_out_with_guidance() {
 )]
 fn wait_frame_timeouts_embed_the_live_screen_not_the_last_frame() {
     let mut t = emit(
-        Terminal::builder().timeout(Duration::from_millis(400)),
+        Terminal::builder().timeout(Duration::from_secs(30)),
         // One synchronized frame, then unbracketed output that will
         // never complete a frame.
         &[
@@ -147,7 +147,9 @@ fn wait_frame_timeouts_embed_the_live_screen_not_the_last_frame() {
     t.wait_frame(|s| s.contains("OLD FRAME")).unwrap();
     t.wait_until(|s| s.contains("LIVE SCREEN")).unwrap();
 
-    let err = t.wait_frame(|s| s.contains("never painted")).unwrap_err();
+    let err = t
+        .wait_frame_for(|s| s.contains("never painted"), Duration::from_millis(400))
+        .unwrap_err();
     let screen = err.screen().expect("timeouts embed a screen");
     assert!(
         screen.contains("LIVE SCREEN"),
@@ -209,7 +211,7 @@ fn a_burst_longer_than_the_retention_bound_drops_its_oldest_frames() -> termlens
         burst.push_str(&format!(r"\e[?2026h\e[HFRAME {n:02}\e[?2026l"));
     }
     let mut t = emit(
-        Terminal::builder().timeout(Duration::from_millis(600)),
+        Terminal::builder().timeout(Duration::from_secs(30)),
         &["--raw", &burst, "--wait"],
     )?;
 
@@ -218,7 +220,9 @@ fn a_burst_longer_than_the_retention_bound_drops_its_oldest_frames() -> termlens
     // can still be observed.
     t.wait_frame(|s| s.contains("FRAME 05"))?;
     // The first four are gone, and the error says how many were seen.
-    let err = t.wait_frame(|s| s.contains("FRAME 01")).unwrap_err();
+    let err = t
+        .wait_frame_for(|s| s.contains("FRAME 01"), Duration::from_millis(600))
+        .unwrap_err();
     assert!(
         err.to_string().contains("12 in total"),
         "the frame count belongs in the message: {err}"
@@ -252,14 +256,27 @@ fn wait_frame_fails_fast_on_eof() {
 #[test]
 fn wait_idle_does_not_resolve_inside_an_open_synchronized_update() {
     // The frame never ends: BSU, content, then the app parks on `--wait`.
+    // The pause stands in for a slow spawn, so a 600 ms builder deadline
+    // on the first wait fails every time rather than under load.
     let mut t = emit(
-        Terminal::builder().timeout(Duration::from_millis(600)),
-        &["--raw", r"\e[?2026hhalf a frame", "--wait"],
+        Terminal::builder().timeout(Duration::from_secs(30)),
+        &[
+            "--sleep",
+            "700ms",
+            "--raw",
+            r"\e[?2026hhalf a frame",
+            "--wait",
+        ],
     )
     .unwrap();
     t.wait_until(|s| s.contains("half a frame")).unwrap();
 
-    let err = t.wait_idle(Duration::from_millis(100)).unwrap_err();
+    // The short deadline belongs on the wait that must expire and nowhere
+    // else: on the builder it also covered the spawn, which a loaded
+    // Windows runner stretched past 600 ms (stress run 35852222516).
+    let err = t
+        .wait_idle_for(Duration::from_millis(100), Duration::from_millis(600))
+        .unwrap_err();
     assert!(
         matches!(err, Error::Timeout { .. }),
         "an open synchronized update must not count as idle: {err}"
@@ -273,13 +290,15 @@ fn an_unmatched_end_publishes_no_frame() {
     // is on the grid — and must leave the frame count at zero, since that
     // is what gates the diagnosis below.
     let mut t = emit(
-        Terminal::builder().timeout(Duration::from_millis(600)),
+        Terminal::builder().timeout(Duration::from_secs(30)),
         &["--raw", r"\e[2J\e[HNO-BEGIN\e[?2026l", "--wait"],
     )
     .unwrap();
     t.wait_until(|s| s.contains("NO-BEGIN")).unwrap();
 
-    let err = t.wait_frame(|s| s.contains("NO-BEGIN")).unwrap_err();
+    let err = t
+        .wait_frame_for(|s| s.contains("NO-BEGIN"), Duration::from_millis(600))
+        .unwrap_err();
     assert!(
         err.to_string().contains("never emitted"),
         "a phantom frame would both match and suppress the diagnosis: {err}"
@@ -293,7 +312,7 @@ fn a_defensive_mode_reset_keeps_the_never_emitted_diagnosis() {
     // to replace the pointed diagnosis with a frame count, which reads as
     // "the app is frame-capable, your predicate is wrong".
     let mut t = emit(
-        Terminal::builder().timeout(Duration::from_millis(600)),
+        Terminal::builder().timeout(Duration::from_secs(30)),
         &[
             "--raw",
             r"\e[?2026l\e[?25h\e[?1000l\e[?1002l\e[?1003l\e[?2004l\e[?1049l",
@@ -305,7 +324,9 @@ fn a_defensive_mode_reset_keeps_the_never_emitted_diagnosis() {
     .unwrap();
     t.wait_until(|s| s.contains("PLAIN-PAINT")).unwrap();
 
-    let err = t.wait_frame(|s| s.contains("NEVER-DRAWN")).unwrap_err();
+    let err = t
+        .wait_frame_for(|s| s.contains("NEVER-DRAWN"), Duration::from_millis(600))
+        .unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("never emitted a DEC 2026 synchronized update"),
@@ -412,14 +433,14 @@ fn one_frame_cannot_satisfy_two_waits() -> termlens::Result<()> {
 )]
 fn a_burst_frame_asked_for_out_of_order_is_gone() -> termlens::Result<()> {
     let mut t = emit(
-        Terminal::builder().timeout(Duration::from_millis(700)),
+        Terminal::builder().timeout(Duration::from_secs(30)),
         &["--raw", BURST_OF_THREE, "--wait"],
     )?;
 
     t.wait_until(|s| s.contains("STEP 3"))?;
     t.wait_frame(|s| s.contains("STEP 3"))?;
 
-    let backwards = t.wait_frame(|s| s.contains("STEP 1"));
+    let backwards = t.wait_frame_for(|s| s.contains("STEP 1"), Duration::from_millis(700));
     assert!(
         matches!(backwards, Err(Error::Timeout { .. })),
         "STEP 1 was already passed over: {backwards:?}"
@@ -473,7 +494,7 @@ fn a_resize_stops_offering_frames_drawn_at_the_old_size() -> termlens::Result<()
     let mut t = emit(
         Terminal::builder()
             .size(80, 24)
-            .timeout(Duration::from_millis(700)),
+            .timeout(Duration::from_secs(30)),
         // Paints one frame, then ignores SIGWINCH and never repaints.
         &[
             "--raw",
@@ -483,11 +504,15 @@ fn a_resize_stops_offering_frames_drawn_at_the_old_size() -> termlens::Result<()
     )?;
 
     // Deliberately not consumed: this proves the resize moves the cursor,
-    // not that an earlier wait did.
-    t.wait_until(|s| s.contains("BEFORE-RESIZE"))?;
+    // not that an earlier wait did. The repaint count is part of the
+    // predicate because the text lands on the grid before its closing
+    // marker is read: a frame published *after* the resize would be
+    // post-resize, and the wait below would then match it for the wrong
+    // reason (#502).
+    t.wait_until(|s| s.repaints() == 1 && s.contains("BEFORE-RESIZE"))?;
     t.resize(40, 10)?;
 
-    let stale = t.wait_frame(|s| s.contains("BEFORE-RESIZE"));
+    let stale = t.wait_frame_for(|s| s.contains("BEFORE-RESIZE"), Duration::from_millis(700));
     assert!(
         matches!(stale, Err(Error::Timeout { .. })),
         "a pre-resize frame must not answer a post-resize wait: {stale:?}"
@@ -619,13 +644,15 @@ fn a_snapshot_can_be_mid_frame_for_a_synchronized_application() -> termlens::Res
 #[test]
 fn a_wait_idle_timeout_names_an_unfinished_frame() {
     let mut t = emit(
-        Terminal::builder().timeout(Duration::from_millis(600)),
+        Terminal::builder().timeout(Duration::from_secs(30)),
         &["--raw", r"\e[?2026hhalf a frame", "--wait"],
     )
     .unwrap();
     t.wait_until(|s| s.contains("half a frame")).unwrap();
 
-    let err = t.wait_idle(Duration::from_millis(100)).unwrap_err();
+    let err = t
+        .wait_idle_for(Duration::from_millis(100), Duration::from_millis(600))
+        .unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("unfinished DEC 2026 synchronized update"),

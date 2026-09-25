@@ -270,7 +270,9 @@ mod patterns {
     #[test]
     fn wait_until_matches_returns_the_screen_it_matched() -> termlens::Result<()> {
         let mut t = emit(&["counting: ", "--sleep", "200ms", "42", "--wait"])?;
-        let prompt = Regex::new(r"counting: \d+$").unwrap();
+        // `\d+$` would already hold once the `4` lands; the wait targets
+        // the last thing painted (#502).
+        let prompt = Regex::new(r"counting: 42$").unwrap();
         let matched = t.wait_until_matches(&prompt)?;
         assert!(matched.matches(&prompt), "{matched}");
         assert_eq!(matched.find_match(&prompt).unwrap().2, "counting: 42");
