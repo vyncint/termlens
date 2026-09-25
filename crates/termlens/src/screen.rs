@@ -1247,6 +1247,22 @@ impl Screen {
     }
 
     /// The cell at `(row, col)`, or `None` when out of bounds.
+    ///
+    /// # Examples
+    ///
+    /// Coordinates are row-first. On a `4x1` screen holding `hi`, `h`
+    /// sits at `(0, 0)` and `i` at `(0, 1)`:
+    ///
+    /// ```
+    /// use termlens::Screen;
+    ///
+    /// let screen = Screen::parse("size: 4x1  cursor: 0,0\nhi")?;
+    /// assert_eq!(screen.cell(0, 0).map(|c| c.contents()), Some("h"));
+    /// assert_eq!(screen.cell(0, 1).map(|c| c.contents()), Some("i"));
+    /// // Row 1 does not exist on a one-row screen:
+    /// assert!(screen.cell(1, 0).is_none());
+    /// # Ok::<(), termlens::Error>(())
+    /// ```
     #[must_use]
     pub fn cell(&self, row: u16, col: u16) -> Option<&Cell> {
         if row >= self.rows || col >= self.cols {
