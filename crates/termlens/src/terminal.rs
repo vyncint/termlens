@@ -1637,7 +1637,7 @@ impl TerminalBuilder {
     ///     .spawn("sh")?;
     /// // "a" has scrolled off a 3-row screen; "e" is still visible.
     /// t.wait_until(|s| s.full_text().contains("a") && s.contains("e"))?;
-    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # t.send(termlens::Key::Enter)?; t.wait_exit()?; Ok(())
     /// # }
     /// ```
     ///
@@ -3414,7 +3414,7 @@ impl Terminal {
     ///     .spawn("sh")?;
     /// let frame = t.wait_frame(|screen| screen.contains("Frame ready"))?;
     /// assert!(frame.contains("Frame ready"));
-    /// # t.send(termlens::Key::Enter); t.wait_exit()?;
+    /// # t.send(termlens::Key::Enter)?; t.wait_exit()?;
     /// # }
     /// # Ok(())
     /// # }

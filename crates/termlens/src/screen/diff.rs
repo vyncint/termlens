@@ -48,7 +48,7 @@ impl Screen {
     /// let a = t.screen();
     /// let b = t.screen();
     /// assert!(a.diff(&b).is_empty(), "{}", a.diff(&b));
-    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # t.send(termlens::Key::Enter)?; t.wait_exit()?; Ok(())
     /// # }
     /// ```
     ///

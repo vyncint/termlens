@@ -1154,7 +1154,7 @@ impl Screen {
     /// assert_eq!(s.unsupported(), ["^[[20h"]);
     /// assert!(s.unsupported().contains("^[[20h"));
     /// assert_eq!(s.unsupported().overflow(), 0);
-    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # t.send(termlens::Key::Enter)?; t.wait_exit()?; Ok(())
     /// # }
     /// ```
     ///
@@ -1410,7 +1410,7 @@ impl Screen {
     ///     Some(Location::History { row, col }) => assert_eq!((row, col), (0, 0)),
     ///     other => panic!("scrolled off, so it is in history: {other:?}"),
     /// }
-    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # t.send(termlens::Key::Enter)?; t.wait_exit()?; Ok(())
     /// # }
     /// ```
     #[must_use]
@@ -1591,7 +1591,7 @@ impl Screen {
     /// assert_eq!(s.find_all("item"), [(0, 0), (1, 0), (2, 0)]);
     /// let (row, col) = s.find_all("item")[1];   // the second one, for a click
     /// # assert_eq!((row, col), (1, 0));
-    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # t.send(termlens::Key::Enter)?; t.wait_exit()?; Ok(())
     /// # }
     /// ```
     #[must_use]
@@ -1917,7 +1917,7 @@ impl Screen {
     /// let s = t.screen();
     /// let right_pane = s.rect_text(7.., ..);   // columns 7 → end, all rows
     /// assert!(right_pane.contains("right"));
-    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # t.send(termlens::Key::Enter)?; t.wait_exit()?; Ok(())
     /// # }
     /// ```
     ///
@@ -1990,7 +1990,7 @@ impl Screen {
     /// # t.wait_until(|s| s.contains("choice"))?;
     /// let s = t.screen();
     /// assert_eq!(s.find_by(|c| c.style().reverse), Some((0, 2)));
-    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # t.send(termlens::Key::Enter)?; t.wait_exit()?; Ok(())
     /// # }
     /// ```
     ///
@@ -2122,7 +2122,7 @@ impl Screen {
     /// let version = regex::Regex::new(r"v\d+\.\d+\.\d+").unwrap();
     /// let (row, col, text) = t.screen().find_match(&version).expect("a version");
     /// assert_eq!((row, col, text.as_str()), (0, 6, "v1.42.0"));
-    /// # t.send(termlens::Key::Enter); t.wait_exit()?; Ok(())
+    /// # t.send(termlens::Key::Enter)?; t.wait_exit()?; Ok(())
     /// # }
     /// ```
     #[must_use]
