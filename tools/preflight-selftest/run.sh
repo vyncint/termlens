@@ -47,13 +47,37 @@ expect() {
   printf '  ok    %-58s exit %s\n' "$label" "$got"
 }
 
+expect_help() {
+  flag=$1
+  label=$2
+  got=0
+  "$runner" "$flag" > out.log 2> err.log || got=$?
+  if [ "$got" -ne 0 ]; then
+    printf '  FAIL  %-58s exit %s, expected 0\n' "$label" "$got" >&2
+    sed 's/^/        /' out.log err.log >&2
+    status=1
+    return
+  fi
+  if [ -s err.log ] || [ "$(wc -l < out.log | tr -d ' ')" -ne 2 ] || \
+    ! grep -Fqx 'usage: tools/preflight.sh [--fast] [-h|--help]' out.log || \
+    ! grep -Fqx -- '--fast runs only formatting, clippy and tests.' out.log; then
+    printf '  FAIL  %-58s unexpected help output\n' "$label" >&2
+    sed 's/^/        /' out.log err.log >&2
+    status=1
+    return
+  fi
+  printf '  ok    %-58s exit %s\n' "$label" "$got"
+}
+
 expect failing/CONTRIBUTING.md nonzero "a failing gate is reported and the run continues" \
   '^  FAIL  false' '^  ok    true'
 expect passing/CONTRIBUTING.md zero "an all-passing fixture exits zero" \
   '^  ok    true'
+expect_help -h "-h prints usage to stdout and exits zero"
+expect_help --help "--help prints usage to stdout and exits zero"
 
-rm -f out.log
+rm -f out.log err.log
 if [ "$status" -eq 0 ]; then
-  echo "preflight selftest: 2 expectation(s), the runner accounts for failures"
+  echo "preflight selftest: 4 expectation(s), the runner accounts for failures and help"
 fi
 exit "$status"
