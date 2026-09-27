@@ -17,6 +17,17 @@ reads that marker.
 
 ## [Unreleased]
 
+### Fixed
+
+- `termlens diff --help` and `termlens render --help` say what exit code 2
+  means, as the top-level help does: bad arguments, or a file that is
+  missing or not a saved screen, and for `render` an `--out` path that
+  cannot be written. `diff --help` said only "a file could not be read",
+  and `render --help` stated no exit codes at all (#514).
+- Every `--help` — `termlens inspect`, `diff`, `render` and
+  `examples/inspect.rs` — names the `--flag=value` spelling their parsers
+  have accepted since 0.11.2 (#515).
+
 ## [0.11.3] - 2026-09-23
 
 ### Changed

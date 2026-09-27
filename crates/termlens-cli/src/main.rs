@@ -61,7 +61,8 @@ repeatable --env sets selected values.
 --ansi paints the screen in colour on a terminal.
 -- ends the options; the program name follows. Options already stop at
 the first argument that does not begin with `-`, so this matters only for
-a program whose name does.
+a program whose name does. Every option that takes a value also accepts
+it attached with `=`, as in --size=100x30 or --env=KEY=VALUE.
 
 What goes to stdout depends on where stdout goes. A terminal gets what
 you came to look at: the plain text, or the painted screen with --ansi.
@@ -86,8 +87,12 @@ Parses two saved screens and prints what changed from <a> to <b>: the rows
 that differ side by side, the size and cursor deltas, the style runs before
 and after. On a terminal the changed cells are coloured (red in <a>, green
 in <b>) unless --color never or NO_COLOR is set; in a pipe the rendering is
-the plain one Screen::diff prints in a CI log. Exit code 0 when the two are
-the same picture, 1 when they differ, 2 when a file could not be read.";
+the plain one Screen::diff prints in a CI log. Every option that takes a
+value also accepts it attached with `=`, as in --color=never.
+
+Exit code 0 when the two are the same picture, 1 when they differ, 2 when
+diff itself could not run — bad arguments, or a file that is missing or not
+a saved screen.";
 
 const RENDER_USAGE: &str = "\
 usage: termlens render (--svg | --html | --ansi | --text | --json) [--out PATH] <a>
@@ -99,7 +104,12 @@ format-1 JSON document the crate's `serde` feature writes.
 <a> may be `-`, meaning standard input. --out writes to PATH instead of
 stdout; `--out -` is standard output, and a file named `-` is still `./-`.
 --out creates nothing when the render fails — unlike a shell redirect,
-which truncates the file before termlens runs.";
+which truncates the file before termlens runs. Every option that takes a
+value also accepts it attached with `=`, as in --out=screen.svg.
+
+Exit code 0: the screen was rendered. Exit code 2: render itself could not
+run — bad arguments, a file that is missing or not a saved screen, or an
+--out path that cannot be written.";
 
 /// Where a rendering goes, so a reader that closed early (`termlens … |
 /// head`) is a clean exit rather than a panic on a broken pipe.

@@ -608,6 +608,34 @@ fn help_and_version() -> termlens::Result<()> {
     Ok(())
 }
 
+/// Every subcommand's help names the `--flag=value` spelling the parser has
+/// accepted since 0.11.2 (#515), and what exit code 2 means, as the
+/// top-level help does (#514). Read through a pipe: help is plain text, and
+/// a pseudo-terminal would add nothing but a wait.
+#[test]
+fn every_subcommand_help_names_the_attached_spelling_and_exit_code_two() -> termlens::Result<()> {
+    use std::process::Command;
+    let bin = env!("CARGO_BIN_EXE_termlens");
+    for (subcommand, attached, exit_two) in [
+        ("inspect", "--size=100x30", "Exit code 2 means inspect"),
+        ("diff", "--color=never", "diff itself could not run"),
+        ("render", "--out=screen.svg", "render itself could not"),
+    ] {
+        let out = Command::new(bin).args([subcommand, "--help"]).output()?;
+        assert_eq!(out.status.code(), Some(0), "{subcommand} --help");
+        let help = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            help.contains("attached with `=`") && help.contains(attached),
+            "`{subcommand} --help` must name the attached spelling:\n{help}"
+        );
+        assert!(
+            help.contains(exit_two) && help.contains("bad arguments"),
+            "`{subcommand} --help` must say what exit code 2 means:\n{help}"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn subcommand_version_prints_same_string_as_top_level() -> termlens::Result<()> {
     // The top-level version string is the reference.

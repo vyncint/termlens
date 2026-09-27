@@ -693,6 +693,13 @@ fn inspect_example_and_command_agree_on_help_and_version() {
             String::from_utf8_lossy(&command.stdout).starts_with("usage: termlens inspect "),
             "command {flag}"
         );
+        // Both parsers take `--size=100x30` (#457), so both helps say so (#515).
+        for (who, out) in [("example", &example), ("command", &command)] {
+            assert!(
+                String::from_utf8_lossy(&out.stdout).contains("--size=100x30"),
+                "{who} {flag} must name the attached spelling"
+            );
+        }
     }
     let (stdout, _) = agree(&["--version"]);
     assert_eq!(stdout, format!("termlens {}\n", env!("CARGO_PKG_VERSION")));
