@@ -237,8 +237,10 @@ with that row as its reason; the README carries the user-facing list. The
 
 Every wait runs under the terminal's **default deadline** (builder
 `timeout`, 5s default) or a per-call one: each `wait_*` has a `_for` twin
-(`wait_until_for`, `wait_frame_for`, `wait_idle_for`, `wait_exit_for`), so
-one known-slow step does not force its deadline on the whole suite. There
+(`wait_until_for`, `wait_frame_for`, `wait_idle_for`, `wait_stable_for`,
+`wait_exit_for`, and `wait_until_matches_for` with the `regex` feature), as
+does `snapshot_after` (`snapshot_after_for`), so one known-slow step does not
+force its deadline on the whole suite. There
 is deliberately no unbounded wait: a hung TUI in CI must produce a readable
 failure, not a 6-hour job timeout. On expiry the error **embeds the full
 screen dump** — a CI log alone answers "what was the app showing?".
@@ -600,8 +602,11 @@ Rules:
    title, the clipboard, the bell count or the link log: the first is a
    window property `RIS` does not restore in xterm, and the rest are records
    of what the application emitted rather than state the terminal still
-   holds. `DECSTR` (soft reset) is not modelled at all — the sequences it
-   touches are not ones tracked here.
+   holds. `DECSTR` (soft reset) resets what a `Screen` can observe — cursor
+   keys, bracketed paste, mouse tracking, focus reporting, the cursor's
+   visibility and shape, the character sets — and leaves the alternate
+   screen alone; the rest of the specified list is not replayed, because
+   none of it is observable. `docs/LIMITATIONS.md` keeps the exact list.
 
    `OSC 8` hyperlinks are **captured**, on the same grounds as `OSC 52`
    below: a link changes no cell, its label renders as ordinary text, and
@@ -617,12 +622,14 @@ Rules:
    a wrong answer. A span the application never closed is reported open —
    in a real terminal every character written afterwards joins it.
 
-   The same slot holds three **cumulative counters**, for behaviour that by
+   The same slot holds four **cumulative counters**, for behaviour that by
    definition leaves the grid unchanged: `Screen::repaints` (completed DEC
    2026 updates — repaints, not changes, so one input becoming four
    repaints is catchable), `Screen::bells` (a `BEL` in ground state; the one
    closing an `OSC` string is punctuation and the one inside a DCS-class
-   string is payload), and `Screen::graphics` (kitty and sixel payloads
+   string is payload), `Screen::visual_bells` (`ESC g`, a flash rather than a
+   beep, counted apart so the two are assertable separately), and
+   `Screen::graphics` (kitty and sixel payloads
    transmitted, by protocol and total bytes). Monotonic on purpose: a test
    takes a delta around an action rather than resetting a gauge. Counting a
    graphics payload is not rendering it and claims nothing — DA1 goes on

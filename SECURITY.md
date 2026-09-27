@@ -10,11 +10,15 @@ issues in escape-sequence handling) are treated as security issues.
 
 What the project does continuously, enforced by required CI on every change:
 
-- **`unsafe` is confined to two audited FFI calls** — `dup(2)`, to open a
-  second writer on the PTY master for the responder thread, and `kill(2)`
-  behind `Terminal::signal` — each a single line with a `SAFETY` comment and
-  a local `#[allow]`; the `unsafe_code` lint is on, so any third block fails
-  clippy `-D warnings`. Neither touches memory the child can influence.
+- **`unsafe` is confined to three audited single-line blocks** — `dup(2)`,
+  to open a second writer on the PTY master for the responder thread;
+  `File::from_raw_fd`, which takes sole ownership of that duplicate so it is
+  closed exactly once; and `kill(2)` behind `Terminal::signal`. They sit
+  under `SAFETY` comments (the first two share one) and each carries its own
+  `#[allow(unsafe_code)]`. The workspace sets `unsafe_code = "warn"` and CI
+  runs clippy with `-D warnings`, so a new block fails unless it carries
+  that `#[allow]` as well: the attribute is what review has to see, not a
+  count the lint keeps. None touches memory the child can influence.
   Everything on the parsing path is pure Rust: escape sequences from the
   child are parsed, never executed or evaluated.
 - **Dependency policy** (`cargo-deny` job): RUSTSEC advisories, yanked

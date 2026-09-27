@@ -257,8 +257,10 @@ allowlist is a list on purpose, so that widening it is a visible decision.
 - Branch from `main`; name branches `feat/…`, `fix/…`, `docs/…`, `ci/…`.
 - PRs are **squash-merged** — keep the PR title in Conventional Commit form,
   since it becomes the commit subject on `main`. Branches are deleted on merge.
-- Required checks: `required-green` (fmt, clippy, tests on Ubuntu + macOS, MSRV, docs, cargo-deny, zizmor), plus `commit-policy` (DCO + attribution). All
-  must pass before merge; direct pushes to `main` are blocked by a ruleset.
+- Required checks: `required-green`, which needs every CI job — `fmt`,
+  `clippy`, `test` (Ubuntu + macOS), `features`, `windows-check`, `windows`,
+  `msrv`, `semver`, `docs`, `deny`, `zizmor`, `gates-listed` and `skill` —
+  plus `commit-policy` (DCO + attribution). All must pass before merge; direct pushes to `main` are blocked by a ruleset.
 - **Every change lands with a test, and the test must be able to fail.** If
   you add a guard, break it once and watch it go red before you commit.
 - **Say what you did not do.** A PR that lists what it left out and why is

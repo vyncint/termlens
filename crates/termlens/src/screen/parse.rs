@@ -54,6 +54,14 @@ impl Screen {
     /// # t.send(termlens::Key::Enter)?; t.wait_exit()?; Ok(())
     /// # }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Parse`] when `text` is not the snapshot text format — a
+    /// header that is not `size: COLSxROWS  cursor: ROW,COL`, a row wider than
+    /// the header declares or text after the grid that is not a `styles:`
+    /// block, a control character, a malformed span — with the number of the
+    /// line it failed on.
     pub fn parse(text: &str) -> Result<Screen> {
         let mut lines = text.lines();
         let header = lines

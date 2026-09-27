@@ -45,8 +45,11 @@ set -euo pipefail
 
 base="https://github.com/vyncint/termlens/blob/main/"
 
-# The repositories a document here has any business linking: the six projects
-# that share this contributor pattern, plus termlens's own demo, which
+# The repositories a document here has any business linking: the four projects
+# CONTRIBUTING.md names as sharing one contributor pattern, oxidelake and
+# oxmera, which follow the same commit rules, DCO and AI policy without being
+# named in that blockquote (it is copied word for word across the named
+# repositories, so it changes in all of them or none), plus termlens's own demo, which
 # `docs/DESIGN.md` cites for the coverage study. The account holds many more
 # repositories than these; the list is deliberately the short one, because a
 # list of everything would wave through the typo this gate exists to catch.
