@@ -2227,6 +2227,23 @@ mod tests {
         assert_eq!(fed(b"\x1b[5 q\x1bc\x1b[2 q").cursor_style(), Some(2));
     }
 
+    /// The rest of the rule the RIS arm states (#516): the title is a window
+    /// property `RIS` does not restore in xterm, and the bell count and the
+    /// clipboard are records of what the application emitted, so a hard
+    /// reset keeps all three. The cursor shape set in the same stream is
+    /// asserted gone, so the reset demonstrably ran.
+    #[test]
+    fn a_hard_reset_keeps_the_title_the_bell_count_and_the_clipboard() {
+        // Title (its BEL terminates the OSC), a real bell, a clipboard write
+        // of "ab", a cursor shape, then `ESC c`.
+        let t = fed(b"\x1b]0;my app\x07\x07\x1b]52;c;YWI=\x07\x1b[5 q\x1bc");
+        assert_eq!(t.cursor_style(), None, "the reset ran");
+        assert_eq!(&*t.title(), "my app", "the title survives it");
+        assert_eq!(t.bells(), 1, "the bell count survives it");
+        let clip = t.clipboard().expect("the clipboard write survives it");
+        assert_eq!(clip.text(), Some("ab"));
+    }
+
     /// An open span cannot survive a hard reset, so it is closed with what
     /// it had. The *log* is a record of what the application emitted and is
     /// deliberately kept, like the bell count and the clipboard.

@@ -431,14 +431,29 @@ mod tests {
             (Key::End, b"\x1b[F"),
             (Key::PageUp, b"\x1b[5~"),
             (Key::PageDown, b"\x1b[6~"),
+            // Every function key: xterm's numbering skips 16 and 22, so
+            // F6 and F11 are where an off-by-one would show (#517).
             (Key::F(1), b"\x1bOP"),
+            (Key::F(2), b"\x1bOQ"),
+            (Key::F(3), b"\x1bOR"),
             (Key::F(4), b"\x1bOS"),
             (Key::F(5), b"\x1b[15~"),
+            (Key::F(6), b"\x1b[17~"),
+            (Key::F(7), b"\x1b[18~"),
+            (Key::F(8), b"\x1b[19~"),
+            (Key::F(9), b"\x1b[20~"),
             (Key::F(10), b"\x1b[21~"),
+            (Key::F(11), b"\x1b[23~"),
             (Key::F(12), b"\x1b[24~"),
             (Key::Ctrl('c'), b"\x03"),
             (Key::Ctrl('C'), b"\x03"),
+            // The punctuation `Key::Ctrl` documents, each its C0 byte.
+            (Key::Ctrl('@'), b"\x00"),
             (Key::Ctrl('['), b"\x1b"),
+            (Key::Ctrl('\\'), b"\x1c"),
+            (Key::Ctrl(']'), b"\x1d"),
+            (Key::Ctrl('^'), b"\x1e"),
+            (Key::Ctrl('_'), b"\x1f"),
             (Key::Ctrl(' '), b"\x00"),
             (Key::Ctrl('?'), b"\x7f"),
             (Key::Alt('x'), b"\x1bx"),
@@ -473,7 +488,11 @@ mod tests {
             (Key::Delete.ctrl(), b"\x1b[3;5~"),
             (Key::F(1).ctrl(), b"\x1b[1;5P"),
             (Key::F(5).ctrl().shift(), b"\x1b[15;6~"),
+            // The chord base computes F6-F10 as `11 + n`; F6 and F11 are
+            // the two sides of the gaps that arithmetic must jump.
+            (Key::F(6).ctrl(), b"\x1b[17;5~"),
             (Key::F(10).alt(), b"\x1b[21;3~"),
+            (Key::F(11).shift(), b"\x1b[23;2~"),
             (Key::F(12).ctrl().alt().shift(), b"\x1b[24;8~"),
         ];
         for (chord, bytes) in table {
@@ -553,6 +572,13 @@ mod tests {
     #[should_panic(expected = "only F1-F12")]
     fn f13_panics() {
         let _ = Key::F(13).encode();
+    }
+
+    /// The other end of the range the `# Panics` section documents.
+    #[test]
+    #[should_panic(expected = "only F1-F12")]
+    fn f0_panics() {
+        let _ = Key::F(0).encode();
     }
 
     #[test]
