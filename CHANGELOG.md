@@ -17,6 +17,15 @@ reads that marker.
 
 ## [Unreleased]
 
+### Changed
+
+- The published `termlens-cli` no longer ships its tests (#519), as the
+  library stopped shipping its own in 0.11.2 (#385). Its corpus test read
+  `../termlens/tests/compat`, a directory outside the package, so `cargo
+  test` on the download failed for everyone; the rest drove a binary built
+  from the workspace. `src/` and the README are unchanged. A new gate,
+  `check-package-contents.sh`, fails CI if either crate ships `tests/` again.
+
 ### Fixed
 
 - `termlens diff --help` and `termlens render --help` say what exit code 2

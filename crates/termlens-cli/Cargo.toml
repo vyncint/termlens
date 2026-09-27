@@ -4,6 +4,11 @@ description = "The termlens command: run a program in a PTY and print its screen
 keywords = ["pty", "terminal", "testing", "tui", "snapshot"]
 categories = ["development-tools::testing", "command-line-interface"]
 readme = "README.md"
+# The tests drive the built binary from the workspace, and the corpus test
+# reads `../termlens/tests/compat`, which is outside this package and not in
+# the library's either: from an unpacked download `cargo test` could only
+# fail. The library excludes its suite for the same reason (#385, #519).
+exclude = ["tests/"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

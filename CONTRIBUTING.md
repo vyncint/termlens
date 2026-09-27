@@ -60,6 +60,7 @@ RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features
 .github/scripts/check-candidate-statement.sh              # README, CHANGELOG and STABILITY state the candidate in the same words
 .github/scripts/check-report-pin.sh                       # the three report@v refs agree with the workspace version
+.github/scripts/check-package-contents.sh                 # neither published crate ships its tests/, which cannot pass outside the workspace
 .github/scripts/check-skill-snippets.sh                   # every Rust block in SKILL.md still compiles
 cargo deny check                          # cargo install cargo-deny
 pipx run zizmor==1.29.0 --persona=pedantic .github/   # workflow and action audit; needs GH_TOKEN for the online checks

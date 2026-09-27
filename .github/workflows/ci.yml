@@ -321,6 +321,10 @@ jobs:
       # releases bumped two of the three and missed the action's own README
       # (#386). This is the check that keeps the four in step.
       - run: .github/scripts/check-report-pin.sh
+      # A published crate that ships its tests ships tests that cannot pass
+      # outside the workspace: the library's build fixture binaries, and the
+      # CLI's corpus test reads a sibling crate's directory (#385, #519).
+      - run: .github/scripts/check-package-contents.sh
 
   deny:
     name: deny
