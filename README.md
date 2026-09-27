@@ -229,7 +229,7 @@ step summary:
 - run: cargo test
   env:
     TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens
-- uses: vyncint/termlens/.github/actions/report@v0.11.3
+- uses: vyncint/termlens/.github/actions/report@v0.11.4
   if: failure()
 ```
 

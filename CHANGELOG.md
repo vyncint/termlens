@@ -17,6 +17,8 @@ reads that marker.
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-09-27
+
 ### Changed
 
 - The published `termlens-cli` no longer ships its tests (#519), as the
@@ -25,6 +27,19 @@ reads that marker.
   test` on the download failed for everyone; the rest drove a binary built
   from the workspace. `src/` and the README are unchanged. A new gate,
   `check-package-contents.sh`, fails CI if either crate ships `tests/` again.
+- The rustdoc gains runnable examples for `Key::encode` (#511) and
+  `Screen::cell`, whose coordinates are row first, the opposite of
+  `Screen::size` (#512), and an `# Errors` section on `Screen::parse`
+  (#510). Ten doctests stopped discarding the `Result` of the `send` that
+  ends them (#513).
+- `SECURITY.md` counts the three `unsafe` blocks there are,
+  `File::from_raw_fd` included, and says the lint enforces each block's
+  `#[allow]` rather than the count (#520).
+- `docs/DESIGN.md` names all seven `_for` wait twins (#507), says what
+  `DECSTR` resets instead of "not modelled at all", and counts
+  `visual_bells` among four cumulative counters (#508). CONTRIBUTING lists
+  every job `required-green` needs (#509), and `tools/preflight.sh -h`
+  prints its usage instead of refusing the flag as misuse (#518).
 
 ### Fixed
 
@@ -2198,7 +2213,8 @@ in the worst of them — hung itself.
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [`Unsupported`]: https://docs.rs/termlens/0.11.0/termlens/struct.Unsupported.html
 
-[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.3...HEAD
+[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.4...HEAD
+[0.11.4]: https://github.com/vyncint/termlens/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/vyncint/termlens/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/vyncint/termlens/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/vyncint/termlens/compare/v0.11.0...v0.11.1
