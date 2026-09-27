@@ -36,6 +36,14 @@ reads that marker.
 - Every `--help` — `termlens inspect`, `diff`, `render` and
   `examples/inspect.rs` — names the `--flag=value` spelling their parsers
   have accepted since 0.11.2 (#515).
+- On Windows, `termlens inspect` and `examples/inspect.rs` give a program
+  2 s after the wait ends to report its exit, up from 500 ms (#501).
+  ConPTY never reports the terminal closing, so a program that has just
+  exited ends the wait by the silence window instead, and a shell that took
+  more than 800 ms from its last byte to its exit status was reported
+  `still running (killed on exit)`. A program that is still running, as a
+  TUI is, now waits the extra 1.5 s before it is killed. Nothing changes
+  on Unix.
 
 ## [0.11.3] - 2026-09-23
 

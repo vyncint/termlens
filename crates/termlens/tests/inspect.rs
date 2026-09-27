@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
+mod common;
+
 /// Built once per test process, whichever test asks first. Every test used
 /// to run its own `cargo build`, and two of them in parallel could race a
 /// relink: one unlinks and rewrites the example while the other's
@@ -38,11 +40,20 @@ fn run_inspect(bin: &PathBuf, args: &[&str]) -> Output {
         .expect("failed to run the inspect example")
 }
 
+/// Both streams of a run, for a failed assertion to print. A screen
+/// assertion that shows only stdout loses the trailer, and the trailer is
+/// what says whether the program exited, was cut off by the silence window,
+/// or ran into the deadline: four tests once saw a blank screen and none
+/// of them recorded which (#497).
+fn both_streams(out: &Output) -> String {
+    format!(
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "the program under inspection is a POSIX shell: MSYS sh can outlive its last output by more than the silence window and the reap grace, so the trailer reads still running (#149)"
-)]
 fn inspect_runs_and_reports_cli_failures() {
     let bin = inspect_bin();
 
@@ -56,11 +67,13 @@ fn inspect_runs_and_reports_cli_failures() {
     let stderr = String::from_utf8_lossy(&sized.stderr);
     assert!(
         stdout.contains("3 12"),
-        "terminal size missing from:\n{stdout}"
+        "terminal size missing from:\n{}",
+        both_streams(&sized)
     );
     assert!(
         stderr.contains("--- exited: exit code 0 ---"),
-        "exit status missing from:\n{stderr}"
+        "exit status missing from:\n{}",
+        both_streams(&sized)
     );
     assert!(
         !stdout.contains("---"),
@@ -247,7 +260,8 @@ fn inspect_prints_its_usage_for_help_and_for_a_missing_program() {
     let stdout = String::from_utf8_lossy(&sized.stdout);
     assert!(
         stdout.contains("3 12"),
-        "spawned at the given size:\n{stdout}"
+        "spawned at the given size:\n{}",
+        both_streams(&sized)
     );
 
     let valued = run_inspect(bin, &["--inherit-env=nonsense", "sh"]);
@@ -326,8 +340,17 @@ fn inspect_takes_its_deadline_and_silence_window_from_flags() {
         !stdout.contains("---"),
         "the trailer belongs on stderr:\n{stdout}"
     );
+    // The silence window ends the wait, and the child is still running, so
+    // the reap grace is paid in full: 1.5 s more of it on Windows (#501).
+    // Either bound stays well under what ignoring the flags would cost — the
+    // five-second default deadline plus the same grace.
+    let bound = if cfg!(windows) {
+        std::time::Duration::from_millis(5_500)
+    } else {
+        std::time::Duration::from_secs(4)
+    };
     assert!(
-        elapsed < std::time::Duration::from_secs(4),
+        elapsed < bound,
         "a 1s deadline took {elapsed:?}; the flag was not honoured"
     );
 }
@@ -364,10 +387,15 @@ fn inspect_resolves_a_relative_program_path_from_its_working_directory() {
         "inspect failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(stdout.contains("relative path resolved"), "{stdout}");
+    assert!(
+        stdout.contains("relative path resolved"),
+        "{}",
+        both_streams(&out)
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("--- exited: exit code 0 ---"),
-        "exit status missing from stderr"
+        "exit status missing from stderr:\n{}",
+        both_streams(&out)
     );
 
     // `--cwd` moves the child without moving the viewer (#312): started
@@ -388,10 +416,41 @@ fn inspect_resolves_a_relative_program_path_from_its_working_directory() {
         "inspect failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(stdout.contains("cwd resolved"), "{stdout}");
+    assert!(stdout.contains("cwd resolved"), "{}", both_streams(&out));
     assert!(
         !stdout.contains("---"),
         "the trailer belongs on stderr:\n{stdout}"
+    );
+}
+
+/// A program whose exit status lands a second after its last byte is
+/// reported exited on Windows, by the example and the command alike (#501).
+///
+/// ConPTY never reports the terminal closing, so there the 300 ms silence
+/// window ends the wait while the program is still finishing, and the
+/// trailer is decided by the reap grace that follows. With the 500 ms Unix
+/// figure this program was called still running every time; the second is
+/// chosen to sit between that and the 2 s Windows grace. The emit fixture,
+/// not a shell, so nothing but the fixture decides when it exits.
+///
+/// Windows only: on Unix a program silent for a second before it exits is
+/// still running by design once the silence window and the 500 ms grace
+/// have passed, and a trailer on that boundary would be a coin toss.
+#[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "pins the Windows reap grace; on Unix the exit closes the terminal and the EOF ends the wait"
+)]
+fn a_program_that_exits_after_the_silence_window_is_reported_exited_on_windows() {
+    let emit = common::fixture_bin("emit");
+    let emit = emit.to_str().expect("a UTF-8 fixture path");
+    let (screen, trailer) = agree(&[
+        "--size", "20x2", "--idle", "300", emit, "done", "--sleep", "1s",
+    ]);
+    assert!(screen.contains("done"), "{screen}\ntrailer: {trailer:?}");
+    assert_eq!(
+        trailer, "--- exited: exit code 0 ---\n",
+        "the program exited inside the Windows reap grace:\n{screen}"
     );
 }
 
@@ -551,7 +610,7 @@ fn inspect_example_and_command_agree_on_a_program_that_exits() {
         let (stdout, stderr) = agree(args);
         assert!(
             stdout.contains(screen),
-            "{args:?}: {screen:?} missing from the screen:\n{stdout}"
+            "{args:?}: {screen:?} missing from the screen:\n{stdout}\ntrailer: {stderr:?}"
         );
         assert_eq!(stderr, trailer, "{args:?}");
         termlens::Screen::parse(&stdout).expect("stdout is a saved screen");

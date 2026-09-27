@@ -33,15 +33,20 @@ use std::time::{Duration, Instant};
 
 use termlens::Terminal;
 
+/// How long to give the reap after the wait ends, so the trailer says
+/// exited when the program did exit: 500 ms for the Unix gap between the
+/// EOF and a collectable status (#374), and 2 s on Windows, where ConPTY
+/// never reports the close and the silence window ends the wait instead, so
+/// the reap covers the program's whole exit (#501). `termlens inspect`
+/// gives the same widths, for the same reasons.
+const REAP_GRACE: Duration = if cfg!(windows) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_millis(500)
+};
+
 /// The one copy of the usage text: `--help` prints it to stdout and exits
 /// 0, a missing program prints it to stderr and exits 2 (#229).
-/// How long to give the reap after the EOF that ended the idle wait: the
-/// kernel can report the terminal's close a scheduling hair before the
-/// child's status is collectable, and the trailer should say exited when
-/// the program did exit. `termlens inspect` gives the same width, for the
-/// same reason (#374).
-const REAP_GRACE: Duration = Duration::from_millis(500);
-
 const USAGE: &str = "\
 usage: inspect [--size COLSxROWS] [--timeout SECONDS] [--idle MILLIS]
                [--cwd PATH] [--inherit-env] [--ansi]

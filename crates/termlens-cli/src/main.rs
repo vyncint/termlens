@@ -203,15 +203,27 @@ const STDIN: &str = "-";
 /// What a diagnostic calls it, since `-: ...` reads as a stray flag.
 const STDIN_NAME: &str = "<stdin>";
 
-/// How long `inspect` gives the reap to land after the EOF that ended the
-/// idle wait. The kernel can report the terminal's close a scheduling hair
-/// before the child's status becomes collectable — the stress run caught
-/// the gap (#374, iteration 3 of 25 on a loaded 16-thread runner) — and the
-/// trailer should say exited when the program did exit. The same width the
-/// library gives its own post-reap drain, for the same reason. Only ever
-/// paid by a child that is genuinely still running, and only after the wait
-/// itself has ended.
-const REAP_GRACE: Duration = Duration::from_millis(500);
+/// How long `inspect` gives the reap to land after the wait ends, so the
+/// trailer says exited when the program did exit. Only ever paid in full by
+/// a child that is genuinely still running, and only after the wait itself
+/// has ended.
+///
+/// On Unix the exit closes the terminal, the EOF ends the wait, and the
+/// kernel can report that close a scheduling hair before the child's status
+/// is collectable — the stress run caught the gap (#374, iteration 3 of 25
+/// on a loaded 16-thread runner). 500 ms, the width the library gives its
+/// own post-reap drain, covers it.
+///
+/// Windows needs longer (#501). ConPTY never reports the terminal closing,
+/// so a program that has just exited ends the wait by the silence window,
+/// not an EOF, and the reap then has to cover everything between the
+/// program's last byte and its exit status: an MSYS `sh` under load took
+/// more than the 300 + 500 ms that left it, and was reported still running.
+const REAP_GRACE: Duration = if cfg!(windows) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_millis(500)
+};
 
 /// A file operand as a diagnostic should name it.
 fn name_of(path: &str) -> &str {

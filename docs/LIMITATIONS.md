@@ -162,6 +162,15 @@ CHANGELOG entry.
   `tests/conpty_probe.rs`, and the `windows` workflow re-runs it on demand.
   The `windows-latest` leg is a required check. This is decision 1 of
   [STABILITY.md](STABILITY.md).
+- **`termlens inspect` on Windows learns of an exit from the reap, not the
+  terminal.** ConPTY never reports the terminal closing, so a program that
+  has just exited ends inspect's wait by the silence window rather than an
+  EOF, and inspect then gives the reap 2 s (500 ms elsewhere) before its
+  trailer calls the program still running. A program whose exit status
+  lands later than that after its last output reads
+  `still running (killed on exit)`, and a program that really is still
+  running — any TUI — waits those 2 s before it is killed. The same holds
+  for `examples/inspect.rs` (#501).
 
 ## Process lifetime and Unicode
 
