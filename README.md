@@ -211,7 +211,7 @@ output back to the terminal stay testable.
 
 ## Command line and CI
 
-`cargo install termlens-cli` gives the same harness as a command:
+`cargo install termlens-cli --locked` gives the same harness as a command:
 
 ```sh
 termlens inspect --size 120x40 myapp     # run a program, print its screen

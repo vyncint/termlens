@@ -539,7 +539,7 @@ directory (see §9b).
 
 ## 9b. At a shell prompt, and in CI
 
-- `cargo install termlens-cli` gives the harness as a command: `termlens
+- `cargo install termlens-cli --locked` gives the harness as a command: `termlens
   inspect --size 120x40 myapp` prints what a program shows (`--ansi` for
   colour), `termlens diff old.snap new.snap.new` prints the cell diff of two
   saved screens and exits 1 if anything changed, `termlens render --svg
