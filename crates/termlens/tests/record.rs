@@ -19,6 +19,22 @@ fn emit(builder: termlens::TerminalBuilder, steps: &[&str]) -> termlens::Result<
     common::spawn_emit(builder.size(40, 6).timeout(Duration::from_secs(10)), steps)
 }
 
+/// The cast with its header's `"timestamp"` key taken out.
+///
+/// The key is the wall clock at *export* — `the_header_timestamp_is_the_export_time`
+/// pins that — so two exports of one recording are the same document except
+/// where a second boundary fell between them, which failed the file-equals-
+/// string comparison on a CI runner (#555). What that comparison is about is
+/// everything else.
+fn without_timestamp(cast: &str) -> String {
+    let (header, events) = cast.split_once('\n').expect("a header line, then events");
+    let Some((before, rest)) = header.split_once(", \"timestamp\": ") else {
+        return cast.to_owned();
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    format!("{before}{}\n{events}", &rest[digits..])
+}
+
 #[test]
 #[cfg_attr(
     windows,
@@ -135,7 +151,13 @@ fn the_asciicast_is_a_v2_header_and_one_full_repaint_per_frame() -> termlens::Re
     frames.write_asciicast(&path)?;
     let written = std::fs::read_to_string(&path)?;
     let _ = std::fs::remove_file(&path);
-    assert_eq!(written, cast);
+    // The same document, not the same second: `write_asciicast` exports again.
+    assert_ne!(
+        without_timestamp(&cast),
+        cast,
+        "the helper must remove something, or the comparison below proves nothing"
+    );
+    assert_eq!(without_timestamp(&written), without_timestamp(&cast));
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())
