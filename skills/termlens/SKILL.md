@@ -128,9 +128,14 @@ your test ── send(Key) · click · paste · resize ──▶ PTY     └─�
    `EndSynchronizedUpdate` — then a `wait_frame` timeout also shows the
    diff from the last frame it returned to the live screen.
 
-9. **Return `termlens::Result<()>` from the test and use `?`.** The
-   `Display` of every error carries the screen, so a failing wait prints
-   the grid the application was showing instead of `called unwrap() on Err`.
+9. **Return `termlens::Result<()>` from the test and use `?`.** Steps and
+   helpers then chain without an `.unwrap()` each, and a failed wait still
+   prints everything: the test harness shows the error's `Debug` form,
+   `Error: Timeout { waiting_for: "…", timeout: …, screen: Screen(…) }`,
+   with the description, any note and the grid. That is the same content
+   `unwrap()` would print, without the panic. The readable `Display` form
+   that §6 quotes is `err.to_string()`, for a test that asserts on an
+   error it expects.
 
 10. **Snapshot the `Screen`, not its text.** `insta::assert_snapshot!(screen)`
     records the header (`size: 80x24  cursor: 3,5` or `cursor: hidden`) and
@@ -396,13 +401,18 @@ fn snapshot_diff_and_mask() -> termlens::Result<()> {
 
 Every error's `Display` ends with the screen, under a header that says
 which screen it is (`--- screen at timeout ---`, `--- final screen ---`).
-Read the first line for the cause:
+Read the first line for the cause. A test that fails through `?` or
+`unwrap()` prints the `Debug` form instead, which carries the same text in
+another shape: `timed out after 5s while waiting for X` is
+`Timeout { waiting_for: "X", timeout: 5s, screen: Screen(…) }`, notes
+included in `X`, and `terminal closed (EOF) while waiting for X` is
+`Eof { waiting_for: "X", … }`. The grid follows inside `Screen(…)`:
 
 | First line says | Meaning | Do |
 |---|---|---|
 | `timed out after 5s while waiting for the screen predicate to hold` | the predicate never became true | look at the embedded grid; the text is usually spelled differently, on another row, or scrolled off (the note says how many rows scrolled) |
 | `… note: N rows have scrolled off the top` | the text went into history | assert with `full_text()` / `scrollback_text()` |
-| `… note: the application queried the terminal (^[[?u …) and received no answer` | the app is blocked on a probe termlens deliberately does not answer | the app needs a fallback; see the termlens README's Known limitations |
+| `… note: the application queried the terminal (^[[?u …) and received no answer` | the app is blocked on a probe termlens deliberately does not answer | the app needs a fallback; see [the questions termlens leaves unanswered](https://github.com/vyncint/termlens/blob/main/docs/LIMITATIONS.md#waits-frames-and-queries) |
 | `terminal closed (EOF) while waiting for …` | the app exited before the predicate held | check `wait_exit()` first, or the app crashed — the final screen shows why |
 | ``failed to send Char('x') to `…` (the child is gone (exit code 7) and the terminal is closed)`` | input was sent after the child exited | check `wait_exit()` first and inspect the screen embedded under `--- screen at the failed write ---` |
 | ``failed to send … to `…` (the application is not reading its input, and the PTY buffer is full — no progress in 5s)`` | the child is alive but has stopped draining terminal input | wait for the application to draw the state that is ready for input before typing |
