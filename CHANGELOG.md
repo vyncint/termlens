@@ -17,6 +17,27 @@ reads that marker.
 
 ## [Unreleased]
 
+### Fixed
+
+- A relative `TerminalBuilder::current_dir`, and so `termlens inspect --cwd
+  ./dir`, runs a relative program path such as `./myapp` inside that
+  directory. The directory was applied twice — the program was looked up
+  as `dir/./myapp` from inside `dir` — and the child died of a Rust runtime
+  abort it could not report (`fatal runtime error: assertion failed:
+  output.write(&bytes).is_ok()`), which inspect showed as `exited: killed
+  by signal: Aborted`. A relative directory is now taken from the test
+  process's own, as `std::process::Command` does. An absolute directory,
+  or a bare program name found on `PATH`, was never affected.
+- `termlens inspect --help` and `examples/inspect.rs --help` describe the
+  wait and the environment as they are: the silence window starts only
+  once the program has drawn something; the child also gets
+  `TERM=xterm-256color` and `SHELL=/bin/sh`; and `--inherit-env` still
+  replaces the caller's `TERM` unless `--env TERM=…` sets it. `--cwd`'s
+  argument is called `DIR` in the help and in its diagnostic, beside a
+  paragraph about the `PATH` variable, and the help says a relative program
+  path is found inside it. The CLI README's `--cwd` example ran a program
+  from the wrong directory and is corrected.
+
 ## [0.11.4] - 2026-09-27
 
 ### Changed

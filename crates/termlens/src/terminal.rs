@@ -1606,6 +1606,10 @@ impl TerminalBuilder {
     /// shell is needed. (Before 0.9 the default was the PTY layer's
     /// fallback, `$HOME`, while this text claimed otherwise: #215.)
     ///
+    /// A relative `dir` is relative to the test process's working directory,
+    /// as with `std::process::Command`, and a relative program path such as
+    /// `./myapp` is then found inside `dir`, where the child runs.
+    ///
     /// [`spawn`](Self::spawn) fails with [`Error::Spawn`] if `dir` is not
     /// an existing directory — running somewhere else instead would make
     /// a directory-sensitive test pass against the wrong tree.
@@ -1896,7 +1900,16 @@ impl TerminalBuilder {
         // rustdoc promised the opposite (#215). The test process's own
         // directory is the default `std::process::Command` gives.
         match &self.cwd {
-            Some(dir) => cmd.cwd(dir),
+            // A relative directory is the test process's, as with
+            // `std::process::Command`, so it is made absolute here. Handed
+            // over relative, the PTY layer joins it onto a relative program
+            // path and the child then enters it before exec: `dir/./prog`
+            // looked up from inside `dir`, which does not exist. The exec
+            // failure could not even be reported, because the PTY layer
+            // closes the pipe std reports it through, so the child died of
+            // a runtime abort instead. `absolute` fails only on an empty
+            // path or an unreadable cwd; the given path stands then.
+            Some(dir) => cmd.cwd(std::path::absolute(dir).unwrap_or_else(|_| dir.clone())),
             None => {
                 if let Ok(here) = std::env::current_dir() {
                     cmd.cwd(here);

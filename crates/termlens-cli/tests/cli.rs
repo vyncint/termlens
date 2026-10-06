@@ -1185,6 +1185,20 @@ fn render_empty_out_value_names_the_flag() -> termlens::Result<()> {
     Ok(())
 }
 
+/// `inspect --help` calls `--cwd`'s argument DIR, beside a paragraph about the
+/// `PATH` variable, so the diagnostic for a missing one says DIR as well.
+#[test]
+fn inspect_cwd_without_a_value_names_its_argument_dir() -> termlens::Result<()> {
+    use std::process::Command;
+    let out = Command::new(env!("CARGO_BIN_EXE_termlens"))
+        .args(["inspect", "--cwd"])
+        .output()?;
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr, "termlens: --cwd needs a DIR argument\n");
+    Ok(())
+}
+
 /// `render --out` exists because every caller was writing `> file.svg`, and
 /// a redirect truncates the file before termlens runs — so a failing render
 /// leaves an empty file where a bug report expected an image (#313).

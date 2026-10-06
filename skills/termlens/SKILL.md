@@ -561,7 +561,8 @@ directory (see §9b).
   trailer goes to stderr), an insta `.snap`, the grid a wait error leaves
   in a log — or the JSON the `serde` feature writes.
   `diff` and `render` read `-` as stdin (one operand of `diff` at most), and
-  `inspect --cwd DIR` runs the program somewhere other than here.
+  `inspect --cwd DIR` runs the program somewhere other than here; a
+  relative program path such as `./demo` is then found inside `DIR`.
 - In CI, set `TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens` on the
   test step and add `uses: vyncint/termlens/.github/actions/report@v0.11.4`
   with `if: failure()` after it: every screen a failing wait embedded, and

@@ -14,6 +14,83 @@ fn emit(steps: &[&str]) -> termlens::Result<Terminal> {
     common::spawn_emit(Terminal::builder().timeout(Duration::from_secs(10)), steps)
 }
 
+/// `to` relative to `from`, both absolute: `..` for each component of
+/// `from` past the common prefix, then the rest of `to`.
+#[cfg(unix)]
+fn relative_path(from: &std::path::Path, to: &std::path::Path) -> std::path::PathBuf {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut out = std::path::PathBuf::new();
+    for _ in common..from.len() {
+        out.push("..");
+    }
+    for part in &to[common..] {
+        out.push(part);
+    }
+    out
+}
+
+/// A relative `current_dir` is the test process's, and a relative program
+/// path then resolves inside it. Handed to the PTY layer relative, the
+/// directory was applied twice — joined onto `./emit`, then entered by the
+/// child before exec — so the exec looked for `dir/./emit` from inside
+/// `dir`, and the child died of a Rust runtime abort it could not report.
+/// Seen through `termlens inspect --cwd ./examples ./myapp`.
+///
+/// The scratch directory sits deeper than the test's own working directory
+/// so that the doubled path cannot land back on it: a directory as deep as
+/// this one, such as `target/debug` beside `crates/termlens`, maps onto
+/// itself and hid the bug. The test checks that before it trusts a pass.
+/// Unix-only, as the CLI's relative-program test is: the fixture is
+/// linked in, and the program path is spelled the Unix way.
+#[cfg(unix)]
+#[test]
+fn a_relative_current_dir_is_the_test_process_s_and_a_relative_program_resolves_in_it(
+) -> termlens::Result<()> {
+    let emit = common::fixture_bin("emit").canonicalize()?;
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("relative-cwd-{}", std::process::id()))
+        .join("a")
+        .join("b");
+    std::fs::create_dir_all(&scratch)?;
+    let scratch = scratch.canonicalize()?;
+    let link = scratch.join("emit");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&emit, &link)?;
+
+    let here = std::env::current_dir()?.canonicalize()?;
+    let relative = relative_path(&here, &scratch);
+    assert!(
+        relative.is_relative() && relative.join("emit").is_file(),
+        "{} from {}",
+        relative.display(),
+        here.display()
+    );
+    assert!(
+        !scratch.join(&relative).join("emit").exists(),
+        "applied twice, {} still finds the program, so this test could not fail",
+        relative.display()
+    );
+
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .current_dir(&relative)
+        .args(["--cwd", "--wait"])
+        .spawn("./emit")?;
+    // `--cwd` prints the directory as the kernel put the process there.
+    t.wait_until(|s| s.contains(scratch.to_str().expect("utf-8 scratch directory")))?;
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    let _ = std::fs::remove_dir_all(
+        scratch
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the scratch root"),
+    );
+    Ok(())
+}
+
 #[test]
 fn current_dir_runs_the_child_where_asked() -> termlens::Result<()> {
     // Canonicalize: /tmp is a symlink on macOS and `--cwd` reports the real
