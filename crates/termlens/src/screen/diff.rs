@@ -183,8 +183,22 @@ impl ScreenDiff {
 
     /// The rows with at least one changed cell, ascending, each once —
     /// so "the highlight moved from row 1 to row 2 and nothing else
-    /// changed" is `assert_eq!(diff.changed_rows().collect::<Vec<_>>(),
-    /// [1, 2])` rather than a dedup over [`cells`](Self::cells).
+    /// changed" is one assertion rather than a dedup over
+    /// [`cells`](Self::cells):
+    ///
+    /// ```
+    /// # fn main() -> termlens::Result<()> {
+    /// use termlens::Screen;
+    ///
+    /// let menu = "size: 10x3  cursor: 0,0\nitem a\nitem b\nitem c\n\nstyles:\n";
+    /// let before = Screen::parse(&format!("{menu}1: 0-5 reverse"))?;
+    /// let after = Screen::parse(&format!("{menu}2: 0-5 reverse"))?;
+    ///
+    /// let diff = before.diff(&after);
+    /// assert_eq!(diff.changed_rows().collect::<Vec<_>>(), [1, 2]);
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// Within the overlap of the two grids, like `cells`; a size or cursor
     /// change alone leaves this empty while [`is_empty`](Self::is_empty)
@@ -198,7 +212,25 @@ impl ScreenDiff {
     /// writes (`(none)` for an all-default row), ascending by row. A row
     /// whose text changed under unchanged styles is not listed; a row
     /// whose styles changed under unchanged text is, since a changed
-    /// style is a changed cell.
+    /// style is a changed cell. The highlight from
+    /// [`changed_rows`](Self::changed_rows) again, row by row:
+    ///
+    /// ```
+    /// # fn main() -> termlens::Result<()> {
+    /// use termlens::Screen;
+    ///
+    /// let menu = "size: 10x3  cursor: 0,0\nitem a\nitem b\nitem c\n\nstyles:\n";
+    /// let before = Screen::parse(&format!("{menu}1: 0-5 reverse"))?;
+    /// let after = Screen::parse(&format!("{menu}2: 0-5 reverse"))?;
+    ///
+    /// let diff = before.diff(&after);
+    /// assert_eq!(
+    ///     diff.style_changes().collect::<Vec<_>>(),
+    ///     [(1, "0-5 reverse", "(none)"), (2, "(none)", "0-5 reverse")]
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn style_changes(&self) -> impl Iterator<Item = (u16, &str, &str)> {
         self.style_changes
             .iter()
