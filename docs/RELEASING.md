@@ -78,8 +78,13 @@ gh run watch                                  # ubuntu, macos, windows × 5 shar
 #    action pin lives in three hand-maintained files, and releases bumped two
 #    of the three twice before the gate that catches it existed (#386);
 #    `check-report-pin.sh` fails whenever one disagrees with this number.
+#    Two more copies of the version have no gate: SKILL.md's "Written
+#    against **termlens X.Y.Z**" line, and the bug report form's version
+#    placeholder, which still said 0.5.0 through eleven later releases,
+#    0.6.0 to 0.11.1, until #432 caught it.
 $EDITOR Cargo.toml crates/termlens-cli/Cargo.toml
 $EDITOR README.md .github/actions/report/README.md skills/termlens/SKILL.md
+$EDITOR .github/ISSUE_TEMPLATE/bug_report.yml # placeholder: "X.Y.Z (or git SHA)"
 cargo check --workspace                       # refreshes Cargo.lock
 
 # 2. Move the CHANGELOG section. A `- **Breaking:**` bullet moves with it,

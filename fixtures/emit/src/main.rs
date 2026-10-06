@@ -16,9 +16,10 @@
 //! two writes says so with two steps. `--wait` at EOF exits 0: a harness that
 //! closed the terminal has finished with it.
 //!
-//! Fixture rules: **no timing but the explicit `--sleep` and the 2s of
-//! `--read-quiet`; std, plus `libc` on Unix for the terminal-mode, ioctl and
-//! signal steps and nothing else.** A dependency with behaviour of its own
+//! Fixture rules: **no timing but the explicit `--sleep`, the 2s of
+//! `--read-quiet`, and the 10 ms poll `--idle` waits for SIGTERM with; std,
+//! plus `libc` on Unix for the terminal-mode, ioctl and signal steps and
+//! nothing else.** A dependency with behaviour of its own
 //! would make this a second thing the suite tests; a clock would make it a
 //! second source of flakiness. Off Unix the terminal-mode steps are accepted
 //! and do nothing — the tests that need them are Unix-only for other reasons.
