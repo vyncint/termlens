@@ -120,6 +120,10 @@ cargo insta review            # inspect and accept/reject each diff
   block in `SKILL.md` is compiled against the crate by
   `.github/scripts/check-skill-snippets.sh`; run it after editing the file.
   `.claude/skills/termlens` links to it so Claude Code finds it here.
+- `tools/` — contributor tooling. `preflight.sh` runs §1's gate list in
+  order, one line per gate (`--fast` for fmt, clippy and the tests), and
+  each `*-selftest/run.sh` proves that a gate — or the runner itself — goes
+  red when it should, before a green run of it is trusted.
 - `.github/` — CI, commit policy enforcement, release automation.
 
 ## 3. Testing policy

@@ -852,10 +852,11 @@ But it is an implementation detail:
   reader (an open hyperlink label) still sees the same set. Rewriting
   before either parser is what keeps the primary and the attribute shadow
   the same shape, exactly as the SGR rewrite does. Scope is deliberately
-  narrow and stated in the README: G0–G3 designation, locking shifts on
-  G0/G1, SS2/SS3 for one character, one set translated, everything else
-  read as ASCII. `LS2`/`LS3` and `DECSC`/`DECRC` of charset state are not
-  modelled.
+  narrow and listed in `docs/LIMITATIONS.md`: G0–G3 designation, locking
+  shifts on G0/G1, SS2/SS3 for one character, two sets translated — DEC
+  Special Graphics and the UK set — and everything else read as ASCII.
+  `DECSC`/`DECRC` save and restore the charset state with the cursor;
+  `LS2`/`LS3` are not modelled.
 - vt100's tab stops are a hardcoded eight with no way to be told otherwise,
   so **the stop set is termlens's too**, and for the same reason: `HTS`,
   `TBC`, `CHT` and `CBT` reached `unhandled_escape`/`unhandled_csi` and were
@@ -875,9 +876,10 @@ But it is an implementation detail:
   wins, which is sound because `HT` draws nothing and only moves the cursor.
   Both parsers are fed the rewrite, so the attribute shadow keeps the same
   shape as the primary grid and the invariant `snapshot` debug-asserts still
-  holds. Scope is in the README: `TBC 0` and `TBC 3` only, back-tab to the
-  nearest stop strictly left of the cursor, and a resize that extends into
-  new columns with the default pattern while leaving existing stops alone.
+  holds. Scope is in `docs/LIMITATIONS.md`: `TBC 0` and `TBC 3` only,
+  back-tab to the nearest stop strictly left of the cursor, and a resize
+  that extends into new columns with the default pattern while leaving
+  existing stops alone.
 
 ### The attribute shadow
 
@@ -940,7 +942,10 @@ test overrides it) so escape output matches what the emulator speaks
 regardless of host. `env_clear()` blocks inheritance while keeping
 `env()`-set variables — order-independent, unlike `std::process::Command`,
 because a builder that silently drops your explicit `TERM` depending on
-call order is a trap.
+call order is a trap. `env_clear()` also pins `SHELL=/bin/sh` unless the
+test sets `SHELL` itself: the PTY layer fills `SHELL` from the host's login
+shell when it is absent, which put one machine-shaped value inside an
+environment `env_clear` promises is hermetic (#221).
 
 ## 6. Input encoding
 

@@ -364,8 +364,6 @@ jobs:
             audit
           }
 
-  # Single stable job name for branch protection: require this one check and
-  # matrix/job changes never break the required-checks configuration.
   # The skill for coding agents (skills/termlens/SKILL.md) is what an agent
   # copies from, so a recipe that no longer compiles teaches the wrong API to
   # everyone who installed it. Every Rust block in it is compiled against the
@@ -382,6 +380,8 @@ jobs:
           toolchain: stable
       - run: .github/scripts/check-skill-snippets.sh
 
+  # Single stable job name for branch protection: require this one check and
+  # matrix/job changes never break the required-checks configuration.
   required-green:
     name: required-green
     if: always()

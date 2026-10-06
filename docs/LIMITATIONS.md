@@ -112,8 +112,8 @@ CHANGELOG entry.
   reporting, the cursor's visibility and shape, the character sets — and
   leaves the alternate screen alone; attributes, margins, origin and insert
   modes and the keypad are not modelled.
-- **Two SGR style attributes are not modeled.** Overline (`SGR 53`) and double
-  underline (`SGR 21`) do not reach [`Style`](https://docs.rs/termlens/latest/termlens/struct.Style.html),
+- **Two SGR style attributes are not modelled.** Overline (`SGR 53`) and
+  double underline (`SGR 21`) do not reach [`Style`](https://docs.rs/termlens/latest/termlens/struct.Style.html),
   so `with_styles()` cannot distinguish those attributes from a plain cell.
   Blink reaches the ANSI, HTML and SVG renderings. The HTML one stops
   animating under `prefers-reduced-motion`; the SVG one cannot, since SMIL
@@ -180,4 +180,4 @@ CHANGELOG entry.
   release it after asserting — see the "instant-exit caveat" in
   [DESIGN.md](DESIGN.md).
 - Exotic grapheme clusters render as the vt100 crate renders them; the
-  unicode-torture fixture pins the current behavior.
+  unicode-torture fixture pins the current behaviour.
