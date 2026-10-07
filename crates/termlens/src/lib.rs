@@ -216,8 +216,9 @@ pub use insta;
 /// Given a [`Screen`] instead of a terminal, the macro records it as it is
 /// (`after =` is refused: an instant has nothing to wait for). Failures come
 /// from insta unchanged; review them with `cargo insta review`. The macro
-/// uses `?`, so the test returns [`Result`] — which every test should, since
-/// the `Display` of every error carries the screen.
+/// uses `?`, so the test returns [`Result`], as every test should: a failed
+/// wait then ends it with its description and the screen printed (the
+/// harness shows the error's `Debug` form, which carries both).
 ///
 /// `insta::assert_snapshot!(t.screen())` remains the low-level spelling for
 /// a screen already waited for by hand.

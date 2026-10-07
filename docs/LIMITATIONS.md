@@ -68,7 +68,9 @@ CHANGELOG entry.
   [DESIGN.md](DESIGN.md) §2.
 - Some questions stay deliberately unanswered — kitty's `CSI ? u`, DECRQSS,
   DA3, XTVERSION, the `OSC 4` palette query, `OSC 12`, `OSC 52` *reads*, and
-  the non-pixel `CSI … t` reports — because a guessed reply is worse than
+  the other `CSI … t` reports, such as `11 t` and `19 t` (`18 t`, the
+  text-area size, is answered, and the pixel sizes `14 t` and `16 t` are
+  once a cell size is declared) — because a guessed reply is worse than
   none. An application blocked on one is **named in the next timeout** rather
   than left to hang unexplained.
 

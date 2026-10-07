@@ -1,6 +1,7 @@
 TEXT             literal text — any argument that is not a step below
+                 and does not begin with `--`, which must be a step
 NL  CR           a newline / a carriage return
---text WORD      literal text that happens to spell a step name
+--text WORD      literal text that begins with `--`, a step name or not
 --esc BYTES      ESC followed by BYTES          `--esc '(0'`  is  ESC ( 0
 --csi BYTES      ESC [ followed by BYTES         `--csi '?2026h'`
 --raw SPEC       bytes with escapes: \e \n \r \t \a \\ and \xNN
