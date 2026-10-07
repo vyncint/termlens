@@ -8,7 +8,7 @@ cargo install termlens-cli --locked
 
 termlens inspect --size 120x40 htop          # run a program, print its screen
 termlens inspect --ansi ./target/debug/myapp # …in colour
-termlens inspect --cwd ./examples ./myapp    # …somewhere else
+termlens inspect --cwd ./examples ./demo     # …in ./examples, where ./demo is found
 termlens diff old.snap new.snap.new          # what changed, cell by cell; exit 1 if anything
 termlens render --svg --out failing.svg failing.snap.new
 ```
@@ -33,8 +33,10 @@ when the render fails. A shell redirect cannot promise that — `> file.svg`
 truncates the file before termlens runs, so a failed render leaves an empty
 image attached to the bug report.
 
-`inspect --cwd PATH` runs the program in `PATH`, which must already exist:
-the working directory is part of how a program is normally run, and
+`inspect --cwd DIR` runs the program in `DIR`, which must already exist. A
+relative `DIR` is taken from where termlens runs, and a relative program
+path such as `./demo` is found inside `DIR`, where the program runs. The
+working directory is part of how a program is normally run, and
 `TerminalBuilder::current_dir` had no way through to the command line.
 
 Exit codes: `0` ran; `diff` exits `1` when the screens differ; `2` means the

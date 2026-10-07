@@ -296,6 +296,8 @@ fn inspect_takes_its_deadline_and_silence_window_from_flags() {
         ),
         (&["--timeout"][..], "--timeout needs a SECONDS argument"),
         (&["--idle"][..], "--idle needs a MILLIS argument"),
+        // The help names `--cwd`'s argument DIR, so the diagnostic does too.
+        (&["--cwd"][..], "--cwd needs a DIR argument"),
     ] {
         let out = run_inspect(bin, args);
         assert_eq!(out.status.code(), Some(2), "{args:?}");
@@ -425,6 +427,42 @@ fn inspect_resolves_a_relative_program_path_from_its_working_directory() {
         !stdout.contains("---"),
         "the trailer belongs on stderr:\n{stdout}"
     );
+
+    // A *relative* `--cwd` is relative to where inspect was started, and the
+    // relative program resolves inside it, in the example and the command
+    // alike. It used to be applied twice, so `--cwd inspect-relative ./echo`
+    // looked for `inspect-relative/./echo` inside `inspect-relative`, and
+    // the child died of a runtime abort it could not report.
+    let parent = scratch
+        .parent()
+        .expect("the scratch directory has a parent");
+    for (who, program, lead) in [
+        ("example", bin.as_path(), None),
+        ("command", command_bin().as_path(), Some("inspect")),
+    ] {
+        let out = Command::new(program)
+            .current_dir(parent)
+            .args(lead)
+            .args([
+                "--cwd",
+                "inspect-relative",
+                "./echo",
+                "relative cwd resolved",
+            ])
+            .output()
+            .expect("failed to run inspect");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("relative cwd resolved"),
+            "{who}:\n{}",
+            both_streams(&out)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("--- exited: exit code 0 ---"),
+            "{who}: the program ran and exited:\n{}",
+            both_streams(&out)
+        );
+    }
 }
 
 /// A program whose exit status lands a second after its last byte is

@@ -8,9 +8,10 @@
 //! cargo run --example inspect -- --env NO_COLOR=1 my-app
 //! ```
 //!
-//! The wait ends on whichever comes first: the program exits, or its
-//! output has been silent for a window (`--idle`, 300ms by default) —
-//! bounded by the deadline (`--timeout`, five seconds by default). Five
+//! The wait ends on whichever comes first: the program exits, or, once it
+//! has drawn something, its output has been silent for a window (`--idle`,
+//! 300ms by default) — bounded by the deadline (`--timeout`, five seconds
+//! by default). Five
 //! seconds is what a test suite wants, where a deadline exists to turn a
 //! hang into a readable failure; a person at a terminal pointing this at an
 //! application that loads a large file or compiles before it draws is
@@ -49,17 +50,21 @@ const REAP_GRACE: Duration = if cfg!(windows) {
 /// 0, a missing program prints it to stderr and exits 2 (#229).
 const USAGE: &str = "\
 usage: inspect [--size COLSxROWS] [--timeout SECONDS] [--idle MILLIS]
-               [--cwd PATH] [--inherit-env] [--ansi]
+               [--cwd DIR] [--inherit-env] [--ansi]
                [--env KEY=VALUE]... <program> [args…]
 
 Runs <program> in an 80x24 pseudo-terminal (or --size) and prints the
 rendered screen. The wait ends on whichever comes first: the program
-exits, or its output has been silent for --idle milliseconds (default
-300), bounded by --timeout (default 5 seconds); a program still running
-when it ends is killed.
-The child environment is cleared by default except for PATH; --inherit-env
-keeps the caller's environment, and repeatable --env sets selected values.
---cwd runs the program in PATH, which must be an existing directory.
+exits, or, once it has drawn something, its output has been silent for
+--idle milliseconds (default 300). --timeout (default 5 seconds) bounds
+both, and a program still running when the wait ends is killed.
+The child environment is cleared except for PATH, and gets
+TERM=xterm-256color and SHELL=/bin/sh; --inherit-env keeps the caller's
+environment instead, but for TERM, and repeatable --env sets selected
+values, TERM included.
+--cwd runs the program in DIR, which must be an existing directory. A
+relative DIR is taken from where inspect runs, and a relative program
+path such as ./myapp is then found inside DIR.
 --ansi paints the screen in colour on a terminal.
 Every option that takes a value also accepts it attached with `=`, as in
 --size=100x30 or --env=KEY=VALUE.
@@ -187,7 +192,7 @@ fn main() -> ExitCode {
             // names the flag the user typed; the builder refuses it too, with
             // a message about `current_dir` the caller never wrote (#312).
             "--cwd" => {
-                take(&mut args, "--cwd", "PATH", "/tmp", |s| Some(s.to_owned())).and_then(|dir| {
+                take(&mut args, "--cwd", "DIR", "/tmp", |s| Some(s.to_owned())).and_then(|dir| {
                     if Path::new(&dir).is_dir() {
                         cwd = Some(dir);
                         Ok(())
