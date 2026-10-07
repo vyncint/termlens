@@ -17,6 +17,34 @@ reads that marker.
 
 ## [Unreleased]
 
+## [0.11.5] - 2026-10-07
+
+### Changed
+
+- The documentation was reviewed against the code, and each correction was
+  checked by reading the code or running it:
+  - `README.md` and the skill recommend `cargo install termlens-cli
+    --locked`, the dependency set a release is tested with (#552), and
+    `AGENTS.md`'s layout lists the `termlens-cli` crate (#553).
+  - The skill's rule 9 gives the true reason to return
+    `termlens::Result`: a failing test prints the error's `Debug` form,
+    screen included, as `unwrap()` would. §6 now reads that form as well
+    as `Display`, and its unanswered-probe row links to
+    `docs/LIMITATIONS.md` (#559). Rule 10, §6 and the mask row no longer
+    say that `format!("{:?}")` equals `Display`, that every error carries
+    a screen, or that `mask_matching` matches across a soft wrap (#562).
+  - The rustdoc gains runnable examples for `Screen::mask_matching` (#551)
+    and `ScreenDiff::changed_rows` and `style_changes` (#560). On docs.rs,
+    `Unsupported` no longer shows `Clipboard`'s summary, and `Clipboard`
+    has one of its own (#562).
+  - `docs/DESIGN.md`, `CONTRIBUTING.md`, `docs/RELEASING.md`,
+    `docs/LIMITATIONS.md` and `SECURITY.md` now match the code. They cover
+    the two translated character sets and `DECSC` saving the charset state,
+    the `SHELL=/bin/sh` pin under `env_clear`, the `tools/` directory, and
+    the release checklist's two ungated copies of the version (#558). They
+    also cover the unbounded writer queue, which `CSI … t` reports are
+    answered, and Dependabot's carve-out from the bot-identity rule (#562).
+
 ### Fixed
 
 - A relative `TerminalBuilder::current_dir`, and so `termlens inspect --cwd
@@ -2234,7 +2262,8 @@ in the worst of them — hung itself.
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [`Unsupported`]: https://docs.rs/termlens/0.11.0/termlens/struct.Unsupported.html
 
-[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.4...HEAD
+[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.5...HEAD
+[0.11.5]: https://github.com/vyncint/termlens/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/vyncint/termlens/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/vyncint/termlens/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/vyncint/termlens/compare/v0.11.1...v0.11.2
