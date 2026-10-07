@@ -171,8 +171,10 @@ insta::assert_snapshot!(s.mask_matches(&regex::Regex::new(r"\d\d:\d\d:\d\d")?, '
 `Screen::diff(&other)` reports what changed between two screens cell by
 cell — `changed_rows()`, `style_changes()`, and a rendering of only the rows
 that changed; `Screen::parse` reads a saved snapshot back, so the text
-termlens prints — an insta `.snap`, the block a wait error leaves in a log,
-what `termlens inspect` writes to stdout — is also its input format.
+termlens prints — the block a wait error leaves in a log, what `termlens
+inspect` writes to stdout, the body of an insta `.snap` below its `---`
+header — is also its input format. The `termlens` command reads a whole
+`.snap`, header included.
 
 ## What a test can see
 
@@ -322,7 +324,7 @@ The short list; the full one, with the reason behind each entry, is
 Agents write terminal tests badly in predictable ways — a `sleep` where a
 wait belongs, a snapshot taken mid-repaint, `(row, col)` handed to a method
 that wants `(col, row)`. [`skills/termlens/SKILL.md`](https://github.com/vyncint/termlens/blob/main/skills/termlens/SKILL.md)
-is the counter to each: the model, the rules, the API on one page and four
+is the counter to each: the model, the rules, the API on one page and five
 recipes. Every Rust block in it is compiled against the crate in CI.
 
 ```sh

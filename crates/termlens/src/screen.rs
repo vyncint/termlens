@@ -278,8 +278,6 @@ pub enum CursorShape {
     Bar,
 }
 
-/// What an application copied with `OSC 52`, as observed at one snapshot.
-///
 /// What the emulator did not implement while producing a [`Screen`] — the
 /// view [`Screen::unsupported`] returns.
 ///
@@ -399,6 +397,8 @@ impl PartialEq<&[&str]> for Unsupported<'_> {
     }
 }
 
+/// What an application copied with `OSC 52`, as observed at one snapshot.
+///
 /// Read it from a snapshot via [`Screen::clipboard`]. A toast on screen
 /// proves the copy path ran; this proves the payload, which is usually the
 /// behaviour actually under test.
@@ -1752,8 +1752,6 @@ impl Screen {
     /// With the `regex` feature, `mask_matches` takes a pattern instead; the
     /// two share one engine.
     ///
-    /// # Examples
-    ///
     /// Mask a clock so a snapshot stops changing on every run. The masked
     /// time keeps its eight columns, so nothing after it moves:
     ///
@@ -2350,12 +2348,12 @@ impl fmt::Display for ScreenWithStyles<'_> {
 }
 
 impl fmt::Debug for Screen {
-    /// Deliberately compact: the header plus the rendered text, exactly like
-    /// [`Display`](fmt::Display). The derived alternative — thousands of
-    /// [`Cell`]s on one line — makes `Err(Error::Timeout { .. })` in a
-    /// `Result`-returning test unreadable (and long enough that CI log
-    /// pipelines drop the line entirely). Use [`Screen::cell`] to inspect
-    /// individual cells.
+    /// Deliberately compact: the header plus the rendered text, as
+    /// [`Display`](fmt::Display) writes them, inside `Screen(…)`. The
+    /// derived alternative — thousands of [`Cell`]s on one line — makes
+    /// `Err(Error::Timeout { .. })` in a `Result`-returning test unreadable
+    /// (and long enough that CI log pipelines drop the line entirely). Use
+    /// [`Screen::cell`] to inspect individual cells.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Screen({self})")
     }

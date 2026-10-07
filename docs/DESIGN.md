@@ -120,12 +120,13 @@ released — the state lock and the writer lock are never held together.
 
 **Nothing writes to the child on a thread that cannot afford to wait.**
 Every write — query replies and typed input alike — is handed to a
-dedicated writer thread over a bounded queue. Typed input carries an
-acknowledgement channel, so the test thread applies the terminal's
-deadline and returns `Error::Write` with the screen ("the application is
-not reading its input") instead of blocking forever; there is no portable
-way to ask whether a PTY write *would* block, since `POLLOUT` on a macOS
-master reports writable and then blocks anyway.
+dedicated writer thread over an unbounded queue, capped on reply bytes
+(below). Typed input carries an acknowledgement channel, so the test
+thread applies the terminal's deadline and returns `Error::Write` with the
+screen ("the application is not reading its input") instead of blocking
+forever; there is no portable way to ask whether a PTY write *would*
+block, since `POLLOUT` on a macOS master reports writable and then blocks
+anyway.
 
 Which failures are errors and which are panics is a deliberate split, not
 an accident of history. `send`/`send_str`/`paste`/`click`/`drag`/`scroll`
@@ -193,11 +194,12 @@ the explicit "unsupported" reply, which is the half that matters: a
 capability we guessed at would be believed, while a refusal lets the
 application decide instead of wait.
 
-Whatever remains unanswered (DECRQSS, the non-pixel `CSI t` reports, …) is
-recorded, and the next wait timeout names it: "the application queried
-the terminal (`^[[14t`) and received no answer" — a hang becomes a
-diagnosis. `answer_queries(false)` mutes the responder for tests that
-need a silent terminal; the diagnosis still works.
+Whatever remains unanswered (DECRQSS, the `CSI t` reports other than the
+text-area and pixel sizes, …) is recorded, and the next wait timeout names
+it: "the application queried the terminal (`^[[14t`) and received no
+answer" — a hang becomes a diagnosis. `answer_queries(false)` mutes the
+responder for tests that need a silent terminal; the diagnosis still
+works.
 
 ### Windows: ConPTY renders, and that decides what is claimed
 
@@ -229,9 +231,10 @@ creates it without `PSEUDOCONSOLE_PASSTHROUGH_MODE`. Measured with
   signal instead (`EXIT_CLOSES_THE_TERMINAL`, `ExitWatch`).
 
 Each test a row above makes impossible is `#[cfg_attr(windows, ignore)]`
-with that row as its reason; the README carries the user-facing list. The
-`windows` workflow re-runs the probe and the whole suite on demand, and the
-`windows-check` gate keeps the build compiling from a Linux runner.
+with that row as its reason; `docs/LIMITATIONS.md` carries the user-facing
+list. The `windows` workflow re-runs the probe and the whole suite on
+demand, and the `windows-check` gate keeps the build compiling from a
+Linux runner.
 
 ## 2. Wait semantics
 
@@ -806,7 +809,7 @@ there must be `rows` of them; a file that does not hold together is an
 error, never a screen that panics on its first `cell()`.
 
 The compatibility corpus under `crates/termlens/tests/compat/` holds both
-formats as written by each published release, and `tests/compat.rs`
+formats as written by each release since 0.10.1, and `tests/compat.rs`
 holds every later release to reading them (#327).
 
 ### Masks

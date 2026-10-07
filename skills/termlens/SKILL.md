@@ -142,9 +142,10 @@ your test ── send(Key) · click · paste · resize ──▶ PTY     └─�
     the grid; `screen.with_styles()` adds a `styles:` block that catches a
     colour regression. The one-liner that gets all three decisions right —
     wait, settle, styles — is `termlens::assert_screen_snapshot!(t, after =
-    |s| s.contains("Ready"))`. `.text()` drops the header and
-    `format!("{:?}")` is the same as `Display`. Review changes with `cargo
-    insta review`; never blind-accept with `INSTA_UPDATE=always`.
+    |s| s.contains("Ready"))`. `.text()` drops the header, and
+    `format!("{:?}")` wraps the same text in `Screen(…)`, which is not a
+    saved screen. Review changes with `cargo insta review`; never
+    blind-accept with `INSTA_UPDATE=always`.
 
 11. **The environment is hermetic by default — set what the app reads.**
     Under `env_clear()` (which `bin!` applies) the child sees only
@@ -399,8 +400,10 @@ fn snapshot_diff_and_mask() -> termlens::Result<()> {
 
 ## 6. Reading a failure
 
-Every error's `Display` ends with the screen, under a header that says
-which screen it is (`--- screen at timeout ---`, `--- final screen ---`).
+A wait error's `Display` (a timeout, an EOF, an emulator failure) and a
+failed write's end with the screen, under a header that says which screen
+it is (`--- screen at timeout ---`, `--- final screen ---`); a spawn, size
+or input error carries none.
 Read the first line for the cause. A test that fails through `?` or
 `unwrap()` prints the `Debug` form instead, which carries the same text in
 another shape: `timed out after 5s while waiting for X` is
@@ -487,7 +490,7 @@ from_r, to_c, to_r)`, `scroll(col, row, Scroll::Down)`, `resize(cols, rows)`,
 | `unsupported()` / `insert_mode()` | an `Unsupported` view of the sequences the emulator did not implement (`^[[20h`…) — `is_empty()`, `contains("^[[5m")`, `iter()`, `overflow()`, and `assert_eq!(s.unsupported(), ["^[[59m"])` pins it — so a plausible grid can be told from a right one / IRM left on |
 | `with_styles()` | `ScreenWithStyles`, a `Display` with a `styles:` block; snapshot this to catch colour regressions |
 | `diff(&other)` | `ScreenDiff`: `is_empty()`, `cells()`, `changed_rows()`, `style_changes()`, and a `Display` of only the rows that changed |
-| `mask_rect(cols, rows)` / `mask_matching(literal, fill)` / `mask_cells(pred)` | a new `Screen` with those cells replaced, styles and columns intact. `mask_matching` is a literal (rows included — it spans a wrap the way `find_all` does); `mask_cells` blanks by predicate |
+| `mask_rect(cols, rows)` / `mask_matching(literal, fill)` / `mask_cells(pred)` | a new `Screen` with those cells replaced, styles and columns intact. `mask_matching` is a literal (a needle with `\n` spans rows, as `find_all`'s does; a value split by a soft wrap is two rows and is not matched); `mask_cells` blanks by predicate |
 | `to_ansi()` / `to_svg()` / `to_html()` | renderings a person can see — the SVG carries `role="img"` and a `<title>` naming its size and the app's title; `Screen::parse(text)` reads the text format back |
 
 **Style** (`Copy`, public fields): `fg`, `bg` (`Color::Default` /

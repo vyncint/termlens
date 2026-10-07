@@ -3446,8 +3446,8 @@ impl Terminal {
     /// ```
     ///
     /// (Unix in the example, because `wait_frame` is: ConPTY closes a DEC
-    /// 2026 bracket before the content it wrapped — see the README's Windows
-    /// note.)
+    /// 2026 bracket before the content it wrapped — see the Windows section
+    /// of `docs/LIMITATIONS.md`.)
     ///
     /// # Errors
     ///

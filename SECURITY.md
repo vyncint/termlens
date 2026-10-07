@@ -32,8 +32,10 @@ What the project does continuously, enforced by required CI on every change:
 - **Release integrity**: `v*` tags are ruleset-protected (admin-only),
   releases re-run the full CI gates, and publishing prefers crates.io
   Trusted Publishing (short-lived OIDC tokens) over stored secrets.
-- **Provenance**: every commit requires a DCO sign-off from a human author
-  of record; bot-authored commits are rejected by CI.
+- **Provenance**: every commit requires a DCO sign-off, and CI rejects
+  bot-authored commits except Dependabot's, which is exempt from the
+  identity rule only: its messages are checked like any other
+  (CONTRIBUTING.md, AI tooling policy).
 
 Resource-exhaustion notes for the paranoid: every buffer a child's output
 can reach is bounded, and a hostile child can at worst waste its own test's
