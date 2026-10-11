@@ -17,6 +17,25 @@ reads that marker.
 
 ## [Unreleased]
 
+### Fixed
+
+- On Unix, a program that exists but cannot be executed now fails
+  `TerminalBuilder::spawn` with an `Error::Spawn` that says why, and
+  `termlens inspect` exits 2 with that message (#563). Typical causes are a
+  missing `#!` interpreter, a missing dynamic loader, and an argument list
+  over the kernel's limit. The message names the interpreter, with any `\r`
+  that CRLF line endings left on it shown escaped. `spawn` used to return
+  `Ok` with a child already killed by SIGABRT (`fatal runtime error:
+  assertion failed: output.write(&bytes).is_ok()`), which inspect showed as
+  `exited: killed by signal: Aborted`. portable-pty closed the pipe std
+  reports a failed exec through, so on Unix termlens now starts the child
+  itself. Program resolution, the environment, the session and the
+  signals are unchanged, and the child still inherits no descriptor besides
+  its terminal.
+- The second writer termlens opens on the PTY master is close-on-exec. A
+  process the test started while a terminal was alive inherited it before,
+  which kept the master open in a process unrelated to the terminal.
+
 ## [0.11.5] - 2026-10-07
 
 ### Changed

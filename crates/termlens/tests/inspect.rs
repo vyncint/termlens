@@ -775,6 +775,34 @@ fn inspect_example_and_command_agree_on_exit_codes_when_inspect_cannot_run() {
     }
 }
 
+/// A program that exists but cannot be executed is inspect failing to run
+/// it, exit 2 with the missing interpreter named, in both. Both used to
+/// paint a screen for a child killed by SIGABRT and exit 0 (#563).
+#[cfg(unix)]
+#[test]
+fn inspect_example_and_command_agree_that_a_missing_interpreter_is_a_spawn_failure() {
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("inspect-exec-failure-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).expect("scratch directory");
+    let script = scratch.join("missing-interpreter");
+    common::write_script(&script, "#!/nonexistent/interpreter\n");
+    let script = script.to_str().expect("utf-8 scratch directory");
+    let (example, command) = run_both(&["--size", "40x3", script]);
+    for (who, out) in [("example", &example), ("command", &command)] {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{who}: {stderr}");
+        assert!(
+            out.stdout.is_empty(),
+            "{who} painted a screen for a child that never ran"
+        );
+        assert!(
+            stderr.contains("failed to spawn") && stderr.contains("/nonexistent/interpreter"),
+            "{who}: {stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
 /// `--help` and `--version` succeed on stdout with nothing on stderr, and
 /// `--version` is the one line both print. The usage text itself is not
 /// compared: it names the tool, and the two legitimately differ (#453).

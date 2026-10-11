@@ -112,6 +112,7 @@ mod error;
 mod graphics;
 mod keys;
 mod screen;
+mod spawn;
 mod terminal;
 mod utf8;
 mod wait;

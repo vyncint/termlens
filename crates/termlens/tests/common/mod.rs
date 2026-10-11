@@ -26,6 +26,23 @@ pub(crate) fn emit(steps: &[&str]) -> termlens::Result<Terminal> {
     spawn_emit(Terminal::builder(), steps)
 }
 
+/// Write an executable script at `path` through `sh`, so that this process
+/// never holds the file open for writing. A test binary forks all the time,
+/// and a child forked while the file was open keeps a copy of the
+/// descriptor until it execs. Running the script in that window fails with
+/// ETXTBSY, "Text file busy", which is never the failure under test.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(crate) fn write_script(path: &std::path::Path, contents: &str) {
+    let status = Command::new("sh")
+        .args(["-c", r#"printf '%s' "$2" > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .arg(contents)
+        .status()
+        .expect("sh runs");
+    assert!(status.success(), "writing {} failed", path.display());
+}
+
 /// Fixture names already rebuilt by this test process.
 static BUILT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 

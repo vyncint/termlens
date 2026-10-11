@@ -91,6 +91,66 @@ fn a_relative_current_dir_is_the_test_process_s_and_a_relative_program_resolves_
     Ok(())
 }
 
+/// A program that exists but cannot be executed is a spawn error naming what
+/// is missing, not a child dead of SIGABRT (#563). The PTY layer closed the
+/// pipe std reports a failed exec through, so the child aborted writing to
+/// it and `spawn` returned `Ok`. The usual culprit is the interpreter a
+/// script's `#!` line names. The sneakiest is the `\r` that CRLF line
+/// endings leave on it, which the message shows escaped.
+#[cfg(unix)]
+#[test]
+fn a_script_whose_interpreter_is_missing_fails_to_spawn_and_names_it() -> termlens::Result<()> {
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("exec-failure-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    for (name, script, culprit) in [
+        (
+            "missing",
+            "#!/nonexistent/interpreter\necho unreachable\n",
+            r#""/nonexistent/interpreter""#,
+        ),
+        (
+            "crlf",
+            "#!/bin/sh\r\necho unreachable\r\n",
+            r#""/bin/sh\r""#,
+        ),
+    ] {
+        let path = scratch.join(name);
+        common::write_script(&path, script);
+        let err = Terminal::builder()
+            .timeout(Duration::from_secs(10))
+            .spawn(&path)
+            .expect_err("a script whose interpreter does not exist cannot run");
+        let Error::Spawn { reason, .. } = &err else {
+            panic!("{name}: not a spawn error: {err}");
+        };
+        assert!(
+            reason.contains(culprit) && reason.contains("does not exist"),
+            "{name}: the message must name the interpreter: {reason}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    Ok(())
+}
+
+/// Any exec the kernel refuses is a spawn error carrying its reason, not
+/// only a missing interpreter. Every Unix refuses an argument this long,
+/// with E2BIG. The error's command line holds the argument, so only the
+/// reason is printed.
+#[cfg(unix)]
+#[test]
+fn an_argument_the_kernel_refuses_is_a_spawn_error_with_its_reason() {
+    let err = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args(["-c", "true", &"x".repeat(2 << 20)])
+        .spawn("sh")
+        .expect_err("a 2 MiB argument is past every Unix's limit");
+    let Error::Spawn { reason, .. } = &err else {
+        panic!("not a spawn error");
+    };
+    assert!(reason.contains("Argument list too long"), "{reason}");
+}
+
 #[test]
 fn current_dir_runs_the_child_where_asked() -> termlens::Result<()> {
     // Canonicalize: /tmp is a symlink on macOS and `--cwd` reports the real
