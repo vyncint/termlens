@@ -134,10 +134,11 @@ cargo insta review            # inspect and accept/reject each diff
   `wait_idle`) must pass the **stress workflow** (`stress.yml` — the suite in
   a 100-iteration loop on Ubuntu, macOS and Windows, sharded across five
   `--test-threads` values). Trigger it from the Actions tab on your branch,
-  or ask a maintainer to. So must a test that *adds* PTY spawns: three of
-  the tests added on one day in September 2026 passed locally and went red
-  only under stress, and stress on `main` is what told one author's flake
-  apart from an inherited one.
+  or ask a maintainer to. So must a change to how the child is started
+  (`spawn.rs`), which every test goes through, and a test that *adds* PTY
+  spawns: three of the tests added on one day in September 2026 passed
+  locally and went red only under stress, and stress on `main` is what told
+  one author's flake apart from an inherited one.
 - **No `sleep` as a wait.** A sleep is either too short and flaky under
   load, or too long and slow on every run, and it names nothing: when it
   fails, the log says only that time passed. Wait on what you mean —

@@ -8,6 +8,7 @@ is the full contributor document and wins wherever the two disagree.
 ## Layout
 
 - `crates/termlens/` — the published library. `terminal.rs` is the runtime,
+  `spawn.rs` starts the child (on Unix by itself, see DESIGN §1),
   `screen.rs` the snapshot types, `emu/` the VT emulation behind a small
   internal trait, `graphics.rs` the inline-image capture and decoder.
 - `crates/termlens-cli/` — the `termlens` command (`inspect`, `diff`,
@@ -17,7 +18,8 @@ is the full contributor document and wins wherever the two disagree.
 - `fixtures/` — deterministic terminal programs the integration suite spawns
   in real PTYs. Never published; `publish = false`.
 - `docs/DESIGN.md` — four layers, the wait-semantics contract, the snapshot
-  format. **Read it before touching `wait.rs`, `terminal.rs`, or `emu/`.**
+  format. **Read it before touching `wait.rs`, `terminal.rs`, `spawn.rs`,
+  or `emu/`.**
 
 ## Build and test
 
