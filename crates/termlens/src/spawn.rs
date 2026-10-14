@@ -337,6 +337,9 @@ mod unix {
 mod tests {
     use std::ffi::OsString;
     use std::io::{Read, Write};
+    use std::sync::{mpsc, Arc, Mutex, PoisonError};
+    use std::thread;
+    use std::time::Duration;
 
     use portable_pty::{CommandBuilder, PtySize};
 
@@ -360,8 +363,45 @@ echo probe-finished
 read _"#;
 
     /// Run [`PROBE`] in a fresh PTY, through termlens's own spawn or through
-    /// the PTY layer's, and return what it printed.
+    /// the PTY layer's, and return what it printed. The probe runs on a
+    /// thread of its own under a deadline, so a probe that hangs fails here,
+    /// naming the step it hung in and what it had printed, instead of
+    /// stalling the suite until the CI job's limit.
     fn probe(through_termlens: bool) -> String {
+        let progress = Arc::new(Mutex::new(("starting", Vec::new())));
+        let (done, outcome) = mpsc::channel();
+        let shared = Arc::clone(&progress);
+        thread::spawn(move || {
+            let _ = done.send(run_probe(through_termlens, &shared));
+        });
+        let path = if through_termlens {
+            "termlens's spawn"
+        } else {
+            "the PTY layer's spawn"
+        };
+        match outcome.recv_timeout(Duration::from_secs(60)) {
+            Ok(printed) => printed,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let (step, seen) = &*progress.lock().unwrap_or_else(PoisonError::into_inner);
+                panic!(
+                    "the probe through {path} hung while {step}, having printed:\n{}",
+                    String::from_utf8_lossy(seen)
+                )
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the probe through {path} failed; its panic is above")
+            }
+        }
+    }
+
+    type Progress = Arc<Mutex<(&'static str, Vec<u8>)>>;
+
+    fn step(progress: &Progress, now: &'static str) {
+        progress.lock().unwrap_or_else(PoisonError::into_inner).0 = now;
+    }
+
+    fn run_probe(through_termlens: bool, progress: &Progress) -> String {
+        step(progress, "opening the PTY");
         let (pair, lifecycle) = crate::terminal::open_pty(PtySize {
             rows: 80,
             cols: 300,
@@ -378,6 +418,7 @@ read _"#;
         }
         let mut reader = pair.master.try_clone_reader().expect("a reader");
         let mut writer = pair.master.take_writer().expect("a writer");
+        step(progress, "spawning sh");
         let mut child = if through_termlens {
             super::unix::spawn(pair.master.as_ref(), &cmd, false, &env)
                 .expect("termlens's own spawn takes this command")
@@ -390,6 +431,7 @@ read _"#;
 
         // Read up to the marker's line ending, not just the marker: a read
         // that stops between the two leaves one side a line shorter.
+        step(progress, "reading what sh printed");
         let mut seen = Vec::new();
         let mut chunk = [0; 4096];
         while !String::from_utf8_lossy(&seen)
@@ -403,11 +445,26 @@ read _"#;
                 String::from_utf8_lossy(&seen)
             );
             seen.extend_from_slice(&chunk[..read]);
+            progress
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .1
+                .extend_from_slice(&chunk[..read]);
         }
+        step(progress, "answering sh's read");
         writer.write_all(b"\n").expect("the PTY writes");
+        step(progress, "waiting for sh to exit");
         child.wait().expect("sh exits");
-        let _teardown = crate::terminal::pty_lifecycle_guard();
+        // Every handle on the master closes under the lifecycle lock, as a
+        // Terminal's do: on macOS the last close revokes the device, and a
+        // revoke landing after the next probe has opened the same, recycled
+        // device would hang up that probe's session.
+        step(progress, "closing the PTY");
+        let teardown = crate::terminal::pty_lifecycle_guard();
+        drop(writer);
+        drop(reader);
         drop(pair.master);
+        drop(teardown);
         String::from_utf8_lossy(&seen).replace("\r\n", "\n")
     }
 
