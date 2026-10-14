@@ -17,6 +17,8 @@ reads that marker.
 
 ## [Unreleased]
 
+## [0.11.6] - 2026-10-14
+
 ### Fixed
 
 - On Unix, a program that exists but cannot be executed now fails
@@ -2287,7 +2289,8 @@ in the worst of them — hung itself.
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [`Unsupported`]: https://docs.rs/termlens/0.11.0/termlens/struct.Unsupported.html
 
-[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.5...HEAD
+[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.6...HEAD
+[0.11.6]: https://github.com/vyncint/termlens/compare/v0.11.5...v0.11.6
 [0.11.5]: https://github.com/vyncint/termlens/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/vyncint/termlens/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/vyncint/termlens/compare/v0.11.2...v0.11.3
