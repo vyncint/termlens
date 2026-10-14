@@ -388,9 +388,14 @@ read _"#;
         drop(pair.slave);
         drop(lifecycle);
 
+        // Read up to the marker's line ending, not just the marker: a read
+        // that stops between the two leaves one side a line shorter.
         let mut seen = Vec::new();
         let mut chunk = [0; 4096];
-        while !String::from_utf8_lossy(&seen).contains("probe-finished") {
+        while !String::from_utf8_lossy(&seen)
+            .replace("\r\n", "\n")
+            .contains("probe-finished\n")
+        {
             let read = reader.read(&mut chunk).expect("the PTY reads");
             assert!(
                 read > 0,
