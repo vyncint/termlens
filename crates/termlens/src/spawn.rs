@@ -364,40 +364,76 @@ read _"#;
 
     /// Run [`PROBE`] in a fresh PTY, through termlens's own spawn or through
     /// the PTY layer's, and return what it printed. The probe runs on a
-    /// thread of its own under a deadline, so a probe that hangs fails here,
-    /// naming the step it hung in and what it had printed, instead of
-    /// stalling the suite until the CI job's limit.
-    fn probe(through_termlens: bool) -> String {
-        let progress = Arc::new(Mutex::new(("starting", Vec::new())));
+    /// thread of its own under a deadline, so a probe that hangs fails,
+    /// naming the step it hung in, what it had printed, and how the shell and
+    /// the terminal stood, instead of stalling the suite until the CI job's
+    /// limit.
+    fn probe(through_termlens: bool) -> Result<String, String> {
+        let progress = Arc::new(Mutex::new(Probe::default()));
         let (done, outcome) = mpsc::channel();
         let shared = Arc::clone(&progress);
         thread::spawn(move || {
             let _ = done.send(run_probe(through_termlens, &shared));
         });
-        let path = if through_termlens {
-            "termlens's spawn"
-        } else {
-            "the PTY layer's spawn"
-        };
         match outcome.recv_timeout(Duration::from_secs(60)) {
-            Ok(printed) => printed,
+            Ok(printed) => Ok(printed),
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let (step, seen) = &*progress.lock().unwrap_or_else(PoisonError::into_inner);
-                panic!(
-                    "the probe through {path} hung while {step}, having printed:\n{}",
-                    String::from_utf8_lossy(seen)
-                )
+                let state = progress.lock().unwrap_or_else(PoisonError::into_inner);
+                let shell = state.pid.map_or_else(String::new, |pid| {
+                    run(
+                        "ps",
+                        &[
+                            "-o",
+                            "pid=,stat=,pgid=,tpgid=,wchan=",
+                            "-p",
+                            &pid.to_string(),
+                        ],
+                    )
+                });
+                let tty = state.tty.as_ref().map_or_else(String::new, |tty| {
+                    let flag = if cfg!(target_os = "macos") {
+                        "-f"
+                    } else {
+                        "-F"
+                    };
+                    run("stty", &[flag, &tty.to_string_lossy(), "-a"])
+                });
+                Err(format!(
+                    "hung while {}, having printed:\n{}\nthe shell (ps): {shell}\nthe terminal \
+                     (stty): {tty}",
+                    state.step,
+                    String::from_utf8_lossy(&state.seen)
+                ))
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("the probe through {path} failed; its panic is above")
-            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err("failed; its panic is above".into()),
         }
     }
 
-    type Progress = Arc<Mutex<(&'static str, Vec<u8>)>>;
+    fn run(program: &str, args: &[&str]) -> String {
+        std::process::Command::new(program)
+            .args(args)
+            .output()
+            .map_or_else(
+                |error| error.to_string(),
+                |out| {
+                    String::from_utf8_lossy(&out.stdout).into_owned()
+                        + &String::from_utf8_lossy(&out.stderr)
+                },
+            )
+    }
+
+    #[derive(Default)]
+    struct Probe {
+        step: &'static str,
+        seen: Vec<u8>,
+        pid: Option<u32>,
+        tty: Option<std::path::PathBuf>,
+    }
+
+    type Progress = Arc<Mutex<Probe>>;
 
     fn step(progress: &Progress, now: &'static str) {
-        progress.lock().unwrap_or_else(PoisonError::into_inner).0 = now;
+        progress.lock().unwrap_or_else(PoisonError::into_inner).step = now;
     }
 
     fn run_probe(through_termlens: bool, progress: &Progress) -> String {
@@ -409,6 +445,7 @@ read _"#;
             pixel_height: 0,
         })
         .expect("a PTY opens");
+        progress.lock().unwrap_or_else(PoisonError::into_inner).tty = pair.master.tty_name();
         let mut cmd = CommandBuilder::new("sh");
         cmd.args(["-c", PROBE]);
         cmd.cwd(std::env::current_dir().expect("a working directory"));
@@ -426,6 +463,7 @@ read _"#;
         } else {
             pair.slave.spawn_command(cmd).expect("sh starts")
         };
+        progress.lock().unwrap_or_else(PoisonError::into_inner).pid = child.process_id();
         drop(pair.slave);
         drop(lifecycle);
 
@@ -448,11 +486,18 @@ read _"#;
             progress
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .1
+                .seen
                 .extend_from_slice(&chunk[..read]);
         }
         step(progress, "answering sh's read");
         writer.write_all(b"\n").expect("the PTY writes");
+        // Drained to the end, as a Terminal's reader drains: the terminal
+        // echoes the line, and on macOS a process exiting with output still
+        // queued waits for it to be read, so an unread echo is a shell that
+        // never finishes exiting.
+        step(progress, "draining the terminal");
+        let mut rest = Vec::new();
+        let _ = reader.read_to_end(&mut rest);
         step(progress, "waiting for sh to exit");
         child.wait().expect("sh exits");
         // Every handle on the master closes under the lifecycle lock, as a
@@ -473,11 +518,19 @@ read _"#;
     /// changes its spawn fails here instead of drifting apart from this one.
     #[test]
     fn the_child_cannot_tell_which_spawn_started_it() {
-        let ours = probe(true);
-        assert!(
-            ours.contains("group-leader\nforeground\ncontrolling-tty\nprobe-finished"),
-            "the probe did not run to the end:\n{ours}"
-        );
-        assert_eq!(ours, probe(false));
+        match (probe(true), probe(false)) {
+            (Ok(ours), Ok(theirs)) => {
+                assert!(
+                    ours.contains("group-leader\nforeground\ncontrolling-tty\nprobe-finished"),
+                    "the probe did not run to the end:\n{ours}"
+                );
+                assert_eq!(ours, theirs);
+            }
+            (ours, theirs) => panic!(
+                "through termlens's spawn: {}\n\nthrough the PTY layer's: {}",
+                ours.unwrap_or_else(|problem| problem),
+                theirs.unwrap_or_else(|problem| problem)
+            ),
+        }
     }
 }
