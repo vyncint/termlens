@@ -255,15 +255,15 @@ static PTY_LIFECYCLE: Mutex<()> = Mutex::new(());
 
 /// The lifecycle lock, held — or `None` on a platform with nothing to
 /// serialize. Callers hold and drop it the same way either way.
-type LifecycleGuard = Option<std::sync::MutexGuard<'static, ()>>;
+pub(crate) type LifecycleGuard = Option<std::sync::MutexGuard<'static, ()>>;
 
 #[cfg(unix)]
-fn pty_lifecycle_guard() -> LifecycleGuard {
+pub(crate) fn pty_lifecycle_guard() -> LifecycleGuard {
     Some(PTY_LIFECYCLE.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
 #[cfg(not(unix))]
-fn pty_lifecycle_guard() -> LifecycleGuard {
+pub(crate) fn pty_lifecycle_guard() -> LifecycleGuard {
     None
 }
 
@@ -295,7 +295,7 @@ const PTY_OPEN_BACKOFF: Duration = Duration::from_millis(25);
 /// classifying an `anyhow` error by its text is guesswork, a permanent fault
 /// still reports its own message at the end, and the cost of being wrong is
 /// under two seconds on a spawn that was going to fail anyway.
-fn open_pty(size: PtySize) -> Result<(PtyPair, LifecycleGuard)> {
+pub(crate) fn open_pty(size: PtySize) -> Result<(PtyPair, LifecycleGuard)> {
     let pty = native_pty_system();
     let mut last = String::new();
     for attempt in 0..PTY_OPEN_ATTEMPTS {
@@ -326,25 +326,18 @@ type SharedWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
 /// descriptor instead: both refer to the same open file description,
 /// which is what we want — same terminal, independent blocking.
 ///
-/// Close-on-exec, like every other descriptor the PTY layer opens. A plain
-/// `dup` was inherited by every child the test process started while the
-/// terminal was alive, holding the master open in processes that have no
-/// business with it.
+/// Close-on-exec, as std makes every descriptor it opens. A plain `dup` was
+/// inherited by every child the test process started while the terminal was
+/// alive, holding the master open in processes that have no business with
+/// it.
 #[cfg(unix)]
 fn dup_writer(master: &dyn portable_pty::MasterPty) -> Option<std::fs::File> {
-    use std::os::unix::io::FromRawFd;
-
     let fd = master.as_raw_fd()?;
-    // SAFETY: `fd` is the live master descriptor (the caller still owns
-    // the master). F_DUPFD_CLOEXEC returns a fresh descriptor we take sole
-    // ownership of; `File` closes it exactly once on drop.
+    // SAFETY: `fd` is the live master descriptor, owned by the master the
+    // caller holds for the whole of this borrow.
     #[allow(unsafe_code)]
-    let duped = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
-    if duped < 0 {
-        return None;
-    }
-    #[allow(unsafe_code)]
-    Some(unsafe { std::fs::File::from_raw_fd(duped) })
+    let master = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+    master.try_clone_to_owned().ok().map(std::fs::File::from)
 }
 
 #[cfg(not(unix))]
@@ -1924,8 +1917,9 @@ impl TerminalBuilder {
         }
         // Whatever the child is told TERM is, XTGETTCAP's `TN` reports the
         // same string — an application must not be able to get two different
-        // answers to "which terminal is this?".
-        let term_name = self.envs.iter().find(|(k, _)| k == "TERM").map_or_else(
+        // answers to "which terminal is this?". Set twice, the later value is
+        // the one the child gets, so it is the one reported.
+        let term_name = self.envs.iter().rfind(|(k, _)| k == "TERM").map_or_else(
             || "xterm-256color".to_owned(),
             |(_, v)| v.to_string_lossy().into_owned(),
         );

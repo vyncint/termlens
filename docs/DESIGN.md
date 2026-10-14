@@ -208,39 +208,74 @@ portable-pty opens the PTY, but on Unix it no longer starts the child. Its
 and one of them is the close-on-exec pipe through which std reports a
 failed `exec`. When the program exists but cannot be executed, the child's
 write into that pipe failed and std aborted the child. `spawn` then
-returned `Ok` with a process already dead of SIGABRT (#563). The usual
-causes are a missing `#!` interpreter (a `\r` left by CRLF line endings
-counts), a missing dynamic loader, and an argument list over the kernel's
-limit.
+returned `Ok` with a process already dead of SIGABRT (#563; upstream,
+wezterm/wezterm#7893). The usual causes are a missing `#!` interpreter (a
+`\r` left by CRLF line endings counts), a missing dynamic loader, and an
+argument list over the kernel's limit.
 
-`src/spawn.rs` builds the command portable-pty would build and runs it with
-`std::process::Command`:
+`src/spawn.rs` builds the command portable-pty 0.9.0 would build and runs
+it with `std::process::Command`:
 
 - **Resolution** finds the same file by the same rules. `./x` and `../x`
   are looked up in the working directory alone. Any other relative name is
   searched for along the child's `PATH`, each entry taken from the working
   directory. A candidate must pass `access(X_OK)` and must not be a
-  directory. `argv[0]` is the name as given.
+  directory. `argv[0]` is the name as given. A working directory that is
+  not a directory gives way to the child's `HOME`, as in portable-pty.
 - **The environment** is the same: the inherited one unless `env_clear`,
   plus the `SHELL` that portable-pty fills in from the login shell when the
   process has none, then termlens's pins and the test's own variables.
 - **The session** gets the same `pre_exec` steps. Six signals go back to
   their defaults and the mask is emptied. `setsid` gives the child a
   session of its own, and `TIOCSCTTY` makes the PTY its controlling
-  terminal.
+  terminal. portable-pty's umask step is left out, because it acts only on
+  a umask termlens never sets.
 - **Descriptors** above stdio are marked close-on-exec rather than closed.
   A successful exec closes exactly what portable-pty closed, and a failed
-  one still has std's pipe to report through. Every descriptor termlens
-  opens is close-on-exec too, so no other child of the test process
-  inherits one.
+  one still has std's pipe to report through.
+
+A unit test in `spawn.rs` starts one probe both ways and requires the same
+answers about argv[0], directory, environment, descriptors, umask, process
+group and controlling terminal. A portable-pty release that changes its
+own spawn fails that test instead of drifting apart from this one.
+
+The error names the culprit where the kernel's errno would point at the
+wrong file. `ENOENT` for a script that is plainly there means a missing
+`#!` interpreter, which is named. For a binary it means a missing loader.
+`EACCES` from an interpreter that cannot be run names the interpreter. A
+failure before the exec, such as a NUL in an argument or a directory that
+cannot be entered, reads as std reports it, with the directory named in the
+second case.
+
+Reporting the exec has a price. std's `spawn` now returns only once the
+exec has happened, so a spawn holds the lifecycle lock about a quarter of a
+millisecond longer on Linux. On a machine whose security software inspects
+every exec, it is held for the length of that inspection.
 
 The slave is opened by name (`tty_name`, `O_NOCTTY`), because portable-pty
-does not expose its own handle. Three cases still go to portable-pty
-unchanged. A working directory that is not a directory gets `$HOME`
-substituted. A program that does not resolve gets portable-pty's diagnosis,
-word for word, which is what termlens has always reported. A slave that
-cannot be named or opened is the third. On Windows ConPTY reports a failed
-`CreateProcess` itself, and portable-pty spawns the child as before.
+does not expose its own handle. Four cases still go to portable-pty
+unchanged:
+
+- a process whose children the kernel reaps, because SIGCHLD is ignored
+  or carries `SA_NOCLDWAIT`. std panics when it cannot reap a failed exec,
+  and every wait fails there anyway;
+- a working directory that is not one, with no UTF-8 `HOME` in the child's
+  environment; portable-pty then reads the passwd entry;
+- a program that does not resolve. portable-pty's diagnosis is what
+  termlens has always reported, word for word;
+- a slave that cannot be named or opened.
+
+These are the old behaviour, not new risk. On Windows ConPTY reports a
+failed `CreateProcess` itself, and portable-pty spawns the child as before.
+
+termlens's own descriptors are all close-on-exec, the second writer it
+duplicates from the master included. One window remains, and it belongs to
+the PTY layer. `openpty` creates the pair without close-on-exec, and
+portable-pty marks it a moment later. A child that another thread of the
+test process forks inside that window inherits the PTY. If it holds the
+slave, that terminal reports no EOF until the child exits. It is measured
+at a few in a thousand concurrent spawns, and only alongside processes the
+test starts itself.
 
 ### Windows: ConPTY renders, and that decides what is claimed
 

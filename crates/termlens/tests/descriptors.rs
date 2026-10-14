@@ -10,17 +10,28 @@ use std::process::Command;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use termlens::Terminal;
+use termlens::{Key, Terminal};
 
 /// The tests below measure and change one descriptor table, so they take
 /// turns: one leaves a descriptor inheritable that the other would count.
 static TABLE: Mutex<()> = Mutex::new(());
 
+/// PATH and nothing else, so that no colour or locale setting of the
+/// machine's reaches what is parsed.
+fn path() -> std::ffi::OsString {
+    std::env::var_os("PATH").unwrap_or_default()
+}
+
 /// The descriptors an ordinary child of this process has open, as `ls`
 /// lists them. The child's own listing descriptor is among them, the same
 /// one each time.
 fn in_an_ordinary_child() -> BTreeSet<u32> {
-    let out = Command::new("ls").arg("/dev/fd").output().expect("ls runs");
+    let out = Command::new("ls")
+        .arg("/dev/fd")
+        .env_clear()
+        .env("PATH", path())
+        .output()
+        .expect("ls runs");
     assert!(out.status.success(), "{out:?}");
     String::from_utf8_lossy(&out.stdout)
         .split_whitespace()
@@ -71,6 +82,8 @@ fn a_termlens_child_inherits_nothing_but_its_terminal() -> termlens::Result<()> 
 
     let ordinary = Command::new("sh")
         .args(["-c", &probe(fd)])
+        .env_clear()
+        .env("PATH", path())
         .output()
         .expect("sh runs");
     assert_eq!(
@@ -79,13 +92,22 @@ fn a_termlens_child_inherits_nothing_but_its_terminal() -> termlens::Result<()> 
         "an ordinary child must inherit {fd}, or this test proves nothing"
     );
 
+    // The child reads a line before it exits, so its answer cannot be lost
+    // to a teardown racing the read (DESIGN.md §2).
     let mut t = Terminal::builder()
         .timeout(Duration::from_secs(10))
-        .args(["-c", &probe(fd)])
+        .env_clear()
+        .env("PATH", path())
+        .args(["-c", &format!("{}; read _", probe(fd))])
         .spawn("sh")?;
-    assert!(t.wait_exit()?.success());
+    t.wait_until(|s| s.contains("closed") || s.contains("inherited"))?;
     let screen = t.screen().text();
-    assert_eq!(screen.trim(), "closed", "descriptor {fd} reached the child");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    assert!(
+        screen.contains("closed") && !screen.contains("inherited"),
+        "descriptor {fd} reached the child:\n{screen}"
+    );
     drop(file);
     Ok(())
 }

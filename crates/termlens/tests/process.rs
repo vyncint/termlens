@@ -96,59 +96,133 @@ fn a_relative_current_dir_is_the_test_process_s_and_a_relative_program_resolves_
 /// pipe std reports a failed exec through, so the child aborted writing to
 /// it and `spawn` returned `Ok`. The usual culprit is the interpreter a
 /// script's `#!` line names. The sneakiest is the `\r` that CRLF line
-/// endings leave on it, which the message shows escaped.
+/// endings leave on it, which the message shows escaped. The messages keep
+/// the prefix the skill's failure table promises.
 #[cfg(unix)]
 #[test]
-fn a_script_whose_interpreter_is_missing_fails_to_spawn_and_names_it() -> termlens::Result<()> {
+fn a_script_whose_interpreter_cannot_run_fails_to_spawn_and_names_it() -> termlens::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
     let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("exec-failure-{}", std::process::id()));
     std::fs::create_dir_all(&scratch)?;
+    let refused = |name: &str, script: &str, mode: u32| -> termlens::Result<String> {
+        let path = scratch.join(name);
+        common::write_script(&path, script);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
+        match Terminal::builder()
+            .timeout(Duration::from_secs(10))
+            .spawn(&path)
+        {
+            Ok(_) => panic!("{name}: spawned, and its interpreter cannot run"),
+            Err(Error::Spawn { reason, .. }) => Ok(reason),
+            Err(other) => panic!("{name}: not a spawn error: {other}"),
+        }
+    };
     for (name, script, culprit) in [
         (
             "missing",
             "#!/nonexistent/interpreter\necho unreachable\n",
-            r#""/nonexistent/interpreter""#,
+            r#"its #! interpreter "/nonexistent/interpreter" does not exist"#,
         ),
         (
             "crlf",
             "#!/bin/sh\r\necho unreachable\r\n",
-            r#""/bin/sh\r""#,
+            r#"its #! interpreter "/bin/sh\r" does not exist"#,
         ),
     ] {
-        let path = scratch.join(name);
-        common::write_script(&path, script);
-        let err = Terminal::builder()
-            .timeout(Duration::from_secs(10))
-            .spawn(&path)
-            .expect_err("a script whose interpreter does not exist cannot run");
-        let Error::Spawn { reason, .. } = &err else {
-            panic!("{name}: not a spawn error: {err}");
-        };
+        let reason = refused(name, script, 0o755)?;
         assert!(
-            reason.contains(culprit) && reason.contains("does not exist"),
+            reason.starts_with("cannot execute ") && reason.ends_with(culprit),
             "{name}: the message must name the interpreter: {reason}"
         );
     }
+    // An interpreter that is there but is not a program is named as well.
+    // The kernel's EACCES alone would blame the script, which can be run.
+    let plain = scratch.join("plain-text");
+    std::fs::write(&plain, "not a program\n")?;
+    std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644))?;
+    let reason = refused(
+        "plain-interpreter",
+        &format!("#!{}\n", plain.display()),
+        0o755,
+    )?;
+    assert!(
+        reason.ends_with(&format!(
+            "its #! interpreter {plain:?} is not an executable file"
+        )),
+        "{reason}"
+    );
+    // A script that may be run but not read cannot show its `#!` line, so
+    // the message names both suspects rather than guessing the loader. Root
+    // reads it anyway, and the interpreter is named outright.
+    let reason = refused("execute-only", "#!/nonexistent/interpreter\n", 0o111)?;
+    assert!(reason.contains("#! interpreter"), "{reason}");
     let _ = std::fs::remove_dir_all(&scratch);
     Ok(())
 }
 
 /// Any exec the kernel refuses is a spawn error carrying its reason, not
 /// only a missing interpreter. Every Unix refuses an argument this long,
-/// with E2BIG. The error's command line holds the argument, so only the
-/// reason is printed.
+/// with E2BIG.
 #[cfg(unix)]
 #[test]
 fn an_argument_the_kernel_refuses_is_a_spawn_error_with_its_reason() {
-    let err = Terminal::builder()
+    let spawned = Terminal::builder()
         .timeout(Duration::from_secs(10))
         .args(["-c", "true", &"x".repeat(2 << 20)])
-        .spawn("sh")
-        .expect_err("a 2 MiB argument is past every Unix's limit");
-    let Error::Spawn { reason, .. } = &err else {
-        panic!("not a spawn error");
-    };
-    assert!(reason.contains("Argument list too long"), "{reason}");
+        .spawn("sh");
+    // Matched, not unwrapped: the terminal and the error both carry the
+    // 2 MiB command line, which a failing assertion would print whole.
+    match spawned {
+        Ok(_) => panic!("a 2 MiB argument is past every Unix's limit, and it spawned"),
+        Err(Error::Spawn { reason, .. }) => {
+            assert!(reason.contains("Argument list too long"), "{reason}");
+        }
+        Err(_) => panic!("not a spawn error"),
+    }
+}
+
+/// A failure before the exec reads as std reports it, and does not blame a
+/// program that is fine. A NUL in a variable is refused before anything is
+/// forked. A working directory that cannot be entered fails in the child,
+/// before the exec, and the directory is named.
+#[cfg(unix)]
+#[test]
+fn a_failure_before_the_exec_does_not_blame_the_program() -> termlens::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    use termlens::TerminalBuilder;
+
+    let reason =
+        |builder: TerminalBuilder| match builder.timeout(Duration::from_secs(10)).spawn("sh") {
+            Ok(_) => panic!("spawned"),
+            Err(Error::Spawn { reason, .. }) => reason,
+            Err(other) => panic!("not a spawn error: {other}"),
+        };
+    let nul = reason(Terminal::builder().env("A", "a\0b"));
+    assert!(
+        nul.contains("nul byte") && !nul.contains("cannot execute"),
+        "{nul}"
+    );
+
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("unenterable-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o600))?;
+    // Root enters any directory, and then there is nothing to refuse.
+    let refused = std::fs::metadata(scratch.join("probe"))
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied);
+    let chdir = refused.then(|| reason(Terminal::builder().current_dir(&scratch)));
+    std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))?;
+    let _ = std::fs::remove_dir_all(&scratch);
+    if let Some(chdir) = chdir {
+        assert!(
+            chdir.starts_with("cannot enter ") && chdir.contains("unenterable-"),
+            "{chdir}"
+        );
+    }
+    Ok(())
 }
 
 #[test]

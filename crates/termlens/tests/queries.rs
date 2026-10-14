@@ -858,6 +858,8 @@ fn xtgettcap_answers_what_it_knows_and_declines_the_rest() -> termlens::Result<(
 
 /// `TN` reports whatever `TERM` the child was actually given, so an
 /// application cannot get two different answers to "which terminal is this?".
+/// Set twice, the later value is the one the child gets, and so the one `TN`
+/// reports: it used to report the first.
 #[test]
 #[cfg_attr(
     windows,
@@ -867,6 +869,7 @@ fn xtgettcap_tn_follows_the_configured_term() -> termlens::Result<()> {
     let mut t = common::spawn_emit(
         Terminal::builder()
             .size(120, 6)
+            .env("TERM", "vt100")
             .env("TERM", "xterm")
             .timeout(Duration::from_secs(10)),
         &[

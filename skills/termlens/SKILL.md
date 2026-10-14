@@ -424,7 +424,7 @@ included in `X`, and `terminal closed (EOF) while waiting for X` is
 | `input not receivable: the application has not enabled mouse tracking` | `click`/`drag`/`scroll` before the app enabled the mouse | `wait_until(|s| s.mouse_mode() != MouseMode::None)` first |
 | `input not receivable: mouse at (50, 2) is outside the 20x5 grid` | coordinates swapped or out of range | rule 6 |
 | `failed to spawn \`sh\`: \`sh\` is a bare program name and env_clear() removed PATH` | bare program name under `env_clear` | absolute path, `bin!`, or `.env("PATH", …)` |
-| ``failed to spawn `./x`: cannot execute …: its #! interpreter "…" does not exist`` | the script's `#!` line names a file that is not there; a `\r` at the end of the quoted name means CRLF line endings | install the interpreter, point the `#!` line at one that exists, or save the script with LF endings |
+| ``failed to spawn `./x`: cannot execute …: its #! interpreter "…" does not exist`` | the script's `#!` line names a file that is not there, or with `is not an executable file` one that cannot be run; a `\r` at the end of the quoted name means CRLF line endings | install the interpreter, point the `#!` line at one that exists, or save the script with LF endings |
 | `invalid terminal size: a terminal needs at least 2 columns and 2 rows` | geometry below 2x2 (past 1000 has its own message) | rule 5 |
 | `the terminal emulator failed and the screen stopped advancing` (`Error::Emulator`) | a bug in the emulation, not in your app | report it to termlens with the detail it names |
 
