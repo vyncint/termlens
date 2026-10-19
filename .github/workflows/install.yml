@@ -144,7 +144,7 @@ jobs:
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "verifying termlens $version, features: $features"
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
       - name: Build a consumer against it
@@ -321,7 +321,7 @@ jobs:
         with:
           ref: v${{ steps.crate.outputs.version }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
       # From the registry, every run, never from a cache: a cached binary is
