@@ -2003,3 +2003,102 @@ fn inspect_reports_still_running_when_the_child_closes_its_terminal() -> termlen
     }
     Ok(())
 }
+
+/// A stderr that refuses every write, `2>/dev/full`, made `eprintln!`
+/// panic with exit 101 (#594). The closed-pipe case is in
+/// `closed_stderr.rs`, a binary of its own.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_stderr_is_exit_two_not_a_panic() -> termlens::Result<()> {
+    use std::process::{Command, Stdio};
+    let bin = env!("CARGO_BIN_EXE_termlens");
+    for args in [&["inspect", "sh", "-c", "echo hi"][..], &["--bogus"][..]] {
+        let full = std::fs::OpenOptions::new().write(true).open("/dev/full")?;
+        let out = Command::new(bin)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(full)
+            .output()?;
+        assert_eq!(out.status.code(), Some(2), "termlens {args:?}: {out:?}");
+    }
+    Ok(())
+}
+
+/// `std::env::args` panics on an argument that is not UTF-8 (#594).
+/// termlens's own arguments must be UTF-8 and are refused with exit 2;
+/// the program inspect runs gets its arguments untouched.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_argument_is_refused_or_passed_through_not_a_panic() -> termlens::Result<()> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::process::Command;
+    let bin = env!("CARGO_BIN_EXE_termlens");
+    let cafe = OsStr::from_bytes(b"caf\xe9");
+
+    for args in [
+        vec![OsStr::new("diff"), cafe, OsStr::new("b.snap")],
+        vec![OsStr::new("render"), OsStr::new("--text"), cafe],
+        vec![
+            OsStr::new("inspect"),
+            OsStr::new("--size"),
+            cafe,
+            OsStr::new("true"),
+        ],
+        vec![cafe],
+    ] {
+        let out = Command::new(bin).args(&args).output()?;
+        assert_eq!(out.status.code(), Some(2), "termlens {args:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("is not valid UTF-8"),
+            "termlens {args:?}: {stderr}"
+        );
+    }
+
+    // The program's own argument is not termlens's business.
+    let out = Command::new(bin)
+        .args([
+            OsStr::new("inspect"),
+            OsStr::new("--size"),
+            OsStr::new("20x3"),
+        ])
+        .args([OsStr::new("true"), cafe])
+        .output()?;
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--- exited: "), "{stderr}");
+    Ok(())
+}
+
+/// `Instant::now() + timeout` overflowed for a huge --timeout and panicked
+/// after the program had been spawned (#594). It is refused up front, by name.
+#[test]
+fn an_unrepresentable_timeout_is_refused_by_name() -> termlens::Result<()> {
+    use std::process::Command;
+    let out = Command::new(env!("CARGO_BIN_EXE_termlens"))
+        .args(["inspect", "--timeout", "18446744073709551615", "true"])
+        .output()?;
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("termlens: bad --timeout \"18446744073709551615\""),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+/// `--out ""` is the separate-argument spelling of `--out=` (#451): an unset
+/// variable in `--out "$DEST"`. It names the flag too, rather than printing
+/// the filesystem's complaint about an empty path (#594).
+#[test]
+fn render_empty_separate_out_value_names_the_flag() -> termlens::Result<()> {
+    use std::process::Command;
+    let out = Command::new(env!("CARGO_BIN_EXE_termlens"))
+        .args(["render", "--text", "--out", "", &data("before.snap")])
+        .output()?;
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr, "termlens: --out needs a PATH argument\n");
+    Ok(())
+}

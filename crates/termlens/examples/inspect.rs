@@ -27,6 +27,7 @@
 //! not be spawned. A viewer, not a gate: the program's own status is
 //! reported, not propagated.
 
+use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
@@ -84,7 +85,7 @@ run — bad arguments, or a program that could not be spawned.
 /// example — the shape `--size` set, so `--timeout` and `--idle` read the
 /// same way (#236).
 fn take<T>(
-    args: &mut impl Iterator<Item = String>,
+    args: &mut impl Iterator<Item = OsString>,
     flag: &str,
     kind: &str,
     example: &str,
@@ -93,7 +94,42 @@ fn take<T>(
     let Some(raw) = args.next() else {
         return Err(format!("{flag} needs a {kind} argument"));
     };
+    let raw = utf8(raw)?;
     parse(&raw).ok_or_else(|| format!("bad {flag} {raw:?}, expected e.g. {example}"))
+}
+
+/// The example's own options must be UTF-8; the program and its arguments
+/// are passed through untouched (#594).
+fn utf8(arg: OsString) -> Result<String, String> {
+    arg.into_string()
+        .map_err(|arg| format!("{arg:?} is not valid UTF-8; inspect's own arguments must be"))
+}
+
+/// A `--timeout` the clock can add to `Instant::now()`, with an hour of
+/// headroom for the grace periods added later; `u64::MAX` seconds is
+/// refused rather than panicking after the spawn (#594).
+fn timeout_secs(spec: &str) -> Option<Duration> {
+    let timeout = Duration::from_secs(spec.parse().ok()?);
+    Instant::now().checked_add(timeout.checked_add(Duration::from_secs(3600))?)?;
+    Some(timeout)
+}
+
+/// One line to stderr without `eprintln!`, which panics when stderr is
+/// closed or full (#594).
+fn report(line: &str) -> io::Result<()> {
+    let mut stderr = io::stderr().lock();
+    writeln!(stderr, "{line}").and_then(|()| stderr.flush())
+}
+
+/// Help and version text to stdout; a reader that closed early is a clean
+/// exit, as for the screen (#223), rather than a `println!` panic (#594).
+fn print(text: &str) -> ExitCode {
+    let mut stdout = io::stdout().lock();
+    match writeln!(stdout, "{text}").and_then(|()| stdout.flush()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(e) => fail(&format!("writing the output failed: {e}")),
+    }
 }
 
 /// Whether the program has put anything on the grid yet: a visible
@@ -126,12 +162,13 @@ fn render(screen: &termlens::Screen, ansi: bool) -> String {
 /// One diagnostic shape for every failure of the tool itself, and the exit
 /// code 2 the CLI promises for the same failures.
 fn fail(message: &str) -> ExitCode {
-    eprintln!("inspect: {message}");
+    let _ = report(&format!("inspect: {message}"));
     ExitCode::from(2)
 }
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1).peekable();
+    // `args_os`: `args` panics on an argument that is not UTF-8 (#594).
+    let mut args = std::env::args_os().skip(1).peekable();
 
     let mut size = (80u16, 24u16);
     let mut timeout = Duration::from_secs(5);
@@ -143,8 +180,14 @@ fn main() -> ExitCode {
 
     // Options come before the program; everything after it is the
     // program's own, however flag-like it looks.
-    while args.peek().is_some_and(|a| a.starts_with('-') && a != "-") {
-        let flag = args.next().unwrap_or_default();
+    while args
+        .peek()
+        .is_some_and(|a| a.as_encoded_bytes().starts_with(b"-") && a != "-")
+    {
+        let flag = match utf8(args.next().unwrap_or_default()) {
+            Ok(flag) => flag,
+            Err(e) => return fail(&e),
+        };
         // `--flag=value` for the flags that take a value, mirroring the
         // command this example follows: a value attached to a flag that
         // takes none (`--inherit-env=nonsense`) falls through to the
@@ -157,24 +200,19 @@ fn main() -> ExitCode {
             }
             _ => (flag.as_str(), None),
         };
-        let mut args = inline.map(str::to_owned).into_iter().chain(args.by_ref());
+        let mut args = inline.map(OsString::from).into_iter().chain(args.by_ref());
         let parsed = match name {
-            "-h" | "--help" => {
-                println!("{USAGE}");
-                return ExitCode::SUCCESS;
-            }
-            "--version" => {
-                println!("termlens {}", env!("CARGO_PKG_VERSION"));
-                return ExitCode::SUCCESS;
-            }
+            "-h" | "--help" => return print(USAGE),
+            "--version" => return print(&format!("termlens {}", env!("CARGO_PKG_VERSION"))),
             "--" => break,
             "--size" => take(&mut args, "--size", "COLSxROWS", "120x40", |spec| {
                 let (c, r) = spec.split_once('x')?;
                 Some((c.parse().ok()?, r.parse().ok()?))
             })
             .map(|s| size = s),
-            "--timeout" => take(&mut args, "--timeout", "SECONDS", "30", |s| s.parse().ok())
-                .map(|secs| timeout = Duration::from_secs(secs)),
+            "--timeout" => {
+                take(&mut args, "--timeout", "SECONDS", "30", timeout_secs).map(|t| timeout = t)
+            }
             "--idle" => take(&mut args, "--idle", "MILLIS", "1000", |s| s.parse().ok())
                 .map(|millis| idle = Duration::from_millis(millis)),
             "--inherit-env" => {
@@ -214,7 +252,7 @@ fn main() -> ExitCode {
     }
 
     let Some(program) = args.next() else {
-        eprintln!("{USAGE}");
+        let _ = report(USAGE);
         return ExitCode::from(2);
     };
 
@@ -295,6 +333,8 @@ fn main() -> ExitCode {
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(e) => fail(&format!("writing the screen failed: {e}")),
     };
-    eprintln!("{trailer}");
+    if report(&trailer).is_err() {
+        return ExitCode::from(2);
+    }
     code
 }

@@ -19,6 +19,16 @@ reads that marker.
 
 ### Fixed
 
+- `termlens` no longer panics with exit code 101 (#594). A closed or full
+  stderr (`2>&1 | true`, `2>/dev/full`) made every diagnostic and the
+  `inspect` trailer panic; the write is now checked, and a trailer that cannot
+  be written is exit 2. Arguments are read with `args_os`, so one that is not
+  UTF-8 no longer panics: termlens's own options and operands are refused with
+  exit 2, and the program `inspect` runs gets its arguments untouched. A
+  `--timeout` too large to add to the clock is refused by name instead of
+  panicking after the spawn, and `render --out ""` says `--out needs a PATH
+  argument` as `--out=` already did (#451). The `inspect` example mirrors all
+  of it, `--help` under `| true` included.
 - `Screen::parse` and the JSON reader refuse a saved screen whose declared
   size is past the 1000-per-axis limit a terminal has (#583), with an
   `Error::Parse` that names it. The grid was allocated from the header before
