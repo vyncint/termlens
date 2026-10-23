@@ -260,6 +260,93 @@ fn every_style_attribute_reaches_every_rendering() -> termlens::Result<()> {
     Ok(())
 }
 
+/// Every character of `doc` is one XML 1.0 allows (the `Char` production)
+/// and its tags nest. Those are the two ways #586 broke the SVG; it is not
+/// a full parse (entities and attribute syntax are not checked), which
+/// keeps the tests free of an XML dependency.
+fn assert_well_formed_xml(doc: &str) {
+    for (i, c) in doc.char_indices() {
+        let allowed = matches!(c, '\t' | '\n' | '\r')
+            || ('\u{20}'..='\u{d7ff}').contains(&c)
+            || ('\u{e000}'..='\u{fffd}').contains(&c)
+            || c >= '\u{10000}';
+        assert!(allowed, "{c:?} at byte {i} is not an XML Char:\n{doc}");
+    }
+    let mut open = Vec::new();
+    let mut rest = doc;
+    while let Some(start) = rest.find('<') {
+        let end = rest[start..].find('>').expect("an unclosed tag") + start;
+        let tag = &rest[start + 1..end];
+        let name = |t: &str| t.split([' ', '\n', '/']).next().unwrap_or("").to_owned();
+        if let Some(closing) = tag.strip_prefix('/') {
+            assert_eq!(
+                open.pop().as_deref(),
+                Some(closing),
+                "mismatched </{closing}>:\n{doc}"
+            );
+        } else if !tag.ends_with('/') && !tag.starts_with('!') && !tag.starts_with('?') {
+            open.push(name(tag));
+        }
+        rest = &rest[end + 1..];
+    }
+    assert!(open.is_empty(), "unclosed {open:?}:\n{doc}");
+}
+
+/// An underlined or struck-through run of blanks is a form field: a
+/// terminal draws the line under it, and the HTML did, but the SVG trimmed
+/// the run to nothing and dropped it with its decoration (#586).
+#[test]
+fn a_decorated_run_of_blanks_is_drawn_in_the_svg() -> termlens::Result<()> {
+    let screen = Screen::parse(
+        "size: 12x1  cursor: hidden\nName:   |  |\n\nstyles:\n0: 5-7 underline\n0: 9-10 strikethrough",
+    )?;
+    let svg = screen.to_svg();
+    assert!(
+        svg.contains("text-decoration=\"underline\">   </text>"),
+        "the underlined field is drawn:\n{svg}"
+    );
+    assert!(
+        svg.contains("text-decoration=\"line-through\">  </text>"),
+        "the struck-through blanks are drawn:\n{svg}"
+    );
+    assert_well_formed_xml(&svg);
+    Ok(())
+}
+
+/// U+FFFF in a cell went into the SVG as itself, and XML forbids it: no
+/// parser opened the file (#586). It is drawn as U+FFFD instead.
+#[test]
+fn a_character_xml_forbids_in_a_cell_is_replaced() -> termlens::Result<()> {
+    let screen = Screen::parse("size: 3x1  cursor: hidden\na\u{ffff}b\n\nstyles:\n0: 0-2 bold")?;
+    assert_eq!(screen.row_text(0), "a\u{ffff}b", "the cell holds it");
+    let svg = screen.to_svg();
+    assert!(svg.contains(">a\u{fffd}b</text>"), "{svg}");
+    assert_well_formed_xml(&svg);
+    let html = screen.to_html();
+    assert!(!html.contains('\u{ffff}'), "{html}");
+    Ok(())
+}
+
+/// A window title is the application's, and a C0 control in it went into
+/// the SVG's `<title>` as itself (#586).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY rewrites the stream before termlens sees it, so the title under test is its rendering (#149)"
+)]
+fn a_control_character_in_the_title_is_replaced() -> termlens::Result<()> {
+    let mut t = emit(&["--raw", r"\e]0;a\x01b\aREADY", "--wait"])?;
+    t.wait_until(|s| s.contains("READY"))?;
+    let screen = t.screen();
+    assert_eq!(screen.title(), "a\u{1}b", "the title holds it");
+    let svg = screen.to_svg();
+    assert!(svg.contains(": a\u{fffd}b</title>"), "{svg}");
+    assert_well_formed_xml(&svg);
+    t.send(Key::Enter)?;
+    t.wait_exit()?;
+    Ok(())
+}
+
 #[cfg(feature = "serde")]
 mod json {
     use super::*;

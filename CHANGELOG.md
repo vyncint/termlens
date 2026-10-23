@@ -29,6 +29,13 @@ reads that marker.
   changed cells (#595). Painting checked each cell against the whole list of
   changed cells, so a full-screen change on a large terminal took seconds
   (8 s at 80,000 cells). The changed cells are now collected once.
+- `Screen::to_svg` draws an underlined or struck-through run of blanks, such
+  as an empty form field, with its line (#586); it trimmed the run to nothing
+  and dropped it. The trailing blanks of any underlined or struck-through run
+  are now drawn with the line too, as in `to_html`. `to_svg` and `to_html`
+  also write a character XML 1.0 forbids, a C0 control other than tab, LF and
+  CR or U+FFFE/U+FFFF, as U+FFFD, so a window title holding `\x01` or a cell
+  holding U+FFFF no longer makes an SVG no parser opens.
 
 ## [0.11.6] - 2026-10-14
 

@@ -102,6 +102,14 @@ fn glyph(cell: &Cell) -> &str {
     }
 }
 
+/// Escape text for an XML (SVG) or HTML text node or attribute value.
+///
+/// Characters outside the XML 1.0 `Char` production — C0 controls other
+/// than tab, LF and CR, and the noncharacters U+FFFE and U+FFFF — cannot be
+/// written at all, escaped or not: one of them makes the whole SVG
+/// ill-formed, and no parser opens it (#586). They reach here from a cell
+/// or a window title, so each becomes U+FFFD, one character for one, which
+/// keeps a cell one column wide.
 fn escape_xml(text: &str, out: &mut String) {
     for c in text.chars() {
         match c {
@@ -109,6 +117,8 @@ fn escape_xml(text: &str, out: &mut String) {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
+            '\t' | '\n' | '\r' => out.push(c),
+            '\u{0}'..='\u{1f}' | '\u{fffe}' | '\u{ffff}' => out.push(char::REPLACEMENT_CHARACTER),
             other => out.push(other),
         }
     }
@@ -231,7 +241,16 @@ impl Screen {
                 // Trailing blanks draw nothing as text — the background run
                 // above is what paints them — so the element carries only
                 // the glyphs. Concealed text is blanks, as a terminal shows it.
-                let shown = if style.conceal { "" } else { text.trim_end() };
+                // An underline or strikethrough is drawn under blanks too, so
+                // a decorated run keeps them: an underlined empty form field
+                // is all blanks, and trimming it dropped the field (#586).
+                let shown = if style.conceal {
+                    ""
+                } else if style.underline || style.strikethrough {
+                    text.as_str()
+                } else {
+                    text.trim_end()
+                };
                 if shown.is_empty() {
                     continue;
                 }
