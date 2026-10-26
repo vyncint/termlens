@@ -24,7 +24,7 @@ authors = ["Vyncint Ng <vyncint@icloud.com>"]
 [workspace.dependencies]
 
 portable-pty = "0.9"
-vt100 = "0.16"
+vt100 = "0.18"
 thiserror = "2"
 unicode-width = "0.2"
 # Needle matching folds both sides to NFC. Terminals draw NFC and NFD
