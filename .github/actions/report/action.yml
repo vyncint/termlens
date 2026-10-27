@@ -6,7 +6,13 @@
 # SVG/HTML renderings as an artifact, since a step summary shows text and
 # not a local image.
 #
-# One `uses:` line from a consumer's workflow, nothing else: the CLI is
+# insta writes a `.snap.new` on CI only when the test step sets
+# `INSTA_UPDATE: new`: its default, `auto`, writes nothing once `CI` is set,
+# and every GitHub runner sets it (#597). Inline snapshots are not collected:
+# insta keeps their new values in `.pending-snap` files, JSON records for
+# `cargo insta review` rather than a screen `termlens render` reads.
+#
+# One `uses:` line from a consumer's workflow, nothing to install: the CLI is
 # `cargo install`ed from crates.io, which every Rust runner already has.
 # This repository passes `cli: workspace` so the suite dogfoods the CLI in
 # the tree rather than the one last published.
@@ -74,9 +80,13 @@ runs:
 
         # What to show: every .snap.new outside target/, then every file the
         # artifact hook wrote. Sorted, so the summary is stable run to run.
+        # `find` exits 1 on any directory it cannot read, a root-owned cache
+        # or a chmod 000 fixture, after printing everything it could; under
+        # pipefail that status ended the step before the summary had a line
+        # in it (#597). The output is kept and the status is not.
         {
-          find . -path ./target -prune -o -name '*.snap.new' -print 2>/dev/null
-          if [ -d "$dir" ]; then find "$dir" -type f -print; fi
+          find . -path ./target -prune -o -name '*.snap.new' -print 2>/dev/null || true
+          if [ -d "$dir" ]; then find "$dir" -type f -print || true; fi
         } | sort > "${out}/files.txt"
 
         {
@@ -84,6 +94,7 @@ runs:
           echo
           if [ ! -s "${out}/files.txt" ]; then
             echo "No \`.snap.new\` files and nothing under \`${dir}\`: the failures left no screen behind."
+            echo "On CI, insta writes a \`.snap.new\` only when the test step sets \`INSTA_UPDATE: new\`; inline snapshots (\`.pending-snap\`) are not rendered here."
           fi
         } >> "$GITHUB_STEP_SUMMARY"
 

@@ -101,6 +101,15 @@ reads that marker.
   also write a character XML 1.0 forbids, a C0 control other than tab, LF and
   CR or U+FFFE/U+FFFF, as U+FFFD, so a window title holding `\x01` or a cell
   holding U+FFFF no longer makes an SVG no parser opens.
+- The `report` action writes its summary when the workspace holds a
+  directory `find` cannot read, such as a root-owned cache or a `chmod 000`
+  test fixture (#597). The step used to stop there with exit 1 before
+  writing anything. The CI snippets in the README, the action's README and
+  the skill now set `INSTA_UPDATE: new` beside `TERMLENS_ARTIFACT_DIR`:
+  insta's default writes no `.snap.new` when `CI` is set, so on GitHub
+  Actions a failing snapshot left the action nothing to show. Inline
+  snapshots are not rendered, and the action's README and its "nothing
+  found" summary now say so.
 
 ## [0.11.6] - 2026-10-14
 

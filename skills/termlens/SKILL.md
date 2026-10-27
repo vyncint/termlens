@@ -567,10 +567,14 @@ directory (see §9b).
   `diff` and `render` read `-` as stdin (one operand of `diff` at most), and
   `inspect --cwd DIR` runs the program somewhere other than here; a
   relative program path such as `./demo` is then found inside `DIR`.
-- In CI, set `TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens` on the
-  test step and add `uses: vyncint/termlens/.github/actions/report@v0.11.6`
-  with `if: failure()` after it: every screen a failing wait embedded, and
-  every `.snap.new` with its diff, lands in the pull request's step summary.
+- In CI, set `TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens` and
+  `INSTA_UPDATE: new` on the test step, and add
+  `uses: vyncint/termlens/.github/actions/report@v0.11.6` with
+  `if: failure()` after it: every screen a failing wait embedded, and every
+  `.snap.new` with its diff, lands in the pull request's step summary.
+  `INSTA_UPDATE: new` is not optional: insta's default writes no `.snap.new`
+  when `CI` is set, and GitHub sets it on every runner. Inline snapshots are
+  not rendered; insta keeps their new values in `.pending-snap` files.
 
 ## 10. A checklist before you finish
 

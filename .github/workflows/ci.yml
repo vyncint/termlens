@@ -67,6 +67,9 @@ jobs:
       - run: cargo test --workspace --all-features
         env:
           TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens
+          # insta's default, `auto`, writes no .snap.new once CI is set, so
+          # the report step below never had a snapshot to show (#597).
+          INSTA_UPDATE: new
       # The CLI's documented exit codes, against this tree. `install.yml`
       # runs the same script against the *published* binary, which is the
       # net; this is the fast feedback. #310 was a `--version` that exited 2
@@ -208,6 +211,10 @@ jobs:
       # all-passing fixture must exit zero. Needs no toolchain, so it lives
       # here with the other script gates.
       - run: tools/preflight-selftest/run.sh
+      # …and the report action's render step (#597), run from action.yml
+      # with a stub CLI: a directory `find` cannot read ended the step
+      # before it wrote a line, and other repositories run this step.
+      - run: tools/report-action-selftest/run.sh
       # The emit fixture's documented steps against the ones it implements
       # (#318). It lives in this job because it needs no toolchain — it is
       # two greps and a `comm` — and the fixture is what almost every
