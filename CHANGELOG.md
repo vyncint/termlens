@@ -17,8 +17,39 @@ reads that marker.
 
 ## [Unreleased]
 
+### Changed
+
+- The terminal emulator is vt100 0.18.1, up from 0.16.2 (#608), which brings
+  the screen a test sees closer to xterm's in ways a snapshot can show. A
+  change of height moves rows as xterm does: a shorter screen drops the rows
+  below the cursor, then pushes rows off the top into history, and a taller
+  one pulls the newest back onto the grid. 0.16 cut rows off the bottom, so
+  after a shrink the line the cursor was on could vanish. A VS16
+  emoji-presentation sequence (`⚠️`, `❤️`) is two columns wide, as
+  `unicode-width` and ratatui lay it out; it was one, which shifted the rest
+  of the row against the application's own layout. HVP (`CSI f`) and HPA
+  (`` CSI ` ``) move the cursor, which they silently did not; ED 3
+  (`CSI 3 J`) empties the terminal's history, and termlens keeps the rows it
+  had already retained, as it does across RIS; IL and DL with the cursor
+  outside the scroll region do nothing, where they used to edit rows outside
+  it. None of these is listed by `unsupported()` any more. The MSRV stays
+  1.85.
+
 ### Fixed
 
+- Leaving the alternate screen no longer copies the whole retained history
+  a second time (#576). The alternate screen's grid has no history of its
+  own, and its empty one was read as the main screen's history emptied, so
+  every trip through a full-screen program repeated every scrolled-off row
+  in `scrollback_text()`, `full_text()` and the styled history.
+- Narrowing the terminal through a wide character and then erasing that row
+  no longer panics the emulator (#577); vt100 0.18 keeps the row consistent.
+- REP (`CSI n b`) repeats the last character drawn (#578). The
+  `xterm-256color` terminfo termlens sets advertises it, and ncurses uses it
+  for runs of one character outside a UTF-8 locale, so a horizontal line or
+  a row of `=` drew as a single character. Under insert mode the repeated
+  characters still overwrite rather than insert, as `docs/LIMITATIONS.md`
+  says.
 - `termlens` no longer panics with exit code 101 (#594). A closed or full
   stderr (`2>&1 | true`, `2>/dev/full`) made every diagnostic and the
   `inspect` trailer panic; the write is now checked, and a trailer that cannot

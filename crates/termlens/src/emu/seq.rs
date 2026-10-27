@@ -401,6 +401,11 @@ pub(crate) enum SeqEvent {
     /// scrolled before this byte, because the backend's history is about
     /// to be rebuilt empty (#391).
     HardReset,
+    /// `ED 3` (`CSI 3 J`) completed: erase the saved lines. vt100 empties
+    /// the active grid's history for it, so this is RIS's case without the
+    /// reset: the emulator saves the rows that scrolled before this byte,
+    /// and the history it reads next starts over.
+    ScrollbackErased,
     /// The application asked the terminal a question.
     Query(Query),
     /// An inline graphics payload completed. Carried out of the tracker
@@ -1212,6 +1217,9 @@ impl SeqTracker {
                 b'Z' if self.csi_param_count <= 1 => {
                     return SeqEvent::Tabs(TabOp::Back(count));
                 }
+                // ED 3, erase the saved lines. vt100 reads the first
+                // parameter alone, and so does this.
+                b'J' if ps == 3 => return SeqEvent::ScrollbackErased,
                 _ => {}
             }
         }

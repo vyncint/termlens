@@ -586,7 +586,14 @@ resize is a cost no assertion has asked for; the other honest option,
 discarding history on resize, would cost a suite that exercises a
 responsive layout everything it had asserted on. Rows captured
 after a resize have the new width, so `full_text()` can hold both
-geometries, and says so where a caller meets it. The alternate screen
+geometries, and says so where a caller meets it. A change of *height*
+moves rows the way xterm does (vt100 0.18): a shorter screen with the
+cursor on its last row pushes its top rows into history, and a taller one
+pulls the newest back onto the grid — where they leave the history, so no
+row is on record twice. RIS and ED 3 (`CSI 3 J`, which `clear` sends)
+empty the terminal's own history; the rows already retained survive both,
+since a record that forgets what a test may still assert on is worse than
+one a real terminal would have cleared. The alternate screen
 accumulates no history at all (vt100 gives the alternate grid none), which
 is what makes retention safe to default on for full-screen TUIs.
 
@@ -962,7 +969,7 @@ But it is an implementation detail:
 
 ### The attribute shadow
 
-vt100 0.16's `Attrs` is `{ fgcolor, bgcolor, mode: u8 }` and its SGR
+vt100's `Attrs` (0.16 through 0.18) is `{ fgcolor, bgcolor, mode: u8 }` and its SGR
 dispatch handles only `0 1 2 3 4 7 22 23 24 27` plus the colour params.
 `5`/`6` (blink), `8` (conceal), `9` (strikethrough) and their resets never
 reach a cell. That is not a missing nicety: **a test asserting that a
@@ -972,7 +979,7 @@ secret in clear**, because the two renderings are identical in the grid and
 crate where a green test certifies the bug it was written to catch.
 
 Upstream is the right home for the fix — three spare bits are sitting in
-`mode: u8` — but 0.16.2 (July 2025) is the newest release, `Attrs` has no
+`mode: u8` — but 0.18.1 still drops all three, `Attrs` has no
 public setter reachable from `Callbacks::unhandled_csi`, and a published
 crate cannot carry a `[patch.crates.io]`. So the three attributes are
 recovered from **a second `vt100::Parser` fed the same byte stream with

@@ -4098,6 +4098,12 @@ impl Terminal {
     /// on. The visible grid is not reflowed either: the backend clips or pads
     /// each row to the new width, which is the stale-frame trap above.
     ///
+    /// A change of *height* moves rows the way xterm does. A shorter screen
+    /// drops the rows below the cursor first, then pushes rows off the top
+    /// into history; a taller one pulls the newest history rows back onto
+    /// the grid, and they leave the history again, so no row is on record
+    /// twice. On the alternate screen nothing moves into history at all.
+    ///
     /// # After the child exits
     ///
     /// Refused, the same way [`send`](Self::send) is. Once the child has

@@ -27,7 +27,9 @@ CHANGELOG entry.
   scrolled-off row has no styles and no cell addressing — and is **not
   reflowed** by a `resize`: rows keep the width they were captured at, by
   decision (`Terminal::resize` says why). The visible grid stays the
-  fully-featured surface.
+  fully-featured surface. History also outlives what clears a terminal's
+  own: RIS and ED 3 (`CSI 3 J`, which `clear` sends) empty a terminal's
+  scrollback, and termlens keeps the rows it had already retained.
 
 ## Character sets, modes and tab stops
 
@@ -42,10 +44,12 @@ CHANGELOG entry.
 - **Insert mode (`IRM`, `CSI 4 h`) pushes the rest of the row right**, as
   ncurses's `insch` expects on a terminal advertising `smir`; `RIS` and
   `DECSTR` clear it, and `Screen::insert_mode()` reports an application
-  that left it on. Other ANSI modes the backend drops (`LNM` and the rest)
-  are not modelled — and *say so*: `Screen::unsupported()` lists every
-  sequence the emulator did not implement, in the form `^[[20h`, so a test
-  can tell a plausible-looking wrong grid from a right one.
+  that left it on. One exception: the characters REP (`CSI n b`) repeats
+  overwrite the row even in insert mode, where xterm inserts them. Other
+  ANSI modes the backend drops (`LNM` and the rest) are not modelled — and
+  *say so*: `Screen::unsupported()` lists every sequence the emulator did
+  not implement, in the form `^[[20h`, so a test can tell a
+  plausible-looking wrong grid from a right one.
 - **A soft-wrapped line is two rows.** `contains` and `find` read the grid
   row by row and do not span the wrap; `Screen::row_wrapped(row)` reports
   the backend's record of where a line wrapped, and

@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -44,6 +45,11 @@ pub(crate) struct Vt100Emulator {
     /// Rows of vt100's own scrollback already copied into `history`, so a
     /// read that scrolled nothing costs one length check.
     captured: usize,
+    /// Set just before the byte that empties vt100's history — RIS, or ED 3
+    /// on the main screen — so the capture that byte's feed runs starts the
+    /// mark over instead of reading the shorter history as rows that came
+    /// back onto the screen. See `capture_scrolled_rows`.
+    history_reset: bool,
     /// Inline graphics payloads, oldest first, behind an `Arc` so a
     /// snapshot costs one refcount rather than a copy of every image.
     graphics: Arc<Vec<GraphicsPayload>>,
@@ -84,20 +90,24 @@ impl Vt100Emulator {
     ) -> Self {
         Self {
             parser: ::vt100::Parser::new_with_callbacks(
-                rows,
-                cols,
+                nz(rows),
+                nz(cols),
                 scrollback_len,
                 Unhandled::default(),
             ),
             tracker: SeqTracker::new(capture, cols),
-            // The shadow keeps history only when its cells will be read.
-            shadow: AttrShadow::new(rows, cols, if styled_history { scrollback_len } else { 0 }),
+            // The shadow keeps the same history as the primary, styled or
+            // not: a resize that makes the screen taller pulls rows back out
+            // of history onto the grid, and the shadow's grid has to get the
+            // same rows back to stay in lockstep.
+            shadow: AttrShadow::new(rows, cols, scrollback_len),
             history_cells: styled_history.then(VecDeque::new),
             colors: ColorNormalizer::new(),
             scrollback_len,
             frame_started: None,
             history: VecDeque::new(),
             captured: 0,
+            history_reset: false,
             graphics: Arc::new(Vec::new()),
             graphics_bytes: 0,
             capture,
@@ -200,6 +210,23 @@ impl Vt100Emulator {
         }
     }
 
+    /// Feed `before`, then `last` — the byte that completes RIS (`hard`) or
+    /// ED 3 — on its own.
+    ///
+    /// Rows that scrolled since the last capture exist only in vt100's
+    /// history, and the sequence is about to discard it. The feed is split
+    /// at its final byte: everything before goes first — one write can carry
+    /// lines and the reset together — and the capture that feed runs takes
+    /// those rows. The final byte follows alone, and the capture its feed
+    /// runs is told the history starts over (#391). ED 3 on the alternate
+    /// screen empties only that grid's history, which is always empty, so
+    /// the main screen's mark stands.
+    fn feed_history_reset(&mut self, before: &[u8], last: &[u8], hard: bool) {
+        self.feed_staged(before);
+        self.history_reset = hard || !self.parser.screen().alternate_screen();
+        self.feed_staged(last);
+    }
+
     /// Copy any rows that have scrolled off since the last call.
     ///
     /// vt100 models scrollback as a *stateful view*: `set_scrollback(n)`
@@ -213,22 +240,41 @@ impl Vt100Emulator {
         if self.scrollback_len == 0 {
             return;
         }
-        let (rows, cols) = self.parser.screen().size();
+        // The alternate screen's grid keeps no history, and every accessor
+        // reads the grid on display: its length of zero is not the main
+        // screen's history emptied. Reading it as that restarted the mark,
+        // and leaving the alternate screen then copied the whole history a
+        // second time (#576). The main screen's history waits, untouched,
+        // until the main screen is back.
+        if self.parser.screen().alternate_screen() {
+            return;
+        }
+        let (rows, cols) = size(self.parser.screen());
         let screen = self.parser.screen_mut();
+        let len = screen.scrollback_len();
 
-        // `set_scrollback` clamps to the real history length, so asking for
-        // more than exists is how we learn how much exists.
-        screen.set_scrollback(usize::MAX);
-        let len = screen.scrollback();
-
-        // Below the cap, history only grows: the new rows are exactly
-        // `captured..len`, and an unchanged length means nothing scrolled.
-        // RIS (`ESC c`) is the one write that breaks that monotonicity:
-        // it rebuilds the screen and empties the history, while the rows
-        // already copied here survive. A length below the mark is that
-        // rebuild — the rows now at the front are new and have to be read
-        // from the start, or everything under the stale mark is skipped
-        // (#391).
+        // Rows only scroll *into* history, so below the cap the new rows
+        // are exactly `captured..len`, and an unchanged length means nothing
+        // scrolled. Three writes shorten it instead. RIS and ED 3 empty it,
+        // while the rows already copied here survive: the mark starts over,
+        // and the rows now at the front are read from the start (#391). A
+        // resize that makes the screen taller pulls the newest rows back
+        // out of history onto the grid (vt100 0.18, as xterm does): those
+        // rows are on screen again, so they leave the copy too, newest
+        // first, and the mark follows them down. Nothing else shortens it,
+        // and a resize applied while the alternate screen was up is settled
+        // here, the first time the main screen is read again.
+        if std::mem::take(&mut self.history_reset) {
+            self.captured = 0;
+        } else if len < self.captured {
+            for _ in len..self.captured {
+                self.history.pop_back();
+                if let Some(cells) = &mut self.history_cells {
+                    cells.pop_back();
+                }
+            }
+            self.captured = len;
+        }
         //
         // At the cap, vt100 evicts from the front and the length stops
         // changing, so it no longer reveals growth — and an unchanged
@@ -243,9 +289,6 @@ impl Vt100Emulator {
         // 352ms with retention off, 327ms below the cap (free, within
         // noise), 639ms on this path — under 2x, for a workload well past
         // what a test drives.
-        if len < self.captured {
-            self.captured = 0;
-        }
         let at_cap = len == self.scrollback_len;
         if !at_cap && len == self.captured {
             screen.set_scrollback(0);
@@ -320,7 +363,7 @@ impl Vt100Emulator {
     fn cursor_position(&self) -> (u16, u16) {
         let screen = self.parser.screen();
         let (row, col) = screen.cursor_position();
-        (row, col.min(screen.size().1.saturating_sub(1)))
+        (row, col.min(size(screen).1.saturating_sub(1)))
     }
 }
 
@@ -357,7 +400,7 @@ impl Emulator for Vt100Emulator {
                 fed = i;
                 let screen = self.parser.screen();
                 let (_, col) = screen.cursor_position();
-                let room = usize::from(screen.size().1.saturating_sub(col));
+                let room = usize::from(size(screen).1.saturating_sub(col));
                 let reserve = width.min(room);
                 if reserve > 0 {
                     self.feed(format!("\x1b[{reserve}@").as_bytes());
@@ -392,17 +435,13 @@ impl Emulator for Vt100Emulator {
                     None
                 }
                 SeqEvent::HardReset => {
-                    // Rows that scrolled since the last capture exist only
-                    // in vt100's history, and the reset is about to discard
-                    // it. The feed is split at the reset: everything before
-                    // it goes first — one write can carry lines and the
-                    // reset together — and the capture that feed runs takes
-                    // those rows. The reset then follows alone, and the
-                    // capture its feed runs sees an emptied history, which
-                    // is how the mark learns to start over (#391).
-                    self.feed_staged(&bytes[fed..i]);
+                    self.feed_history_reset(&bytes[fed..i], &bytes[i..=i], true);
                     fed = i + 1;
-                    self.feed_staged(&bytes[i..=i]);
+                    None
+                }
+                SeqEvent::ScrollbackErased => {
+                    self.feed_history_reset(&bytes[fed..i], &bytes[i..=i], false);
+                    fed = i + 1;
                     None
                 }
                 SeqEvent::Tabs(op) => {
@@ -440,7 +479,7 @@ impl Emulator for Vt100Emulator {
         let unsupported_overflow = self.parser.callbacks().overflow();
         let visual_bells = self.parser.callbacks().visual_bells();
         let screen = self.parser.screen();
-        let (rows, cols) = screen.size();
+        let (rows, cols) = size(screen);
         let mut cells: Vec<Cell> = Vec::with_capacity(usize::from(rows) * usize::from(cols));
         // The shadow grid is the same shape as the primary — vt100's
         // attributes never influence geometry, and the two streams differ
@@ -587,7 +626,7 @@ impl Emulator for Vt100Emulator {
     }
 
     fn set_size(&mut self, rows: u16, cols: u16) {
-        self.parser.screen_mut().set_size(rows, cols);
+        self.parser.screen_mut().set_size(nz(rows), nz(cols));
         self.shadow.set_size(rows, cols);
         self.tracker.set_cols(cols);
         // A resize can push rows into history on its own.
@@ -649,7 +688,7 @@ fn is_printable(b: u8) -> bool {
 /// What the reader substitutes for a byte it could not decode (`utf8.rs`).
 const REPLACEMENT: &str = "\u{FFFD}";
 /// What the grid is fed in its place. vt100's `print` drops U+FFFD outright
-/// (0.16, `perform.rs`), so the replacement would vanish exactly as the
+/// (0.16 through 0.18, `perform.rs`), so the replacement would vanish as the
 /// invalid byte did (#217). U+FDD0 is a Unicode noncharacter — reserved for
 /// internal use like this, never for interchange, so no application has any
 /// business emitting one — and vt100 draws it as an ordinary width-1 cell.
@@ -694,6 +733,19 @@ fn convert_color(color: ::vt100::Color) -> Color {
         ::vt100::Color::Idx(i) => Color::Indexed(i),
         ::vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
+}
+
+/// vt100 0.18 takes and returns sizes as `NonZeroU16`. termlens never asks
+/// for a zero dimension (the builder's floor is 2, a parsed screen's 1), so
+/// the clamp to 1 never fires; it keeps the conversion total.
+pub(super) fn nz(n: u16) -> NonZeroU16 {
+    NonZeroU16::new(n).unwrap_or(NonZeroU16::MIN)
+}
+
+/// The screen's `(rows, cols)` as plain numbers.
+fn size(screen: &::vt100::Screen) -> (u16, u16) {
+    let (rows, cols) = screen.size();
+    (rows.get(), cols.get())
 }
 
 #[cfg(test)]
@@ -1145,6 +1197,170 @@ mod tests {
             b"\x1b[?1049h one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix",
         );
         assert_eq!(emu.snapshot().scrollback_rows(), 0);
+    }
+
+    #[test]
+    fn leaving_the_alternate_screen_copies_no_history_twice() {
+        // The alternate grid has no history, and its length of zero read as
+        // the main screen's history emptied: the mark restarted, and every
+        // return copied the whole history again (#576). Separate feeds, as
+        // a shell, a full-screen program and the shell again write them.
+        let mut emu = Vt100Emulator::new(4, 20, 100, crate::graphics::DEFAULT_CAPTURE, false);
+        feed_all(&mut emu, b"line1\r\nline2\r\nline3\r\nline4\r\nline5\r\n");
+        for _ in 0..2 {
+            feed_all(&mut emu, b"\x1b[?1049halt");
+            // The history stays on record while the program runs, too.
+            assert_eq!(emu.snapshot().scrollback_text(), "line1\nline2");
+            feed_all(&mut emu, b"\x1b[?1049l");
+        }
+        let s = emu.snapshot();
+        assert_eq!(s.scrollback_text(), "line1\nline2");
+        assert_eq!(s.text(), "line3\nline4\nline5\n");
+    }
+
+    #[test]
+    fn a_taller_screen_takes_its_rows_back_from_history() {
+        // vt100 0.18 resizes as xterm does: a shorter screen with the cursor
+        // on its last row pushes rows into history, and a taller one pulls
+        // them back. A row back on the grid leaves the history, or it would
+        // be on record twice.
+        let mut emu = Vt100Emulator::new(5, 10, 100, crate::graphics::DEFAULT_CAPTURE, false);
+        feed_all(&mut emu, b"1\r\n2\r\n3\r\n4\r\nend");
+        emu.set_size(3, 10);
+        let s = emu.snapshot();
+        assert_eq!(s.scrollback_text(), "1\n2");
+        assert_eq!(s.text(), "3\n4\nend");
+        emu.set_size(5, 10);
+        let s = emu.snapshot();
+        assert_eq!(s.scrollback_text(), "");
+        assert_eq!(s.text(), "1\n2\n3\n4\nend");
+        // Scrolling afterwards copies each row once.
+        feed_all(&mut emu, b"\r\nf\r\ng");
+        assert_eq!(emu.snapshot().full_text(), "1\n2\n3\n4\nend\nf\ng");
+    }
+
+    #[test]
+    fn rows_back_from_history_keep_the_attributes_the_shadow_carries() {
+        // Blink lives in the attribute shadow, a second parser. Its grid
+        // must get the same rows back from history as the primary's, or a
+        // snapshot after the resize trips the shadow's lockstep assertion
+        // and reads attributes off the wrong rows. Styled history off, the
+        // default: the shadow used to keep no history then.
+        for styled in [false, true] {
+            let mut emu = Vt100Emulator::new(5, 10, 100, crate::graphics::DEFAULT_CAPTURE, styled);
+            feed_all(&mut emu, b"\x1b[5m1\x1b[0m\r\n2\r\n3\r\n4\r\nend");
+            emu.set_size(3, 10);
+            emu.set_size(5, 10);
+            let s = emu.snapshot();
+            assert_eq!(s.text(), "1\n2\n3\n4\nend", "styled history {styled}");
+            assert!(
+                s.cell(0, 0).is_some_and(|c| c.style().blink),
+                "styled history {styled}"
+            );
+            assert!(
+                s.cell(1, 0).is_some_and(|c| !c.style().blink),
+                "styled history {styled}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resize_while_the_alternate_screen_is_up_is_settled_on_return() {
+        // The resize reaches the main screen's grid too, out of sight: rows
+        // come back out of its history while the alternate screen is shown,
+        // and the copy catches up when the main screen is read again.
+        let mut emu = Vt100Emulator::new(5, 10, 100, crate::graphics::DEFAULT_CAPTURE, false);
+        feed_all(&mut emu, b"1\r\n2\r\n3\r\n4\r\nend");
+        emu.set_size(3, 10);
+        assert_eq!(emu.snapshot().scrollback_text(), "1\n2");
+        feed_all(&mut emu, b"\x1b[?1049hfull screen");
+        emu.set_size(5, 10);
+        feed_all(&mut emu, b"\x1b[?1049l");
+        let s = emu.snapshot();
+        assert_eq!(s.scrollback_text(), "");
+        assert_eq!(s.full_text(), "1\n2\n3\n4\nend");
+    }
+
+    #[test]
+    fn erasing_the_saved_lines_restarts_the_mark_and_keeps_the_copy() {
+        // ED 3 (`CSI 3 J`, which `clear` sends) empties vt100's history. More
+        // rows scrolling in the same write than the mark held must all be
+        // copied: read by length alone, the history looked like it had
+        // grown past the mark, and the first rows after the erase were
+        // skipped. The rows copied before the erase are kept, as for RIS.
+        let stream = b"a\r\nb\r\nc\r\nd\r\ne\r\n\x1b[3J1\r\n2\r\n3\r\n4\r\n5\r\n6";
+        let erase = stream.iter().position(|&b| b == 0x1b).unwrap();
+        // One feed, split before the erase, inside it, and after it.
+        for split in [stream.len(), erase, erase + 2, erase + 4, erase + 6] {
+            let mut emu = Vt100Emulator::new(4, 10, 100, crate::graphics::DEFAULT_CAPTURE, false);
+            feed_all(&mut emu, &stream[..split]);
+            feed_all(&mut emu, &stream[split..]);
+            let s = emu.snapshot();
+            assert_eq!(
+                s.scrollback_text(),
+                "a\nb\nc\nd\ne\n1\n2",
+                "split at {split}"
+            );
+            assert_eq!(s.text(), "3\n4\n5\n6", "split at {split}");
+        }
+    }
+
+    #[test]
+    fn erasing_saved_lines_on_the_alternate_screen_leaves_the_main_history() {
+        // ED 3 empties the history of the grid on display, and the alternate
+        // grid has none: the main screen's history and its mark are untouched.
+        let mut emu = Vt100Emulator::new(4, 10, 100, crate::graphics::DEFAULT_CAPTURE, false);
+        feed_all(&mut emu, b"a\r\nb\r\nc\r\nd\r\ne\r\n");
+        feed_all(&mut emu, b"\x1b[?1049h\x1b[3Jtui\x1b[?1049l");
+        let s = emu.snapshot();
+        assert_eq!(s.scrollback_text(), "a\nb");
+        assert_eq!(s.text(), "c\nd\ne\n");
+    }
+
+    #[test]
+    fn narrowing_through_a_wide_character_leaves_a_row_that_can_be_erased() {
+        // vt100 0.16 kept the cut character marked wide after a resize took
+        // its second column, and the next write that cleared the row read
+        // past its end and panicked the emulator (#577). Each eraser is
+        // a separate way of reaching that cell.
+        for eraser in [
+            &b"\r\x1b[K"[..],
+            b"\x1b[J",
+            b"\x1b[1;3H\x1b[P",
+            b"\x1b[1;3H\x1b[X",
+            b"\x1b[1;3Hx",
+        ] {
+            let mut emu = Vt100Emulator::new(3, 4, 0, crate::graphics::DEFAULT_CAPTURE, false);
+            feed_all(&mut emu, "ab\u{6f22}".as_bytes());
+            emu.set_size(3, 3);
+            feed_all(&mut emu, eraser);
+            let s = emu.snapshot();
+            assert_eq!(s.cols(), 3, "{eraser:?}");
+            assert!(
+                !s.row_text(0).contains('\u{6f22}'),
+                "{eraser:?}: {:?}",
+                s.row_text(0)
+            );
+        }
+    }
+
+    #[test]
+    fn rep_repeats_the_last_character_drawn() {
+        // REP (`CSI n b`), which the xterm-256color terminfo advertises and
+        // ncurses uses for runs outside a UTF-8 locale (#578): vt100 0.17
+        // implements it. The character repeated is the one drawn, so a
+        // DEC Special Graphics line repeats as the line.
+        let emu = emu_with(b"x\x1b[5bEND");
+        let s = emu.snapshot();
+        assert_eq!(s.row_text(0), "xxxxxxEND ");
+        assert_eq!(s.unsupported(), [] as [&str; 0]);
+        let emu = emu_with(b"\x1b(0q\x1b[3b\x1b(B|");
+        assert_eq!(
+            emu.snapshot().row_text(0),
+            "\u{2500}\u{2500}\u{2500}\u{2500}|     "
+        );
+        let emu = emu_with("\u{6f22}\x1b[2b".as_bytes());
+        assert_eq!(emu.snapshot().row_text(0), "\u{6f22}\u{6f22}\u{6f22}    ");
     }
 
     #[test]
