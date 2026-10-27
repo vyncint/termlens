@@ -255,9 +255,9 @@ termlens assertion that does:
 | Invisible to `TestBackend` | The assertion that sees it |
 | --- | --- |
 | raw-mode entry and exit, the alternate screen | `t.wait_until(\|s\| s.alternate_screen())`, and `!alternate_screen()` after `q` |
-| a resize reaching the application | `t.resize(60, 14)?; t.wait_frame(\|s\| s.contains("60x14"))` |
+| a resize reaching the application | `t.resize(60, 14)?; t.wait_until(\|s\| s.contains("60x14"))?` |
 | output outside ratatui — a `println!`, a logger, a panic | `s.contains("panicked")`, or a snapshot of the whole grid |
-| a torn frame | `wait_frame` returns complete DEC 2026 frames only |
+| a torn frame, in an application that emits DEC 2026 synchronized updates (stock ratatui does not) | `wait_frame` returns complete DEC 2026 frames only |
 | capability probes and the modes they turn on | `answer_queries` replies as a terminal would; `s.mouse_mode()`, `s.bracketed_paste()` say what was asked for |
 | mouse and paste bytes under the enabled modes | `t.click(col, row)`, `t.scroll(…)`, `t.paste(…)` encode for the mode the app turned on |
 | a masked field that is really printed in clear | `cell.style().conceal` — identical text, different picture |

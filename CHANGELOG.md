@@ -110,6 +110,11 @@ reads that marker.
   Actions a failing snapshot left the action nothing to show. Inline
   snapshots are not rendered, and the action's README and its "nothing
   found" summary now say so.
+- The README's resize recipe for ratatui users waits with `wait_until`
+  instead of `wait_frame` (#600). `wait_frame` waits for DEC 2026
+  synchronized updates, which stock ratatui does not emit, so the recipe
+  timed out for exactly the readers it addressed. The torn-frame row now
+  says it applies to an application that does emit them.
 
 ## [0.11.6] - 2026-10-14
 
