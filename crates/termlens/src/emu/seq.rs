@@ -853,6 +853,19 @@ impl SeqTracker {
         self.counts
     }
 
+    /// Abort a kitty upload still waiting for its last chunk, keeping the
+    /// wire cost it already ran up.
+    ///
+    /// Only a kitty escape continues an upload. A delete aborts one, in the
+    /// protocol's own words, and neither a sixel nor a hard reset can be
+    /// part of one. All three used to leave the upload in place (#587): the
+    /// sixel was built on top of it and came out carrying the kitty `s=`,
+    /// `c=` and `i=`, the delete was swallowed as its last chunk, and after
+    /// `RIS` the next transmission completed it.
+    fn abandon_upload(&mut self) {
+        self.counts.bytes += self.building.abandon();
+    }
+
     /// True while the application has focus reporting (mode 1004) enabled.
     pub(crate) fn focus_events(&self) -> bool {
         self.focus_events
@@ -929,7 +942,10 @@ impl SeqTracker {
     /// bell count and the link log stay, for the same reason they survive
     /// `RIS`: they are records of what the application emitted, not modes
     /// the terminal holds. An open link span stays open too — a soft reset
-    /// clears no screen, so the text after it is still the span's text.
+    /// clears no screen, so the text after it is still the span's text. A
+    /// kitty upload still in progress survives as well, though `RIS`
+    /// abandons one: kitty's soft reset leaves its images alone, and the
+    /// next chunk there still completes the upload.
     fn soft_reset(&mut self) {
         self.reset_charsets();
         self.saved_charsets = None;
@@ -1359,16 +1375,21 @@ impl SeqTracker {
                 }
             }
         }
-        // An APC opening with `G` is the kitty graphics protocol — or a
-        // continuation of one, which carries `m=` and nothing else.
-        if self.dcs_introducer == b'_'
-            && (self.dcs_head.first() == Some(&b'G') || self.building.in_progress())
-        {
+        // An APC opening with `G` is the kitty graphics protocol — a
+        // continuation chunk too, which is `G` with `m=` and nothing else.
+        // Any other APC is not graphics and leaves an upload where it was,
+        // as kitty does; it used to be taken as the upload's next chunk.
+        if self.dcs_introducer == b'_' && self.dcs_head.first() == Some(&b'G') {
             let control = self.dcs_control_block().to_vec();
             // The control block is `G` followed by the comma-separated keys.
             let keys = control.strip_prefix(b"G").unwrap_or(&control);
             let is_query = keys.split(|&b| b == b',').any(|pair| pair == b"a=q");
             if !is_query {
+                // A delete is never an upload's last chunk: it aborts the
+                // upload in progress and is then a delete like any other.
+                if key_is(keys, b"a", b"d") {
+                    self.abandon_upload();
+                }
                 // One image, however many escapes it took. `m=1` says
                 // another follows; the transmission is not an image until
                 // one arrives without it, and counting each escape instead
@@ -1407,6 +1428,9 @@ impl SeqTracker {
         // intermediate is the whole distinction from the two DCS questions
         // below, which reach the same `q` final through `+` and `$`.
         if self.dcs_introducer == b'P' && self.dcs_final == b'q' && self.dcs_intermediate == 0 {
+            // No part of a kitty upload, so it abandons one still in
+            // progress rather than being built on top of it.
+            self.abandon_upload();
             self.building.sixel();
             let at = self.dcs_payload_start();
             self.building.chunk(
@@ -1634,8 +1658,10 @@ impl SeqTracker {
                 // RIS (`ESC c`), the hard reset: the terminal returns to its
                 // power-on state, so the cursor is the terminal's default
                 // again, all four character sets are ASCII with G0 invoked,
-                // no single shift is pending, and any open hyperlink span
-                // cannot survive.
+                // no single shift is pending, and neither an open hyperlink
+                // span nor a kitty upload still waiting for its last chunk
+                // can survive — kitty's own reset drops the image being
+                // loaded, so the chunks still to come fail there.
                 //
                 // Reporting the last `DECSCUSR` after a reset would claim a
                 // fact the terminal does not hold — and it would do it in the
@@ -1658,6 +1684,7 @@ impl SeqTracker {
                     self.insert_mode = false;
                     self.tabs.reset();
                     self.close_link();
+                    self.abandon_upload();
                     // The grid rebuild is vt100's; the event tells the
                     // emulator to capture what scrolled before it, since
                     // that history is what the rebuild discards (#391).
@@ -1814,7 +1841,7 @@ impl SeqTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graphics::GraphicsFormat;
+    use crate::graphics::{GraphicsAction, GraphicsFormat, GraphicsProtocol};
 
     /// The width these tests construct a tracker at. Only the tab-stop set
     /// is sized, and only the tab tests care what the size is; the rest is
@@ -1953,6 +1980,125 @@ mod tests {
         assert_eq!(counts.deletes, 1, "and one teardown");
         // The wire cost of both is still counted: a delete is traffic.
         assert!(counts.bytes > 22);
+    }
+
+    /// The first chunk of a kitty upload whose last chunk never comes, with
+    /// every fact a control block can state, so one leaking into whatever
+    /// follows is visible. #587's first sequence.
+    const KITTY_UNFINISHED: &[u8] = b"\x1b_Ga=T,f=32,s=1,v=1,i=42,c=3,r=2,o=z,t=f,m=1;AAAA\x1b\\";
+    /// A 4x6 sixel, red throughout.
+    const RED_SIXEL: &[u8] = b"\x1bPq\"1;1;4;6#0;2;100;0;0~~~~\x1b\\";
+    /// The first chunk of #587's second sequence.
+    const UPLOAD_OF_5: &[u8] = b"\x1b_Ga=T,f=32,s=2,v=1,i=5,m=1;AAAA\x1b\\";
+
+    /// Wire bytes the tracker counts for whole escapes: everything between
+    /// the two-byte introducer and the two-byte `ST`.
+    fn wire_cost(escapes: &[&[u8]]) -> u64 {
+        escapes.iter().map(|escape| escape.len() as u64 - 4).sum()
+    }
+
+    /// A sixel is no part of a kitty upload, so one arriving mid-upload
+    /// abandons it (#587). It was built on top of it instead: one payload,
+    /// described as a sixel carrying the kitty `s=`, `c=`/`r=`, `t=`, `i=`
+    /// and `o=`, its data the kitty chunk and the sixel run together.
+    #[test]
+    fn a_sixel_abandons_an_unfinished_kitty_upload() {
+        let wire = [KITTY_UNFINISHED, RED_SIXEL].concat();
+        let seen = payloads(&wire);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        let sixel = &seen[0];
+        assert_eq!(sixel.protocol(), GraphicsProtocol::Sixel);
+        assert_eq!(sixel.size(), Some((4, 6)), "its own raster: {sixel:?}");
+        assert_eq!(sixel.cells(), None, "no kitty fact: {sixel:?}");
+        assert_eq!(sixel.transmission(), None, "{sixel:?}");
+        assert_eq!(sixel.id(), None, "{sixel:?}");
+        assert!(!sixel.compressed(), "{sixel:?}");
+        assert_eq!(sixel.chunks(), 1);
+        assert_eq!(sixel.data(), Some(&b"\"1;1;4;6#0;2;100;0;0~~~~"[..]));
+
+        let counts = fed(&wire).graphics();
+        assert_eq!((counts.kitty, counts.sixel), (0, 1), "{counts:?}");
+        // Abandoned is not unsent: the upload's chunk crossed the wire, and
+        // `bytes` counts traffic rather than pictures.
+        assert_eq!(counts.bytes, wire_cost(&[KITTY_UNFINISHED, RED_SIXEL]));
+    }
+
+    /// The picture the bug was about: built on the kitty chunk, the `AAAA`
+    /// in front pushed the red four columns right of the declared 4x6 and
+    /// the frame decoded fully transparent.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn a_sixel_after_an_abandoned_upload_decodes_to_the_red_it_painted() {
+        let seen = payloads(&[KITTY_UNFINISHED, RED_SIXEL].concat());
+        let bitmap = seen[0].decode().expect("decodes");
+        assert_eq!((bitmap.width(), bitmap.height()), (4, 6));
+        assert_eq!(bitmap.colours(), vec![([255, 0, 0, 255], 24)]);
+    }
+
+    /// "If an image is being loaded in chunks and the upload is not complete
+    /// when any delete command is received, the partial upload must be
+    /// aborted" — and the delete still deletes (#587). It was read as the
+    /// upload's last chunk instead: its control block ignored, the upload
+    /// counted as an image that decodes to nothing, and the teardown
+    /// `deletes` exists to assert gone.
+    #[test]
+    fn a_delete_aborts_an_unfinished_upload_and_is_counted() {
+        let delete: &[u8] = b"\x1b_Ga=d,d=i,i=5\x1b\\";
+        let wire = [UPLOAD_OF_5, delete].concat();
+        let counts = fed(&wire).graphics();
+        assert_eq!(counts.kitty, 0, "an aborted upload is no image: {counts:?}");
+        assert_eq!(counts.deletes, 1, "and the delete is counted: {counts:?}");
+        assert_eq!(counts.bytes, wire_cost(&[UPLOAD_OF_5, delete]));
+
+        let seen = payloads(&wire);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].action(), GraphicsAction::Delete);
+        assert_eq!(seen[0].id(), Some(5));
+        assert_eq!(seen[0].size(), None, "no fact of the upload's: {seen:?}");
+        assert_eq!(seen[0].chunks(), 1);
+    }
+
+    /// A terminal at power-on has no upload half-received, and kitty's own
+    /// `RIS` drops the image being loaded, so the chunks still to come fail.
+    /// The next transmission is then described by its own control block
+    /// rather than completing the abandoned one (#587). `DECSTR` resets
+    /// modes and keeps content, and kitty's keeps the upload too, so the
+    /// next chunk after it completes the upload as if nothing had come
+    /// between.
+    #[test]
+    fn a_hard_reset_abandons_an_unfinished_upload_and_a_soft_reset_does_not() {
+        let fresh: &[u8] = b"\x1b_Ga=T,f=24,s=1,v=1,i=9;QUJD\x1b\\";
+        let seen = payloads(&[UPLOAD_OF_5, b"\x1bc", fresh].concat());
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].id(), Some(9), "its own control block: {seen:?}");
+        assert_eq!(seen[0].format(), GraphicsFormat::Rgb);
+        assert_eq!(seen[0].size(), Some((1, 1)));
+        assert_eq!(seen[0].chunks(), 1);
+        assert_eq!(seen[0].data(), Some(&b"QUJD"[..]));
+
+        let seen = payloads(&[UPLOAD_OF_5, b"\x1b[!p", b"\x1b_Gm=0;BBBB\x1b\\"].concat());
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].id(), Some(5), "the upload survived: {seen:?}");
+        assert_eq!(seen[0].chunks(), 2);
+        assert_eq!(seen[0].data(), Some(&b"AAAABBBB"[..]));
+    }
+
+    /// Only an APC opening with `G` is kitty's, continuation chunks
+    /// included. Any other APC used to be taken as the upload's next chunk —
+    /// and, carrying no `m=1`, as its last. kitty ignores one, and so the
+    /// upload goes on to the chunk that really is its last.
+    #[test]
+    fn an_apc_that_is_not_kitty_leaves_an_upload_alone() {
+        let wire = [
+            UPLOAD_OF_5,
+            b"\x1b_Xnot kitty;BBBB\x1b\\",
+            b"\x1b_Gm=0;CCCC\x1b\\",
+        ]
+        .concat();
+        let seen = payloads(&wire);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].chunks(), 2);
+        assert_eq!(seen[0].data(), Some(&b"AAAACCCC"[..]));
     }
 
     /// A payload past the capture bound keeps every count and drops the

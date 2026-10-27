@@ -101,6 +101,16 @@ reads that marker.
   also write a character XML 1.0 forbids, a C0 control other than tab, LF and
   CR or U+FFFE/U+FFFF, as U+FFFD, so a window title holding `\x01` or a cell
   holding U+FFFF no longer makes an SVG no parser opens.
+- A chunked kitty upload (`m=1`) is no longer completed by an escape that
+  cannot continue it (#587). A sixel sent mid-upload was built on top of
+  it: one payload, a sixel carrying the kitty `s=`, `c=`/`r=`, `t=` and
+  `i=`, that decoded to a transparent 4x6 instead of the red it painted. A
+  delete (`a=d`) was taken as the upload's last chunk, so `kitty()` counted
+  an image and `deletes()` missed the teardown; any other APC was taken as
+  a chunk too, and after `RIS` the next transmission completed the upload.
+  Only a kitty escape continues an upload now: a delete aborts it, as the
+  protocol requires, and is counted, and a sixel or `RIS` abandons it. An
+  abandoned upload is no image, and its bytes still count in `bytes()`.
 
 ## [0.11.6] - 2026-10-14
 
