@@ -1214,6 +1214,37 @@ fn render_and_diff_read_a_screen_from_stdin() -> termlens::Result<()> {
     Ok(())
 }
 
+/// A saved screen whose cell carried an escape sequence drove the terminal
+/// of whoever rendered it: `render --text` wrote the OSC that set the window
+/// title and the `ESC [2J` that cleared the screen straight to stdout, and
+/// then refused its own output as input (#582). The reader now refuses the
+/// file, so nothing reaches stdout and the tool exits 2 naming the cell.
+#[test]
+fn a_saved_screen_cannot_drive_the_terminal_that_renders_it() {
+    let screen = Screen::parse("size: 8x1  cursor: 0,0\nhi").expect("a saved screen");
+    let mut value = serde_json::to_value(&screen).expect("serializes");
+    value["cells"][0][1]["contents"] = "\u{1b}]0;PWNED\u{7}\u{1b}[2Jh".into();
+    let document = value.to_string();
+    let before = data("before.snap");
+    for args in [
+        &["render", "--text", "-"][..],
+        &["render", "--ansi", "-"],
+        &["diff", "--color", "never", "-", &before],
+    ] {
+        let out = with_stdin(args, &document);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert!(
+            !out.stdout.contains(&0x1b),
+            "{args:?} wrote an escape: {out:?}"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("cell 0,1") && stderr.contains("control character"),
+            "{args:?}: {stderr}"
+        );
+    }
+}
+
 /// Standard input is read once, so it can be one of `diff`'s operands and
 /// not both — said plainly rather than left to look like an empty screen.
 #[test]
@@ -2101,4 +2132,58 @@ fn render_empty_separate_out_value_names_the_flag() -> termlens::Result<()> {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(stderr, "termlens: --out needs a PATH argument\n");
     Ok(())
+}
+
+/// `inspect` takes the library's errors as outcomes — a program that exits
+/// without painting is `Eof`, one still running at the deadline `Timeout` —
+/// and the library writes every such error to `TERMLENS_ARTIFACT_DIR`. A
+/// run that ended normally left "failing test" screens there (#596). A
+/// program that inherits the environment is still handed the variable.
+#[test]
+#[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
+fn inspect_leaves_the_artifact_dir_alone_on_a_normal_run() {
+    use std::process::Command;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("inspect-artifacts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("an artifact directory");
+    let inspect = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_termlens"))
+            .args(args)
+            .env("TERMLENS_ARTIFACT_DIR", &dir)
+            .output()
+            .expect("termlens runs")
+    };
+    for args in [
+        &["inspect", "true"][..],
+        &[
+            "inspect",
+            "--timeout",
+            "1",
+            "sh",
+            "-c",
+            "printf hi; sleep 30",
+        ][..],
+    ] {
+        let out = inspect(args);
+        assert_eq!(out.status.code(), Some(0), "termlens {args:?}: {out:?}");
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .expect("the directory is readable")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        assert!(left.is_empty(), "termlens {args:?} left {left:?}");
+    }
+    let out = inspect(&[
+        "inspect",
+        "--inherit-env",
+        "sh",
+        "-c",
+        "printf '%s' \"${TERMLENS_ARTIFACT_DIR##*/}\"",
+    ]);
+    let shown = String::from_utf8_lossy(&out.stdout);
+    let name = dir
+        .file_name()
+        .expect("a name")
+        .to_string_lossy()
+        .into_owned();
+    assert!(shown.contains(&name), "the program saw: {shown}");
 }

@@ -1,9 +1,9 @@
 //! `find_all`, the `regex` feature's matches and waits, and the grid-aware
 //! masks (#264, #245, #250).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use termlens::{Key, Terminal};
+use termlens::{Key, Screen, Terminal};
 
 mod common;
 
@@ -369,4 +369,110 @@ fn a_mask_covers_a_needle_that_spans_rows() -> termlens::Result<()> {
     t.send(Key::Enter)?;
     t.wait_exit()?;
     Ok(())
+}
+
+/// The fastest of `runs` timings of `search`: a transient stall on a loaded
+/// machine has to hit every run to count.
+fn fastest<T>(runs: usize, search: impl Fn() -> T) -> Duration {
+    (0..runs)
+        .map(|_| {
+            let start = Instant::now();
+            std::hint::black_box(search());
+            start.elapsed()
+        })
+        .min()
+        .expect("at least one run")
+}
+
+/// Every search costs a small multiple of the work it cannot avoid. Each
+/// used to re-read the whole grid for every row it visited, asking whether
+/// the screen was ASCII, so `find` on 1000x1000 took three seconds where
+/// `contains` took six milliseconds — and `contains` too, once the first
+/// non-ASCII cell came late (#584).
+///
+/// Timed against a reference on the same screen rather than against a
+/// clock, so a slow or loaded machine slows both sides: one pass over the
+/// grid (`contains` on an ASCII screen) for a search, and building the
+/// masked screen (a mask that matches nothing) for a mask, which clones
+/// every cell. The rows are what multiplied the cost, so the screen is as
+/// tall as a terminal may be.
+#[test]
+fn every_search_costs_a_small_multiple_of_the_work_it_cannot_avoid() {
+    const COLS: usize = 200;
+    const ROWS: usize = 1000;
+    const BOUND: u32 = 10;
+    // Each row a run of the alphabet, so `zzz` is nowhere and every search
+    // reads the whole grid before it gives up.
+    let grid = |last: Option<char>| {
+        let mut text = format!("size: {COLS}x{ROWS}  cursor: 0,0\n");
+        for row in 0..ROWS {
+            let mut line: String = (0..COLS)
+                .map(|col| char::from(b'a' + ((row + col) % 26) as u8))
+                .collect();
+            if let (true, Some(ch)) = (row + 1 == ROWS, last) {
+                line.pop();
+                line.push(ch);
+            }
+            text.push_str(&line);
+            text.push('\n');
+        }
+        Screen::parse(&text).expect("the grid is well formed")
+    };
+    let ascii = grid(None);
+    let late = grid(Some('\u{e9}'));
+    assert!(ascii.find("zzz").is_none() && !late.contains("zzz"));
+
+    let pass = fastest(3, || ascii.contains("zzz"));
+    let build = fastest(3, || ascii.mask_cells(|_| false));
+    let within = |name: &str, took: Duration, reference: Duration| {
+        assert!(
+            took < reference * BOUND,
+            "{name} took {took:?}, {:.0} times its reference ({reference:?})",
+            took.as_secs_f64() / reference.as_secs_f64()
+        );
+    };
+    within("find", fastest(2, || ascii.find("zzz")), pass);
+    within("find_all", fastest(2, || ascii.find_all("zzz")), pass);
+    within(
+        "find across rows",
+        fastest(2, || ascii.find("a\nzzz")),
+        pass,
+    );
+    within("locate", fastest(2, || ascii.locate("zzz")), pass);
+    within(
+        "contains, a non-ASCII needle",
+        fastest(2, || ascii.contains("z\u{e9}")),
+        pass,
+    );
+    within(
+        "contains, the last cell non-ASCII",
+        fastest(2, || late.contains("zzz")),
+        pass,
+    );
+    within(
+        "find, the last cell non-ASCII",
+        fastest(2, || late.find("zzz")),
+        pass,
+    );
+    within(
+        "mask_matching",
+        fastest(2, || ascii.mask_matching("zzz", '#')),
+        build,
+    );
+    #[cfg(feature = "regex")]
+    {
+        let re = regex::Regex::new("zzz").unwrap();
+        within("matches", fastest(2, || ascii.matches(&re)), pass);
+        within("find_match", fastest(2, || ascii.find_match(&re)), pass);
+        within(
+            "find_all_matches",
+            fastest(2, || ascii.find_all_matches(&re)),
+            pass,
+        );
+        within(
+            "mask_matches",
+            fastest(2, || ascii.mask_matches(&re, '#')),
+            build,
+        );
+    }
 }

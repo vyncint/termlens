@@ -78,6 +78,9 @@ impl ExitWatch {
                 _ => return,
             }
         }
+        // From the first time anything saw the child reaped, kept on the
+        // terminal: a watch made per wait restarted the grace at every wait,
+        // so waits shorter than it never saw the terminal close (#593).
         let reaped_at = *self.reaped_at.get_or_insert_with(Instant::now);
         if reaped_at.elapsed() >= DRAIN_GRACE {
             state.eof = true;
@@ -85,6 +88,11 @@ impl ExitWatch {
             // is a fact about the stream even when no byte carried it.
             state.generation += 1;
         }
+    }
+
+    /// The child was reaped just now, by something other than a tick.
+    fn reaped(&mut self) {
+        self.reaped_at.get_or_insert_with(Instant::now);
     }
 }
 
@@ -231,8 +239,10 @@ struct WriteRequest {
 /// test binary that never exits is a worse one.
 const DROP_REAP_GRACE: Duration = Duration::from_secs(2);
 
-/// Serializes every PTY *lifecycle edge* (open+spawn on one side, kill+reap+
-/// master-close on the other) across all `Terminal`s in this process.
+/// Serializes every PTY *lifecycle edge* (open+spawn on one side, the close
+/// of each master descriptor on the other) across all `Terminal`s in this
+/// process. The child is stopped before the lock is taken, while its
+/// master is still open (#589).
 ///
 /// Why: macOS tears PTYs down with `revoke()`, and PTY device numbers are
 /// recycled immediately. With concurrent terminals, one thread's teardown
@@ -265,6 +275,49 @@ pub(crate) fn pty_lifecycle_guard() -> LifecycleGuard {
 #[cfg(not(unix))]
 pub(crate) fn pty_lifecycle_guard() -> LifecycleGuard {
     None
+}
+
+/// A duplicate of the PTY master owned by a responder thread, closed under
+/// the lifecycle lock wherever the thread drops it.
+///
+/// The reader and writer threads each hold one, and end on their own after
+/// `Drop` returns — never joined, so a grandchild holding the terminal
+/// cannot hang teardown. Their closes would then fall outside the lock,
+/// and on macOS the last close of a master is the one that revokes the
+/// device; through this, every close of a master is serialized against
+/// every open, whichever comes last (#589).
+struct MasterDup<T>(Option<T>);
+
+impl<T> Drop for MasterDup<T> {
+    fn drop(&mut self) {
+        let _lifecycle = pty_lifecycle_guard();
+        drop(self.0.take());
+    }
+}
+
+impl<T: Read> Read for MasterDup<T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match &mut self.0 {
+            Some(inner) => inner.read(buf),
+            None => Ok(0),
+        }
+    }
+}
+
+impl<T: Write> Write for MasterDup<T> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match &mut self.0 {
+            Some(inner) => inner.write(buf),
+            None => Err(io::ErrorKind::BrokenPipe.into()),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.0 {
+            Some(inner) => inner.flush(),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Attempts to open a PTY before giving up, and the step between them. The
@@ -1606,8 +1659,11 @@ impl TerminalBuilder {
     /// fallback, `$HOME`, while this text claimed otherwise: #215.)
     ///
     /// A relative `dir` is relative to the test process's working directory,
-    /// as with `std::process::Command`, and a relative program path such as
-    /// `./myapp` is then found inside `dir`, where the child runs.
+    /// as with `std::process::Command`, and a program named with a directory
+    /// part — `./myapp`, `target/debug/app` — is then found inside `dir`,
+    /// where the child runs; a bare name is searched for along `PATH`. That
+    /// is the Unix rule (#592); on Windows the pseudoconsole layer finds the
+    /// program by its own.
     ///
     /// [`spawn`](Self::spawn) fails with [`Error::Spawn`] if `dir` is not
     /// an existing directory — running somewhere else instead would make
@@ -1787,7 +1843,12 @@ impl TerminalBuilder {
     /// Defaults to [`Graphics::None`] — nothing claimed.
     ///
     /// See [`Graphics`] for why declaring is not the harness lying, and pair
-    /// it with [`cell_size`](Self::cell_size).
+    /// it with [`cell_size`](Self::cell_size). A declared terminal also moves
+    /// the cursor past an image it places, as that terminal does — kitty to
+    /// the placement's last row, one column past it; xterm's sixel to the
+    /// image's last text row — so text the application writes next lands
+    /// where it would there (#588). `docs/LIMITATIONS.md` says what the move
+    /// cannot know.
     #[must_use]
     pub fn graphics(mut self, graphics: Graphics) -> Self {
         self.graphics = graphics;
@@ -1944,10 +2005,10 @@ impl TerminalBuilder {
         // buffered at teardown — see docs/DESIGN.md §2 — so the window
         // between child start and first read must be as close to zero as
         // userspace can make it.)
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| Error::Pty(format!("cloning PTY reader failed: {e}")))?;
+        let reader: Box<dyn Read + Send> =
+            Box::new(MasterDup(Some(pair.master.try_clone_reader().map_err(
+                |e| Error::Pty(format!("cloning PTY reader failed: {e}")),
+            )?)));
         let writer = pair
             .master
             .take_writer()
@@ -1958,13 +2019,17 @@ impl TerminalBuilder {
         // memory bound instead of on a queue-slot count.
         let queued_bytes = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(Monitor::new(EmuState::new(
-            Box::new(Vt100Emulator::new(
-                self.rows,
-                self.cols,
-                self.scrollback,
-                self.capture_graphics,
-                self.scrollback_styles,
-            )),
+            Box::new({
+                let mut emu = Vt100Emulator::new(
+                    self.rows,
+                    self.cols,
+                    self.scrollback,
+                    self.capture_graphics,
+                    self.scrollback_styles,
+                );
+                emu.declare_graphics(self.graphics, self.cell_size);
+                emu
+            }),
             Responder {
                 respond: self.answer_queries,
                 background: self.background,
@@ -1985,7 +2050,8 @@ impl TerminalBuilder {
         // a full output buffer), and the test thread would hang with no
         // deadline and no diagnosis.
         let write_tx = match dup_writer(pair.master.as_ref()) {
-            Some(mut pty_writer) => {
+            Some(pty_writer) => {
+                let mut pty_writer = MasterDup(Some(pty_writer));
                 let (tx, rx) = mpsc::channel::<WriteRequest>();
                 let written = Arc::clone(&replies_pending);
                 let drained = Arc::clone(&queued_bytes);
@@ -2080,6 +2146,7 @@ impl TerminalBuilder {
             shared,
             default_timeout: self.timeout,
             exit_status: None,
+            exit_watch: ExitWatch::default(),
             command_desc,
             frame_cursor: 0,
             last_frame: None,
@@ -2400,9 +2467,10 @@ fn reader_loop(
             // The emulator stops at each DEC 2026 frame end and at
             // each query, so state read there (screen, cursor) is
             // exact — even when the same chunk already carries the
-            // following bytes. Replies are BUILT under the state
-            // lock but WRITTEN after it is released; the state lock
-            // and the writer lock are never held together.
+            // following bytes. Replies are built and queued for the
+            // writer thread under the state lock, and written after it
+            // is released; the state lock and the writer lock are never
+            // held together.
             let replies = shared.mutate(|state| {
                 // A panicked emulator is never fed again: its grid is in
                 // whatever state the panic left it. The loop still runs, so
@@ -2482,6 +2550,14 @@ fn reader_loop(
                 }
                 state.utf8_pending = utf8_pending;
                 state.touch();
+                // Queued before the lock is released: a waiter that sees
+                // this read's screen — woken by the release, or by its own
+                // tick — and types in response must find the replies ahead
+                // of its input in the writer's queue, as a terminal answers
+                // a query before it shows anything after it (#591).
+                if let Some(tx) = replies_to {
+                    queue_replies(tx, &mut replies, state, pending, queued_bytes);
+                }
                 replies
             });
             // One queue entry per *read*, not per reply. A single read
@@ -2494,49 +2570,15 @@ fn reader_loop(
             // millisecond between the queries. Batching is what removes
             // that mismatch; ordering is unchanged, since the bytes are
             // concatenated in the order they were built.
+            // No responder thread (no descriptor to duplicate): the
+            // replies are still here, and are written inline, as before —
+            // after the state lock is released, since writing needs the
+            // writer lock.
             if !replies.is_empty() {
                 let batch: Vec<u8> = replies.concat();
-                let count = replies.len();
-                match replies_to {
-                    // Still without waiting. Now that a full queue means
-                    // 64 reads' worth of answers are already pending, it
-                    // really does mean the application has stopped
-                    // reading — and the drain must keep running
-                    // regardless, or the child blocks writing into a full
-                    // output buffer and the harness deadlocks itself.
-                    Some(tx) => {
-                        // Refuse only on the memory bound. The queue is
-                        // unbounded, so this hand-off cannot block and the
-                        // drain cannot stall — which is the constraint
-                        // that rules out backpressuring the reader.
-                        let size = batch.len();
-                        if queued_bytes.load(Ordering::Relaxed) + size > REPLY_QUEUE_BYTES {
-                            shared.mutate(|state| state.replies_dropped += count);
-                        } else {
-                            // Counted as pending *before* the hand-off, so
-                            // a wait that fails while the write is blocked
-                            // can say how many answers are stuck.
-                            pending.fetch_add(count, Ordering::Relaxed);
-                            queued_bytes.fetch_add(size, Ordering::Relaxed);
-                            let request = WriteRequest {
-                                bytes: batch,
-                                ack: None, // fire and forget: never wait
-                                replies: count,
-                            };
-                            if tx.send(request).is_err() {
-                                pending.fetch_sub(count, Ordering::Relaxed);
-                                queued_bytes.fetch_sub(size, Ordering::Relaxed);
-                            }
-                        }
-                    }
-                    // No responder thread (no descriptor to duplicate):
-                    // write inline, as before.
-                    None => {
-                        let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
-                        if let Some(writer) = writer.as_mut() {
-                            let _ = writer.write_all(&batch).and_then(|()| writer.flush());
-                        }
-                    }
+                let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(writer) = writer.as_mut() {
+                    let _ = writer.write_all(&batch).and_then(|()| writer.flush());
                 }
             }
         }
@@ -2548,6 +2590,56 @@ fn reader_loop(
         state.eof = true;
         state.touch();
     });
+}
+
+/// Hand this read's replies to the writer thread, leaving `replies` empty.
+///
+/// One queue entry per *read*, not per reply. A single read can carry
+/// dozens of queries — a startup batch is a legitimate pattern — and
+/// enqueueing each answer separately made the reader outrun the writer,
+/// which issues one `write(2)` per entry. The queue then filled and answers
+/// were discarded although nothing was blocked: measured at 173 of 200
+/// delivered back-to-back, and 200 of 200 with a millisecond between the
+/// queries. Batching is what removes that mismatch; ordering is unchanged,
+/// since the bytes are concatenated in the order they were built.
+///
+/// Never waits, so it is safe under the state lock. A full queue — 64 reads'
+/// worth of answers already pending — really does mean the application has
+/// stopped reading, and the drain must keep running regardless, or the
+/// child blocks writing into a full output buffer and the harness
+/// deadlocks itself. So the only refusal is the memory bound, recorded as
+/// dropped replies.
+fn queue_replies(
+    tx: &mpsc::Sender<WriteRequest>,
+    replies: &mut Vec<Vec<u8>>,
+    state: &mut EmuState,
+    pending: &AtomicUsize,
+    queued_bytes: &AtomicUsize,
+) {
+    if replies.is_empty() {
+        return;
+    }
+    let batch: Vec<u8> = replies.concat();
+    let count = replies.len();
+    replies.clear();
+    let size = batch.len();
+    if queued_bytes.load(Ordering::Relaxed) + size > REPLY_QUEUE_BYTES {
+        state.replies_dropped += count;
+        return;
+    }
+    // Counted as pending *before* the hand-off, so a wait that fails while
+    // the write is blocked can say how many answers are stuck.
+    pending.fetch_add(count, Ordering::Relaxed);
+    queued_bytes.fetch_add(size, Ordering::Relaxed);
+    let request = WriteRequest {
+        bytes: batch,
+        ack: None, // fire and forget: never wait
+        replies: count,
+    };
+    if tx.send(request).is_err() {
+        pending.fetch_sub(count, Ordering::Relaxed);
+        queued_bytes.fetch_sub(size, Ordering::Relaxed);
+    }
 }
 
 /// A program running inside a real PTY, observed through an emulated screen.
@@ -2567,6 +2659,9 @@ pub struct Terminal {
     shared: Arc<Monitor<EmuState>>,
     default_timeout: Duration,
     exit_status: Option<ExitStatus>,
+    /// Where nothing else says the child is gone, when it was first seen
+    /// reaped — across waits, not per wait (#593).
+    exit_watch: ExitWatch,
     command_desc: String,
     /// Index of the newest frame [`wait_frame`](Terminal::wait_frame) has
     /// already returned from this terminal. Each call looks only past it,
@@ -2713,7 +2808,8 @@ impl Terminal {
     /// released the terminal, or it stopped reading its input and the write
     /// gave up at the terminal's deadline rather than blocking forever. The
     /// error embeds the screen, so a CI log shows what the application was
-    /// displaying when the keystroke had nowhere to go.
+    /// displaying when the keystroke had nowhere to go. A write that gave
+    /// up is not withdrawn: [`Error::Write`] says what happens to its bytes.
     ///
     /// This is the same answer on every platform. A raw write to a closed
     /// terminal fails with `EIO` on macOS and *succeeds* on Linux, where
@@ -3177,8 +3273,15 @@ impl Terminal {
     /// never reports EOF while it is open, so there the reaped child is
     /// the signal (see [`EXIT_CLOSES_THE_TERMINAL`]).
     fn ensure_deliverable(&mut self, what: &str) -> Result<()> {
-        if !self.shared.lock().eof {
-            return Ok(());
+        {
+            let mut state = self.shared.lock();
+            // Where a reaped child is the terminal closing, a send asks too:
+            // input long after the exit must not need a wait to be refused.
+            self.exit_watch
+                .tick(&mut self.child, &mut self.exit_status, &mut state);
+            if !state.eof {
+                return Ok(());
+            }
         }
         let reason = match &self.exit_status {
             Some(status) => format!("the child is gone ({status}) and the terminal is closed"),
@@ -3215,10 +3318,14 @@ impl Terminal {
             };
         };
 
+        // The write is not withdrawn: it is mid-`write(2)` on the writer
+        // thread, which no portable call can interrupt, and the rest of it
+        // follows once the application reads again (#590).
         let not_reading = || {
             format!(
                 "the application is not reading its input, and the PTY buffer is \
-                 full — no progress in {:?}",
+                 full — no progress in {:?}; what was not written stays queued and \
+                 reaches the application if it reads again",
                 self.default_timeout
             )
         };
@@ -3314,11 +3421,11 @@ impl Terminal {
         const WHAT: &str = "the screen predicate to hold";
         let deadline = Instant::now() + timeout;
         let mut seen_generation = None;
-        let mut exit_watch = ExitWatch::default();
         let outcome = self.shared.wait_until(deadline, |state| {
             // Ahead of the generation check: a child that exited changes
             // nothing on the grid, and on Windows is the only EOF there is.
-            exit_watch.tick(&mut self.child, &mut self.exit_status, state);
+            self.exit_watch
+                .tick(&mut self.child, &mut self.exit_status, state);
             // Spurious wake (poll-cap tick, unrelated notify): the state is
             // unchanged, so the predicate's verdict is too.
             if seen_generation == Some(state.generation) {
@@ -3495,9 +3602,9 @@ impl Terminal {
         let deadline = Instant::now() + timeout;
         let cursor = self.frame_cursor;
         let mut seen_frame = None;
-        let mut exit_watch = ExitWatch::default();
         let outcome = self.shared.wait_until(deadline, |state| {
-            exit_watch.tick(&mut self.child, &mut self.exit_status, state);
+            self.exit_watch
+                .tick(&mut self.child, &mut self.exit_status, state);
             if let Some(failure) = state.emulator_failure() {
                 return Some(Err(failure));
             }
@@ -3651,10 +3758,10 @@ impl Terminal {
 
     fn wait_idle_deadline(&mut self, quiet: Duration, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
-        let mut exit_watch = ExitWatch::default();
         let mut guard = self.shared.lock();
         loop {
-            exit_watch.tick(&mut self.child, &mut self.exit_status, &mut guard);
+            self.exit_watch
+                .tick(&mut self.child, &mut self.exit_status, &mut guard);
             // Ahead of the EOF shortcut: a stream that stopped because the
             // emulator died is not a stream that went quiet.
             if let Some(failure) = guard.emulator_failure() {
@@ -3843,9 +3950,9 @@ impl Terminal {
         let mut last = guard.peek_snapshot();
         let mut since = guard.last_activity;
         let mut seen_generation = guard.generation;
-        let mut exit_watch = ExitWatch::default();
         loop {
-            exit_watch.tick(&mut self.child, &mut self.exit_status, &mut guard);
+            self.exit_watch
+                .tick(&mut self.child, &mut self.exit_status, &mut guard);
             // Ahead of the EOF shortcut: a grid that stopped changing
             // because the emulator died has not settled.
             if let Some(failure) = guard.emulator_failure() {
@@ -3957,16 +4064,8 @@ impl Terminal {
         };
         let pid = libc::pid_t::try_from(pid)
             .map_err(|_| Error::Input(format!("pid {pid} exceeds the platform's pid range")))?;
-        // SAFETY: kill(2) touches no memory. The pid is our own un-reaped
-        // child (guarded above): worst case it is a zombie, for which kill
-        // is defined and harmless — never an unrelated, recycled pid.
-        #[allow(unsafe_code)]
-        let rc = unsafe { libc::kill(pid, signal.raw()) };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(Error::Io(io::Error::last_os_error()))
-        }
+        // Our own un-reaped child, guarded above.
+        send_signal(pid, signal.raw()).map_err(Error::Io)
     }
 
     /// Block until the child exits, then return its status. Idempotent:
@@ -4005,6 +4104,7 @@ impl Terminal {
             if let Some(status) = self.child.try_wait().map_err(Error::Io)? {
                 let status = ExitStatus::from_pty(&status);
                 self.exit_status = Some(status.clone());
+                self.exit_watch.reaped();
                 let drained = self
                     .shared
                     .wait_until(Instant::now() + DRAIN_GRACE, |state| {
@@ -4237,39 +4337,92 @@ impl Terminal {
     }
 }
 
+/// How long a hung-up child has to exit on its own before it is killed:
+/// portable-pty's own grace, kept so a program's SIGHUP handler still runs.
+#[cfg(unix)]
+const HANGUP_GRACE: Duration = Duration::from_millis(200);
+
+/// Hang the child up, give it [`HANGUP_GRACE`] to go, then kill it — the
+/// sequence portable-pty's `kill` runs, with the reap polled from 1 ms where
+/// portable-pty slept in fixed 50 ms steps, so a child that dies on SIGHUP
+/// at once is reaped in about a millisecond rather than fifty (#589).
+/// Gives up at `deadline`, as `Drop` must terminate.
+fn stop_child(child: &mut PtyChild, deadline: Instant) {
+    #[cfg(unix)]
+    if let Some(pid) = child
+        .process_id()
+        .and_then(|pid| libc::pid_t::try_from(pid).ok())
+    {
+        // The child is not reaped: `Drop` asked just before, and only this
+        // thread reaps it.
+        let _ = send_signal(pid, libc::SIGHUP);
+        if reaped_by(child, (Instant::now() + HANGUP_GRACE).min(deadline)) {
+            return;
+        }
+        let _ = send_signal(pid, libc::SIGKILL);
+        reaped_by(child, deadline);
+        return;
+    }
+    let _ = child.kill();
+    reaped_by(child, deadline);
+}
+
+/// Poll for the child's exit until `deadline`; whether it was reaped.
+fn reaped_by(child: &mut PtyChild, deadline: Instant) -> bool {
+    let mut backoff = INITIAL_BACKOFF;
+    loop {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        thread::sleep(backoff.min(deadline - now));
+        backoff = next_backoff(backoff);
+    }
+}
+
+/// `kill(2)`, the one call site. Every caller passes its own child, not yet
+/// reaped.
+#[cfg(unix)]
+fn send_signal(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
+    // SAFETY: kill(2) touches no memory. The pid is the caller's own
+    // un-reaped child: worst case a zombie, for which kill is defined and
+    // harmless — never an unrelated, recycled pid.
+    #[allow(unsafe_code)]
+    let rc = unsafe { libc::kill(pid, signal) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 impl Drop for Terminal {
     /// Kill and reap the child. No zombies, even when a test panics before
     /// `wait_exit`. The reader thread ends on its own at EOF and is never
     /// joined here — a grandchild holding the PTY open must not hang Drop.
     ///
-    /// The whole teardown (including closing the master/writer fds) runs
-    /// under the process-wide PTY lifecycle lock: on macOS, letting a
-    /// master close overlap a concurrent `openpty()` can revoke the *other*
-    /// terminal's freshly recycled PTY device (see `PTY_LIFECYCLE` in this module).
+    /// Closing the master and writer descriptors runs under the
+    /// process-wide PTY lifecycle lock: on macOS, letting a master close
+    /// overlap a concurrent `openpty()` can revoke the *other* terminal's
+    /// freshly recycled PTY device (see `PTY_LIFECYCLE` in this module).
+    /// Stopping the child comes first and outside it: this terminal's
+    /// master is still open then, so its device cannot be recycled under
+    /// anyone, and every spawn in the binary used to wait out the child's
+    /// shutdown (#589).
     ///
     /// The reap is bounded (`DROP_REAP_GRACE`). A child that cannot be
     /// reaped is a bad outcome; a test binary that never exits — which an
     /// unbounded `wait` here produced whenever the child was wedged — is a
     /// worse one, and unlike the first it cannot even be diagnosed.
     fn drop(&mut self) {
-        let _lifecycle = pty_lifecycle_guard();
-        if self.exit_status.is_none() {
-            let already_exited = matches!(self.child.try_wait(), Ok(Some(_)));
-            if !already_exited {
-                let _ = self.child.kill();
-                let deadline = Instant::now() + DROP_REAP_GRACE;
-                let mut backoff = INITIAL_BACKOFF;
-                while !matches!(self.child.try_wait(), Ok(Some(_))) {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        break;
-                    }
-                    thread::sleep(backoff.min(deadline - now));
-                    backoff = next_backoff(backoff);
-                }
-            }
+        if self.exit_status.is_none() && !matches!(self.child.try_wait(), Ok(Some(_))) {
+            stop_child(&mut self.child, Instant::now() + DROP_REAP_GRACE);
         }
-        // Close the PTY fds while still holding the lock. Taking the writer
+        let _lifecycle = pty_lifecycle_guard();
+        // Close the PTY fds while holding the lock. Taking the writer
         // out of the shared cell closes its fd even though the reader
         // thread keeps the (now empty) cell alive — and it must happen
         // before the master is dropped, since the reader polls the
@@ -4363,6 +4516,62 @@ mod tests {
             },
             Arc::new(AtomicUsize::new(0)),
         ))
+    }
+
+    /// A waiter that first sees the screen a query was drawn on finds the
+    /// query's reply already queued for the writer, so whatever it types in
+    /// response is queued behind the reply — as a terminal answers a query
+    /// before it shows anything that followed it (#591). The predicate here
+    /// runs under the state lock at every observation, which is when a
+    /// waiter would decide to type. The reply used to be queued after the
+    /// lock was released, so the window is a few instructions wide: this
+    /// pins the order rather than hunting the race.
+    #[test]
+    fn a_query_s_reply_is_queued_before_its_screen_can_be_seen() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let shared = Arc::new(Monitor::new(EmuState::new(
+            Box::new(super::Vt100Emulator::new(
+                4,
+                20,
+                0,
+                crate::graphics::DEFAULT_CAPTURE,
+                false,
+            )),
+            Responder {
+                respond: true,
+                background: (0, 0, 0),
+                foreground: (255, 255, 255),
+                cell_size: None,
+                graphics: Graphics::default(),
+                term_name: "xterm-256color".into(),
+            },
+            Arc::new(AtomicUsize::new(0)),
+        )));
+        let (tx, rx) = mpsc::channel::<super::WriteRequest>();
+        let reader_shared = Arc::clone(&shared);
+        let reader = std::thread::spawn(move || {
+            let writer: super::SharedWriter = Arc::new(std::sync::Mutex::new(None));
+            reader_loop(
+                Box::new(std::io::Cursor::new(b"ready\x1b[6n".to_vec())),
+                &reader_shared,
+                &writer,
+                Some(&tx),
+                &AtomicUsize::new(0),
+                &AtomicUsize::new(0),
+            );
+        });
+        let mut state = shared.lock();
+        while !state.build_snapshot().contains("ready") {
+            state = shared.wait_timeout(state, Duration::from_millis(50));
+        }
+        let reply = rx
+            .try_recv()
+            .expect("the screen showed the query before its reply was queued");
+        assert_eq!(reply.bytes, b"\x1b[1;6R");
+        drop(state);
+        reader.join().expect("the reader ends at EOF");
     }
 
     /// The reader turns an emulator panic into state every wait can report,

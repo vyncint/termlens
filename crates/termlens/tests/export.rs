@@ -520,6 +520,256 @@ mod json {
             last = at;
         }
     }
+
+    /// A one-row screen to edit as JSON: `ab`, the wide `東` in columns 2
+    /// and 3, then two blanks.
+    fn document() -> serde_json::Value {
+        let screen = Screen::parse("size: 6x1  cursor: 0,0\nab\u{6771}").expect("a 6x1 screen");
+        serde_json::to_value(&screen).expect("serializes")
+    }
+
+    /// [`document`] with `edit` applied, read back.
+    fn read_edited(edit: impl FnOnce(&mut serde_json::Value)) -> Result<Screen, String> {
+        let mut value = document();
+        edit(&mut value);
+        serde_json::from_value(value).map_err(|e| e.to_string())
+    }
+
+    /// A cell carrying a control character drove the terminal of whoever
+    /// rendered the file: `render --text` and `diff` printed it, so an OSC
+    /// set the window title and `ESC [2J` cleared the screen (#582). vt100
+    /// drops every control character before the grid, so no termlens wrote
+    /// one, and the reader refuses it in the text reader's words (#376).
+    #[test]
+    fn a_control_character_in_a_cell_is_refused() {
+        for contents in [
+            "\u{1b}]0;PWNED\u{7}\u{1b}[2Jh",
+            "\n",
+            "\0",
+            "a\u{7}",
+            "\u{7f}",
+            "\u{9b}2J",
+        ] {
+            let control = contents.chars().find(|ch| ch.is_control()).unwrap();
+            let err = read_edited(|v| v["cells"][0][1]["contents"] = contents.into())
+                .expect_err(contents);
+            assert!(
+                err.contains(&format!("cell 0,1: {control:?} is a control character")),
+                "{contents:?}: {err}"
+            );
+        }
+        // The styled history holds cells too, in rows of their own width.
+        let err = read_edited(|v| {
+            let mut cell = v["cells"][0][0].clone();
+            cell["contents"] = "\u{1b}[2J".into();
+            v["state"]["scrollback"] = serde_json::json!(["x"]);
+            v["state"]["scrollback_cells"] = serde_json::json!([[cell]]);
+        })
+        .expect_err("a control character in the history");
+        assert!(
+            err.contains("scrollback cell 0,0: '\\u{1b}' is a control character"),
+            "{err}"
+        );
+    }
+
+    /// A cell is one character and the zero-width marks after it. vt100
+    /// appends to a cell only what its width table calls zero-width, and
+    /// printable ASCII is one column in every table, so a cell holding a
+    /// second ASCII character is one no termlens wrote (#582). It rendered
+    /// wider than its column and pushed the rest of the row out of line.
+    #[test]
+    fn a_cell_of_more_than_one_character_is_refused() {
+        for contents in ["abc", "a ", "\u{e9}1", "\u{6771}x"] {
+            let err = read_edited(|v| v["cells"][0][0]["contents"] = contents.into())
+                .expect_err(contents);
+            assert!(
+                err.contains(&format!(
+                    "cell 0,0: {contents:?} is more than one character"
+                )),
+                "{err}"
+            );
+        }
+    }
+
+    /// The wide flags no grid holds (#582). vt100 marks a cell wide only
+    /// for a character its table makes two columns, which printable ASCII
+    /// never is, and never an empty one; it clears a cell before making it
+    /// a second column; and it clears or moves the two halves of a wide
+    /// character together, while a resize cuts a row from the right — so a
+    /// first column can be stranded, never a second.
+    #[test]
+    fn a_wide_flag_no_grid_holds_is_refused() {
+        let refused = |expected: &str, edit: fn(&mut serde_json::Value)| {
+            let err = read_edited(edit).expect_err(expected);
+            assert!(err.contains(expected), "{expected}: {err}");
+        };
+        refused("cell 0,0: 'a' is one column wide but marked wide", |v| {
+            v["cells"][0][0]["wide"] = true.into();
+            v["cells"][0][1]["contents"] = "".into();
+            v["cells"][0][1]["wide_continuation"] = true.into();
+        });
+        refused("cell 0,4: marked wide but holds no character", |v| {
+            v["cells"][0][4]["wide"] = true.into();
+        });
+        refused("cell 0,4: marked wide but holds no character", |v| {
+            v["cells"][0][4]["wide"] = true.into();
+            v["cells"][0][4]["wide_continuation"] = true.into();
+        });
+        refused(
+            "cell 0,3: a wide character's second column holding \"x\"",
+            |v| v["cells"][0][3]["contents"] = "x".into(),
+        );
+        let orphan = "a wide character's second column with no wide character before it";
+        refused(&format!("cell 0,0: {orphan}"), |v| {
+            v["cells"][0][0]["contents"] = "".into();
+            v["cells"][0][0]["wide_continuation"] = true.into();
+        });
+        refused(&format!("cell 0,5: {orphan}"), |v| {
+            v["cells"][0][5]["wide_continuation"] = true.into();
+        });
+    }
+
+    /// A terminal is at least 2x2 and the text reader refuses a screen
+    /// under 1x1, so no termlens wrote an empty one. Read anyway, a screen
+    /// of no columns re-serialised as a document of no rows, which the
+    /// reader then refused (#582).
+    #[test]
+    fn a_screen_of_no_columns_or_no_rows_is_refused() {
+        for (cols, rows, cells) in [
+            (0, 1, serde_json::json!([[]])),
+            (6, 0, serde_json::json!([])),
+        ] {
+            let err = read_edited(|v| {
+                v["cols"] = cols.into();
+                v["rows"] = rows.into();
+                v["cells"] = cells;
+            })
+            .expect_err("an empty screen");
+            assert!(
+                err.contains(&format!(
+                    "at least one column and one row, got {cols}x{rows}"
+                )),
+                "{err}"
+            );
+        }
+    }
+
+    /// Four tracking modes have a bit each, and the derive read any byte:
+    /// `255` made `len()` say 8 while `iter()` yielded 4 (#582). The tracker
+    /// never set another bit, so the reader drops them rather than refuse
+    /// the file.
+    #[test]
+    fn a_mouse_mode_bit_no_mode_occupies_is_dropped() {
+        let screen =
+            read_edited(|v| v["state"]["mouse_modes"] = 255.into()).expect("the file reads");
+        let modes = screen.mouse_modes();
+        assert_eq!((modes.len(), modes.iter().count()), (4, 4), "{modes:?}");
+        assert_eq!(
+            serde_json::to_value(&screen).unwrap()["state"]["mouse_modes"],
+            15
+        );
+        let alone: termlens::MouseModes =
+            serde_json::from_str("240").expect("a set on its own reads");
+        assert!(alone.is_empty(), "{alone:?}");
+    }
+
+    /// What the reader must go on reading (#582): cells a termlens wrote
+    /// that this build would not have. A width is a table entry, and the
+    /// tables move between unicode-width releases — U+11A3A was a mark in
+    /// 0.2.1 and is one column in 0.2.2, U+1ACF went the other way, U+16FF2
+    /// from one column to two — so each is written here both ways. So is an
+    /// emoji-presentation sequence: `⚠️` one column, as vt100 0.16 wrote it,
+    /// and two, as 0.18 does, with a keycap whose first character is an
+    /// ASCII digit. U+FFFD, which termlens writes for a byte it could not
+    /// decode; the space vt100 puts under a mark that lands on an empty
+    /// cell; and a wide character a resize cut, which vt100 0.16 left in
+    /// the last column, and before a blank once the grid widened again.
+    #[test]
+    fn a_cell_an_earlier_release_wrote_still_reads() {
+        let reads = |edit: fn(&mut serde_json::Value)| {
+            let mut value = document();
+            edit(&mut value);
+            let screen: Screen = serde_json::from_value(value.clone())
+                .unwrap_or_else(|e| panic!("{e}: {}", value["cells"]));
+            assert_eq!(
+                serde_json::to_value(&screen).unwrap(),
+                value,
+                "and it writes back unchanged"
+            );
+        };
+        reads(|v| v["cells"][0][0]["contents"] = "a\u{11a3a}".into());
+        reads(|v| v["cells"][0][4]["contents"] = "\u{11a3a}".into());
+        reads(|v| v["cells"][0][0]["contents"] = "a\u{1acf}".into());
+        reads(|v| v["cells"][0][4]["contents"] = "\u{1acf}".into());
+        reads(|v| v["cells"][0][4]["contents"] = "\u{16ff2}".into());
+        reads(|v| {
+            v["cells"][0][4]["contents"] = "\u{16ff2}".into();
+            v["cells"][0][4]["wide"] = true.into();
+            v["cells"][0][5]["wide_continuation"] = true.into();
+        });
+        reads(|v| {
+            v["cells"][0][4]["contents"] = "1\u{fe0f}\u{20e3}".into();
+            v["cells"][0][4]["wide"] = true.into();
+            v["cells"][0][5]["wide_continuation"] = true.into();
+        });
+        reads(|v| v["cells"][0][4]["contents"] = "\u{26a0}\u{fe0f}".into());
+        reads(|v| {
+            v["cells"][0][4]["contents"] = "\u{26a0}\u{fe0f}".into();
+            v["cells"][0][4]["wide"] = true.into();
+            v["cells"][0][5]["wide_continuation"] = true.into();
+        });
+        reads(|v| v["cells"][0][4]["contents"] = "\u{fffd}".into());
+        reads(|v| v["cells"][0][4]["contents"] = " \u{301}".into());
+        reads(|v| {
+            v["cells"][0][5]["contents"] = "\u{6771}".into();
+            v["cells"][0][5]["wide"] = true.into();
+        });
+        reads(|v| v["cells"][0][3]["wide_continuation"] = false.into());
+    }
+
+    /// The cells a live terminal writes read back as the same screen
+    /// (#582): combining marks, wide characters, a joiner, emoji that U+FE0F
+    /// makes two columns — among them a keycap, whose first character is an
+    /// ASCII digit — the space vt100 puts under a mark that lands on an
+    /// empty cell, and whatever a resize through a wide character leaves.
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "ConPTY re-renders wide characters into columns of its own choosing (#149)"
+    )]
+    fn every_cell_a_live_terminal_writes_reads_back() -> termlens::Result<()> {
+        // Eighteen columns: `e\u{301}`, `漢`, `☺️`, `👨\u{200d}` and `👩`, then
+        // the keycap `1️⃣` in 13 and 14 and `#️` in 16 and 17; then a mark on
+        // the empty cell (1,3).
+        let text = "e\u{301} \u{6f22} \u{263a}\u{fe0f} \u{1f468}\u{200d}\u{1f469} \
+                    1\u{fe0f}\u{20e3} #\u{fe0f}\\e[2;5H\u{301}\\r\\nREADY";
+        let mut t = emit(&["--raw", text, "--wait"])?;
+        t.wait_until(|s| s.contains("READY"))?;
+        let read_back = |screen: &Screen| -> Screen {
+            let json = serde_json::to_string(screen).expect("serializes");
+            serde_json::from_str(&json).unwrap_or_else(|e| panic!("{e}:\n{screen}"))
+        };
+
+        let screen = t.screen();
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), "e\u{301}");
+        let keycap = screen.cell(0, 13).unwrap();
+        assert_eq!(keycap.contents(), "1\u{fe0f}\u{20e3}");
+        assert!(keycap.is_wide(), "{screen:?}");
+        assert_eq!(screen.cell(1, 3).unwrap().contents(), " \u{301}");
+        assert_eq!(read_back(&screen), screen);
+
+        // Through `#️`, and back.
+        t.resize(17, 4)?;
+        let cut = t.screen();
+        assert_eq!(read_back(&cut), cut);
+        t.resize(30, 4)?;
+        let widened = t.screen();
+        assert_eq!(read_back(&widened), widened);
+
+        t.send(Key::Enter)?;
+        t.wait_exit()?;
+        Ok(())
+    }
 }
 
 /// A grid can hold the words a styles block is made of. Reading them as

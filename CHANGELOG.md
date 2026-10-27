@@ -74,6 +74,40 @@ reads that marker.
   which moved to the next row because it did not fit in an empty last
   column is not recorded as a wrap, so `logical_text()` splits the line
   there (#585).
+- Dropping a `Terminal` no longer holds the process-wide PTY lock while
+  the child stops (#589). It sent SIGHUP and polled in portable-pty's fixed
+  50 ms steps under the lock, so a drop took 50 ms (200 ms when the child
+  ignores SIGHUP), and every spawn in the test binary waited it out. The
+  child is now stopped first, polled from 1 ms, and the lock is taken only
+  to close the descriptors: measured, 1 ms per drop and no wait for a
+  concurrent spawn. The responder threads' copies of the master now close
+  under the lock too.
+- `Error::Write` at the deadline says what happens to the bytes (#590): the
+  write is not withdrawn, the rest of it reaches the application if it
+  reads again, and later input queues behind it. The message and the docs
+  said the write "gave up", so a retry typed its input twice.
+- A query's reply is queued before the screen the query is drawn on can be
+  seen (#591). A test that waited for that screen and typed could have its
+  keystroke reach the application ahead of the reply: 11 runs in 9,600 at
+  32 threads, and none since.
+- On Unix, a program named with a directory part, such as
+  `target/debug/app`, is found from the working directory, as
+  `std::process::Command` finds it (#592). Only `PATH` was searched, so the
+  spawn failed with "No viable candidates found in PATH", or under
+  `env_clear()` could not resolve `PATH` at all. `PATH` is still searched
+  after.
+- On Windows, a reaped child is the terminal closing 500 ms after the reap,
+  however short the waits that follow (#593). Each wait restarted that
+  grace, so waits shorter than it never saw EOF, and a send to the dead
+  child was not refused.
+- `termlens inspect` no longer leaves screens in `TERMLENS_ARTIFACT_DIR`
+  for a run that ended normally (#596). It takes the library's `Eof` and
+  `Timeout` as outcomes — a program that exits, one still running at the
+  deadline — and the library records every error that carries a screen, so
+  `inspect true` wrote a failure screen the report action then listed among
+  the failing tests. The program under inspection still gets the variable
+  when it inherits the environment. The library's documentation of the
+  variable now says an expected error is recorded too.
 - `termlens` no longer panics with exit code 101 (#594). A closed or full
   stderr (`2>&1 | true`, `2>/dev/full`) made every diagnostic and the
   `inspect` trailer panic; the write is now checked, and a trailer that cannot
@@ -101,6 +135,48 @@ reads that marker.
   also write a character XML 1.0 forbids, a C0 control other than tab, LF and
   CR or U+FFFE/U+FFFF, as U+FFFD, so a window title holding `\x01` or a cell
   holding U+FFFF no longer makes an SVG no parser opens.
+- A terminal declared to speak kitty or sixel graphics (`graphics()`)
+  moves the cursor past an image it places, as that terminal does (#588):
+  kitty to the placement's last row, one column past its right edge,
+  wrapping and scrolling as kitty does, unless `C=1`, `U=1` or `P=` says
+  otherwise; xterm's sixel, given a `cell_size()`, to the image's last text
+  row. The cursor stayed where the image began, so text an application
+  wrote after an image overwrote it, and `docs/DESIGN.md` claimed neither
+  protocol moves the cursor. The default, `Graphics::None`, still moves
+  nothing: a terminal without the protocol ignores the escape. A kitty
+  transmission that names no action is now reported as `a=t`, transmit
+  only, the protocol's default; it was reported as an image placed.
+- A chunked kitty upload (`m=1`) is no longer completed by an escape that
+  cannot continue it (#587). A sixel sent mid-upload was built on top of
+  it: one payload, a sixel carrying the kitty `s=`, `c=`/`r=`, `t=` and
+  `i=`, that decoded to a transparent 4x6 instead of the red it painted. A
+  delete (`a=d`) was taken as the upload's last chunk, so `kitty()` counted
+  an image and `deletes()` missed the teardown; any other APC was taken as
+  a chunk too, and after `RIS` the next transmission completed the upload.
+  Only a kitty escape continues an upload now: a delete aborts it, as the
+  protocol requires, and is counted, and a sixel or `RIS` abandons it. An
+  abandoned upload is no image, and its bytes still count in `bytes()`.
+- `Screen::find`, `find_all`, `locate`, `mask_matching` and, with `regex`,
+  `matches`, `find_match`, `find_all_matches` and `mask_matches` no longer
+  take time quadratic in the size of the screen (#584), and neither does
+  `contains` once the first non-ASCII cell comes late. Every row a search
+  visited re-read the whole grid to ask whether it was ASCII, so one `find`
+  on 1000x1000 took 3 s in a release build where `contains` took 6 ms; it
+  now takes 5 ms. A `wait_until` calling `find`, and `wait_until_matches`,
+  paid that on every wake-up.
+- The JSON reader refuses a cell no termlens could have written (#582). A
+  saved screen whose cell held an escape sequence loaded, and `termlens
+  render --text`, `--ansi` and `diff` then wrote it to the terminal: an OSC
+  set the window title and `ESC [2J` cleared the screen. Refused now, in
+  the grid and the styled history, naming the cell: a control character
+  (C0, DEL or C1, as `Screen::parse` refuses it), printable ASCII after a
+  cell's first character, an empty cell marked wide or an ASCII one with
+  no U+FE0F after it, and a wide character's second column that holds text
+  or follows none; and a screen of no columns or rows. A tracking-mode set
+  keeps only its four mode bits, so `MouseModes::len` and `iter` agree. No
+  check refuses a file a termlens wrote: a keycap such as `1️⃣`, a cell
+  whose width only this build's width tables dispute, and a wide character
+  that vt100 0.16 left in the last column after a resize all still read.
 - The `report` action writes its summary when the workspace holds a
   directory `find` cannot read, such as a root-owned cache or a `chmod 000`
   test fixture (#597). The step used to stop there with exit 1 before

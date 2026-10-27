@@ -527,9 +527,14 @@ Related, and fixed inside the library: macOS tears PTYs down with
 terminals one thread's teardown could revoke another thread's *freshly
 opened* PTY and kill its child at birth (~1/800 spawns under CI load; the
 same suite ran 100/100 on Linux). termlens therefore serializes every PTY
-lifecycle edge — open+spawn on one side, kill+reap+close on the other —
+lifecycle edge — open+spawn on one side, the close of each master
+descriptor on the other, the responder threads' duplicates included —
 behind a process-wide lock (`PTY_LIFECYCLE` in `terminal.rs`). The lock is
-held for microseconds per edge; steady-state I/O never touches it.
+held for an open and a spawn, or for a close; steady-state I/O never
+touches it. Stopping a child is not an edge: it happens before the lock is
+taken, while the terminal's master is still open and its device cannot be
+recycled. It used to be one, and portable-pty's kill sleeps in 50 ms steps,
+so every spawn in a test binary waited out every drop (#589).
 
 ### Scrollback
 
@@ -731,15 +736,19 @@ Rules:
    Those counters count **images**, which is not the same as counting
    escapes, and the difference is not a detail. The kitty protocol caps a
    payload at 4096 bytes and continues with `m=1`, so every image of
-   consequence arrives in several escapes and the continuations carry no
-   control block at all; and `a=d` deletes an image rather than sending one.
-   Counted per escape, a 4.9 KB chart read as two pictures and a teardown
-   read as a third — so "how many images did this frame send?", the question
-   that distinguishes a diffing painter from one that re-sends the year,
-   could not be asked. `GraphicsBuilder` joins the chunks and classifies the
-   action; `deletes` is counted separately, because an application that
-   takes down what it drew and one that draws twice as much are opposite
-   behaviours.
+   consequence arrives in several escapes and the continuations carry `m=`
+   and none of the image's facts; and `a=d` deletes an image rather than
+   sending one. Counted per escape, a 4.9 KB chart read as two pictures and
+   a teardown read as a third — so "how many images did this frame send?",
+   the question that distinguishes a diffing painter from one that re-sends
+   the year, could not be asked. `GraphicsBuilder` joins the chunks and
+   classifies the action; `deletes` is counted separately, because an
+   application that takes down what it drew and one that draws twice as
+   much are opposite behaviours. Only a kitty escape continues an upload. A
+   delete arriving mid-upload aborts it, as the protocol requires, and so do
+   a sixel and `RIS`: the upload is then no image, though its bytes still
+   count, and the escape that interrupted it stands on its own. `DECSTR`
+   leaves an upload alone, as kitty's does (#587).
 
    The payloads themselves land on the same slot, as `GraphicsSeen::payloads`.
    This is the position `OSC 52` already takes and for the same reason: a
@@ -751,8 +760,18 @@ Rules:
    cursor position at the terminator. That is why `process` now feeds the
    parser in pieces: the tracker runs a byte ahead of the grid, and a
    placement read before the grid caught up would be the position from before
-   the whole read. Neither protocol's escape moves the cursor, so the position
-   after the terminator is the image's top-left corner.
+   the whole read. The position at the terminator is the image's top-left
+   corner, stamped before anything moves the cursor. A terminal that speaks
+   the protocol then does move it, and the emulator follows the one the test
+   declared (`graphics()`, with `cell_size()`; #588): kitty puts it on the
+   placement's last row, one column past its right edge, wrapping to the
+   next row past the screen's and scrolling past the bottom margin, unless
+   `C=1`, `U=1` or `P=` says otherwise; xterm, with sixel scrolling on as it
+   is by default, puts it on the image's last text row and leaves the
+   column. A terminal declared without the protocol ignores the escape and
+   moves nothing, which is the default. The cursor is moved with line feeds
+   and a cursor-forward fed to the grid, so a scroll it causes reaches
+   history like any other.
 
    Decoding sits behind the `decode` feature and runs on demand, never as the
    bytes arrive: a suite that only asks whether an image went out should pay
@@ -868,7 +887,8 @@ is specified here next to the text format (#329). Format **1**:
   refuses the file and names both numbers rather than reading as far as
   the fields line up. A new number is a new stability candidate or a
   major version, never a silent change.
-- `cols`, `rows` — the geometry, in the terminal's order.
+- `cols`, `rows` — the geometry, in the terminal's order: at least 1 and
+  at most 1000 each, as a terminal's is (#582, #583).
 - `cursor` — three named fields. A hidden cursor keeps its position here
   (`"visible": false`), unlike the text format, where `cursor: hidden`
   drops it; `Screen::diff` treats a hidden cursor's position as not part
@@ -889,13 +909,45 @@ is specified here next to the text format (#329). Format **1**:
   protocol and the tracking-mode set, the clipboard, the counters, the
   cursor style, the links, the graphics record, the scrollback (text, and
   cells when retained), the wrap flags, insert mode, the unsupported
-  sequences with their overflow count, the visual bells.
+  sequences with their overflow count, the visual bells. The tracking-mode
+  set keeps its four mode bits and drops any other, which no termlens
+  wrote and which `len()` counted while `iter()` never yielded it.
 
 Nothing is omitted that a `Screen` holds, which is why reading the JSON
 back gives a `Screen` that is `==` to the original where the text format
 gives one that only `diff`s empty. Every row must hold `cols` cells and
 there must be `rows` of them; a file that does not hold together is an
 error, never a screen that panics on its first `cell()`.
+
+A cell must also be one a termlens could have written, because the CLI
+prints what it reads: a cell carrying an escape sequence drove the
+terminal of whoever ran `render --text` or `diff` on the file (#582).
+Refused, naming the cell, in the grid and in the retained history alike:
+
+- a control character — C0, DEL or C1 — anywhere in a cell, by the test
+  `Screen::parse` applies to a line (#376). vt100 drops every one before
+  it reaches the grid;
+- printable ASCII after a cell's first character. A cell is one character
+  and the zero-width marks after it, and no width table makes ASCII
+  zero-width;
+- an empty cell marked `wide`, or one whose first character is ASCII
+  with no U+FE0F after it. vt100 sizes a cell by its first character, or,
+  from 0.18, by the whole cell once a U+FE0F asks for emoji presentation,
+  which makes a keycap such as `1️⃣` two columns;
+- a `wide_continuation` cell that holds text, or that does not follow a
+  `wide` one.
+
+Two kinds of cell `Screen::parse` would never build are read as written,
+because a termlens did write them. Whether a non-ASCII character is a
+mark, one column or two is an entry in `unicode-width`'s tables, and the
+tables move between releases — 0.2.1 to 0.2.2, both of which vt100 0.16
+accepted, moved 197 code points — so a cell another release wrote
+correctly can look malformed under this one's; control characters and
+printable ASCII are the only widths no release reads from a table. And a
+`wide` cell need not be followed by its continuation: vt100 0.16, behind
+every release up to 0.11.6, narrowed a row by truncating it, so a resize
+that cut a wide character left it in the last column, and widening again
+left it before a blank.
 
 The compatibility corpus under `crates/termlens/tests/compat/` holds both
 formats as written by each release since 0.10.1, and `tests/compat.rs`

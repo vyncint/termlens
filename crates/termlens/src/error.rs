@@ -23,7 +23,10 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// written there as it is embedded: `<test>-<n>.screen.json` with the
 /// `serde` feature, `<test>-<n>.screen.txt` (the `with_styles` rendering,
 /// which [`Screen::parse`] reads back) without, where `<test>` is the
-/// current thread's name — under `cargo test`, the test's path. Unset, the
+/// current thread's name — under `cargo test`, the test's path. Every such
+/// error is recorded, an expected one included: a test that asserts a
+/// timeout or EOF leaves that screen in the directory too, so set the
+/// variable for the steps whose failures you want to see (#596). Unset, the
 /// hook is one environment read and nothing else; insta's `.snap.new`
 /// files stay where insta puts them. This repository's `report` action
 /// (`.github/actions/report`) renders that directory into a pull
@@ -129,6 +132,13 @@ pub enum Error {
     /// means the bytes could not be handed over at all, which is a fact
     /// about the child rather than about the test, so the screen at the
     /// moment of the failure is embedded the way a timeout's is.
+    ///
+    /// A write that gave up at the deadline is **not withdrawn**: the bytes
+    /// not yet written stay queued and reach the application, in order, if
+    /// it ever reads again, and input sent afterwards waits behind them —
+    /// failing the same way while the queue does not move. So a retry types
+    /// its input twice, and "the application never got these bytes" is not
+    /// what this error says (#590).
     #[error("failed to send {what}\n--- screen at the failed write ---\n{screen}")]
     Write {
         /// What was being sent, which command it was going to, and why the

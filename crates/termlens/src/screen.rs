@@ -191,12 +191,20 @@ impl MouseMode {
 /// # }
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+// `Deserialize` is written by hand in `serde_impl.rs`, to drop the bits no
+// mode occupies (#582).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct MouseModes(u8);
 
 impl MouseModes {
+    /// The set holding the modes whose bits are set in `bits`. A bit no mode
+    /// occupies is dropped: kept, it counted in `len()` and never appeared
+    /// in `iter()`, and a saved screen can carry one (#582).
     pub(crate) fn from_bits(bits: u8) -> Self {
-        Self(bits)
+        let known = MouseMode::TRACKING
+            .iter()
+            .fold(0, |known, mode| known | mode.bit());
+        Self(bits & known)
     }
 
     /// Whether the application currently has `mode` enabled.
@@ -1620,7 +1628,7 @@ impl Screen {
             visit((0, 0));
             return;
         }
-        let needle = &self.fold(needle);
+        let needle = &nfc(needle);
         if !needle.contains('\n') {
             for row in 0..self.rows {
                 let (text, cols) = self.searchable_row(row);
@@ -1776,7 +1784,7 @@ impl Screen {
     /// row's width, which is the one thing a mask exists not to do.
     #[must_use]
     pub fn mask_matching(&self, pattern: &str, fill: char) -> Screen {
-        let pattern = self.fold(pattern);
+        let pattern = nfc(pattern);
         if pattern.contains('\n') {
             // A needle that spans rows is matched by the engine `find_all`
             // uses. The per-row scan below is handed one row at a time and
@@ -2027,20 +2035,15 @@ impl Screen {
     }
 
     /// True when every cell holds only ASCII, so normalization is the
-    /// identity and the search helpers can skip it. This is the shape of
-    /// virtually every screen, which is what keeps `contains` — evaluated
-    /// on every wait wake-up — as cheap as it was.
+    /// identity and `contains` can search [`text`](Self::text) as it is.
+    /// This is the shape of virtually every screen, which is what keeps
+    /// `contains` — evaluated on every wait wake-up — as cheap as it was.
+    ///
+    /// A pass over every cell, so it is asked once per query and never per
+    /// row: asked per row it made every search quadratic in the size of the
+    /// screen, three seconds for one `find` on 1000x1000 (#584).
     fn is_ascii(&self) -> bool {
         self.cells.iter().all(|c| c.contents().is_ascii())
-    }
-
-    /// `needle` in the form the search helpers compare against.
-    fn fold(&self, needle: &str) -> String {
-        if self.is_ascii() && needle.is_ascii() {
-            needle.to_owned()
-        } else {
-            nfc(needle)
-        }
     }
 
     /// The whole grid in searchable form: rows joined with `\n`, trailing
@@ -2067,8 +2070,12 @@ impl Screen {
     /// folding cell by cell composes exactly what the terminal draws in one
     /// cell and can never compose across a cell boundary. It also keeps the
     /// byte-to-column map exact, which is what [`find`](Self::find) reports.
+    ///
+    /// Whether to normalize at all is decided per cell for the same reason
+    /// it is cheap there: an ASCII cell is NFC already. Deciding it for the
+    /// whole screen, a pass over every cell, on each row visited is what
+    /// made every search quadratic (#584).
     fn searchable_row(&self, row: u16) -> (String, Vec<u16>) {
-        let ascii = self.is_ascii();
         let mut text = String::with_capacity(usize::from(self.cols));
         let mut cols = Vec::with_capacity(usize::from(self.cols));
         for col in 0..self.cols {
@@ -2081,10 +2088,8 @@ impl Screen {
             let before = text.len();
             if cell.contents().is_empty() {
                 text.push(' ');
-            } else if ascii {
-                text.push_str(cell.contents());
             } else {
-                text.extend(cell.contents().nfc());
+                push_nfc(&mut text, cell.contents());
             }
             cols.resize(text.len(), col);
             debug_assert!(text.len() > before || cell.is_wide_continuation());
@@ -2208,9 +2213,22 @@ impl Screen {
     }
 }
 
-/// `s` folded to NFC.
+/// `s` folded to NFC, the form a needle and the screen are compared in.
 fn nfc(s: &str) -> String {
-    s.nfc().collect()
+    let mut out = String::with_capacity(s.len());
+    push_nfc(&mut out, s);
+    out
+}
+
+/// Append `s` folded to NFC. ASCII is NFC already — no ASCII character
+/// decomposes, or composes with the one after it — so it is copied, and
+/// that is the shape of virtually every cell and every needle.
+fn push_nfc(out: &mut String, s: &str) {
+    if s.is_ascii() {
+        out.push_str(s);
+    } else {
+        out.extend(s.nfc());
+    }
 }
 
 /// Clamp any range expression to `0..len`, as `(start, end)` exclusive.
