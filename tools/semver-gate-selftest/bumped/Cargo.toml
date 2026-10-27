@@ -1,7 +1,9 @@
 [package]
-# The gate checks the package called termlens, and run.sh runs the gate
-# itself against these models, so they carry that name.
-name = "termlens"
+# Not `termlens`, though the gate checks the package of that name: the
+# selftest names this one with SEMVER_GATE_PACKAGE, and a second
+# `termlens` under the repository makes cargo-semver-checks refuse the real
+# one as ambiguous.
+name = "gate-model"
 version = "0.11.0"
 edition = "2021"
 publish = false

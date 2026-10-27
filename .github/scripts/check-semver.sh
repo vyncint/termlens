@@ -58,10 +58,16 @@
 #                             the baseline's source instead of the crates.io
 #                             release, for tools/semver-gate-selftest/
 #                             only; CI never sets it
+#   env SEMVER_GATE_PACKAGE=<name>
+#                             the package checked instead of termlens, for
+#                             the same selftest: its models must not be named
+#                             termlens, or cargo-semver-checks, which reads
+#                             every manifest under the repository, finds the
+#                             real crate's name defined five times
 set -euo pipefail
 
 baseline=${1:?usage: check-semver.sh <baseline-version>}
-package=termlens
+package="${SEMVER_GATE_PACKAGE:-termlens}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root"
 

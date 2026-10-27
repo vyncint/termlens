@@ -171,7 +171,7 @@ gate() {
   git -C "$scratch" checkout -q "$at"
   got=0
   env BREAKING_LABEL= BASE_REV= GITHUB_STEP_SUMMARY= \
-    SEMVER_GATE_BASELINE_ROOT="$PWD/baseline" "$@" \
+    SEMVER_GATE_BASELINE_ROOT="$PWD/baseline" SEMVER_GATE_PACKAGE=gate-model "$@" \
     "$scratch/.github/scripts/check-semver.sh" 0.10.1 > out.log 2>&1 || got=$?
   report "$label" "$want" "$got" "$pattern"
 }
