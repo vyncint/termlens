@@ -1,7 +1,8 @@
 //! Recovering the three SGR attributes `vt100` drops.
 //!
-//! `vt100` 0.16's `Attrs` is `{ fgcolor, bgcolor, mode: u8 }` and its SGR
-//! dispatch handles only `0 1 2 3 4 7 22 23 24 27` plus the colour params.
+//! `vt100`'s `Attrs` (0.16 through 0.18) is `{ fgcolor, bgcolor, mode: u8 }`
+//! and its SGR dispatch handles only `0 1 2 3 4 7 22 23 24 27` plus the
+//! colour params.
 //! `5`/`6` (blink), `8` (conceal) and `9` (strikethrough), and their resets
 //! `25`/`28`/`29`, never reach a cell — so three distinct renderings collapse
 //! into one value, and a test asserting that a password field is masked

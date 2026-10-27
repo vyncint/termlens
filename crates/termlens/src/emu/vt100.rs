@@ -688,7 +688,7 @@ fn is_printable(b: u8) -> bool {
 /// What the reader substitutes for a byte it could not decode (`utf8.rs`).
 const REPLACEMENT: &str = "\u{FFFD}";
 /// What the grid is fed in its place. vt100's `print` drops U+FFFD outright
-/// (0.16, `perform.rs`), so the replacement would vanish exactly as the
+/// (0.16 through 0.18, `perform.rs`), so the replacement would vanish as the
 /// invalid byte did (#217). U+FDD0 is a Unicode noncharacter — reserved for
 /// internal use like this, never for interchange, so no application has any
 /// business emitting one — and vt100 draws it as an ordinary width-1 cell.
