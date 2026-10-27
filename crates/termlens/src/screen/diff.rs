@@ -8,8 +8,6 @@
 
 use std::fmt;
 
-use unicode_width::UnicodeWidthStr;
-
 use super::{same_cursor, Cell, Screen, Style};
 
 /// The difference between two screens. Built by [`Screen::diff`]; render it
@@ -255,12 +253,13 @@ fn cursor_text((row, col, visible): (u16, u16, bool)) -> String {
     }
 }
 
-/// `text` followed by blanks out to `width` display columns, so the `│`
-/// closing the row line lands in the same column as the one closing its
-/// marker line. The `{:<width$}` formatter counts `char`s, and a row's text
-/// is exactly where the two counts part ways (#380).
+/// `text` followed by blanks out to `width` columns, so the `│` closing the
+/// row line lands in the same column as the one closing its marker line.
+/// The `{:<width$}` formatter counts `char`s, and a row's text is exactly
+/// where the two counts part ways (#380). The columns are the grid's, as
+/// the markers' are: a ZWJ family takes four, `⚠️` two (#580).
 fn pad(text: &str, width: usize) -> String {
-    let missing = width.saturating_sub(text.width());
+    let missing = width.saturating_sub(crate::width::columns(text));
     let mut out = String::with_capacity(text.len() + missing);
     out.push_str(text);
     out.extend(std::iter::repeat_n(' ', missing));
@@ -386,5 +385,50 @@ mod tests {
                 "the frame lines disagree in display width:\n{rendered}"
             );
         }
+    }
+
+    /// The pad measured a row as a string, where a ZWJ family is one
+    /// two-column cluster and lam-alef one column — four and two on the
+    /// grid, which is where the markers are placed (#580).
+    #[test]
+    fn rows_the_string_measure_misjudges_keep_the_frame_on_grid_columns() {
+        let screen = |last: &str| {
+            let blank = || Cell::new(String::new(), Style::default(), false, false);
+            let cells = vec![
+                Cell::new("\u{1f468}\u{200d}".into(), Style::default(), true, false),
+                Cell::new(String::new(), Style::default(), false, true),
+                Cell::new("\u{1f469}".into(), Style::default(), true, false),
+                Cell::new(String::new(), Style::default(), false, true),
+                Cell::new("\u{644}".into(), Style::default(), false, false),
+                Cell::new("\u{627}".into(), Style::default(), false, false),
+                Cell::new(last.into(), Style::default(), false, false),
+                blank(),
+                blank(),
+                blank(),
+            ];
+            Screen::from_parts(10, 1, 0, 0, true, cells, TermState::default())
+        };
+        let rendered = screen("x").diff(&screen("y")).to_string();
+        let mut lines = rendered.lines().skip(1);
+        let text = lines.next().expect("a row line");
+        let marks = lines.next().expect("its marker line");
+        let grid_columns = |line: &str| {
+            let mut columns = Vec::new();
+            for (at, _) in line.match_indices('│') {
+                columns.push(crate::width::columns(&line[..at]));
+            }
+            columns
+        };
+        assert_eq!(
+            grid_columns(text),
+            grid_columns(marks),
+            "the │ separators sit at different grid columns:\n{rendered}"
+        );
+        assert_eq!(
+            marks
+                .find('^')
+                .map(|at| crate::width::columns(&marks[..at])),
+            Some(11)
+        );
     }
 }

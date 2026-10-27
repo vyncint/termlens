@@ -44,8 +44,10 @@ CHANGELOG entry.
 - **Insert mode (`IRM`, `CSI 4 h`) pushes the rest of the row right**, as
   ncurses's `insch` expects on a terminal advertising `smir`; `RIS` and
   `DECSTR` clear it, and `Screen::insert_mode()` reports an application
-  that left it on. One exception: the characters REP (`CSI n b`) repeats
-  overwrite the row even in insert mode, where xterm inserts them. Other
+  that left it on. Two exceptions: the characters REP (`CSI n b`) repeats
+  overwrite the row even in insert mode, where xterm inserts them; and an
+  inserted run that reaches the right margin wraps onto the next row over
+  its text, where xterm pushes that row right as well. Other
   ANSI modes the backend drops (`LNM` and the rest) are not modelled — and
   *say so*: `Screen::unsupported()` lists every sequence the emulator did
   not implement, in the form `^[[20h`, so a test can tell a
@@ -54,7 +56,14 @@ CHANGELOG entry.
   row by row and do not span the wrap; `Screen::row_wrapped(row)` reports
   the backend's record of where a line wrapped, and
   `Screen::logical_text()` joins wrapped rows back together for the
-  assertion that spans one.
+  assertion that spans one. The backend records a wrap only where the last
+  column held something: a wide character that does not fit in an empty
+  last column moves to the next row unrecorded, so on six columns
+  `abcde漢fg` reads as `abcde` and `漢fg` there.
+- **Autowrap cannot be turned off.** `CSI ? 7 l` (DECAWM reset) is not
+  modelled: text past the right margin still wraps, and `unsupported()`
+  names the sequence. `CSI ? 7 h`, which every ncurses program sends, asks
+  for what the emulator already does and is not named.
 - **Tab stops are the application's to set.** `HTS` (`ESC H`), `TBC`
   (`CSI g`, `CSI 3 g`), `CHT` (`CSI I`) and `CBT` (`CSI Z`) all work, and a
   plain `\t` honours whatever stops are set rather than a fixed eight.

@@ -102,6 +102,11 @@ fn params_text(params: &[&[u16]]) -> String {
 /// console's handshake in every Windows snapshot's list (#149).
 const TRACKED_PRIVATE_MODES: &[u16] = &[9, 1000, 1002, 1003, 1005, 1006, 1015, 1004, 2026, 9001];
 
+/// DECAWM, autowrap. Setting it asks for the only behaviour the emulator
+/// has, so `CSI ? 7 h` — which ncurses sends at every start (`smam`) — is
+/// honoured; resetting it is not modelled, and stays on record (#581).
+const AUTOWRAP: u16 = 7;
+
 /// The SGR parameters [`shadow`](super::shadow) recovers: blink, conceal,
 /// strikethrough and their three "off" forms.
 ///
@@ -193,7 +198,7 @@ impl Callbacks for Unhandled {
             (Some(b'?'), None, 'h' | 'l') => params
                 .iter()
                 .flat_map(|p| p.iter())
-                .all(|m| TRACKED_PRIVATE_MODES.contains(m)),
+                .all(|m| TRACKED_PRIVATE_MODES.contains(m) || (c == 'h' && *m == AUTOWRAP)),
             // An SGR every one of whose parameters the shadow recovers is
             // implemented, and naming it here would contradict the cell
             // (#320). One parameter outside the set and the whole sequence
@@ -276,6 +281,19 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect()
+    }
+
+    #[test]
+    fn autowrap_on_is_honoured_and_autowrap_off_is_on_record() {
+        // Every ncurses program sends `CSI ? 7 h` at startup, and it asks
+        // for the only behaviour there is: naming it made an empty
+        // `unsupported()` impossible for any of them (#581). Turning wrap
+        // off is not modelled, so that still is named.
+        assert_eq!(shapes(b"\x1b[?7hready"), [] as [String; 0]);
+        assert_eq!(shapes(b"\x1b[?7l"), ["^[[?7l"]);
+        // In a list, the set is honoured with the others it is set with.
+        assert_eq!(shapes(b"\x1b[?7;1000h"), [] as [String; 0]);
+        assert_eq!(shapes(b"\x1b[?7;12h"), ["^[[?7;12h"]);
     }
 
     #[test]

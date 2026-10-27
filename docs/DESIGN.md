@@ -626,7 +626,13 @@ Rules:
    grid, so `cell()`, `row_text()`, and `find()` coordinates are unaffected.
 4. Wide characters occupy their real columns: the character appears once;
    its continuation cell contributes nothing to the text but does count
-   for column arithmetic (`find` returns true terminal columns).
+   for column arithmetic (`find` returns true terminal columns). The
+   columns are the emulator's, character by character — a ZWJ family is
+   two wide cells, not one cluster — and an emoji-presentation selector
+   (U+FE0F) makes the emoji it follows two columns, as vt100 0.18 lays it
+   out. Releases before 0.11.7 gave such an emoji one column and the text
+   does not say which wrote it, so the reader widens it unless the row
+   then would not fit, and reads that row the earlier way.
 5. Styles are text-invisible by default; `Screen::with_styles()` opts in.
    Its rendering is the plain `Display` output followed by a blank line
    and a `styles:` block:
