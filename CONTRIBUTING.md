@@ -75,7 +75,7 @@ tools/attribution-gate-selftest/run.sh                  # …and the AI-attribut
 tools/dco-gate-selftest/run.sh                          # …and the DCO gate, its one-commit squash exemption included
 tools/preflight-selftest/run.sh                         # …and the runner accounts for each gate it runs, failures included
 tools/report-action-selftest/run.sh                     # …and the report action writes its summary past a directory it cannot read
-.github/scripts/check-semver.sh 0.11.6                  # …and the public API is compatible with the last published release
+.github/scripts/check-semver.sh 0.11.7                  # …and the public API is compatible with the last published release
 ```
 
 The list is written out here rather than left as a pointer because a first
