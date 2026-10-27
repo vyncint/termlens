@@ -731,15 +731,19 @@ Rules:
    Those counters count **images**, which is not the same as counting
    escapes, and the difference is not a detail. The kitty protocol caps a
    payload at 4096 bytes and continues with `m=1`, so every image of
-   consequence arrives in several escapes and the continuations carry no
-   control block at all; and `a=d` deletes an image rather than sending one.
-   Counted per escape, a 4.9 KB chart read as two pictures and a teardown
-   read as a third — so "how many images did this frame send?", the question
-   that distinguishes a diffing painter from one that re-sends the year,
-   could not be asked. `GraphicsBuilder` joins the chunks and classifies the
-   action; `deletes` is counted separately, because an application that
-   takes down what it drew and one that draws twice as much are opposite
-   behaviours.
+   consequence arrives in several escapes and the continuations carry `m=`
+   and none of the image's facts; and `a=d` deletes an image rather than
+   sending one. Counted per escape, a 4.9 KB chart read as two pictures and
+   a teardown read as a third — so "how many images did this frame send?",
+   the question that distinguishes a diffing painter from one that re-sends
+   the year, could not be asked. `GraphicsBuilder` joins the chunks and
+   classifies the action; `deletes` is counted separately, because an
+   application that takes down what it drew and one that draws twice as
+   much are opposite behaviours. Only a kitty escape continues an upload. A
+   delete arriving mid-upload aborts it, as the protocol requires, and so do
+   a sixel and `RIS`: the upload is then no image, though its bytes still
+   count, and the escape that interrupted it stands on its own. `DECSTR`
+   leaves an upload alone, as kitty's does (#587).
 
    The payloads themselves land on the same slot, as `GraphicsSeen::payloads`.
    This is the position `OSC 52` already takes and for the same reason: a
