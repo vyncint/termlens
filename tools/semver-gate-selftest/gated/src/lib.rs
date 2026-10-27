@@ -4,3 +4,5 @@ pub fn kept() {}
 pub fn removed() {}
 #[cfg(feature = "render")]
 pub fn to_svg() {}
+#[cfg(feature = "regex")]
+pub fn find() {}

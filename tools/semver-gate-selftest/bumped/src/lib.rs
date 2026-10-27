@@ -3,3 +3,5 @@
 //! every check.
 pub fn kept() {}
 pub fn to_svg() {}
+#[cfg(feature = "regex")]
+pub fn find() {}

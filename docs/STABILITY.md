@@ -130,18 +130,29 @@ to be short.
   `--no-default-features`, each single feature (`decode`, `regex`, `serde`)
   and all features together. Semver over all of it: an item is not removed,
   renamed, re-typed or moved behind a feature in any of those
-  configurations without a new candidate. *Checked by* the `semver` job
-  (`.github/scripts/check-semver.sh`: cargo-semver-checks against the last
-  published release, release type forced to `patch`, in the default,
-  explicit-only and all-features views; `tools/semver-gate-selftest/` proves
-  the gate fails on a removed and on a gated item) and by the `features`
-  job, which builds and tests each reduced configuration for the library
-  alone (`.github/scripts/check-feature-isolation.sh`). *Not checked, and
-  said so:* a method whose signature changes under the same name — the
-  0.11 change to `unsupported()` was exactly that, and cargo-semver-checks
+  configurations without a new candidate. *Checked by* the `semver` and
+  `features` jobs. The `semver` job (`.github/scripts/check-semver.sh`)
+  runs cargo-semver-checks against the last published release, release
+  type forced to `patch`, in each of those configurations: the default,
+  explicit-only and all-features views, and `decode`, `regex` and `serde`
+  each alone, read from the manifest so that a new feature joins them.
+  While a declared break waits in the CHANGELOG for its release, every
+  later pull request and push to `main` that declares nothing itself is
+  checked again, with `patch`, against the commit it lands on, so the
+  declared break carries no second one through.
+  `tools/semver-gate-selftest/` proves the gate fails on a removed item, a
+  gated item, an item moved from one feature to two, and a second break
+  after a declared one. The `features` job builds and tests each reduced
+  configuration for the library alone
+  (`.github/scripts/check-feature-isolation.sh`). *Not checked, and said
+  so:* a method whose signature changes under the same name — the 0.11
+  change to `unsupported()` was exactly that, and cargo-semver-checks
   0.50.0 reported only the removed `unsupported_overflow()` beside it. That
   class is caught by the crate's own tests and every consumer's compile,
-  and by review.
+  and by review. Nor is the rest of a pull request that declares a break,
+  by the `breaking` label or a `- **Breaking` bullet it adds: it runs with
+  `--release-type major`, which accepts any break, so what else it breaks
+  is for review, against the diagnostics its description pastes.
 - **The snapshot text format** of [DESIGN.md](DESIGN.md) §3, which
   `Screen::parse` reads back: the header, the grid, the `styles:` block and
   its tokens. A file written by any release from 0.10.1 on parses in every

@@ -27,21 +27,28 @@ before 1.0. What that means for a release:
 
 - **A patch or minor release breaks nothing.** The `semver` job holds it:
   every pull request is checked against the last published release with
-  the release type forced to `patch`, in three feature views. A red
-  `semver` on a PR is the answer, not an obstacle.
+  the release type forced to `patch`, in the default, explicit-only and
+  all-features views and with each feature alone. A red `semver` on a PR
+  is the answer, not an obstacle.
 - **A necessary break is a new candidate** — `0.12.0`, never a patch — and
   restarts the observation window of the
   [1.0 readiness criteria](STABILITY.md#the-10-readiness-criteria). Its
   pull request carries the **`breaking` label** (a maintainer applies it;
   the gate then runs with `--release-type major`), its description pastes
   the diagnostics the *forced* run produced (run
-  `.github/scripts/check-semver.sh <baseline>` without the label to get
-  them), and its CHANGELOG entry is a bullet beginning **`- **Breaking:**`**
-  under **Changed** or **Removed** whose text matches those diagnostics and
-  carries a migration table. The marker is what keeps `main` green after
-  the merge, where no label exists, and what lets the release tag pass the
-  same gate — so a break without the marker is a break the gate refuses,
-  on the PR and again on the tag.
+  `.github/scripts/check-semver.sh <baseline>` without the label, and
+  before the bullet below is written, to get them), and its CHANGELOG
+  entry is a bullet beginning **`- **Breaking:**`** under **Changed** or
+  **Removed** whose text matches those diagnostics and carries a migration
+  table. The marker is what keeps `main` green after the merge, where no
+  label exists, and what lets the release tag pass the same gate — so a
+  break without the marker is a break the gate refuses, on the PR and
+  again on the tag. The marker declares that break and no other: until the
+  release, every pull request and push to `main` that adds no marker of its
+  own is checked a second time, with `patch`, against the commit it lands
+  on (`BASE_REV` in ci.yml), so a second, undeclared break is refused on
+  its PR and again on `main`. A second break that is meant is declared
+  like the first, with the label and a bullet of its own.
 - **Release candidates for 1.0** are tagged `v1.0.0-rc.N` and publish to
   crates.io as pre-releases; a consumer opts in with an exact requirement
   (`termlens = "=1.0.0-rc.1"`), and Cargo never resolves a pre-release
@@ -137,14 +144,18 @@ previous release. That is green when the release broke nothing, and green
 for a release whose CHANGELOG section records its break as a `- **Breaking`
 bullet — the gate reads that marker (`.github/scripts/check-semver.sh`), so
 a break that was declared stays declared after the label on its pull
-request is out of sight.
+request is out of sight. The release moved the bullet without adding one,
+so a change in that window is still checked a second time against the
+commit it lands on, as above.
 
 Pushing the tag runs `release.yml`, which:
 
 1. fails unless tag == `crates/termlens` version,
 2. re-runs the full CI gates (`workflow_call` into ci.yml) — the semver
    gate among them, against the last published release with the release
-   type forced (`.github/scripts/check-semver.sh`),
+   type forced (`.github/scripts/check-semver.sh`); a tag push has no
+   commit it lands on, so a declared break's second check is not repeated
+   there, and the tagged commit passed it on its way to `main`,
 3. `cargo publish -p termlens` then `cargo publish -p termlens-cli`, both
    via Trusted Publishing (OIDC); each crate needs its own publisher
    link, and the step says so if one is missing,

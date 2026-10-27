@@ -1,0 +1,17 @@
+[package]
+# The gate checks the package called termlens, and run.sh runs the gate
+# itself against these models, so they carry that name.
+name = "termlens"
+version = "0.10.1"
+edition = "2021"
+publish = false
+
+[features]
+render = []
+regex = []
+serde = []
+
+# Standalone on purpose: a member of the termlens workspace would be built,
+# formatted and linted as part of the product, and this is a test fixture
+# for the gate, not code anyone ships.
+[workspace]
