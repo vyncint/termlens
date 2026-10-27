@@ -905,7 +905,9 @@ impl GraphicsSeen {
     ///
     /// **Images, not escapes.** A transmission split across the protocol's
     /// 4096-byte chunks is one image, and an action carrying no picture — a
-    /// delete above all — is not one at all.
+    /// delete above all — is not one at all. Nor is an upload abandoned
+    /// before its last chunk: a delete aborts one, as the protocol requires,
+    /// and so does a sixel or a hard reset (`RIS`) arriving in the middle.
     #[must_use]
     pub fn kitty(&self) -> u32 {
         self.counts.kitty
@@ -945,7 +947,8 @@ impl GraphicsSeen {
 
     /// Total payload bytes across both protocols and every action, counted
     /// the same way for each: everything between the introducer and the
-    /// terminator.
+    /// terminator. The chunks of an abandoned upload count too, since they
+    /// crossed the wire.
     #[must_use]
     pub fn bytes(&self) -> u64 {
         self.counts.bytes
@@ -987,8 +990,9 @@ impl GraphicsSeen {
 }
 
 /// A payload under construction, owned by the sequence tracker: kitty splits
-/// one image across escapes, so a payload is not complete until an escape
-/// arrives without `m=1`.
+/// one image across escapes, so a payload is not complete until a kitty
+/// escape arrives without `m=1` — and it is [abandoned](Self::abandon)
+/// instead if a delete, a sixel or a hard reset arrives first.
 #[derive(Debug)]
 pub(crate) struct GraphicsBuilder {
     protocol: Option<GraphicsProtocol>,
@@ -1027,12 +1031,6 @@ impl Default for GraphicsBuilder {
 }
 
 impl GraphicsBuilder {
-    /// True once a kitty escape has opened a transmission that later
-    /// escapes continue.
-    pub(crate) fn in_progress(&self) -> bool {
-        self.protocol.is_some()
-    }
-
     /// Take on the facts of a kitty control block. Only the first escape of
     /// a chunked transmission carries one; the continuations carry `m=` and
     /// nothing else, so nothing here overwrites what is already known.
@@ -1074,7 +1072,9 @@ impl GraphicsBuilder {
     }
 
     /// Take on the facts of a sixel header: the raster attributes are inside
-    /// the data, so only the protocol is settled here.
+    /// the data, so only the protocol is settled here. Nothing else is
+    /// reset, so the builder must hold no kitty upload — the tracker
+    /// abandons one first.
     pub(crate) fn sixel(&mut self) {
         self.protocol = Some(GraphicsProtocol::Sixel);
         self.action = GraphicsAction::TransmitAndPlace;
@@ -1128,6 +1128,17 @@ impl GraphicsBuilder {
         };
         *self = Self::default();
         Some(payload)
+    }
+
+    /// Drop a transmission that will never complete, handing back the wire
+    /// bytes its chunks already cost. Nothing of it becomes a payload: the
+    /// protocol aborts the upload, so there is no image to report. The bytes
+    /// are another matter — they crossed the wire, and
+    /// [`GraphicsSeen::bytes`] counts traffic, not pictures.
+    pub(crate) fn abandon(&mut self) -> u64 {
+        let spent = self.bytes;
+        *self = Self::default();
+        spent
     }
 }
 
