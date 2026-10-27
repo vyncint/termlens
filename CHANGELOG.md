@@ -74,6 +74,32 @@ reads that marker.
   which moved to the next row because it did not fit in an empty last
   column is not recorded as a wrap, so `logical_text()` splits the line
   there (#585).
+- Dropping a `Terminal` no longer holds the process-wide PTY lock while
+  the child stops (#589). It sent SIGHUP and polled in portable-pty's fixed
+  50 ms steps under the lock, so a drop took 50 ms (200 ms when the child
+  ignores SIGHUP), and every spawn in the test binary waited it out. The
+  child is now stopped first, polled from 1 ms, and the lock is taken only
+  to close the descriptors: measured, 1 ms per drop and no wait for a
+  concurrent spawn. The responder threads' copies of the master now close
+  under the lock too.
+- `Error::Write` at the deadline says what happens to the bytes (#590): the
+  write is not withdrawn, the rest of it reaches the application if it
+  reads again, and later input queues behind it. The message and the docs
+  said the write "gave up", so a retry typed its input twice.
+- A query's reply is queued before the screen the query is drawn on can be
+  seen (#591). A test that waited for that screen and typed could have its
+  keystroke reach the application ahead of the reply: 11 runs in 9,600 at
+  32 threads, and none since.
+- On Unix, a program named with a directory part, such as
+  `target/debug/app`, is found from the working directory, as
+  `std::process::Command` finds it (#592). Only `PATH` was searched, so the
+  spawn failed with "No viable candidates found in PATH", or under
+  `env_clear()` could not resolve `PATH` at all. `PATH` is still searched
+  after.
+- On Windows, a reaped child is the terminal closing 500 ms after the reap,
+  however short the waits that follow (#593). Each wait restarted that
+  grace, so waits shorter than it never saw EOF, and a send to the dead
+  child was not refused.
 - `termlens inspect` no longer leaves screens in `TERMLENS_ARTIFACT_DIR`
   for a run that ended normally (#596). It takes the library's `Eof` and
   `Timeout` as outcomes — a program that exits, one still running at the
@@ -109,6 +135,16 @@ reads that marker.
   also write a character XML 1.0 forbids, a C0 control other than tab, LF and
   CR or U+FFFE/U+FFFF, as U+FFFD, so a window title holding `\x01` or a cell
   holding U+FFFF no longer makes an SVG no parser opens.
+- A chunked kitty upload (`m=1`) is no longer completed by an escape that
+  cannot continue it (#587). A sixel sent mid-upload was built on top of
+  it: one payload, a sixel carrying the kitty `s=`, `c=`/`r=`, `t=` and
+  `i=`, that decoded to a transparent 4x6 instead of the red it painted. A
+  delete (`a=d`) was taken as the upload's last chunk, so `kitty()` counted
+  an image and `deletes()` missed the teardown; any other APC was taken as
+  a chunk too, and after `RIS` the next transmission completed the upload.
+  Only a kitty escape continues an upload now: a delete aborts it, as the
+  protocol requires, and is counted, and a sixel or `RIS` abandons it. An
+  abandoned upload is no image, and its bytes still count in `bytes()`.
 
 ## [0.11.6] - 2026-10-14
 

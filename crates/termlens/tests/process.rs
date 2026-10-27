@@ -183,6 +183,63 @@ fn an_argument_the_kernel_refuses_is_a_spawn_error_with_its_reason() {
     }
 }
 
+/// A program named with a directory part is a path from the working
+/// directory, as `std::process::Command` and `execvp` take it. The PTY
+/// layer's rules searched PATH for `sub/x` and never the directory the test
+/// runs in, so `spawn("target/debug/app")` failed with "No viable
+/// candidates found in PATH" — or, under `env_clear()`, could not even
+/// resolve PATH (#592).
+#[cfg(unix)]
+#[test]
+fn a_program_with_a_directory_part_is_found_from_the_working_directory() -> termlens::Result<()> {
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("dir-part-{}", std::process::id()));
+    std::fs::create_dir_all(scratch.join("sub"))?;
+    common::write_script(
+        &scratch.join("sub/x"),
+        "#!/bin/sh\necho ran from sub\nread _\n",
+    );
+    for clear in [false, true] {
+        let mut builder = Terminal::builder()
+            .timeout(Duration::from_secs(10))
+            .current_dir(&scratch);
+        if clear {
+            builder = builder.env_clear();
+        }
+        let mut t = builder.spawn("sub/x")?;
+        t.wait_until(|s| s.contains("ran from sub"))?;
+        t.send(Key::Enter)?;
+        assert!(t.wait_exit()?.success(), "env_clear: {clear}");
+    }
+    Ok(())
+}
+
+/// A child that ignores the hang-up is gone all the same once `drop`
+/// returns: it gets the hang-up's grace, then SIGKILL. `drop` now stops the
+/// child itself, outside the lifecycle lock (#589), and must still not
+/// leave one behind.
+#[cfg(unix)]
+#[test]
+fn drop_stops_a_child_that_ignores_the_hangup() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args([
+            "-c",
+            "trap '' HUP; echo ready; while :; do sleep 0.05; done",
+        ])
+        .spawn("sh")?;
+    t.wait_until(|s| s.contains("ready"))?;
+    let pid = t.pid().expect("a pid").to_string();
+    drop(t);
+    let alive = std::process::Command::new("kill")
+        .args(["-0", &pid])
+        .stderr(std::process::Stdio::null())
+        .status()?
+        .success();
+    assert!(!alive, "pid {pid} outlived the drop");
+    Ok(())
+}
+
 /// A failure before the exec reads as std reports it, and does not blame a
 /// program that is fine. A NUL in a variable is refused before anything is
 /// forked. A working directory that cannot be entered fails in the child,
@@ -491,4 +548,33 @@ fn a_panicking_child_puts_its_message_on_the_screen() -> termlens::Result<()> {
     );
     assert_eq!(t.wait_exit()?.code(), Some(101));
     Ok(())
+}
+
+/// A pseudoconsole never reports EOF while it is open, so on Windows a
+/// reaped child plus the drain grace is the terminal closing — measured from
+/// the reap. Every wait used to restart the grace, so waits shorter than it
+/// never saw the exit and a send to the dead child was not refused (#593).
+#[cfg(windows)]
+#[test]
+fn short_waits_after_the_exit_see_the_terminal_close() -> termlens::Result<()> {
+    let mut t = Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .args(["/c", "echo done"])
+        .spawn("cmd")?;
+    t.wait_until(|s| s.contains("done"))?;
+    // Waits of a fifth of the grace each, for four graces in all.
+    for _ in 0..20 {
+        match t.wait_until_for(|_| false, Duration::from_millis(100)) {
+            Err(Error::Eof { .. }) => {
+                assert!(
+                    matches!(t.send_str("x"), Err(Error::Write { .. })),
+                    "a closed terminal refuses input"
+                );
+                return Ok(());
+            }
+            Err(Error::Timeout { .. }) => {}
+            other => panic!("only the exit can end this wait: {other:?}"),
+        }
+    }
+    panic!("two seconds of short waits after the exit never saw the terminal close");
 }

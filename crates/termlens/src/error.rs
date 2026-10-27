@@ -132,6 +132,13 @@ pub enum Error {
     /// means the bytes could not be handed over at all, which is a fact
     /// about the child rather than about the test, so the screen at the
     /// moment of the failure is embedded the way a timeout's is.
+    ///
+    /// A write that gave up at the deadline is **not withdrawn**: the bytes
+    /// not yet written stay queued and reach the application, in order, if
+    /// it ever reads again, and input sent afterwards waits behind them —
+    /// failing the same way while the queue does not move. So a retry types
+    /// its input twice, and "the application never got these bytes" is not
+    /// what this error says (#590).
     #[error("failed to send {what}\n--- screen at the failed write ---\n{screen}")]
     Write {
         /// What was being sent, which command it was going to, and why the
