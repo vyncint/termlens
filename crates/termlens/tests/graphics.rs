@@ -302,3 +302,34 @@ mod decoded {
         Ok(())
     }
 }
+
+/// A terminal declared to speak kitty graphics moves the cursor past a
+/// placement as kitty does, onto the image's last row one column past it,
+/// and the default terminal, which claims no graphics and so ignores the
+/// escape, moves nothing (#588). The builder's `graphics` and `cell_size`
+/// are what reach the emulator.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward kitty or sixel payloads (#149)"
+)]
+fn a_declared_kitty_terminal_moves_the_cursor_past_a_placement() -> termlens::Result<()> {
+    for (graphics, expected) in [
+        (termlens::Graphics::Kitty, (1, 3)),
+        (termlens::Graphics::None, (0, 0)),
+    ] {
+        let mut t = util::spawn_emit(
+            Terminal::builder()
+                .size(20, 4)
+                .timeout(Duration::from_secs(30))
+                .graphics(graphics)
+                .cell_size(10, 20),
+            &["--raw", r"\e_Ga=T,f=24,s=1,v=1,c=3,r=2;ESIz\e\\X", "--wait"],
+        )?;
+        t.wait_until(|s| s.contains("X"))?;
+        assert_eq!(t.screen().find("X"), Some(expected), "{graphics:?}");
+        t.send(termlens::Key::Enter)?;
+        t.wait_exit()?;
+    }
+    Ok(())
+}

@@ -1787,7 +1787,12 @@ impl TerminalBuilder {
     /// Defaults to [`Graphics::None`] — nothing claimed.
     ///
     /// See [`Graphics`] for why declaring is not the harness lying, and pair
-    /// it with [`cell_size`](Self::cell_size).
+    /// it with [`cell_size`](Self::cell_size). A declared terminal also moves
+    /// the cursor past an image it places, as that terminal does — kitty to
+    /// the placement's last row, one column past it; xterm's sixel to the
+    /// image's last text row — so text the application writes next lands
+    /// where it would there (#588). `docs/LIMITATIONS.md` says what the move
+    /// cannot know.
     #[must_use]
     pub fn graphics(mut self, graphics: Graphics) -> Self {
         self.graphics = graphics;
@@ -1958,13 +1963,17 @@ impl TerminalBuilder {
         // memory bound instead of on a queue-slot count.
         let queued_bytes = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(Monitor::new(EmuState::new(
-            Box::new(Vt100Emulator::new(
-                self.rows,
-                self.cols,
-                self.scrollback,
-                self.capture_graphics,
-                self.scrollback_styles,
-            )),
+            Box::new({
+                let mut emu = Vt100Emulator::new(
+                    self.rows,
+                    self.cols,
+                    self.scrollback,
+                    self.capture_graphics,
+                    self.scrollback_styles,
+                );
+                emu.declare_graphics(self.graphics, self.cell_size);
+                emu
+            }),
             Responder {
                 respond: self.answer_queries,
                 background: self.background,

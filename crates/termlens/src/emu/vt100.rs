@@ -11,8 +11,12 @@ use super::seq::{SeqEvent, SeqTracker, TabOp};
 use super::shadow::{AttrShadow, ColorNormalizer};
 use super::unhandled::Unhandled;
 use super::{Emulator, FrameSpan, InputModes, ModeState, MouseEncoding, Processed, Stop};
-use crate::graphics::{GraphicsPayload, GraphicsSeen, HISTORY};
+use crate::graphics::{
+    kitty_cells, GraphicsAction, GraphicsPayload, GraphicsProtocol, GraphicsSeen, Placement,
+    HISTORY,
+};
 use crate::screen::{Cell, Color, MouseMode, Screen, Style, TermState};
+use crate::Graphics;
 
 pub(crate) struct Vt100Emulator {
     /// Built with the callback set that records what vt100 could not
@@ -56,12 +60,25 @@ pub(crate) struct Vt100Emulator {
     graphics_bytes: usize,
     /// The retention budget, from `TerminalBuilder::capture_graphics`.
     capture: usize,
+    /// The inline-graphics support the test declared, and its cell size:
+    /// what decides whether, and how far, an image moves the cursor (#588).
+    image_support: Graphics,
+    cell_size: Option<(u16, u16)>,
     /// Bytes rewritten on their way to the parsers and not yet handed over.
     /// Empty except while a DEC Special Graphics set is invoked: a byte the
     /// set redefines reaches the grid as the glyph it draws, so the stream
     /// the parsers see is then no longer a sub-slice of the read. Kept
     /// between calls only for its allocation.
     staged: Vec<u8>,
+}
+
+/// How far past an image the declared terminal moves the cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageStep {
+    /// kitty: the placement's size in cells.
+    Kitty { cols: u32, rows: u32 },
+    /// xterm's sixel: the text rows the image covers.
+    Sixel { rows: u32 },
 }
 
 impl Vt100Emulator {
@@ -109,8 +126,86 @@ impl Vt100Emulator {
             graphics: Arc::new(Vec::new()),
             graphics_bytes: 0,
             capture,
+            image_support: Graphics::None,
+            cell_size: None,
             staged: Vec::new(),
         }
+    }
+
+    /// Simulate a terminal with `support` for inline graphics and cells of
+    /// `cell_size` pixels: an image it places then moves the cursor as that
+    /// terminal moves it. A terminal without the protocol ignores the
+    /// escape and moves nothing — the default (#588).
+    pub(crate) fn declare_graphics(&mut self, support: Graphics, cell_size: Option<(u16, u16)>) {
+        self.image_support = support;
+        self.cell_size = cell_size;
+    }
+
+    /// How far the declared terminal moves the cursor past `payload`, or
+    /// `None` where it does not move it or the escape does not say.
+    ///
+    /// kitty moves it right by the placement's columns and down by its rows
+    /// less one — onto the image's last row, one column past it — for a
+    /// placement that asks (no `C=1`, `U=1` or `P=`). xterm, with sixel
+    /// scrolling on as it is by default, moves it down to the image's last
+    /// text row and leaves the column. Each ignores the other's escape.
+    fn image_step(&self, payload: &GraphicsPayload, placement: &Placement) -> Option<ImageStep> {
+        match (self.image_support, payload.protocol()) {
+            (Graphics::Kitty, GraphicsProtocol::Kitty) => {
+                if !placement.moves {
+                    return None;
+                }
+                let image = match payload.action() {
+                    GraphicsAction::TransmitAndPlace => payload.size(),
+                    // A placement of an image sent earlier: its size is the
+                    // last transmission of that id still in the log.
+                    GraphicsAction::Place => {
+                        let id = payload.id()?;
+                        self.graphics.iter().rev().find_map(|earlier| {
+                            (earlier.protocol() == GraphicsProtocol::Kitty
+                                && earlier.id() == Some(id))
+                            .then(|| earlier.size())
+                            .flatten()
+                        })
+                    }
+                    _ => return None,
+                };
+                let (cols, rows) = kitty_cells(placement, image, self.cell_size)?;
+                Some(ImageStep::Kitty { cols, rows })
+            }
+            (Graphics::Sixel, GraphicsProtocol::Sixel) => {
+                let (_, cell_height) = self.cell_size.filter(|&(w, h)| w > 0 && h > 0)?;
+                let rows = placement.height.div_ceil(u32::from(cell_height));
+                (rows > 0).then_some(ImageStep::Sixel { rows })
+            }
+            _ => None,
+        }
+    }
+
+    /// Move the cursor past an image (#588): down to its last row — a line
+    /// feed at a time, so the bottom margin scrolls and the rows it pushes
+    /// out reach history as any other scroll does — then, for kitty, one
+    /// column past its right edge, or to the start of the next row when that
+    /// is past the screen's. No count scrolls further than the screen is
+    /// tall: past that every row it pushed out was blank.
+    fn move_past_image(&mut self, step: ImageStep) {
+        let (screen_rows, screen_cols) = size(self.parser.screen());
+        let (_, col) = self.cursor_position();
+        let (rows, across) = match step {
+            ImageStep::Kitty { cols, rows } => (rows, Some(u32::from(col).saturating_add(cols))),
+            ImageStep::Sixel { rows } => (rows, None),
+        };
+        let wrap = across.is_some_and(|x| x >= u32::from(screen_cols));
+        let down = (rows.saturating_sub(1) + u32::from(wrap)).min(u32::from(screen_rows));
+        let mut bytes = vec![b'\n'; down as usize];
+        match across {
+            Some(_) if wrap => bytes.push(b'\r'),
+            Some(x) if x > u32::from(col) => {
+                bytes.extend_from_slice(format!("\x1b[{}C", x - u32::from(col)).as_bytes());
+            }
+            _ => {}
+        }
+        self.feed(&bytes);
     }
 
     /// Hand the grid the bytes the tracker has already scanned.
@@ -189,11 +284,14 @@ impl Vt100Emulator {
 
     /// File a completed payload, stamped with where it landed.
     ///
-    /// Neither protocol's escape moves the cursor, so the position once the
-    /// terminator has been consumed *is* the image's top-left corner — the
-    /// one fact about an image that lives in the grid rather than in the
-    /// payload, and the one an application gets wrong when a picture drifts
-    /// out from under its own labels.
+    /// The position once the terminator has been consumed *is* the image's
+    /// top-left corner: stamped before [`move_past_image`] moves the cursor
+    /// on, as the declared terminal does. It is the one fact about an image
+    /// that lives in the grid rather than in the payload, and the one an
+    /// application gets wrong when a picture drifts out from under its own
+    /// labels.
+    ///
+    /// [`move_past_image`]: Self::move_past_image
     fn record_graphics(&mut self, mut payload: GraphicsPayload) {
         payload.place(self.cursor_position());
         let kept = payload.data().map_or(0, <[u8]>::len);
@@ -416,10 +514,17 @@ impl Emulator for Vt100Emulator {
             let stop = match self.tracker.step(byte) {
                 SeqEvent::SyncEnd => Some(Stop::FrameComplete(self.close_frame())),
                 SeqEvent::Query(query) => Some(Stop::Query(query)),
-                SeqEvent::Graphics(payload) => {
+                SeqEvent::Graphics(payload, placement) => {
                     self.feed_staged(&bytes[fed..=i]);
                     fed = i + 1;
+                    // Sized before the payload joins the log, so a placement
+                    // finds the earlier transmission and not itself; moved
+                    // after it is stamped, so `at` is the top-left corner.
+                    let step = self.image_step(&payload, &placement);
                     self.record_graphics(*payload);
+                    if let Some(step) = step {
+                        self.move_past_image(step);
+                    }
                     None
                 }
                 SeqEvent::SoftReset => {
@@ -1473,6 +1578,113 @@ mod tests {
         }
         assert_eq!(live.find("Y"), Some((0, 6)));
         assert_eq!(back.find("Y"), Some((0, 6)));
+    }
+
+    /// An emulator simulating `support`, cells 10x20 pixels, fed `bytes`.
+    fn graphics_emu(support: Graphics, rows: u16, cols: u16, bytes: &[u8]) -> Vt100Emulator {
+        let mut emu = Vt100Emulator::new(rows, cols, 100, crate::graphics::DEFAULT_CAPTURE, false);
+        emu.declare_graphics(support, Some((10, 20)));
+        feed_all(&mut emu, bytes);
+        emu
+    }
+
+    /// Where `X` landed.
+    fn x_at(emu: &Vt100Emulator) -> Option<(u16, u16)> {
+        emu.snapshot().find("X")
+    }
+
+    #[test]
+    fn a_kitty_placement_moves_the_cursor_to_its_last_row_one_column_past_it() {
+        // kitty moves the cursor right by the columns and down by the rows
+        // less one (#588); `at` stays the top-left corner.
+        let placed = b"\x1b_Ga=T,f=24,s=1,v=1,c=3,r=2;ESIz\x1b\\X";
+        let emu = graphics_emu(Graphics::Kitty, 6, 10, placed);
+        assert_eq!(x_at(&emu), Some((1, 3)));
+        assert_eq!(emu.snapshot().graphics().payloads()[0].at(), (0, 0));
+        // A terminal without the protocol ignores the escape: nothing moves.
+        for support in [Graphics::None, Graphics::Sixel] {
+            assert_eq!(
+                x_at(&graphics_emu(support, 6, 10, placed)),
+                Some((0, 0)),
+                "{support:?}"
+            );
+        }
+        // Asked not to (`C=1`), or only transmitted: no move either. A
+        // transmission naming no action is `a=t`.
+        for escape in [
+            &b"\x1b_Ga=T,f=24,s=1,v=1,c=3,r=2,C=1;ESIz\x1b\\X"[..],
+            b"\x1b_Gf=24,s=1,v=1,c=3,r=2;ESIz\x1b\\X",
+        ] {
+            assert_eq!(
+                x_at(&graphics_emu(Graphics::Kitty, 6, 10, escape)),
+                Some((0, 0))
+            );
+        }
+    }
+
+    #[test]
+    fn a_kitty_placement_wraps_and_scrolls_as_kitty_does() {
+        // Past the right edge: the start of the next row.
+        let emu = graphics_emu(
+            Graphics::Kitty,
+            6,
+            10,
+            b"\x1b[1;9H\x1b_Ga=T,f=24,s=1,v=1,c=3,r=1;ESIz\x1b\\X",
+        );
+        assert_eq!(x_at(&emu), Some((1, 0)));
+        // Below the bottom margin: the screen scrolls, the rows pushed out
+        // go to history, and the cursor ends on the last row.
+        let emu = graphics_emu(
+            Graphics::Kitty,
+            4,
+            10,
+            b"top\r\n\r\n\r\n\x1b_Ga=T,f=24,s=1,v=1,c=2,r=3;ESIz\x1b\\X",
+        );
+        let screen = emu.snapshot();
+        assert_eq!(screen.find("X"), Some((3, 2)));
+        assert_eq!(screen.scrollback_text(), "top\n");
+    }
+
+    #[test]
+    fn a_kitty_placement_without_cells_is_sized_from_pixels_and_the_cell_size() {
+        // A 20x40 image in 10x20 cells: 2x2. `a=p` of it, by id, later.
+        let emu = graphics_emu(
+            Graphics::Kitty,
+            6,
+            10,
+            b"\x1b_Ga=t,f=24,s=20,v=40,i=7;ESIz\x1b\\\x1b_Ga=p,i=7\x1b\\X",
+        );
+        assert_eq!(x_at(&emu), Some((1, 2)));
+        // Without a cell size there is nothing to size it by: no move.
+        let mut emu = Vt100Emulator::new(6, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+        emu.declare_graphics(Graphics::Kitty, None);
+        feed_all(&mut emu, b"\x1b_Ga=T,f=24,s=20,v=40;ESIz\x1b\\X");
+        assert_eq!(x_at(&emu), Some((0, 0)));
+    }
+
+    #[test]
+    fn a_sixel_moves_the_cursor_to_its_last_text_row_and_keeps_the_column() {
+        // xterm, sixel scrolling on: 45 px over 20-px cells is three rows,
+        // so the cursor goes down two, in the column the image started at.
+        let sixel = b"\x1b[1;3H\x1bPq\"1;1;4;45#0;2;100;0;0~~~~-~~~~-~~~~\x1b\\X";
+        assert_eq!(
+            x_at(&graphics_emu(Graphics::Sixel, 6, 10, sixel)),
+            Some((2, 2))
+        );
+        // An image shorter than a cell stays on its row.
+        let short = b"\x1bPq\"1;1;4;6#0;2;100;0;0~~~~\x1b\\X";
+        assert_eq!(
+            x_at(&graphics_emu(Graphics::Sixel, 6, 10, short)),
+            Some((0, 0))
+        );
+        // kitty ignores sixel, and the default ignores both.
+        for support in [Graphics::None, Graphics::Kitty] {
+            assert_eq!(
+                x_at(&graphics_emu(support, 6, 10, sixel)),
+                Some((0, 2)),
+                "{support:?}"
+            );
+        }
     }
 
     #[test]

@@ -755,8 +755,18 @@ Rules:
    cursor position at the terminator. That is why `process` now feeds the
    parser in pieces: the tracker runs a byte ahead of the grid, and a
    placement read before the grid caught up would be the position from before
-   the whole read. Neither protocol's escape moves the cursor, so the position
-   after the terminator is the image's top-left corner.
+   the whole read. The position at the terminator is the image's top-left
+   corner, stamped before anything moves the cursor. A terminal that speaks
+   the protocol then does move it, and the emulator follows the one the test
+   declared (`graphics()`, with `cell_size()`; #588): kitty puts it on the
+   placement's last row, one column past its right edge, wrapping to the
+   next row past the screen's and scrolling past the bottom margin, unless
+   `C=1`, `U=1` or `P=` says otherwise; xterm, with sixel scrolling on as it
+   is by default, puts it on the image's last text row and leaves the
+   column. A terminal declared without the protocol ignores the escape and
+   moves nothing, which is the default. The cursor is moved with line feeds
+   and a cursor-forward fed to the grid, so a scroll it causes reaches
+   history like any other.
 
    Decoding sits behind the `decode` feature and runs on demand, never as the
    bytes arrive: a suite that only asks whether an image went out should pay
