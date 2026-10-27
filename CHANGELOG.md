@@ -137,6 +137,27 @@ reads that marker.
   Only a kitty escape continues an upload now: a delete aborts it, as the
   protocol requires, and is counted, and a sixel or `RIS` abandons it. An
   abandoned upload is no image, and its bytes still count in `bytes()`.
+- `Screen::find`, `find_all`, `locate`, `mask_matching` and, with `regex`,
+  `matches`, `find_match`, `find_all_matches` and `mask_matches` no longer
+  take time quadratic in the size of the screen (#584), and neither does
+  `contains` once the first non-ASCII cell comes late. Every row a search
+  visited re-read the whole grid to ask whether it was ASCII, so one `find`
+  on 1000x1000 took 3 s in a release build where `contains` took 6 ms; it
+  now takes 5 ms. A `wait_until` calling `find`, and `wait_until_matches`,
+  paid that on every wake-up.
+- The JSON reader refuses a cell no termlens could have written (#582). A
+  saved screen whose cell held an escape sequence loaded, and `termlens
+  render --text`, `--ansi` and `diff` then wrote it to the terminal: an OSC
+  set the window title and `ESC [2J` cleared the screen. Refused now, in
+  the grid and the styled history, naming the cell: a control character
+  (C0, DEL or C1, as `Screen::parse` refuses it), printable ASCII after a
+  cell's first character, an empty cell marked wide or an ASCII one with
+  no U+FE0F after it, and a wide character's second column that holds text
+  or follows none; and a screen of no columns or rows. A tracking-mode set
+  keeps only its four mode bits, so `MouseModes::len` and `iter` agree. No
+  check refuses a file a termlens wrote: a keycap such as `1️⃣`, a cell
+  whose width only this build's width tables dispute, and a wide character
+  that vt100 0.16 left in the last column after a resize all still read.
 
 ## [0.11.6] - 2026-10-14
 

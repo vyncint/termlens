@@ -167,6 +167,19 @@ fn parse_header(line: &str) -> Result<(u16, u16, (u16, u16, bool))> {
     Ok((cols, rows, cursor))
 }
 
+/// The columns `ch` takes in a cell, or why no saved screen holds it.
+///
+/// `unicode_width` answers `None` for a control character — C0, DEL and C1
+/// — and `Some(0)` for a zero-width mark. Reading them alike folded an
+/// `ESC` into the cell before it, and the snapshot renderings then carried
+/// the raw byte out (#376). The JSON reader asks this of every character in
+/// every cell, so the two readers refuse the same ones (#582).
+pub(super) fn cell_width(ch: char) -> std::result::Result<usize, String> {
+    ch.width().ok_or_else(|| {
+        format!("{ch:?} is a control character; the snapshot format never writes one")
+    })
+}
+
 /// One grid line into `row`, a slice of exactly `cols` cells. A zero-width
 /// combining mark joins the cell before it; a wide character takes two; a
 /// control character is an error.
@@ -194,15 +207,7 @@ fn lay_out_row(line: &str, number: usize, cols: u16, row: &mut [Cell], widen: bo
     };
     let mut col = 0usize;
     for ch in line.chars() {
-        // `unicode_width` answers `None` for a control character and
-        // `Some(0)` for a zero-width mark. Reading them alike folded an
-        // `ESC` into the cell before it, and the snapshot renderings then
-        // carried the raw byte out (#376).
-        let Some(width) = ch.width() else {
-            return Err(Error::Parse(format!(
-                "line {number}: {ch:?} is a control character; the snapshot format never writes one"
-            )));
-        };
+        let width = cell_width(ch).map_err(|why| Error::Parse(format!("line {number}: {why}")))?;
         if width == 0 {
             // The cell that owns the glyph before this mark. A wide
             // character advanced the column by two, so one step back lands
