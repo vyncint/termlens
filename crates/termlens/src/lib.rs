@@ -116,6 +116,7 @@ mod spawn;
 mod terminal;
 mod utf8;
 mod wait;
+mod width;
 
 pub use error::{Error, Result};
 #[cfg(feature = "decode")]
