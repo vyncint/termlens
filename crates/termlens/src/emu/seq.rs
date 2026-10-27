@@ -54,7 +54,7 @@
 
 use std::sync::Arc;
 
-use crate::graphics::{GraphicsBuilder, GraphicsCounts, GraphicsPayload};
+use crate::graphics::{GraphicsBuilder, GraphicsCounts, GraphicsPayload, Placement};
 use crate::screen::{Clipboard, Link, MouseModes};
 
 /// OSC strings are captured whole (titles must not truncate), but bounded:
@@ -410,8 +410,9 @@ pub(crate) enum SeqEvent {
     Query(Query),
     /// An inline graphics payload completed. Carried out of the tracker
     /// rather than stored in it because the placement — where the cursor
-    /// stood — is a fact about the grid, which only the emulator holds.
-    Graphics(Box<GraphicsPayload>),
+    /// stood — is a fact about the grid, which only the emulator holds; so
+    /// is moving the cursor past the image, which the [`Placement`] sizes.
+    Graphics(Box<GraphicsPayload>, Placement),
     /// A tab-stop operation completed, and needs the cursor column to
     /// finish — carried out for the same reason a graphics placement is.
     Tabs(TabOp),
@@ -1405,10 +1406,10 @@ impl SeqTracker {
                 if key_is(keys, b"m", b"1") {
                     return SeqEvent::None;
                 }
-                return match self.building.finish() {
-                    Some(payload) => {
+                return match self.building.finish_placed() {
+                    Some((payload, placement)) => {
                         self.counts.record(&payload);
-                        SeqEvent::Graphics(Box::new(payload))
+                        SeqEvent::Graphics(Box::new(payload), placement)
                     }
                     None => SeqEvent::None,
                 };
@@ -1439,10 +1440,10 @@ impl SeqTracker {
                 self.dcs_body_full,
                 self.capture,
             );
-            return match self.building.finish() {
-                Some(payload) => {
+            return match self.building.finish_placed() {
+                Some((payload, placement)) => {
                     self.counts.record(&payload);
-                    SeqEvent::Graphics(Box::new(payload))
+                    SeqEvent::Graphics(Box::new(payload), placement)
                 }
                 None => SeqEvent::None,
             };
@@ -1892,7 +1893,7 @@ mod tests {
 
         let mut seen = None;
         for &byte in &wire {
-            if let SeqEvent::Graphics(payload) = tracker.step(byte) {
+            if let SeqEvent::Graphics(payload, _) = tracker.step(byte) {
                 seen = Some(*payload);
             }
         }
@@ -1911,7 +1912,7 @@ mod tests {
         let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         let mut out = Vec::new();
         for &byte in bytes {
-            if let SeqEvent::Graphics(payload) = tracker.step(byte) {
+            if let SeqEvent::Graphics(payload, _) = tracker.step(byte) {
                 out.push(*payload);
             }
         }
@@ -2109,7 +2110,7 @@ mod tests {
         let mut tracker = SeqTracker::new(8, TEST_COLS);
         let mut seen = None;
         for &byte in b"\x1b_Ga=T,f=32,s=4,v=4;AAAABBBBCCCCDDDD\x1b\\" {
-            if let SeqEvent::Graphics(payload) = tracker.step(byte) {
+            if let SeqEvent::Graphics(payload, _) = tracker.step(byte) {
                 seen = Some(*payload);
             }
         }

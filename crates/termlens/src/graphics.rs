@@ -88,7 +88,8 @@ impl fmt::Display for GraphicsProtocol {
     serde(rename_all = "snake_case")
 )]
 pub enum GraphicsAction {
-    /// `a=t`: transmit the data, place it later.
+    /// `a=t`: transmit the data, place it later. A transmission that names
+    /// no action is this one, the protocol's default.
     Transmit,
     /// `a=p`: place an image transmitted earlier.
     Place,
@@ -330,7 +331,11 @@ impl GraphicsPayload {
     }
 
     /// Where the cursor stood when the payload completed, as `(row, col)` —
-    /// which for both protocols is the image's top-left corner.
+    /// which for both protocols is the image's top-left corner. A terminal
+    /// that speaks the protocol moves the cursor past the image afterwards,
+    /// and so does a termlens terminal declared to
+    /// ([`graphics`](crate::TerminalBuilder::graphics)); text that scrolls
+    /// later leaves this where the image was placed.
     #[must_use]
     pub fn at(&self) -> (u16, u16) {
         self.at
@@ -989,6 +994,35 @@ impl GraphicsSeen {
     }
 }
 
+/// Where an image lands, as far as its escape says: what the emulator needs
+/// to move the cursor past it the way the terminal it simulates does (#588).
+///
+/// Kept beside the payload rather than in it: the payload's fields are its
+/// JSON, which a saved screen promises not to change.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Placement {
+    /// kitty's `c=`, `r=`: the placement's size in cells, 0 when the escape
+    /// leaves it to the image's size, as kitty reads a missing key.
+    pub(crate) cols: u32,
+    pub(crate) rows: u32,
+    /// kitty's `w=`, `h=`, `x=`, `y=`: the source rectangle within the image,
+    /// 0 for the whole image.
+    pub(crate) src_width: u32,
+    pub(crate) src_height: u32,
+    pub(crate) src_x: u32,
+    pub(crate) src_y: u32,
+    /// kitty's `X=`, `Y=`: the offset within the first cell, in pixels.
+    pub(crate) cell_x: u32,
+    pub(crate) cell_y: u32,
+    /// kitty: whether a placement moves the cursor at all. `C=1` asks it not
+    /// to, and neither a Unicode-placeholder placement (`U=1`) nor one
+    /// relative to another image (`P=`) moves it.
+    pub(crate) moves: bool,
+    /// sixel: the image's height in pixels as xterm measures it, the larger
+    /// of the raster attributes' and the painted rows'.
+    pub(crate) height: u32,
+}
+
 /// A payload under construction, owned by the sequence tracker: kitty splits
 /// one image across escapes, so a payload is not complete until a kitty
 /// escape arrives without `m=1` — and it is [abandoned](Self::abandon)
@@ -1009,6 +1043,7 @@ pub(crate) struct GraphicsBuilder {
     /// Set once any chunk arrived past the capture bound. The payload then
     /// reports no data at all rather than a prefix of one.
     dropped: bool,
+    placement: Placement,
 }
 
 impl Default for GraphicsBuilder {
@@ -1026,6 +1061,7 @@ impl Default for GraphicsBuilder {
             bytes: 0,
             data: Vec::new(),
             dropped: false,
+            placement: Placement::default(),
         }
     }
 }
@@ -1038,10 +1074,11 @@ impl GraphicsBuilder {
         if self.protocol.is_none() {
             self.protocol = Some(GraphicsProtocol::Kitty);
             self.action = match key(control, b"a") {
-                Some(b"t") => GraphicsAction::Transmit,
+                // `a=t`, transmit only, is the protocol's default: a
+                // transmission that names no action shows nothing (#588).
+                Some(b"t") | None => GraphicsAction::Transmit,
                 Some(b"p") => GraphicsAction::Place,
-                // `a=T` is the default when a transmission names no action.
-                Some(b"T") | None => GraphicsAction::TransmitAndPlace,
+                Some(b"T") => GraphicsAction::TransmitAndPlace,
                 Some(b"d") => GraphicsAction::Delete,
                 Some(_) => GraphicsAction::Other,
             };
@@ -1068,6 +1105,19 @@ impl GraphicsBuilder {
                 )),
                 _ => None,
             };
+            let value = |name: &[u8]| number(control, name).unwrap_or(0);
+            self.placement = Placement {
+                cols: value(b"c"),
+                rows: value(b"r"),
+                src_width: value(b"w"),
+                src_height: value(b"h"),
+                src_x: value(b"x"),
+                src_y: value(b"y"),
+                cell_x: value(b"X"),
+                cell_y: value(b"Y"),
+                moves: value(b"C") != 1 && value(b"U") != 1 && key(control, b"P").is_none(),
+                height: 0,
+            };
         }
     }
 
@@ -1092,6 +1142,12 @@ impl GraphicsBuilder {
     /// entirely rather than kept as a prefix that would decode into a
     /// plausible-looking wrong picture.
     pub(crate) fn chunk(&mut self, bytes: u64, data: &[u8], complete: bool, cap: usize) {
+        // Measured here, before a chunk past the capture bound is dropped:
+        // the cursor moves past an image whatever this test chose to keep.
+        if self.protocol == Some(GraphicsProtocol::Sixel) && self.chunks == 0 {
+            let declared = raster_size(data).map_or(0, |(_, height)| height);
+            self.placement.height = declared.max(sixel_painted_height(data));
+        }
         self.chunks += 1;
         self.bytes += bytes;
         let fits = self.data.len().saturating_add(data.len()) <= cap;
@@ -1103,10 +1159,17 @@ impl GraphicsBuilder {
         }
     }
 
-    /// Finish the payload. `at` is stamped later, by the emulator, once the
-    /// grid has caught up with the terminator.
+    /// [`finish_placed`](Self::finish_placed) without the placement.
+    #[cfg(test)]
     pub(crate) fn finish(&mut self) -> Option<GraphicsPayload> {
+        self.finish_placed().map(|(payload, _)| payload)
+    }
+
+    /// Finish the payload, with where it lands. `at` is stamped later, by
+    /// the emulator, once the grid has caught up with the terminator.
+    pub(crate) fn finish_placed(&mut self) -> Option<(GraphicsPayload, Placement)> {
         let protocol = self.protocol.take()?;
+        let placement = self.placement;
         let mut size = self.size;
         if protocol == GraphicsProtocol::Sixel {
             size = raster_size(&self.data).or(size);
@@ -1127,7 +1190,7 @@ impl GraphicsBuilder {
                 .then(|| Arc::from(std::mem::take(&mut self.data).into_boxed_slice())),
         };
         *self = Self::default();
-        Some(payload)
+        Some((payload, placement))
     }
 
     /// Drop a transmission that will never complete, handing back the wire
@@ -1166,6 +1229,86 @@ fn raster_size(data: &[u8]) -> Option<(u32, u32)> {
         (Some(&width), Some(&height)) if width > 0 && height > 0 => Some((width, height)),
         _ => None,
     }
+}
+
+/// The height in pixels the sixels in `data` paint, as xterm's decoder
+/// measures it: down to the lowest pixel set. Bands of six rows are
+/// separated by `-`, and each sixel character's bits are its band's rows,
+/// the lowest bit the top one.
+fn sixel_painted_height(data: &[u8]) -> u32 {
+    let mut band = 0u32;
+    let mut height = 0u32;
+    for &byte in data {
+        match byte {
+            b'-' => band = band.saturating_add(1),
+            0x3f..=0x7e => {
+                let bits = u32::from(byte - 0x3f);
+                if bits != 0 {
+                    let lowest = band.saturating_mul(6) + (u32::BITS - bits.leading_zeros());
+                    height = height.max(lowest);
+                }
+            }
+            _ => {}
+        }
+    }
+    height
+}
+
+/// The cells a kitty placement covers, `(cols, rows)`, computed as kitty
+/// computes them (`update_dest_rect` in kitty's `graphics.c`): `c=` and `r=`
+/// when both are given; otherwise from the source rectangle — `w=`/`h=` or
+/// the whole image, less `x=`/`y=` — and the cell size, keeping the image's
+/// aspect when one of the two is given. `None` when that needs an image size
+/// or a cell size nobody stated.
+pub(crate) fn kitty_cells(
+    placement: &Placement,
+    image: Option<(u32, u32)>,
+    cell: Option<(u16, u16)>,
+) -> Option<(u32, u32)> {
+    let (mut cols, mut rows) = (placement.cols, placement.rows);
+    if cols > 0 && rows > 0 {
+        return Some((cols, rows));
+    }
+    let (cell_w, cell_h) = cell
+        .map(|(w, h)| (u32::from(w), u32::from(h)))
+        .filter(|&(w, h)| w > 0 && h > 0)?;
+    let (image_w, image_h) = image?;
+    let src_w = if placement.src_width > 0 {
+        placement.src_width
+    } else {
+        image_w
+    };
+    let src_h = if placement.src_height > 0 {
+        placement.src_height
+    } else {
+        image_h
+    };
+    let src_w = src_w.min(image_w - placement.src_x.min(image_w));
+    let src_h = src_h.min(image_h - placement.src_y.min(image_h));
+    let offset_x = placement.cell_x.min(cell_w - 1);
+    let offset_y = placement.cell_y.min(cell_h - 1);
+    let (auto_cols, auto_rows) = (cols == 0, rows == 0);
+    if auto_cols {
+        cols = if auto_rows {
+            (src_w + offset_x).div_ceil(cell_w)
+        } else if src_h == 0 {
+            0
+        } else {
+            let height = f64::from(cell_h * rows + offset_y);
+            (height * f64::from(src_w) / f64::from(src_h) / f64::from(cell_w)).ceil() as u32
+        };
+    }
+    if auto_rows {
+        rows = if auto_cols {
+            (src_h + offset_y).div_ceil(cell_h)
+        } else if src_w == 0 {
+            0
+        } else {
+            let width = f64::from(cell_w * cols + offset_x);
+            (width * f64::from(src_h) / f64::from(src_w) / f64::from(cell_h)).ceil() as u32
+        };
+    }
+    Some((cols, rows))
 }
 
 /// The raw value of `name` in a kitty control block (`a=T,i=3,f=32`).
@@ -1213,11 +1356,106 @@ mod tests {
 
     #[test]
     fn the_protocols_defaults_are_the_protocols_defaults() {
-        // A transmission naming neither action nor format is `a=T,f=32`.
+        // A transmission naming neither action nor format is `a=t,f=32`:
+        // transmit only. It was reported as `a=T`, an image placed, which
+        // kitty never shows (#588).
         let payload = kitty_payload(b"s=1,v=1", b"AAAA");
-        assert_eq!(payload.action(), GraphicsAction::TransmitAndPlace);
+        assert_eq!(payload.action(), GraphicsAction::Transmit);
         assert_eq!(payload.format(), GraphicsFormat::Rgba);
         assert!(!payload.compressed());
+    }
+
+    /// The placement facts the cursor move needs, read off the control
+    /// block of the first chunk (#588).
+    #[test]
+    fn a_kitty_placement_records_its_size_source_and_whether_it_moves() {
+        let mut builder = GraphicsBuilder::default();
+        builder.kitty(b"a=T,f=24,s=8,v=4,c=3,w=6,h=2,x=1,y=1,X=4,Y=5");
+        builder.chunk(4, b"AAAA", true, usize::MAX);
+        let (_, placement) = builder.finish_placed().expect("a payload");
+        assert_eq!(
+            placement,
+            Placement {
+                cols: 3,
+                rows: 0,
+                src_width: 6,
+                src_height: 2,
+                src_x: 1,
+                src_y: 1,
+                cell_x: 4,
+                cell_y: 5,
+                moves: true,
+                height: 0,
+            }
+        );
+        for control in [&b"a=T,C=1"[..], b"a=T,U=1", b"a=p,i=1,P=2"] {
+            let mut builder = GraphicsBuilder::default();
+            builder.kitty(control);
+            builder.chunk(0, b"", true, usize::MAX);
+            let (_, placement) = builder.finish_placed().expect("a payload");
+            assert!(!placement.moves, "{}", String::from_utf8_lossy(control));
+        }
+    }
+
+    /// kitty's own arithmetic (`update_dest_rect`): the cells given, or the
+    /// source rectangle over the cell size, rounded up, keeping the aspect
+    /// when only one side is given.
+    #[test]
+    fn kitty_sizes_a_placement_as_kitty_does() {
+        let cell = Some((10, 20));
+        let given = |cols, rows| Placement {
+            cols,
+            rows,
+            ..Placement::default()
+        };
+        // Both given: no image or cell size needed.
+        assert_eq!(kitty_cells(&given(3, 2), None, None), Some((3, 2)));
+        // Neither: the image over the cell, rounded up.
+        assert_eq!(
+            kitty_cells(&given(0, 0), Some((25, 41)), cell),
+            Some((3, 3))
+        );
+        // One given: the other keeps the aspect. 2 rows are 40 px tall, so a
+        // 20x10 image is 80 px wide there: 8 columns.
+        assert_eq!(
+            kitty_cells(&given(0, 2), Some((20, 10)), cell),
+            Some((8, 2))
+        );
+        assert_eq!(
+            kitty_cells(&given(4, 0), Some((20, 10)), cell),
+            Some((4, 1))
+        );
+        // A source rectangle, less its origin, and the offset in the cell.
+        let cropped = Placement {
+            src_width: 15,
+            src_height: 50,
+            src_x: 10,
+            cell_x: 6,
+            ..given(0, 0)
+        };
+        // 15 wide but only 10 left past x=10; plus 6: 16 px, 2 columns.
+        assert_eq!(kitty_cells(&cropped, Some((20, 60)), cell), Some((2, 3)));
+        // Nothing to compute from: no move rather than a guess.
+        assert_eq!(kitty_cells(&given(0, 0), None, cell), None);
+        assert_eq!(kitty_cells(&given(0, 0), Some((20, 10)), None), None);
+    }
+
+    /// xterm measures a sixel down to its lowest painted pixel; each sixel
+    /// character's bits are its band's six rows, the low bit the top one.
+    #[test]
+    fn a_sixel_is_as_tall_as_the_lowest_pixel_it_paints() {
+        assert_eq!(sixel_painted_height(b"#0~~~~"), 6);
+        assert_eq!(sixel_painted_height(b"#0~-~-@"), 13);
+        // `?` paints nothing; colour and raster parameters are not sixels.
+        assert_eq!(sixel_painted_height(b"\"1;1;4;45#0;2;100;0;0??"), 0);
+        // The builder takes the larger of the raster's and the painted one,
+        // from the data as it arrives — kept past the capture bound too.
+        let mut builder = GraphicsBuilder::default();
+        builder.sixel();
+        builder.chunk(8, b"\"1;1;4;45#0~-~", true, 0);
+        let (payload, placement) = builder.finish_placed().expect("a payload");
+        assert_eq!(payload.data(), None, "dropped by the bound");
+        assert_eq!(placement.height, 45);
     }
 
     #[test]

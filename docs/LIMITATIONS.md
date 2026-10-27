@@ -107,6 +107,19 @@ CHANGELOG entry.
   above 4096x4096: every size in a payload is chosen by the program under
   test, and a sixel `!n` repeat or a declared `65535x65535` would otherwise
   set the allocation directly.
+- **The cursor moves past an image as the declared terminal moves it**,
+  and only as far as the escape says. A `Graphics::Kitty` terminal moves
+  it for a placement whose size in cells is known: from `c=` and `r=`, or
+  from the pixel size and `cell_size()`. A PNG (`f=100`) placed without
+  `c=` and `r=`, or a placement of an image whose transmission has left
+  the payload log, does not move it. Whether kitty would have loaded the
+  image at all is not knowable here, so a placement is taken to succeed. A
+  `Graphics::Sixel` terminal with a `cell_size()` moves it to the image's
+  last text row, as xterm does with sixel scrolling on. Sixel display mode
+  (`CSI ? 80 h`), xterm's extra scroll for a trailing `-` on the bottom row,
+  and its sixel-scrolls-right mode (`CSI ? 8452 h`) are not modelled. A
+  `Graphics::None` terminal, the default, moves nothing: it ignores both
+  escapes.
 - **Hyperlinks are captured, not attributed to cells.** `links()` reports
   every `OSC 8` span with its target, its `id`, and the text it wrapped, so
   "did it link the right place?" is assertable — but a `Cell` does not carry

@@ -127,6 +127,17 @@ reads that marker.
   also write a character XML 1.0 forbids, a C0 control other than tab, LF and
   CR or U+FFFE/U+FFFF, as U+FFFD, so a window title holding `\x01` or a cell
   holding U+FFFF no longer makes an SVG no parser opens.
+- A terminal declared to speak kitty or sixel graphics (`graphics()`)
+  moves the cursor past an image it places, as that terminal does (#588):
+  kitty to the placement's last row, one column past its right edge,
+  wrapping and scrolling as kitty does, unless `C=1`, `U=1` or `P=` says
+  otherwise; xterm's sixel, given a `cell_size()`, to the image's last text
+  row. The cursor stayed where the image began, so text an application
+  wrote after an image overwrote it, and `docs/DESIGN.md` claimed neither
+  protocol moves the cursor. The default, `Graphics::None`, still moves
+  nothing: a terminal without the protocol ignores the escape. A kitty
+  transmission that names no action is now reported as `a=t`, transmit
+  only, the protocol's default; it was reported as an image placed.
 - A chunked kitty upload (`m=1`) is no longer completed by an escape that
   cannot continue it (#587). A sixel sent mid-upload was built on top of
   it: one payload, a sixel carrying the kitty `s=`, `c=`/`r=`, `t=` and
