@@ -1,0 +1,7 @@
+size: 12x3  cursor: 2,3
+東京 é 😀!
+abcdefghij東
+END
+
+styles:
+(none)

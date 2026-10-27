@@ -17,6 +17,8 @@ reads that marker.
 
 ## [Unreleased]
 
+## [0.11.7] - 2026-10-27
+
 ### Changed
 
 - The terminal emulator is vt100 0.18.1, up from 0.16.2 (#608), which brings
@@ -2464,7 +2466,8 @@ in the worst of them — hung itself.
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [`Unsupported`]: https://docs.rs/termlens/0.11.0/termlens/struct.Unsupported.html
 
-[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.6...HEAD
+[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.7...HEAD
+[0.11.7]: https://github.com/vyncint/termlens/compare/v0.11.6...v0.11.7
 [0.11.6]: https://github.com/vyncint/termlens/compare/v0.11.5...v0.11.6
 [0.11.5]: https://github.com/vyncint/termlens/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/vyncint/termlens/compare/v0.11.3...v0.11.4
