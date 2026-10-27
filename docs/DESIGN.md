@@ -527,9 +527,14 @@ Related, and fixed inside the library: macOS tears PTYs down with
 terminals one thread's teardown could revoke another thread's *freshly
 opened* PTY and kill its child at birth (~1/800 spawns under CI load; the
 same suite ran 100/100 on Linux). termlens therefore serializes every PTY
-lifecycle edge — open+spawn on one side, kill+reap+close on the other —
+lifecycle edge — open+spawn on one side, the close of each master
+descriptor on the other, the responder threads' duplicates included —
 behind a process-wide lock (`PTY_LIFECYCLE` in `terminal.rs`). The lock is
-held for microseconds per edge; steady-state I/O never touches it.
+held for an open and a spawn, or for a close; steady-state I/O never
+touches it. Stopping a child is not an edge: it happens before the lock is
+taken, while the terminal's master is still open and its device cannot be
+recycled. It used to be one, and portable-pty's kill sleeps in 50 ms steps,
+so every spawn in a test binary waited out every drop (#589).
 
 ### Scrollback
 

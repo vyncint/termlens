@@ -145,3 +145,57 @@ fn replies_still_reach_an_application_that_reads_them() -> termlens::Result<()> 
     assert!(t.wait_exit()?.success());
     Ok(())
 }
+
+/// A send that gives up at the deadline is not withdrawn (#590). The
+/// application here sleeps before it reads, so 200,000 bytes fill the
+/// buffer and the send fails — and so does the next one, queued behind it.
+/// Once the application reads, it receives both, in order. The error says
+/// so, because "the application never got these bytes" would be false.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY buffers typed input on its own side, so a full queue is not reached the same way (#149)"
+)]
+fn a_send_that_gives_up_at_the_deadline_is_still_delivered() -> termlens::Result<()> {
+    const N: usize = 200_000;
+    let count = N.to_string();
+    let mut t = common::spawn_emit(
+        // The builder's deadline is the send's; every wait below names
+        // its own, generous one.
+        Terminal::builder().timeout(Duration::from_millis(500)),
+        &[
+            "--raw-mode",
+            "ready",
+            "NL",
+            "--sleep",
+            "2s",
+            "--read-count",
+            &count,
+            "x",
+            "NL",
+            "--read-count",
+            "1",
+            "y",
+            "NL",
+            "--wait",
+        ],
+    )?;
+    t.wait_until_for(|s| s.contains("ready"), Duration::from_secs(10))?;
+    for input in ["x".repeat(N), "y".to_owned()] {
+        match t.send_str(&input) {
+            Err(Error::Write { what, .. }) => assert!(
+                what.contains("stays queued and reaches the application if it reads again"),
+                "{what}"
+            ),
+            other => panic!("the queue is not moving, so the send gives up: {other:?}"),
+        }
+    }
+    // Both arrive, the x's first.
+    t.wait_until_for(
+        |s| s.contains(&count) && s.text().lines().nth(2) == Some("1"),
+        Duration::from_secs(20),
+    )?;
+    t.send(termlens::Key::Enter)?;
+    assert!(t.wait_exit_for(Duration::from_secs(10))?.success());
+    Ok(())
+}
