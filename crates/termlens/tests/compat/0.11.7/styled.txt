@@ -1,0 +1,10 @@
+size: 30x4  cursor: 2,17
+myapp  > Alpha
+note it ul bl hid st
+rgb bg fg208 DONE
+
+
+styles:
+0: 0-4 fg=6 bold; 7-13 reverse
+1: 0-3 dim; 5-6 italic; 8-9 fg=3 underline; 11-12 blink; 14-16 conceal; 18-19 strikethrough
+2: 0-5 bg=#1e1e2e; 7-11 fg=208
