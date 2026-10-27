@@ -67,6 +67,9 @@ jobs:
       - run: cargo test --workspace --all-features
         env:
           TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens
+          # insta's default, `auto`, writes no .snap.new once CI is set, so
+          # the report step below never had a snapshot to show (#597).
+          INSTA_UPDATE: new
       # The CLI's documented exit codes, against this tree. `install.yml`
       # runs the same script against the *published* binary, which is the
       # net; this is the fast feedback. #310 was a `--version` that exited 2
@@ -208,6 +211,10 @@ jobs:
       # all-passing fixture must exit zero. Needs no toolchain, so it lives
       # here with the other script gates.
       - run: tools/preflight-selftest/run.sh
+      # …and the report action's render step (#597), run from action.yml
+      # with a stub CLI: a directory `find` cannot read ended the step
+      # before it wrote a line, and other repositories run this step.
+      - run: tools/report-action-selftest/run.sh
       # The emit fixture's documented steps against the ones it implements
       # (#318). It lives in this job because it needs no toolchain — it is
       # two greps and a `comm` — and the fixture is what almost every
@@ -269,12 +276,16 @@ jobs:
   # measured and both pinned by the self-test that runs first: a version bump
   # in the same PR as a break makes the inferred release type "major" and
   # skips every check, so the type is forced; and --all-features cannot see
-  # an item moved behind a feature, so three views run. A deliberate break
-  # carries the `breaking` label (the release type becomes `major`, and the
-  # diagnostics go in the PR description) — and is recorded in CHANGELOG.md
-  # as a `- **Breaking` bullet, which is what keeps main green after the
-  # merge, where no label exists. `.github/scripts/check-semver.sh` has the
-  # rules; docs/RELEASING.md says when the baseline literal below moves.
+  # an item moved behind a feature, so the default and explicit-only views
+  # run too, and each feature alone (#598). A deliberate break carries the
+  # `breaking` label (the release type becomes `major`, and the diagnostics
+  # go in the PR description) — and is recorded in CHANGELOG.md as a
+  # `- **Breaking` bullet, which is what keeps main green after the merge,
+  # where no label exists. While that bullet is on main, a later change that
+  # declares nothing itself is also checked with `patch` against the commit
+  # it lands on, so the one declared break carries no other through (#598).
+  # `.github/scripts/check-semver.sh` has the rules; docs/RELEASING.md says
+  # when the baseline literal below moves.
   #
   # The checker is a prebuilt binary downloaded every run: never built from
   # source and never restored from a cache, so a green run is evidence about
@@ -286,6 +297,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          # The whole history, so that BASE_REV below is a commit the
+          # checker can build as a baseline.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
@@ -296,6 +310,12 @@ jobs:
       - run: .github/scripts/check-semver.sh 0.11.6
         env:
           BREAKING_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'breaking') }}
+          # The commit this change lands on: a pull request's base, or the
+          # commit a push to main moved from. A push that creates its ref
+          # reports forty zeros, which the script reads as no base; that is
+          # the tag push release.yml calls this workflow for, whose commit
+          # was checked on its way to main.
+          BASE_REV: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
 
   docs:
     name: docs

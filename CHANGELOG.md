@@ -177,6 +177,20 @@ reads that marker.
   check refuses a file a termlens wrote: a keycap such as `1️⃣`, a cell
   whose width only this build's width tables dispute, and a wide character
   that vt100 0.16 left in the last column after a resize all still read.
+- The `report` action writes its summary when the workspace holds a
+  directory `find` cannot read, such as a root-owned cache or a `chmod 000`
+  test fixture (#597). The step used to stop there with exit 1 before
+  writing anything. The CI snippets in the README, the action's README and
+  the skill now set `INSTA_UPDATE: new` beside `TERMLENS_ARTIFACT_DIR`:
+  insta's default writes no `.snap.new` when `CI` is set, so on GitHub
+  Actions a failing snapshot left the action nothing to show. Inline
+  snapshots are not rendered, and the action's README and its "nothing
+  found" summary now say so.
+- The README's resize recipe for ratatui users waits with `wait_until`
+  instead of `wait_frame` (#600). `wait_frame` waits for DEC 2026
+  synchronized updates, which stock ratatui does not emit, so the recipe
+  timed out for exactly the readers it addressed. The torn-frame row now
+  says it applies to an application that does emit them.
 
 ## [0.11.6] - 2026-10-14
 

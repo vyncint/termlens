@@ -38,10 +38,12 @@ jobs:
 
   # Re-run the exact CI gates (fmt, clippy, test matrix, msrv, docs, deny),
   # the semver gate included: ci.yml's `semver` job checks the tree against
-  # the last published release with the release type forced, in three
-  # feature views (#323). A release with a declared break passes because
-  # its CHANGELOG section records it (`- **Breaking`); an undeclared one
-  # fails here before anything is published.
+  # the last published release with the release type forced, in every
+  # feature view (#323, #598). A release with a declared break passes
+  # because its CHANGELOG section records it (`- **Breaking`); an undeclared
+  # one fails here before anything is published. A tag push has no base
+  # revision, so the gate's second check of a declared break is not
+  # repeated here: the tagged commit passed it on its push to main.
   ci:
     name: ci
     needs: verify-version
