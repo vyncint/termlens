@@ -101,6 +101,14 @@ reads that marker.
   also write a character XML 1.0 forbids, a C0 control other than tab, LF and
   CR or U+FFFE/U+FFFF, as U+FFFD, so a window title holding `\x01` or a cell
   holding U+FFFF no longer makes an SVG no parser opens.
+- `Screen::find`, `find_all`, `locate`, `mask_matching` and, with `regex`,
+  `matches`, `find_match`, `find_all_matches` and `mask_matches` no longer
+  take time quadratic in the size of the screen (#584), and neither does
+  `contains` once the first non-ASCII cell comes late. Every row a search
+  visited re-read the whole grid to ask whether it was ASCII, so one `find`
+  on 1000x1000 took 3 s in a release build where `contains` took 6 ms; it
+  now takes 5 ms. A `wait_until` calling `find`, and `wait_until_matches`,
+  paid that on every wake-up.
 
 ## [0.11.6] - 2026-10-14
 
