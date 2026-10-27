@@ -50,6 +50,32 @@ reads that marker.
   a row of `=` drew as a single character. Under insert mode the repeated
   characters still overwrite rather than insert, as `docs/LIMITATIONS.md`
   says.
+- Dropping a `Terminal` no longer holds the process-wide PTY lock while
+  the child stops (#589). It sent SIGHUP and polled in portable-pty's fixed
+  50 ms steps under the lock, so a drop took 50 ms (200 ms when the child
+  ignores SIGHUP), and every spawn in the test binary waited it out. The
+  child is now stopped first, polled from 1 ms, and the lock is taken only
+  to close the descriptors: measured, 1 ms per drop and no wait for a
+  concurrent spawn. The responder threads' copies of the master now close
+  under the lock too.
+- `Error::Write` at the deadline says what happens to the bytes (#590): the
+  write is not withdrawn, the rest of it reaches the application if it
+  reads again, and later input queues behind it. The message and the docs
+  said the write "gave up", so a retry typed its input twice.
+- A query's reply is queued before the screen the query is drawn on can be
+  seen (#591). A test that waited for that screen and typed could have its
+  keystroke reach the application ahead of the reply: 11 runs in 9,600 at
+  32 threads, and none since.
+- On Unix, a program named with a directory part, such as
+  `target/debug/app`, is found from the working directory, as
+  `std::process::Command` finds it (#592). Only `PATH` was searched, so the
+  spawn failed with "No viable candidates found in PATH", or under
+  `env_clear()` could not resolve `PATH` at all. `PATH` is still searched
+  after.
+- On Windows, a reaped child is the terminal closing 500 ms after the reap,
+  however short the waits that follow (#593). Each wait restarted that
+  grace, so waits shorter than it never saw EOF, and a send to the dead
+  child was not refused.
 - `termlens` no longer panics with exit code 101 (#594). A closed or full
   stderr (`2>&1 | true`, `2>/dev/full`) made every diagnostic and the
   `inspect` trailer panic; the write is now checked, and a trailer that cannot

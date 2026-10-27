@@ -202,9 +202,14 @@ mod unix {
         })
     }
 
-    /// The file the PTY layer would execute for `program` run in `dir`,
-    /// chosen by its rules, or `None` for the PTY layer to say why there is
-    /// none.
+    /// The file to execute for `program` run in `dir`, or `None` for the PTY
+    /// layer to say why there is none.
+    ///
+    /// The PTY layer's rules, with one change: a name with a directory part
+    /// is a path from `dir` first, as `execvp` and `std::process::Command`
+    /// take it. The PTY layer searched PATH for `target/debug/app`, never
+    /// the directory the test runs in (#592); PATH is still searched after,
+    /// so nothing it found stops being found.
     fn resolve(program: &OsStr, dir: &Path, path: Option<&OsStr>) -> Option<PathBuf> {
         let program = Path::new(program);
         let runnable = |file: &Path| !file.is_dir() && executable(file);
@@ -219,8 +224,14 @@ mod unix {
             let file = dir.join(program);
             return runnable(&file).then_some(file);
         }
-        // Anything else, `sub/x` included, along PATH, each entry taken
-        // relative to `dir`.
+        // `sub/x` in `dir`, then along PATH; a bare name along PATH only.
+        if program.components().count() > 1 {
+            let file = dir.join(program);
+            if runnable(&file) {
+                return Some(file);
+            }
+        }
+        // Each PATH entry taken relative to `dir`.
         std::env::split_paths(path?)
             .map(|entry| dir.join(entry).join(program))
             .find(|file| runnable(file))
