@@ -259,7 +259,12 @@ mod tests {
     use super::*;
 
     fn fed(bytes: &[u8]) -> vt100::Parser<Unhandled> {
-        let mut parser = vt100::Parser::new_with_callbacks(4, 20, 0, Unhandled::default());
+        let mut parser = vt100::Parser::new_with_callbacks(
+            super::super::vt100::nz(4),
+            super::super::vt100::nz(20),
+            0,
+            Unhandled::default(),
+        );
         parser.process(bytes);
         parser
     }
@@ -374,7 +379,7 @@ mod tests {
         );
         assert_eq!(
             parser.screen().size(),
-            (4, 20),
+            (super::super::vt100::nz(4), super::super::vt100::nz(20)),
             "the request is recorded, not honoured"
         );
     }

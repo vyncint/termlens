@@ -94,13 +94,18 @@ pub(super) struct AttrShadow {
 }
 
 impl AttrShadow {
-    /// `scrollback` is zero unless the terminal retains styled history:
-    /// text-only history needs the shadow for the visible grid alone, while
-    /// styled history reads the shadow's scrolled rows in lockstep with the
-    /// primary's (#146).
+    /// `scrollback` is the primary's. Styled history reads the shadow's
+    /// scrolled rows in lockstep with the primary's (#146), and even without
+    /// it the shadow's grid needs the same history: a resize that makes the
+    /// screen taller pulls rows back out of history onto the grid, and the
+    /// shadow must get the same rows back or the two grids diverge.
     pub(super) fn new(rows: u16, cols: u16, scrollback: usize) -> Self {
         Self {
-            parser: ::vt100::Parser::new(rows, cols, scrollback),
+            parser: ::vt100::Parser::new(
+                super::vt100::nz(rows),
+                super::vt100::nz(cols),
+                scrollback,
+            ),
             state: State::Ground,
             pending: Vec::new(),
         }
@@ -113,7 +118,9 @@ impl AttrShadow {
     }
 
     pub(super) fn set_size(&mut self, rows: u16, cols: u16) {
-        self.parser.screen_mut().set_size(rows, cols);
+        self.parser
+            .screen_mut()
+            .set_size(super::vt100::nz(rows), super::vt100::nz(cols));
     }
 
     /// The shadow cell at `(row, col)`, whose bold/italic/underline flags are
@@ -462,7 +469,8 @@ mod tests {
             &b"\x1b]0;title\x1b[31mA\x1b[5mB\x1b[0mC"[..],
             &b"\x1b[1;2\x1b[31mA"[..],
         ] {
-            let mut primary = ::vt100::Parser::new(4, 20, 0);
+            let mut primary =
+                ::vt100::Parser::new(super::super::vt100::nz(4), super::super::vt100::nz(20), 0);
             let mut shadow = AttrShadow::new(4, 20, 0);
             primary.process(payload);
             shadow.feed(payload);

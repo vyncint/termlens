@@ -261,7 +261,8 @@ fn the_asciicast_replays_every_row_of_every_frame() -> termlens::Result<()> {
         // Replay it into a terminal of the recorded size, exactly as a
         // player would, and hold the result against the frame it came from.
         let (cols, rows) = frame.size();
-        let mut replay = vt100::Parser::new(rows, cols, 0);
+        let nz = |n: u16| std::num::NonZeroU16::new(n).expect("a recorded size is never zero");
+        let mut replay = vt100::Parser::new(nz(rows), nz(cols), 0);
         replay.process(data.as_bytes());
         let played: Vec<String> = replay
             .screen()
