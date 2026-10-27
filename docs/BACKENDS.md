@@ -11,13 +11,13 @@ clusters rendering however the backend renders them.
 
 ## The candidates
 
-| | `vt100` 0.16.2 | `alacritty_terminal` 0.26.0 | `wezterm-term` |
+| | `vt100` 0.18.1 | `alacritty_terminal` 0.26.0 | `wezterm-term` |
 |---|---|---|---|
 | On crates.io | yes | yes | **no** — git-only in the wezterm workspace; the `tattoy-wezterm-term` fork is a third party's |
 | Licence | MIT | Apache-2.0 only | MIT |
-| MSRV | 1.70 | 1.85.0, moves with Alacritty releases | wezterm's, moves with wezterm |
-| Source size | 3,950 lines | 11,739 lines | larger; a workspace of crates (`wezterm-cell`, `-escape-parser`, `-surface`, `termwiz`) |
-| Dependency tree (`default-features = false`) | 9 crates: `vte`, `unicode-width`, `itoa`, and theirs | 27 crates: `vte`, `polling`, `rustix`, `rustix-openpty`, `signal-hook`, `parking_lot`, `regex-automata`, `base64`, `home`… — the tty/event-loop half is not feature-gated | `image`, `serde`, `terminfo`, `url`, `lru`, `miniz_oxide`, `unicode-normalization`, `wezterm-bidi`… |
+| MSRV | 1.85 | 1.85.0, moves with Alacritty releases | wezterm's, moves with wezterm |
+| Source size | 5,111 lines | 11,739 lines | larger; a workspace of crates (`wezterm-cell`, `-escape-parser`, `-surface`, `termwiz`) |
+| Dependency tree (`default-features = false`) | 5 crates: `vte`, `unicode-width`, `itoa`, `arrayvec`, `memchr` | 27 crates: `vte`, `polling`, `rustix`, `rustix-openpty`, `signal-hook`, `parking_lot`, `regex-automata`, `base64`, `home`… — the tty/event-loop half is not feature-gated | `image`, `serde`, `terminfo`, `url`, `lru`, `miniz_oxide`, `unicode-normalization`, `wezterm-bidi`… |
 | Headless driving | `Parser::process(bytes)`; `Callbacks` trait for what it does not handle | `Term::new(config, dims, EventListener)` + `vte::ansi::Processor::advance`; `VoidListener` exists | `Terminal::new` with a `TerminalConfiguration` and a writer; designed around a renderer |
 | SGR blink (`5`/`6`) | dropped | **dropped** — no `Flags::BLINK`; `Attr::Blink` is not handled | tracked |
 | SGR conceal (`8`) | dropped | tracked (`HIDDEN`) | tracked |
@@ -25,10 +25,10 @@ clusters rendering however the backend renders them.
 | Extra attributes | — | double/curly/dotted/dashed underline, underline colour | the same and more |
 | Mouse modes | one value (the last set) | distinct flags: `MOUSE_REPORT_CLICK`, `MOUSE_DRAG`, `MOUSE_MOTION`, `SGR_MOUSE`; no 1005 | distinct |
 | Kitty keyboard, focus, bracketed paste, alt screen, insert, origin, LNM | partial (see below) | all as `TermMode` flags | all |
-| Grapheme clusters | one `char` + width; zero-width chars appended to the previous cell | one `char` + `zerowidth: Vec<char>`, same shape | `finl_unicode` segmentation; the strongest of the three |
+| Grapheme clusters | one `char` + width; zero-width chars appended to the previous cell, and VS16 widens an emoji to two columns | one `char` + `zerowidth: Vec<char>`, same shape | `finl_unicode` segmentation; the strongest of the three |
 | Scrollback reflow on resize | no | yes (`grid/resize.rs`) | yes |
 | Unhandled-sequence hook | `Callbacks::unhandled_*` — the basis of `Screen::unsupported` | none; unknown sequences are silently ignored | none |
-| Release cadence | slow: 0.16.2 (July 2025) is the newest | with Alacritty, several a year, breaking freely | with wezterm |
+| Release cadence | slow: 0.16.2 (July 2025), then 0.17.0 and 0.18.0 together (October 2026) | with Alacritty, several a year, breaking freely | with wezterm |
 
 ## What termlens already does in front of the backend
 

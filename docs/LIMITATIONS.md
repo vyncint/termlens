@@ -27,7 +27,9 @@ CHANGELOG entry.
   scrolled-off row has no styles and no cell addressing — and is **not
   reflowed** by a `resize`: rows keep the width they were captured at, by
   decision (`Terminal::resize` says why). The visible grid stays the
-  fully-featured surface.
+  fully-featured surface. History also outlives what clears a terminal's
+  own: RIS and ED 3 (`CSI 3 J`, which `clear` sends) empty a terminal's
+  scrollback, and termlens keeps the rows it had already retained.
 
 ## Character sets, modes and tab stops
 
