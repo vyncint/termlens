@@ -868,7 +868,8 @@ is specified here next to the text format (#329). Format **1**:
   refuses the file and names both numbers rather than reading as far as
   the fields line up. A new number is a new stability candidate or a
   major version, never a silent change.
-- `cols`, `rows` — the geometry, in the terminal's order.
+- `cols`, `rows` — the geometry, in the terminal's order: at least 1 and
+  at most 1000 each, as a terminal's is (#582, #583).
 - `cursor` — three named fields. A hidden cursor keeps its position here
   (`"visible": false`), unlike the text format, where `cursor: hidden`
   drops it; `Screen::diff` treats a hidden cursor's position as not part
@@ -889,13 +890,45 @@ is specified here next to the text format (#329). Format **1**:
   protocol and the tracking-mode set, the clipboard, the counters, the
   cursor style, the links, the graphics record, the scrollback (text, and
   cells when retained), the wrap flags, insert mode, the unsupported
-  sequences with their overflow count, the visual bells.
+  sequences with their overflow count, the visual bells. The tracking-mode
+  set keeps its four mode bits and drops any other, which no termlens
+  wrote and which `len()` counted while `iter()` never yielded it.
 
 Nothing is omitted that a `Screen` holds, which is why reading the JSON
 back gives a `Screen` that is `==` to the original where the text format
 gives one that only `diff`s empty. Every row must hold `cols` cells and
 there must be `rows` of them; a file that does not hold together is an
 error, never a screen that panics on its first `cell()`.
+
+A cell must also be one a termlens could have written, because the CLI
+prints what it reads: a cell carrying an escape sequence drove the
+terminal of whoever ran `render --text` or `diff` on the file (#582).
+Refused, naming the cell, in the grid and in the retained history alike:
+
+- a control character — C0, DEL or C1 — anywhere in a cell, by the test
+  `Screen::parse` applies to a line (#376). vt100 drops every one before
+  it reaches the grid;
+- printable ASCII after a cell's first character. A cell is one character
+  and the zero-width marks after it, and no width table makes ASCII
+  zero-width;
+- an empty cell marked `wide`, or one whose first character is ASCII
+  with no U+FE0F after it. vt100 sizes a cell by its first character, or,
+  from 0.18, by the whole cell once a U+FE0F asks for emoji presentation,
+  which makes a keycap such as `1️⃣` two columns;
+- a `wide_continuation` cell that holds text, or that does not follow a
+  `wide` one.
+
+Two kinds of cell `Screen::parse` would never build are read as written,
+because a termlens did write them. Whether a non-ASCII character is a
+mark, one column or two is an entry in `unicode-width`'s tables, and the
+tables move between releases — 0.2.1 to 0.2.2, both of which vt100 0.16
+accepted, moved 197 code points — so a cell another release wrote
+correctly can look malformed under this one's; control characters and
+printable ASCII are the only widths no release reads from a table. And a
+`wide` cell need not be followed by its continuation: vt100 0.16, behind
+every release up to 0.11.6, narrowed a row by truncating it, so a resize
+that cut a wide character left it in the last column, and widening again
+left it before a blank.
 
 The compatibility corpus under `crates/termlens/tests/compat/` holds both
 formats as written by each release since 0.10.1, and `tests/compat.rs`

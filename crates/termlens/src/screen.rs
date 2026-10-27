@@ -191,12 +191,20 @@ impl MouseMode {
 /// # }
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+// `Deserialize` is written by hand in `serde_impl.rs`, to drop the bits no
+// mode occupies (#582).
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct MouseModes(u8);
 
 impl MouseModes {
+    /// The set holding the modes whose bits are set in `bits`. A bit no mode
+    /// occupies is dropped: kept, it counted in `len()` and never appeared
+    /// in `iter()`, and a saved screen can carry one (#582).
     pub(crate) fn from_bits(bits: u8) -> Self {
-        Self(bits)
+        let known = MouseMode::TRACKING
+            .iter()
+            .fold(0, |known, mode| known | mode.bit());
+        Self(bits & known)
     }
 
     /// Whether the application currently has `mode` enabled.

@@ -1214,6 +1214,37 @@ fn render_and_diff_read_a_screen_from_stdin() -> termlens::Result<()> {
     Ok(())
 }
 
+/// A saved screen whose cell carried an escape sequence drove the terminal
+/// of whoever rendered it: `render --text` wrote the OSC that set the window
+/// title and the `ESC [2J` that cleared the screen straight to stdout, and
+/// then refused its own output as input (#582). The reader now refuses the
+/// file, so nothing reaches stdout and the tool exits 2 naming the cell.
+#[test]
+fn a_saved_screen_cannot_drive_the_terminal_that_renders_it() {
+    let screen = Screen::parse("size: 8x1  cursor: 0,0\nhi").expect("a saved screen");
+    let mut value = serde_json::to_value(&screen).expect("serializes");
+    value["cells"][0][1]["contents"] = "\u{1b}]0;PWNED\u{7}\u{1b}[2Jh".into();
+    let document = value.to_string();
+    let before = data("before.snap");
+    for args in [
+        &["render", "--text", "-"][..],
+        &["render", "--ansi", "-"],
+        &["diff", "--color", "never", "-", &before],
+    ] {
+        let out = with_stdin(args, &document);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert!(
+            !out.stdout.contains(&0x1b),
+            "{args:?} wrote an escape: {out:?}"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("cell 0,1") && stderr.contains("control character"),
+            "{args:?}: {stderr}"
+        );
+    }
+}
+
 /// Standard input is read once, so it can be one of `diff`'s operands and
 /// not both — said plainly rather than left to look like an empty screen.
 #[test]
