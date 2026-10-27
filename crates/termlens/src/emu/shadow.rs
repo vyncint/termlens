@@ -58,9 +58,11 @@ enum State {
     Csi,
 }
 
-/// Rewrites colon-form extended colours into the semicolon form understood by
-/// `vt100`. Like [`AttrShadow`], it only holds a complete plain SGR and emits
-/// every other sequence unchanged.
+/// Rewrites the SGR colour forms `vt100` misreads into ones it reads right:
+/// colon-form extended colours into the semicolon form it understands, and
+/// a semicolon-form underline colour into one colon parameter it skips.
+/// Like [`AttrShadow`], it only holds a complete plain SGR and emits every
+/// other sequence unchanged.
 pub(super) struct ColorNormalizer {
     state: State,
     pending: Vec<u8>,
@@ -79,7 +81,7 @@ impl ColorNormalizer {
             &mut self.state,
             &mut self.pending,
             bytes,
-            normalize_colon_colours,
+            normalize_for_grid,
         )
     }
 }
@@ -207,7 +209,18 @@ fn rewrite_stream(
     out
 }
 
-fn normalize_colon_colours(seq: &[u8]) -> Option<Vec<u8>> {
+/// One plain SGR in the form `vt100` reads right, or `None` to pass it
+/// through unchanged.
+///
+/// Two forms need it. Colon-form extended colours (`38:2::r:g:b`) become
+/// the semicolon form. And an underline colour (`58`), which vt100 does not
+/// model, in the semicolon form (`58;5;n`, `58;2;r;g;b`) becomes one colon
+/// parameter (`58:5:n`): vt100 reads parameters one at a time, so it took
+/// the arguments for attributes — `58;5;1` was blink and bold, and
+/// `58;5;0` a reset. As one parameter it is skipped whole, and the
+/// sequence is still recorded as one nobody honoured (#579). crossterm
+/// writes the semicolon form for `SetUnderlineColor`.
+fn normalize_for_grid(seq: &[u8]) -> Option<Vec<u8>> {
     let params = seq.get(2..seq.len().checked_sub(1)?)?;
     if params
         .iter()
@@ -215,14 +228,37 @@ fn normalize_colon_colours(seq: &[u8]) -> Option<Vec<u8>> {
     {
         return None;
     }
-    if !params.contains(&b':') {
+    // The common case, checked without allocating: neither form is here.
+    if !params.contains(&b':') && !params.split(|&b| b == b';').any(|group| group == b"58") {
         return None;
     }
 
     let groups: Vec<&[u8]> = params.split(|&b| b == b';').collect();
     let mut normalized = Vec::with_capacity(groups.len());
     let mut changed = false;
-    for group in groups {
+    let mut next = 0;
+    while next < groups.len() {
+        let group = groups[next];
+        next += 1;
+        if group == b"58" {
+            let arguments = match groups.get(next).copied() {
+                Some(b"5") => 2,
+                Some(b"2") => 4,
+                _ => 0,
+            };
+            if arguments > 0 {
+                let end = (next + arguments).min(groups.len());
+                let mut joined = group.to_vec();
+                for argument in &groups[next..end] {
+                    joined.push(b':');
+                    joined.extend_from_slice(argument);
+                }
+                normalized.push(joined);
+                next = end;
+                changed = true;
+                continue;
+            }
+        }
         let parts: Vec<&[u8]> = group.split(|&b| b == b':').collect();
         let replacement = match parts.as_slice() {
             [first @ (b"38" | b"48"), b"2", b"", red, green, blue]
@@ -396,7 +432,7 @@ mod tests {
     fn normalized(bytes: &[u8]) -> String {
         let mut state = State::Ground;
         let mut pending = Vec::new();
-        let mut out = rewrite_stream(&mut state, &mut pending, bytes, normalize_colon_colours);
+        let mut out = rewrite_stream(&mut state, &mut pending, bytes, normalize_for_grid);
         // Anything still held at the end of the stream is not a complete SGR.
         out.append(&mut pending);
         String::from_utf8_lossy(&out).replace('\x1b', "E")
@@ -522,6 +558,30 @@ mod tests {
                 String::from_utf8_lossy(seq).replace('\x1b', "E"),
                 "sequence {:?} must pass through untouched",
                 String::from_utf8_lossy(seq)
+            );
+        }
+    }
+
+    #[test]
+    fn a_semicolon_underline_colour_becomes_one_colon_parameter() {
+        // vt100 reads parameters one at a time and has no SGR 58, so its
+        // arguments must not reach it as parameters of their own (#579).
+        assert_eq!(normalized(b"\x1b[58;5;1m"), "E[58:5:1m");
+        assert_eq!(normalized(b"\x1b[4;58;2;0;1;7;31m"), "E[4;58:2:0:1:7;31m");
+        // Truncated: what is there is still one parameter.
+        assert_eq!(normalized(b"\x1b[58;5m"), "E[58:5m");
+        // Already one parameter, a 58 with no colour form after it, and a
+        // reset of the underline colour: nothing to group.
+        for seq in [
+            &b"\x1b[58:5:1m"[..],
+            b"\x1b[58m",
+            b"\x1b[58;3m",
+            b"\x1b[59m",
+            b"\x1b[1;5m",
+        ] {
+            assert_eq!(
+                normalized(seq),
+                String::from_utf8_lossy(seq).replace('\x1b', "E")
             );
         }
     }

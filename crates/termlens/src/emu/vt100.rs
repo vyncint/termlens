@@ -7,8 +7,6 @@ use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use unicode_width::UnicodeWidthStr;
-
 use super::seq::{SeqEvent, SeqTracker, TabOp};
 use super::shadow::{AttrShadow, ColorNormalizer};
 use super::unhandled::Unhandled;
@@ -381,10 +379,11 @@ impl Emulator for Vt100Emulator {
         for (i, &byte) in bytes.iter().enumerate() {
             // Insert mode: a printable run pushes the rest of the row right
             // instead of overwriting it. vt100 does not model IRM, so the
-            // room is reserved with the `ICH` it does dispatch, sized in
-            // columns — a wide character counts twice — and never past the
-            // right margin (#261). The bytes owed to the grid go first, so
-            // the cursor column the reservation is made at is current.
+            // room is reserved with the `ICH` it does dispatch, sized in the
+            // columns the grid will give the run — its own layout, which no
+            // `unicode-width` measure is (#580) — and never past the right
+            // margin (#261). The bytes owed to the grid go first, so the
+            // cursor column the reservation is made at is current.
             if i >= run_until
                 && self.tracker.insert_mode()
                 && !self.tracker.mid_sequence()
@@ -395,7 +394,7 @@ impl Emulator for Vt100Emulator {
                     .position(|&b| !is_printable(b))
                     .map_or(bytes.len(), |p| i + p);
                 run_until = end;
-                let width = String::from_utf8_lossy(&bytes[i..end]).width();
+                let width = crate::width::columns(&String::from_utf8_lossy(&bytes[i..end]));
                 self.feed_staged(&bytes[fed..i]);
                 fed = i;
                 let screen = self.parser.screen();
@@ -758,6 +757,12 @@ mod tests {
         while off < bytes.len() {
             off += emu.process(&bytes[off..]).consumed;
         }
+    }
+
+    fn emu_with_size(rows: u16, cols: u16, bytes: &[u8]) -> Vt100Emulator {
+        let mut emu = Vt100Emulator::new(rows, cols, 0, crate::graphics::DEFAULT_CAPTURE, false);
+        feed_all(&mut emu, bytes);
+        emu
     }
 
     fn emu_with(bytes: &[u8]) -> Vt100Emulator {
@@ -1361,6 +1366,113 @@ mod tests {
         );
         let emu = emu_with("\u{6f22}\x1b[2b".as_bytes());
         assert_eq!(emu.snapshot().row_text(0), "\u{6f22}\u{6f22}\u{6f22}    ");
+    }
+
+    #[test]
+    fn the_width_model_is_the_grid_s_own_layout() {
+        // `width::columns` predicts how far the grid moves the cursor for a
+        // run of text; insert mode, `locate` and the diff all rely on that
+        // prediction. Held against vt100 itself, one sample at a time.
+        for sample in [
+            "abc",
+            "\u{6f22}\u{5b57}x",
+            "e\u{301}x",
+            "\u{644}\u{627}",
+            "\u{1f468}\u{200d}\u{1f469}x",
+            "\u{26a0}\u{fe0f}x",
+            "\u{2714}\u{fe0f}\u{31}\u{fe0f}\u{20e3}x",
+            "\u{1f44d}\u{1f3fd}x",
+            "a\u{fe0f}b",
+            "\u{1f1fa}\u{1f1f8}x",
+        ] {
+            let emu = emu_with_size(2, 30, sample.as_bytes());
+            let (_, col, _) = emu.snapshot().cursor();
+            assert_eq!(
+                usize::from(col),
+                crate::width::columns(sample),
+                "{sample:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_underline_colour_is_one_parameter_not_three_attributes() {
+        // vt100 does not model SGR 58 and read `58;5;n` a parameter at a
+        // time: `5` blink, then `n` as an attribute — `0` reset the cell, `1`
+        // made it bold (#579). crossterm writes exactly this form.
+        let emu = emu_with(b"\x1b[1;31mA\x1b[58;5;0mB\x1b[0m \x1b[58;5;1mC\x1b[0m");
+        let s = emu.snapshot();
+        let style = |col| *s.cell(0, col).unwrap().style();
+        for col in [0, 1] {
+            assert_eq!(style(col).fg, Color::Indexed(1), "column {col}");
+            assert!(style(col).bold, "column {col}");
+            assert!(!style(col).blink, "column {col}");
+        }
+        assert_eq!(style(3), Style::default(), "C asked only for a colour");
+        // The truecolour form's arguments are 0, 1 and 7: a reset, bold and
+        // reverse if read as attributes.
+        let emu = emu_with(b"\x1b[4mx\x1b[58;2;0;1;7my");
+        let y = *emu.snapshot().cell(0, 1).unwrap().style();
+        assert!(y.underline && !y.bold && !y.reverse && !y.dim, "{y:?}");
+        // Still a sequence nobody honoured, so it is still on record.
+        let shapes: Vec<String> = emu
+            .snapshot()
+            .unsupported()
+            .iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(shapes, ["^[[58:2:0:1:7m"]);
+    }
+
+    #[test]
+    fn insert_mode_reserves_the_columns_the_grid_gives_the_run() {
+        // The reservation was the run's string width, and the grid lays a
+        // ZWJ family out as two wide cells and lam-alef as two letters:
+        // the difference was overwritten instead of pushed right (#580).
+        for (run, expected) in [
+            (
+                "\u{1f468}\u{200d}\u{1f469}",
+                "\u{1f468}\u{200d}\u{1f469}ABCDEF",
+            ),
+            ("\u{644}\u{627}", "\u{644}\u{627}ABCDEFGH"),
+            ("\u{26a0}\u{fe0f}", "\u{26a0}\u{fe0f}ABCDEFGH"),
+        ] {
+            let stream = format!("ABCDEFGHIJ\r\x1b[4h{run}");
+            let emu = emu_with_size(2, 10, stream.as_bytes());
+            assert_eq!(emu.snapshot().row_text(0), expected, "{run:?}");
+        }
+    }
+
+    #[test]
+    fn locate_reports_the_column_the_grid_gave_a_history_row() {
+        // History is text; `locate` turns the text before a match into a
+        // column, and a column `scrollback_cell` can be asked about must be
+        // the grid's (#580).
+        let mut emu = Vt100Emulator::new(2, 20, 100, crate::graphics::DEFAULT_CAPTURE, true);
+        feed_all(
+            &mut emu,
+            "\u{1f468}\u{200d}\u{1f469} SECRET\r\nb\r\nc\r\n".as_bytes(),
+        );
+        let s = emu.snapshot();
+        assert_eq!(
+            s.locate("SECRET"),
+            Some(crate::screen::Location::History { row: 0, col: 5 })
+        );
+        assert_eq!(s.scrollback_cell(0, 5).map(Cell::contents), Some("S"));
+    }
+
+    #[test]
+    fn a_selector_widened_emoji_survives_the_text_format() {
+        // The grid gives `⚠️` two columns; the saved text reads back with
+        // the same cells, so `find` agrees before and after (#580).
+        let emu = emu_with_size(2, 10, "\u{26a0}\u{fe0f}X \u{2714}\u{fe0f}Y".as_bytes());
+        let live = emu.snapshot();
+        let back = Screen::parse(&live.to_string()).unwrap();
+        for col in 0..10 {
+            assert_eq!(back.cell(0, col), live.cell(0, col), "column {col}");
+        }
+        assert_eq!(live.find("Y"), Some((0, 6)));
+        assert_eq!(back.find("Y"), Some((0, 6)));
     }
 
     #[test]

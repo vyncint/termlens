@@ -1194,6 +1194,10 @@ impl Screen {
     /// outside the screen.
     ///
     /// This is the fact [`logical_text`](Self::logical_text) joins rows on.
+    /// The backend records a wrap only where the last column held
+    /// something, so a wide character that moved to the next row because it
+    /// did not fit in an empty last column leaves the row `false`
+    /// (`docs/LIMITATIONS.md`).
     #[must_use]
     pub fn row_wrapped(&self, row: u16) -> bool {
         self.state
@@ -1427,7 +1431,8 @@ impl Screen {
             let Some(byte_off) = folded.find(needle.as_str()) else {
                 continue;
             };
-            let col = unicode_width::UnicodeWidthStr::width(&folded[..byte_off]);
+            // The columns the grid gave the text before the match (#580).
+            let col = crate::width::columns(&folded[..byte_off]);
             return Some(Location::History {
                 row,
                 col: u16::try_from(col).unwrap_or(u16::MAX),

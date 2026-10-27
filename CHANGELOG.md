@@ -50,6 +50,30 @@ reads that marker.
   a row of `=` drew as a single character. Under insert mode the repeated
   characters still overwrite rather than insert, as `docs/LIMITATIONS.md`
   says.
+- An underline colour in the form crossterm writes it (`CSI 58;5;n m`,
+  `CSI 58;2;r;g;b m`) no longer reads as attributes (#579). The emulator
+  took `5` for blink and `n` for an attribute of its own, so a cell lost its
+  style (`58;5;0` reset it) or turned bold (`58;5;1`); ratatui writes
+  underline colours by default. The sequence is still listed by
+  `unsupported()`, now as one parameter (`^[[58:5:1m`).
+- Text is measured in the columns the grid gives it (#580). Insert mode
+  reserved room for a run by its string width, so a ZWJ family, lam-alef or
+  a skin-toned emoji overwrote the characters after it instead of pushing
+  them right; `Screen::locate` reported a history column that
+  `scrollback_cell` did not address; and the `termlens diff` frame sat a
+  column or two off on such rows. A saved screen holding an emoji the
+  presentation selector widened (`⚠️`) reads back with the columns it was
+  written at, and a row an earlier release wrote with one column for it
+  still reads.
+- `CSI ? 7 h`, which every ncurses program sends at startup, is no longer
+  listed by `unsupported()` (#581). It asks for autowrap, the only
+  behaviour the emulator has, so no ncurses application could pass
+  `unsupported().is_empty()`. `CSI ? 7 l` is still listed: autowrap cannot
+  be turned off, as `docs/LIMITATIONS.md` now says.
+- `Screen::row_wrapped` and `docs/LIMITATIONS.md` say that a wide character
+  which moved to the next row because it did not fit in an empty last
+  column is not recorded as a wrap, so `logical_text()` splits the line
+  there (#585).
 - `termlens` no longer panics with exit code 101 (#594). A closed or full
   stderr (`2>&1 | true`, `2>/dev/full`) made every diagnostic and the
   `inspect` trailer panic; the write is now checked, and a trailer that cannot

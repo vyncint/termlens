@@ -170,7 +170,28 @@ fn parse_header(line: &str) -> Result<(u16, u16, (u16, u16, bool))> {
 /// One grid line into `row`, a slice of exactly `cols` cells. A zero-width
 /// combining mark joins the cell before it; a wide character takes two; a
 /// control character is an error.
+///
+/// An emoji-presentation selector (U+FE0F) makes the emoji it follows two
+/// columns wide, as the emulator lays it out since 0.11.7 (vt100 0.18), so
+/// a row written with one reads back with the same columns. Earlier
+/// releases gave such a cell one column, and the text does not say which
+/// layout wrote it; a row that only fits at one column per such cell can
+/// only be one of those, and is read that way, so no file an earlier
+/// release wrote stops parsing.
 fn parse_row(line: &str, number: usize, cols: u16, row: &mut [Cell]) -> Result<()> {
+    lay_out_row(line, number, cols, row, true).or_else(|_| {
+        row.fill(Cell::new(String::new(), Style::default(), false, false));
+        lay_out_row(line, number, cols, row, false)
+    })
+}
+
+/// [`parse_row`] for one layout: `widen` is whether the selector widens.
+fn lay_out_row(line: &str, number: usize, cols: u16, row: &mut [Cell], widen: bool) -> Result<()> {
+    let too_wide = || {
+        Error::Parse(format!(
+            "line {number}: the row is wider than the {cols} columns the header declares"
+        ))
+    };
     let mut col = 0usize;
     for ch in line.chars() {
         // `unicode_width` answers `None` for a control character and
@@ -194,20 +215,34 @@ fn parse_row(line: &str, number: usize, cols: u16, row: &mut [Cell]) -> Result<(
                     c
                 }
             });
-            match owner.map(|c| &mut row[c]) {
-                Some(cell) if !cell.contents.is_empty() => cell.contents.push(ch),
-                _ => {
-                    return Err(Error::Parse(format!(
-                        "line {number}: {ch:?} has no character to combine with"
-                    )));
+            let Some(owner) = owner.filter(|&c| !row[c].contents.is_empty()) else {
+                return Err(Error::Parse(format!(
+                    "line {number}: {ch:?} has no character to combine with"
+                )));
+            };
+            row[owner].contents.push(ch);
+            // The selector widens the cell it joins when the cluster is
+            // wide — only a narrow cell just written can be widened, since
+            // the column after it is the one it grows into.
+            if widen
+                && ch == crate::width::VS16
+                && owner + 1 == col
+                && !row[owner].wide
+                && crate::width::cell_is_wide(&row[owner].contents)
+            {
+                if col >= usize::from(cols) {
+                    return Err(too_wide());
                 }
+                row[owner].wide = true;
+                row[col] = Cell::new(String::new(), Style::default(), false, true);
+                col += 1;
             }
             continue;
         }
+        // At most two columns, as the emulator draws them.
+        let width = width.min(2);
         if col + width > usize::from(cols) {
-            return Err(Error::Parse(format!(
-                "line {number}: the row is wider than the {cols} columns the header declares"
-            )));
+            return Err(too_wide());
         }
         row[col] = Cell::new(ch.to_string(), Style::default(), width == 2, false);
         if width == 2 {
@@ -425,6 +460,27 @@ mod tests {
             "\u{6771}\u{301}\u{302}"
         );
         assert!(many.cell(0, 3).unwrap().is_wide_continuation());
+    }
+
+    /// The emulator gives `⚠️` two columns since vt100 0.18, so a row with
+    /// one reads back with the same columns; a row that only fits at one
+    /// column per such cell is what earlier releases wrote, and still reads
+    /// (#580).
+    #[test]
+    fn an_emoji_presentation_selector_widens_its_cell_unless_the_row_cannot_hold_it() {
+        let screen = Screen::parse("size: 4x1  cursor: 0,0\n\u{26a0}\u{fe0f}X").unwrap();
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), "\u{26a0}\u{fe0f}");
+        assert!(screen.cell(0, 0).unwrap().is_wide());
+        assert!(screen.cell(0, 1).unwrap().is_wide_continuation());
+        assert_eq!(screen.cell(0, 2).unwrap().contents(), "X");
+        // Four columns of text at one column per selector cell: a 0.11.6
+        // row, read the way 0.11.6 laid it out.
+        let earlier = Screen::parse("size: 4x1  cursor: 0,0\n\u{26a0}\u{fe0f}XYZ").unwrap();
+        assert!(!earlier.cell(0, 0).unwrap().is_wide());
+        assert_eq!(earlier.cell(0, 1).unwrap().contents(), "X");
+        assert_eq!(earlier.cell(0, 3).unwrap().contents(), "Z");
+        // A row too wide either way is still refused.
+        assert!(Screen::parse("size: 4x1  cursor: 0,0\n\u{26a0}\u{fe0f}XYZW").is_err());
     }
 
     /// `unicode_width` answers `None` for a control character and `Some(0)`
