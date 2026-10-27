@@ -88,7 +88,8 @@ impl fmt::Display for GraphicsProtocol {
     serde(rename_all = "snake_case")
 )]
 pub enum GraphicsAction {
-    /// `a=t`: transmit the data, place it later.
+    /// `a=t`: transmit the data, place it later. A transmission that names
+    /// no action is this one, the protocol's default.
     Transmit,
     /// `a=p`: place an image transmitted earlier.
     Place,
