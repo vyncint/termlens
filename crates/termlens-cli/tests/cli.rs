@@ -2102,3 +2102,57 @@ fn render_empty_separate_out_value_names_the_flag() -> termlens::Result<()> {
     assert_eq!(stderr, "termlens: --out needs a PATH argument\n");
     Ok(())
 }
+
+/// `inspect` takes the library's errors as outcomes — a program that exits
+/// without painting is `Eof`, one still running at the deadline `Timeout` —
+/// and the library writes every such error to `TERMLENS_ARTIFACT_DIR`. A
+/// run that ended normally left "failing test" screens there (#596). A
+/// program that inherits the environment is still handed the variable.
+#[test]
+#[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
+fn inspect_leaves_the_artifact_dir_alone_on_a_normal_run() {
+    use std::process::Command;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("inspect-artifacts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("an artifact directory");
+    let inspect = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_termlens"))
+            .args(args)
+            .env("TERMLENS_ARTIFACT_DIR", &dir)
+            .output()
+            .expect("termlens runs")
+    };
+    for args in [
+        &["inspect", "true"][..],
+        &[
+            "inspect",
+            "--timeout",
+            "1",
+            "sh",
+            "-c",
+            "printf hi; sleep 30",
+        ][..],
+    ] {
+        let out = inspect(args);
+        assert_eq!(out.status.code(), Some(0), "termlens {args:?}: {out:?}");
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .expect("the directory is readable")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        assert!(left.is_empty(), "termlens {args:?} left {left:?}");
+    }
+    let out = inspect(&[
+        "inspect",
+        "--inherit-env",
+        "sh",
+        "-c",
+        "printf '%s' \"${TERMLENS_ARTIFACT_DIR##*/}\"",
+    ]);
+    let shown = String::from_utf8_lossy(&out.stdout);
+    let name = dir
+        .file_name()
+        .expect("a name")
+        .to_string_lossy()
+        .into_owned();
+    assert!(shown.contains(&name), "the program saw: {shown}");
+}

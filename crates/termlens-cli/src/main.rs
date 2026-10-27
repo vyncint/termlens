@@ -681,6 +681,15 @@ fn shows_something(screen: &termlens::Screen) -> bool {
 }
 
 fn inspect(args: Vec<OsString>) -> ExitCode {
+    // The library writes every screen-carrying error to
+    // `TERMLENS_ARTIFACT_DIR`, which is right for a failing test. Here a
+    // program that exits (`Eof`) or is still running at the deadline
+    // (`Timeout`) is a run that ended normally, so the variable is taken
+    // out of this process's environment before anything reads it — no
+    // thread exists yet — and handed to the program itself when it
+    // inherits the environment (#596).
+    let artifact_dir = std::env::var_os("TERMLENS_ARTIFACT_DIR");
+    std::env::remove_var("TERMLENS_ARTIFACT_DIR");
     let mut args = args.into_iter().peekable();
     let mut size = (80u16, 24u16);
     let mut timeout = Duration::from_secs(5);
@@ -776,6 +785,8 @@ fn inspect(args: Vec<OsString>) -> ExitCode {
         if let Some(path) = std::env::var_os("PATH") {
             builder = builder.env("PATH", path);
         }
+    } else if let Some(dir) = artifact_dir {
+        builder = builder.env("TERMLENS_ARTIFACT_DIR", dir);
     }
     for (key, value) in env {
         builder = builder.env(key, value);

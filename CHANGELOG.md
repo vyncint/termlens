@@ -74,6 +74,14 @@ reads that marker.
   which moved to the next row because it did not fit in an empty last
   column is not recorded as a wrap, so `logical_text()` splits the line
   there (#585).
+- `termlens inspect` no longer leaves screens in `TERMLENS_ARTIFACT_DIR`
+  for a run that ended normally (#596). It takes the library's `Eof` and
+  `Timeout` as outcomes — a program that exits, one still running at the
+  deadline — and the library records every error that carries a screen, so
+  `inspect true` wrote a failure screen the report action then listed among
+  the failing tests. The program under inspection still gets the variable
+  when it inherits the environment. The library's documentation of the
+  variable now says an expected error is recorded too.
 - `termlens` no longer panics with exit code 101 (#594). A closed or full
   stderr (`2>&1 | true`, `2>/dev/full`) made every diagnostic and the
   `inspect` trailer panic; the write is now checked, and a trailer that cannot
