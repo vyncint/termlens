@@ -167,6 +167,15 @@ fn fail(message: &str) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    // The library writes every screen-carrying error to
+    // `TERMLENS_ARTIFACT_DIR`, which is right for a failing test. Here a
+    // program that exits (`Eof`) or is still running at the deadline
+    // (`Timeout`) is a run that ended normally, so the variable is taken
+    // out of this process's environment before anything reads it — no
+    // thread exists yet — and handed to the program itself when it
+    // inherits the environment (#596).
+    let artifact_dir = std::env::var_os("TERMLENS_ARTIFACT_DIR");
+    std::env::remove_var("TERMLENS_ARTIFACT_DIR");
     // `args_os`: `args` panics on an argument that is not UTF-8 (#594).
     let mut args = std::env::args_os().skip(1).peekable();
 
@@ -265,6 +274,8 @@ fn main() -> ExitCode {
         if let Some(path) = std::env::var_os("PATH") {
             builder = builder.env("PATH", path);
         }
+    } else if let Some(dir) = artifact_dir {
+        builder = builder.env("TERMLENS_ARTIFACT_DIR", dir);
     }
     for (key, value) in env {
         builder = builder.env(key, value);

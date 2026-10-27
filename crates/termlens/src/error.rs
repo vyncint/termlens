@@ -23,7 +23,10 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// written there as it is embedded: `<test>-<n>.screen.json` with the
 /// `serde` feature, `<test>-<n>.screen.txt` (the `with_styles` rendering,
 /// which [`Screen::parse`] reads back) without, where `<test>` is the
-/// current thread's name — under `cargo test`, the test's path. Unset, the
+/// current thread's name — under `cargo test`, the test's path. Every such
+/// error is recorded, an expected one included: a test that asserts a
+/// timeout or EOF leaves that screen in the directory too, so set the
+/// variable for the steps whose failures you want to see (#596). Unset, the
 /// hook is one environment read and nothing else; insta's `.snap.new`
 /// files stay where insta puts them. This repository's `report` action
 /// (`.github/actions/report`) renders that directory into a pull
