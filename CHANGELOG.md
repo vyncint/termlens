@@ -52,6 +52,13 @@ reads that marker.
   5 ms. Each row is now built once per call and the whole rows in the
   middle of the needle are matched in one pass; the same search takes as
   long as `contains` whatever the needle's height.
+- A `ScreenDiff` between screens of different sizes prints each row clipped
+  to the overlap it compares (#649). The wider screen's rows were printed
+  whole under the note saying the rest is clipped, so the `│` separators
+  left the marker line's columns and the after side's `^` sat under the
+  wrong cells. `termlens diff --color` clips the same way and no longer
+  leaves painted blanks at the end of the after side. A wide character cut
+  by the overlap's edge prints as one blank, and its cell is still marked.
 
 ## [0.11.7] - 2026-10-27
 
