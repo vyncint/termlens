@@ -1,0 +1,307 @@
+{
+  "format": 1,
+  "cols": 5,
+  "rows": 3,
+  "cursor": {
+    "row": 1,
+    "col": 4,
+    "visible": true
+  },
+  "cells": [
+    [
+      {
+        "contents": "a",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": false,
+        "wide_continuation": false
+      },
+      {
+        "contents": "b",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": false,
+        "wide_continuation": false
+      },
+      {
+        "contents": "c",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": false,
+        "wide_continuation": false
+      },
+      {
+        "contents": "d",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": false,
+        "wide_continuation": false
+      },
+      {
+        "contents": "東",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": true,
+        "wide_continuation": false
+      }
+    ],
+    [
+      {
+        "contents": "A",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": false,
+        "wide_continuation": false
+      },
+      {
+        "contents": "B",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": false,
+        "wide_continuation": false
+      },
+      {
+        "contents": "C",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": false,
+        "wide_continuation": false
+      },
+      {
+        "contents": "東",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": true,
+        "wide_continuation": false
+      },
+      {
+        "contents": "",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": false,
+        "wide_continuation": true
+      }
+    ],
+    [
+      {
+        "contents": "",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": false,
+        "wide_continuation": false
+      },
+      {
+        "contents": "",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": false,
+        "wide_continuation": false
+      },
+      {
+        "contents": "",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": false,
+        "wide_continuation": false
+      },
+      {
+        "contents": "",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": false,
+        "wide_continuation": false
+      },
+      {
+        "contents": "",
+        "style": {
+          "fg": "default",
+          "bg": "default",
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "blink": false,
+          "reverse": false,
+          "conceal": false,
+          "strikethrough": false
+        },
+        "wide": false,
+        "wide_continuation": false
+      }
+    ]
+  ],
+  "state": {
+    "title": "",
+    "alternate_screen": false,
+    "bracketed_paste": false,
+    "application_cursor": false,
+    "mouse": "none",
+    "mouse_modes": 0,
+    "clipboard": null,
+    "bells": 0,
+    "focus_events": false,
+    "cursor_style": null,
+    "links": [],
+    "graphics": {
+      "counts": {
+        "kitty": 0,
+        "sixel": 0,
+        "deletes": 0,
+        "bytes": 0
+      },
+      "payloads": []
+    },
+    "repaints": 0,
+    "scrollback": [],
+    "scrollback_cells": null,
+    "wrapped": [
+      false,
+      false,
+      false
+    ],
+    "insert_mode": false,
+    "unsupported": [],
+    "unsupported_overflow": 0,
+    "visual_bells": 0
+  }
+}

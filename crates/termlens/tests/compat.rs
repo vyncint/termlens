@@ -138,6 +138,81 @@ fn a_declared_size_past_the_terminal_limit_is_refused_before_allocating() {
     assert!(Screen::parse("size: 1000x1000  cursor: 0,0\n").is_ok());
 }
 
+/// The shapes the six cannot pin, because the writer no longer produces
+/// them: each file was written by the published release its directory
+/// names (a registry dependency on `termlens = "=<version>"`, resolving
+/// vt100 0.16), and is frozen here for the reader that refused it (#643).
+const EXTRA_SHAPES: [(&str, &str); 2] = [
+    // `printf '\r\nabcdef'` on 6x2: the write fills the last column and
+    // 0.11.1 parked the visible cursor one past it, at `1,6`.
+    ("0.11.1", "pending-wrap-visible"),
+    // `printf 'abcd東xy\r\nABC東'` on 8x3, then `resize(5, 3)`: vt100
+    // 0.16 left the first row's `東` wide in the last column with no
+    // continuation cell — the truncation case DESIGN §3 describes.
+    ("0.11.6", "stranded-wide"),
+];
+
+fn extra(version: &str, shape: &str, ext: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/compat")
+        .join(version)
+        .join(format!("{shape}.{ext}"))
+}
+
+/// 0.11.1 wrote a visible cursor at `col == cols` into the text header.
+/// It reads, clamped onto the last cell as the JSON reader clamps the same
+/// column (#375) — so the header renders back with `1,5`, the one byte the
+/// clamp moves, and everything else byte for byte. Keeping `1,6` would need
+/// a cursor no grid has, which is what #401 removed.
+#[test]
+fn a_visible_pending_wrap_cursor_written_by_0_11_1_reads_clamped() {
+    let path = extra("0.11.1", "pending-wrap-visible", "txt");
+    let text = read(&path);
+    assert!(
+        text.starts_with("size: 6x2  cursor: 1,6\n"),
+        "the frozen file really carries col == cols: {text}"
+    );
+    let screen = Screen::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    assert_eq!(screen.cursor(), (1, 5, true), "clamped, visibility kept");
+    assert_eq!(screen.row_text(1), "abcdef");
+    let (_, rendered) = round_trip(&text);
+    assert_eq!(
+        rendered,
+        text.replacen("cursor: 1,6", "cursor: 1,5", 1),
+        "only the clamped column differs"
+    );
+    // The clamp is for the one column a release wrote, not for any.
+    let past = text.replacen("cursor: 1,6", "cursor: 1,7", 1);
+    assert!(Screen::parse(&past).is_err(), "col > cols is still refused");
+}
+
+/// 0.11.6 wrote a wide character stranded in the last column by a
+/// narrowing resize. It reads as that cell — wide, no continuation — and
+/// renders back byte for byte.
+#[test]
+fn a_wide_character_stranded_by_a_resize_in_0_11_6_round_trips() {
+    let path = extra("0.11.6", "stranded-wide", "txt");
+    let text = read(&path);
+    let (screen, rendered) = round_trip(&text);
+    assert_eq!(
+        rendered,
+        text,
+        "{} does not survive parse -> render",
+        path.display()
+    );
+    let stranded = screen.cell(0, 4).expect("the last column");
+    assert_eq!(stranded.contents(), "東");
+    assert!(stranded.is_wide(), "kept wide, as the JSON reader keeps it");
+    assert_eq!(screen.row_text(0), "abcd東");
+    // Only the last column strands: anything after the stranded half is
+    // past the edge and still refused.
+    let longer = text.replacen("abcd東", "abcd東x", 1);
+    assert!(
+        Screen::parse(&longer).is_err(),
+        "a cell past the edge is refused"
+    );
+}
+
 #[cfg(feature = "serde")]
 mod json {
     use super::*;
@@ -248,6 +323,27 @@ mod json {
             Screen::parse(&screen.with_styles().to_string()).is_ok(),
             "and the text it renders to parses"
         );
+    }
+
+    /// The JSON twins of [`EXTRA_SHAPES`] read, show the same picture as
+    /// their text (cursor included: both readers clamp the same column),
+    /// and survive JSON -> text -> parse, the path that refused the
+    /// stranded character before #643.
+    #[test]
+    fn every_extra_shape_reads_from_json_and_back_through_text() {
+        for (version, shape) in EXTRA_SHAPES {
+            let json_path = extra(version, shape, "json");
+            let from_json: Screen = serde_json::from_str(&read(&json_path))
+                .unwrap_or_else(|e| panic!("{}: {e}", json_path.display()));
+            let (from_text, _) = round_trip(&read(&extra(version, shape, "txt")));
+            let diff = from_text.diff(&from_json);
+            assert!(diff.is_empty(), "{}:\n{diff}", json_path.display());
+            assert_eq!(from_text.cursor(), from_json.cursor(), "{shape}");
+            let again = Screen::parse(&from_json.with_styles().to_string())
+                .unwrap_or_else(|e| panic!("{}: JSON -> text -> parse: {e}", json_path.display()));
+            assert!(from_json.diff(&again).is_empty(), "{shape}");
+            assert_eq!(again.cursor(), from_json.cursor(), "{shape}");
+        }
     }
 
     #[test]

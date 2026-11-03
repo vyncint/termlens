@@ -17,6 +17,18 @@ reads that marker.
 
 ## [Unreleased]
 
+### Fixed
+
+- `Screen::parse` and `termlens render` read two text snapshots earlier
+  releases wrote and 0.11.7 refused (#643): a visible cursor one past the
+  last column (`cursor: 1,6` on a 6-column screen), which releases up to
+  0.11.1 wrote after a write filled the last cell, and a wide character a
+  narrowing resize stranded in the last column with no second half, which
+  releases up to 0.11.6 wrote. The cursor reads onto the last cell, as the
+  JSON reader already read it, and the stranded character reads as that
+  cell, so the JSON twin's own text also parses again. Both files, written
+  by the published releases, are in the compatibility corpus.
+
 ## [0.11.7] - 2026-10-27
 
 ### Changed

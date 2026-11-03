@@ -157,6 +157,14 @@ fn parse_header(line: &str) -> Result<(u16, u16, (u16, u16, bool))> {
         let (r, c) = cursor.split_once(',').ok_or_else(bad)?;
         let r: u16 = r.parse().map_err(|_| bad())?;
         let c: u16 = c.parse().map_err(|_| bad())?;
+        // `c == cols` is the pending-wrap column a terminal parks at after
+        // a write fills the last cell. Releases up to 0.11.1 wrote it (#401
+        // stopped the emulator producing it), so it is clamped onto the
+        // last cell, as the JSON reader does (#375), rather than refused:
+        // the format promise is that every file a release wrote still
+        // reads (#643). Any other column off the grid is a file nothing
+        // wrote.
+        let c = if c == cols { cols - 1 } else { c };
         if r >= rows || c >= cols {
             return Err(Error::Parse(format!(
                 "line 1: cursor {r},{c} is outside the {cols}x{rows} grid"
@@ -246,6 +254,19 @@ fn lay_out_row(line: &str, number: usize, cols: u16, row: &mut [Cell], widen: bo
         }
         // At most two columns, as the emulator draws them.
         let width = width.min(2);
+        if width == 2 && col + 1 == usize::from(cols) {
+            // A wide character in the last column, with no room for its
+            // second half: a narrowing resize strands one there (DESIGN
+            // §3), and releases on vt100 0.16 wrote the row that way. It
+            // is kept wide with no continuation cell, as the JSON reader
+            // keeps it (`check_row`), so the file reads and renders back
+            // as written (#643). The column count stops at the edge, so a
+            // mark after it still finds its cell and anything wider is
+            // refused below.
+            row[col] = Cell::new(ch.to_string(), Style::default(), true, false);
+            col += 1;
+            continue;
+        }
         if col + width > usize::from(cols) {
             return Err(too_wide());
         }
@@ -465,6 +486,28 @@ mod tests {
             "\u{6771}\u{301}\u{302}"
         );
         assert!(many.cell(0, 3).unwrap().is_wide_continuation());
+    }
+
+    /// A narrowing resize strands a wide character in the last column with
+    /// no second half, and releases on vt100 0.16 saved the row that way
+    /// (#643). It reads as that cell; a mark after it joins it; a character
+    /// after it is past the edge.
+    #[test]
+    fn a_wide_character_stranded_in_the_last_column_reads() {
+        let screen = Screen::parse("size: 3x1  cursor: 0,0\nab\u{6771}").unwrap();
+        let last = screen.cell(0, 2).unwrap();
+        assert_eq!(last.contents(), "\u{6771}");
+        assert!(last.is_wide() && !last.is_wide_continuation());
+        assert_eq!(screen.to_string(), "size: 3x1  cursor: 0,0\nab\u{6771}");
+        let marked = Screen::parse("size: 3x1  cursor: 0,0\nab\u{6771}\u{301}").unwrap();
+        assert_eq!(marked.cell(0, 2).unwrap().contents(), "\u{6771}\u{301}");
+        for past in ["ab\u{6771}x", "ab\u{6771}\u{6771}", "abc\u{6771}"] {
+            let err = Screen::parse(&format!("size: 3x1  cursor: 0,0\n{past}")).unwrap_err();
+            assert!(
+                err.to_string().contains("wider than the 3 columns"),
+                "{past}: {err}"
+            );
+        }
     }
 
     /// The emulator gives `⚠️` two columns since vt100 0.18, so a row with
