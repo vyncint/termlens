@@ -156,7 +156,10 @@ to be short.
 - **The snapshot text format** of [DESIGN.md](DESIGN.md) §3, which
   `Screen::parse` reads back: the header, the grid, the `styles:` block and
   its tokens. A file written by any release from 0.10.1 on parses in every
-  later release and renders back byte for byte. *Checked by*
+  later release and renders back byte for byte, with one exception: a
+  visible cursor in the pending-wrap column (`col == cols`), which releases
+  up to 0.11.1 wrote, reads clamped onto the last cell, as the JSON reader
+  has read it since 0.11.2, and renders back clamped (#643). *Checked by*
   `crates/termlens/tests/compat.rs` over the frozen corpus in
   `tests/compat/<version>/` — the definition of "the format stays valid" —
   and by `crates/termlens-cli/tests/cli.rs`, which renders every corpus
@@ -172,9 +175,12 @@ to be short.
   difference, 2 the tool could not run) and the saved-screen input formats
   — the text format with or without an insta header or a pre-0.11 `inspect`
   trailer, and the JSON. Flags may be added; `inspect`'s stdout is a saved
-  screen. *Checked by* `.github/scripts/check-cli-contract.sh` against the
-  tree on every pull request (`test` job) and against the **published**
-  binary on every release and every day (`install.yml`, `cli` job).
+  screen. An input larger than 1 GiB is refused (#653), a size no release
+  writes: the largest screen termlens draws, 1000x1000 cells each styled
+  differently, is about 600 MB as pretty-printed JSON. *Checked by*
+  `.github/scripts/check-cli-contract.sh` against the tree on every pull
+  request (`test` job) and against the **published** binary on every
+  release and every day (`install.yml`, `cli` job).
 - **The coordinate conventions**: `(row, col)` for cells, `(cols, rows)` for
   geometry, both zero-based. *Checked by* the crate's own suite; there is no
   separate gate, since every accessor test encodes them.

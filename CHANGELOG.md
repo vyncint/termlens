@@ -17,6 +17,8 @@ reads that marker.
 
 ## [Unreleased]
 
+## [0.11.8] - 2026-11-03
+
 ### Changed
 
 - A `Graphics::Kitty` terminal answers kitty's `a=q` query as kitty does
@@ -2801,7 +2803,8 @@ in the worst of them — hung itself.
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [`Unsupported`]: https://docs.rs/termlens/0.11.0/termlens/struct.Unsupported.html
 
-[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.7...HEAD
+[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.8...HEAD
+[0.11.8]: https://github.com/vyncint/termlens/compare/v0.11.7...v0.11.8
 [0.11.7]: https://github.com/vyncint/termlens/compare/v0.11.6...v0.11.7
 [0.11.6]: https://github.com/vyncint/termlens/compare/v0.11.5...v0.11.6
 [0.11.5]: https://github.com/vyncint/termlens/compare/v0.11.4...v0.11.5
