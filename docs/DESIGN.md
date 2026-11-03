@@ -262,7 +262,11 @@ unchanged:
 - a working directory that is not one, with no UTF-8 `HOME` in the child's
   environment; portable-pty then reads the passwd entry;
 - a program that does not resolve. portable-pty's diagnosis is what
-  termlens has always reported, word for word;
+  termlens has always reported, word for word. A name with a directory part
+  (`target/debug/app`) is the exception: it is a file in the working
+  directory however that file stands, so its exec reports the OS's reason,
+  `EACCES` or `ENOENT`, rather than a PATH search that was never the place
+  to look (#631);
 - a slave that cannot be named or opened.
 
 These are the old behaviour, not new risk. On Windows ConPTY reports a
@@ -398,7 +402,10 @@ screen dump** — a CI log alone answers "what was the app showing?".
   before returning. Idempotent via a cached status.
 
 `Drop` kills + reaps the child unconditionally (unless already reaped):
-tests never leak zombies, including on panic.
+tests never leak zombies, including on panic. A child the kernel reaped,
+where the test process ignores SIGCHLD, counts as reaped: nothing is
+signalled, `wait_exit` says why there is no status, and `signal` refuses
+(#630).
 
 ### `screen()` is the live grid, frames or no frames
 

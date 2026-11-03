@@ -68,6 +68,55 @@ reads that marker.
 
 ### Fixed
 
+- Every wait takes `Duration::MAX` as "no deadline", per call or as the
+  builder's `timeout` (#629). Each one added the timeout to the current
+  instant and panicked with "overflow when adding duration to instant"; the
+  deadline is now the furthest instant the clock can represent.
+
+- A send under a builder `timeout` of zero, or of a few microseconds, no
+  longer fails while its bytes are delivered (#632). It waited for the
+  writer thread's acknowledgement for exactly the deadline, which expired
+  before that thread had run, and the error then said the application was
+  not reading and the buffer was full. A send now waits at least a tenth of
+  a second, and the error claims a full buffer only when a write into it is
+  seen blocked; it reads "a write into it was still blocked after …" where
+  it read "no progress in …".
+
+- `spawn("sub/prog")` of a file in the working directory that cannot be
+  executed, or is not there, fails with the reason the OS gave for that
+  file, "cannot execute …/sub/prog: Permission denied (os error 13)" or
+  "No such file or directory (os error 2)" (#631). It reported a PATH
+  search, "No viable candidates found in PATH", the one place the file was
+  never meant to be; the usual case is a `target/debug/app` downloaded as
+  an artifact without its executable bit. A program a PATH entry provides
+  under the same name is still found.
+
+- In a test process that ignores SIGCHLD, a terminal drops at once instead
+  of taking two seconds, and nothing is signalled after the child has gone
+  (#630). The kernel reaps every child itself there, and teardown read the
+  child it had already reaped as one still running: it sent SIGHUP and
+  SIGKILL to a pid that could belong to another process by then, and waited
+  out its whole reap grace. `wait_exit` now fails naming the cause ("…the
+  kernel reaped it, because SIGCHLD is ignored…") where it gave a bare "No
+  child processes", and `signal` refuses with `Error::Input`, as it does for
+  a child already waited for.
+
+- Dropping a terminal returns when the application left more input unread
+  than its terminal holds, which a raw-mode application that stops reading
+  allows (#628). The PTY layer writes an end-of-file as its writer is
+  dropped, and that write waited forever on the full queue, with the child
+  already gone, while holding the lock every spawn in the test binary takes:
+  the binary never exited. Teardown now makes the terminal's writes give up
+  rather than wait and empties the queue nothing will read, so the writer
+  thread stuck behind it ends too, instead of keeping the PTY open.
+
+- A spawn that fails closes the terminal it opened before it releases the
+  PTY lifecycle lock (#633). It released the lock first, so on macOS the
+  close could revoke a device another thread had just opened, the failure
+  the lock exists to prevent; and a spawn that failed after opening the
+  terminal but before starting the child could deadlock on the lock it
+  held, instead of reporting why.
+
 - A cursor-position or size query is answered without building a snapshot
   (#618). Each reply copied the whole grid, history and graphics log to
   read two numbers, and 0.11.7 doubled that in debug builds, so 2000
