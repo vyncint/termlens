@@ -987,8 +987,10 @@ impl Recording {
 
     /// The recording as an [asciicast v2] document: a header line, then one
     /// output event per frame at its timestamp, each a full repaint —
-    /// clear, home, then the frame through [`Screen::to_ansi`] — which is
-    /// what the format expects and what `asciinema play` and `agg` render.
+    /// clear, home, then the frame through [`Screen::to_ansi`], then the
+    /// frame's cursor moved into place and shown or hidden as the test saw
+    /// it — which is what the format expects and what `asciinema play` and
+    /// `agg` render.
     /// A frame whose geometry differs from the one before it is preceded
     /// by a resize event, so a recording that spans a `resize` replays at
     /// the size each frame was drawn at rather than the first frame's.
@@ -1041,6 +1043,18 @@ impl Recording {
             let ansi = frame.to_ansi();
             let painted = ansi.strip_suffix('\n').unwrap_or(&ansi);
             data.push_str(&painted.replace('\n', "\r\n"));
+            // `to_ansi` carries no cursor, so without these a player leaves
+            // its own after the last row painted, visible, on every frame —
+            // again a screen the test never saw (#646). The frame's cursor
+            // goes where the test saw it, shown or hidden as it was.
+            let (row, col, visible) = frame.cursor();
+            let _ = write!(
+                data,
+                "\x1b[{};{}H\x1b[?25{}",
+                row + 1,
+                col + 1,
+                if visible { 'h' } else { 'l' }
+            );
             out.push_str(&format!(
                 "[{:.6}, \"o\", {}]\n",
                 at.as_secs_f64(),
@@ -4802,6 +4816,55 @@ mod tests {
     use crate::emu::{Emulator, InputModes, ModeState, MouseEncoding, Processed, Query};
     use crate::screen::{Cell, Style, TermState};
     use crate::{Error, Screen};
+
+    /// Each asciicast event leaves the player's cursor where the frame had
+    /// it, hidden when it was hidden (#646). A menu that hid its cursor and
+    /// parked it at 1;1 replayed with a visible cursor after its last row.
+    /// Replayed through vt100, as `asciinema play` would, the cursor must
+    /// come out as the frame's.
+    #[test]
+    fn an_asciicast_event_carries_the_frames_cursor() {
+        let frames = [
+            "size: 10x3  cursor: hidden\nmenu\n> item",
+            "size: 10x3  cursor: 1,4\nmenu\n> it",
+            "size: 10x3  cursor: 2,9\nmenu\n\nbottom row",
+        ];
+        let recording = super::Recording {
+            frames: frames
+                .iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    let at = std::time::Duration::from_millis(100 * (i as u64 + 1));
+                    (at, Screen::parse(text).expect("a frame"))
+                })
+                .collect(),
+            dropped: 0,
+            title: String::new(),
+        };
+        let cast = recording.to_asciicast();
+        let events: Vec<&str> = cast.lines().skip(1).collect();
+        assert_eq!(events.len(), frames.len(), "{cast}");
+        assert!(
+            events[0].ends_with("\\u001b[1;1H\\u001b[?25l\"]"),
+            "the hidden cursor is parked and hidden: {}",
+            events[0]
+        );
+        assert!(
+            events[1].ends_with("\\u001b[2;5H\\u001b[?25h\"]"),
+            "the visible one is placed and shown: {}",
+            events[1]
+        );
+        let nz = |n: u16| std::num::NonZeroU16::new(n).expect("non-zero");
+        let mut player = vt100::Parser::new(nz(3), nz(10), 0);
+        for (event, (_, frame)) in events.iter().zip(recording.frames()) {
+            let parsed: serde_json::Value = serde_json::from_str(event).expect("an event");
+            let payload = parsed[2].as_str().expect("the output payload");
+            player.process(payload.as_bytes());
+            let (row, col, visible) = frame.cursor();
+            assert_eq!(player.screen().cursor_position(), (row, col), "{event}");
+            assert_eq!(player.screen().hide_cursor(), !visible, "{event}");
+        }
+    }
 
     /// An emulator that renders one line and then panics, so the reader's
     /// failure path can be exercised without waiting for a vt100 bug to

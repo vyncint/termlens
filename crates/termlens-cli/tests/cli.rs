@@ -129,6 +129,69 @@ fn diff_color_always_keeps_the_overlap_note_and_paints_the_rows() -> termlens::R
     Ok(())
 }
 
+/// A diff across sizes prints each row clipped to the overlap, plain and
+/// coloured, so every `│` sits in one column (#649). The wider side was
+/// printed whole, past the note saying the rest is clipped, and the
+/// coloured after side kept painted trailing blanks.
+#[test]
+fn diff_across_sizes_keeps_every_separator_in_one_column() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("termlens-clip-diff-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let (big, small) = (dir.join("big.snap"), dir.join("small.snap"));
+    std::fs::write(
+        &big,
+        "size: 30x3  cursor: 0,25\nhello world and more text\n",
+    )
+    .expect("write big");
+    std::fs::write(&small, "size: 10x3  cursor: 0,5\njello\n\nlast  \n").expect("write small");
+    // The text before each `│`, in columns: the rows here are ASCII, so a
+    // column is a character once the SGR runs are taken out.
+    let separators = |line: &str| -> Vec<usize> {
+        let mut plain = String::new();
+        let mut rest = line;
+        while let Some(at) = rest.find('\x1b') {
+            plain.push_str(&rest[..at]);
+            let end = rest[at..].find('m').expect("an SGR run ends") + at + 1;
+            rest = &rest[end..];
+        }
+        plain.push_str(rest);
+        plain
+            .match_indices('│')
+            .map(|(at, _)| plain[..at].chars().count())
+            .collect()
+    };
+    for (first, second) in [(&big, &small), (&small, &big)] {
+        for color in ["never", "always"] {
+            let out = Command::new(env!("CARGO_BIN_EXE_termlens"))
+                .args(["diff", "--color", color])
+                .arg(first)
+                .arg(second)
+                .output()
+                .expect("run termlens");
+            assert_eq!(out.status.code(), Some(1));
+            let printed = String::from_utf8(out.stdout).expect("UTF-8");
+            let frames: Vec<Vec<usize>> = printed
+                .lines()
+                .filter(|l| l.contains('│'))
+                .map(separators)
+                .collect();
+            assert!(!frames.is_empty(), "{printed}");
+            assert!(
+                frames.iter().all(|f| f == &[4, 15]),
+                "--color {color}: the frames sit at {frames:?}:\n{printed}"
+            );
+            assert!(!printed.contains("more text"), "clipped:\n{printed}");
+            // No painted blank trails a row: a coloured blank shows nothing.
+            assert!(
+                !printed.lines().any(|l| l.ends_with(" \x1b[0m")),
+                "--color {color}: {printed:?}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Two 1000x1000 screens that differ in every cell. Painting used to ask
 /// the diff about each cell in turn, which took 8 s at 80,000 changed cells
 /// and would not finish here (#595).
