@@ -116,6 +116,21 @@ pub(crate) trait Emulator: Send {
     /// Snapshot the current screen as an owned value.
     fn snapshot(&self) -> Screen;
 
+    /// The cursor as `(row, col)`, 0-based, exactly as [`snapshot`]
+    /// reports it.
+    ///
+    /// The query responder reads this rather than a snapshot: a snapshot
+    /// copies every cell, the history and the graphics log to answer with
+    /// two numbers, once per query, and an application that probes in a
+    /// batch waited seconds for the replies on a large grid (#618).
+    ///
+    /// [`snapshot`]: Self::snapshot
+    fn cursor_position(&self) -> (u16, u16);
+
+    /// The grid as `(rows, cols)`, for the same reason as
+    /// [`cursor_position`](Self::cursor_position).
+    fn size(&self) -> (u16, u16);
+
     /// True while the byte stream ends inside an unfinished escape sequence
     /// or an incomplete UTF-8 character — used by `wait_idle` to avoid
     /// declaring idleness mid-update.

@@ -654,6 +654,16 @@ impl Emulator for Vt100Emulator {
         )
     }
 
+    fn cursor_position(&self) -> (u16, u16) {
+        // The inherent method, which `snapshot` uses too, so a reply and a
+        // snapshot cannot disagree — #401's clamp included.
+        Vt100Emulator::cursor_position(self)
+    }
+
+    fn size(&self) -> (u16, u16) {
+        size(self.parser.screen())
+    }
+
     fn mid_sequence(&self) -> bool {
         self.tracker.mid_sequence()
     }

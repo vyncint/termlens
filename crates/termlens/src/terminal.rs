@@ -1261,9 +1261,9 @@ impl EmuState {
         let reply = match query {
             Query::CursorPosition { private } => {
                 // Report exactly the cursor as of the query byte: the
-                // emulator stopped there, so this snapshot cannot include
-                // later output. 1-based on the wire.
-                let (row, col, _) = self.emu.snapshot().cursor();
+                // emulator stopped there, so this cannot include later
+                // output. 1-based on the wire.
+                let (row, col) = self.emu.cursor_position();
                 let prefix = if *private { "?" } else { "" };
                 format!("\x1b[{prefix}{};{}R", row + 1, col + 1).into_bytes()
             }
@@ -1278,8 +1278,8 @@ impl EmuState {
             },
             Query::SecondaryDa => b"\x1b[>1;10;0c".to_vec(),
             Query::TextAreaSize => {
-                let screen = self.emu.snapshot();
-                format!("\x1b[8;{};{}t", screen.rows(), screen.cols()).into_bytes()
+                let (rows, cols) = self.emu.size();
+                format!("\x1b[8;{rows};{cols}t").into_bytes()
             }
             // Pixel geometry, answered only from a declared cell size.
             // Unconfigured, these stay unanswered and named in the next
@@ -1296,9 +1296,9 @@ impl EmuState {
             },
             Query::WindowSizePixels => match self.cell_size {
                 Some((w, h)) => {
-                    let screen = self.emu.snapshot();
-                    let height = u32::from(screen.rows()) * u32::from(h);
-                    let width = u32::from(screen.cols()) * u32::from(w);
+                    let (rows, cols) = self.emu.size();
+                    let height = u32::from(rows) * u32::from(h);
+                    let width = u32::from(cols) * u32::from(w);
                     format!("\x1b[4;{height};{width}t").into_bytes()
                 }
                 None => {
@@ -4446,7 +4446,7 @@ mod tests {
         cells_between, check_mouse_in_grid, check_size, history_note, panic_detail, reader_loop,
         EmuState, Graphics, Monitor, Responder, Scroll, ScrollChord,
     };
-    use crate::emu::{Emulator, InputModes, ModeState, MouseEncoding, Processed};
+    use crate::emu::{Emulator, InputModes, ModeState, MouseEncoding, Processed, Query};
     use crate::screen::{Cell, Style, TermState};
     use crate::{Error, Screen};
 
@@ -4481,6 +4481,14 @@ mod tests {
                 "the emulator must never be asked for a screen after it panicked"
             );
             Self::screen()
+        }
+        fn cursor_position(&self) -> (u16, u16) {
+            let (row, col, _) = Self::screen().cursor();
+            (row, col)
+        }
+        fn size(&self) -> (u16, u16) {
+            let (cols, rows) = Self::screen().size();
+            (rows, cols)
         }
         fn mid_sequence(&self) -> bool {
             false
@@ -4572,6 +4580,75 @@ mod tests {
         assert_eq!(reply.bytes, b"\x1b[1;6R");
         drop(state);
         reader.join().expect("the reader ends at EOF");
+    }
+
+    /// A reply to a cursor or size query costs the same on any grid. Each
+    /// used to snapshot the whole screen to read two numbers, so 2000
+    /// cursor-position queries at 200x50 took ten seconds in a debug build
+    /// and arrived in bursts several seconds apart (#618).
+    ///
+    /// Timed against the same replies on a tiny grid rather than against a
+    /// clock, so a slow or loaded machine slows both sides — the shape of
+    /// #584's search test. The large grid is the largest a terminal may be,
+    /// where one snapshot copies a million cells.
+    #[test]
+    fn a_query_reply_costs_the_same_on_any_grid() {
+        use std::time::{Duration, Instant};
+
+        // Loose on purpose. The regression is about 128,000 times the
+        // reference, so 100 still catches it with three orders of magnitude
+        // to spare, while 10 over microsecond timings is a ratio a loaded CI
+        // runner or a stress shard can reach by scheduling alone.
+        const BOUND: u32 = 100;
+        let state = |rows, cols| {
+            let mut emu =
+                super::Vt100Emulator::new(rows, cols, 0, crate::graphics::DEFAULT_CAPTURE, false);
+            emu.process(b"text\x1b[3;5H");
+            EmuState::new(
+                Box::new(emu),
+                Responder {
+                    respond: true,
+                    background: (0, 0, 0),
+                    foreground: (255, 255, 255),
+                    cell_size: Some((8, 16)),
+                    graphics: Graphics::default(),
+                    term_name: "xterm-256color".into(),
+                },
+                Arc::new(AtomicUsize::new(0)),
+            )
+        };
+        let fastest = |state: &mut EmuState, query: &Query| -> Duration {
+            (0..5)
+                .map(|_| {
+                    let start = Instant::now();
+                    for _ in 0..50 {
+                        std::hint::black_box(state.answer(query));
+                    }
+                    start.elapsed()
+                })
+                .min()
+                .expect("at least one run")
+        };
+        let mut small = state(2, 2);
+        let mut large = state(1000, 1000);
+        for (query, reply) in [
+            (Query::CursorPosition { private: false }, &b"\x1b[3;5R"[..]),
+            (Query::TextAreaSize, b"\x1b[8;1000;1000t"),
+            (Query::WindowSizePixels, b"\x1b[4;16000;8000t"),
+        ] {
+            assert_eq!(
+                large.answer(&query).as_deref(),
+                Some(reply),
+                "{query:?} is answered from the grid it asked about"
+            );
+            let reference = fastest(&mut small, &query);
+            let took = fastest(&mut large, &query);
+            assert!(
+                took < reference * BOUND,
+                "{query:?} took {took:?} on 1000x1000, {:.0} times its reply on 2x2 ({reference:?})",
+                took.as_secs_f64() / reference.as_secs_f64()
+            );
+        }
     }
 
     /// The reader turns an emulator panic into state every wait can report,
