@@ -199,3 +199,24 @@ fn a_send_that_gives_up_at_the_deadline_is_still_delivered() -> termlens::Result
     assert!(t.wait_exit_for(Duration::from_secs(10))?.success());
     Ok(())
 }
+
+/// A zero deadline does not make a send to an application that is reading
+/// fail (#632). Every send waited for the writer thread's acknowledgement
+/// for exactly the deadline, so with `Duration::ZERO` each one failed,
+/// blaming a full buffer, while the application got every byte. The
+/// acknowledgement now has a floor, and a full buffer is claimed only when a
+/// write is seen blocked.
+#[test]
+fn a_zero_timeout_send_to_a_reading_application_succeeds() -> termlens::Result<()> {
+    let mut t = common::spawn_emit(
+        // The deadline under test is the send's; every wait names its own.
+        Terminal::builder().timeout(Duration::ZERO),
+        &["--raw-mode", "ready", "NL", "--echo"],
+    )?;
+    t.wait_until_for(|s| s.contains("ready"), Duration::from_secs(10))?;
+    for n in 1..=10 {
+        t.send_str(&format!("line-{n}\r"))?;
+    }
+    t.wait_until_for(|s| s.contains("line-10"), Duration::from_secs(10))?;
+    Ok(())
+}

@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -26,11 +26,11 @@ use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use crate::emu::{Emulator, InputModes, MouseEncoding, Query, Stop, Vt100Emulator};
 use crate::error::{Error, Result};
 use crate::keys::Input;
-use crate::keys::{mouse_legacy, mouse_sgr, mouse_utf8};
+use crate::keys::{mouse_legacy, mouse_sgr, mouse_urxvt, mouse_utf8};
 use crate::screen::{MouseMode, Screen};
 use crate::spawn::{spawn_child, PtyChild};
 use crate::utf8::Utf8Sanitizer;
-use crate::wait::{next_backoff, Expired, Monitor, INITIAL_BACKOFF, POLL_CAP};
+use crate::wait::{deadline_after, next_backoff, Expired, Monitor, INITIAL_BACKOFF, POLL_CAP};
 
 /// How long `wait_exit` keeps draining PTY output after the child has been
 /// reaped, so the final screen is complete. Best effort: a grandchild
@@ -234,6 +234,18 @@ struct WriteRequest {
     replies: usize,
 }
 
+/// The least time a send waits for the writer to acknowledge its bytes,
+/// whatever the terminal's deadline.
+///
+/// A write to an application that is reading returns in microseconds, but
+/// it returns on another thread, and a zero deadline expired before that
+/// thread had run: with `timeout(Duration::ZERO)` every send failed, telling
+/// of a full buffer, while every byte was delivered (#632). Only a write
+/// still unacknowledged past this is reported. A tenth of a second is far
+/// past any write the application is reading, and still prompt for one that
+/// is truly stuck.
+const ACK_FLOOR: Duration = Duration::from_millis(100);
+
 /// How long `Drop` will wait for a killed child to be reaped before
 /// giving up. Teardown must terminate: a stuck child is a bad outcome, a
 /// test binary that never exits is a worse one.
@@ -263,18 +275,48 @@ const DROP_REAP_GRACE: Duration = Duration::from_secs(2);
 #[cfg(unix)]
 static PTY_LIFECYCLE: Mutex<()> = Mutex::new(());
 
-/// The lifecycle lock, held — or `None` on a platform with nothing to
-/// serialize. Callers hold and drop it the same way either way.
-pub(crate) type LifecycleGuard = Option<std::sync::MutexGuard<'static, ()>>;
+/// The lifecycle lock, held, or nothing: on a platform with nothing to
+/// serialize, and on a thread that already holds it. Callers hold and drop
+/// it the same way either way.
+pub(crate) struct LifecycleGuard(Option<std::sync::MutexGuard<'static, ()>>);
 
 #[cfg(unix)]
+thread_local! {
+    /// Whether this thread holds [`PTY_LIFECYCLE`].
+    static HOLDS_LIFECYCLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Take the lifecycle lock, unless this thread holds it already.
+///
+/// Re-entrant because a spawn that fails while it holds the lock drops what
+/// it opened right there, and a [`MasterDup`] dropped there, or a responder
+/// thread's closure when the thread cannot be started, takes the lock to
+/// close: with a plain mutex, a spawn that failed at those steps deadlocked
+/// on itself instead of reporting why (#633).
+#[cfg(unix)]
 pub(crate) fn pty_lifecycle_guard() -> LifecycleGuard {
-    Some(PTY_LIFECYCLE.lock().unwrap_or_else(PoisonError::into_inner))
+    if HOLDS_LIFECYCLE.get() {
+        return LifecycleGuard(None);
+    }
+    let guard = PTY_LIFECYCLE.lock().unwrap_or_else(PoisonError::into_inner);
+    HOLDS_LIFECYCLE.set(true);
+    LifecycleGuard(Some(guard))
 }
 
 #[cfg(not(unix))]
 pub(crate) fn pty_lifecycle_guard() -> LifecycleGuard {
-    None
+    LifecycleGuard(None)
+}
+
+impl Drop for LifecycleGuard {
+    fn drop(&mut self) {
+        // Only the guard that took the lock clears the mark; one handed out
+        // re-entrantly leaves it to the outer guard. Never set off Unix.
+        if self.0.is_some() {
+            #[cfg(unix)]
+            HOLDS_LIFECYCLE.set(false);
+        }
+    }
 }
 
 /// A duplicate of the PTY master owned by a responder thread, closed under
@@ -317,6 +359,54 @@ impl<T: Write> Write for MasterDup<T> {
             Some(inner) => inner.flush(),
             None => Ok(()),
         }
+    }
+}
+
+/// A PTY a spawn is setting up, with the lifecycle lock held: whichever way
+/// the spawn ends, every handle on it closes before the lock is released.
+///
+/// A failed spawn used to drop its bindings in reverse order, the lock first,
+/// so the master and slave closed outside it, and the PTY layer's writer,
+/// shared with the reader thread, closed on that thread whenever it ended
+/// (#633). On macOS such a close can revoke a recycled device another thread
+/// has just opened, which is what the lock exists to prevent (#589).
+struct Opening {
+    pair: Option<PtyPair>,
+    /// The terminal's writer, once there is one: the PTY layer's writer is
+    /// taken out of it on failure, since the reader thread keeps the cell.
+    writer: Option<SharedWriter>,
+    lifecycle: Option<LifecycleGuard>,
+}
+
+impl Opening {
+    fn pair(&self) -> &PtyPair {
+        self.pair
+            .as_ref()
+            .expect("the pair is taken only by `spawned`, which consumes the opening")
+    }
+
+    /// The child is running: close the parent's slave handle, so the master
+    /// sees EOF once the child and its descendants release the terminal,
+    /// release the lock, and hand the master on.
+    fn spawned(mut self) -> Box<dyn portable_pty::MasterPty + Send> {
+        // The writer now belongs to the terminal.
+        self.writer = None;
+        let pair = self.pair.take().expect("the pair is taken only here, once");
+        drop(pair.slave);
+        pair.master
+    }
+}
+
+impl Drop for Opening {
+    /// In this order: the writer and the pair close, then the lock goes. The
+    /// fields would drop in declaration order without this body, which is the
+    /// right order too, but the order is the point and is not left to it.
+    fn drop(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            drop(writer.lock().unwrap_or_else(PoisonError::into_inner).take());
+        }
+        drop(self.pair.take());
+        drop(self.lifecycle.take());
     }
 }
 
@@ -1261,9 +1351,9 @@ impl EmuState {
         let reply = match query {
             Query::CursorPosition { private } => {
                 // Report exactly the cursor as of the query byte: the
-                // emulator stopped there, so this snapshot cannot include
-                // later output. 1-based on the wire.
-                let (row, col, _) = self.emu.snapshot().cursor();
+                // emulator stopped there, so this cannot include later
+                // output. 1-based on the wire.
+                let (row, col) = self.emu.cursor_position();
                 let prefix = if *private { "?" } else { "" };
                 format!("\x1b[{prefix}{};{}R", row + 1, col + 1).into_bytes()
             }
@@ -1278,8 +1368,8 @@ impl EmuState {
             },
             Query::SecondaryDa => b"\x1b[>1;10;0c".to_vec(),
             Query::TextAreaSize => {
-                let screen = self.emu.snapshot();
-                format!("\x1b[8;{};{}t", screen.rows(), screen.cols()).into_bytes()
+                let (rows, cols) = self.emu.size();
+                format!("\x1b[8;{rows};{cols}t").into_bytes()
             }
             // Pixel geometry, answered only from a declared cell size.
             // Unconfigured, these stay unanswered and named in the next
@@ -1296,9 +1386,9 @@ impl EmuState {
             },
             Query::WindowSizePixels => match self.cell_size {
                 Some((w, h)) => {
-                    let screen = self.emu.snapshot();
-                    let height = u32::from(screen.rows()) * u32::from(h);
-                    let width = u32::from(screen.cols()) * u32::from(w);
+                    let (rows, cols) = self.emu.size();
+                    let height = u32::from(rows) * u32::from(h);
+                    let width = u32::from(cols) * u32::from(w);
                     format!("\x1b[4;{height};{width}t").into_bytes()
                 }
                 None => {
@@ -1570,6 +1660,11 @@ impl TerminalBuilder {
     }
 
     /// Default deadline applied to **every** `wait_*` call. Defaults to 5s.
+    ///
+    /// It is also how long a send waits for its bytes to be written before
+    /// it reports the application as not reading, though never less than a
+    /// tenth of a second: the write happens on another thread, and a
+    /// shorter wait reported writes that were merely not yet done (#632).
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -1942,7 +2037,8 @@ impl TerminalBuilder {
 
         // The lifecycle lock is held across openpty → spawn → slave close, so
         // no concurrent Terminal teardown can revoke our fresh PTY device.
-        // `open_pty` takes it, retries under it, and hands it back still held.
+        // `open_pty` takes it, retries under it, and hands it back still held,
+        // and `Opening` closes what this opened under it however this ends.
         let (pair, lifecycle) = open_pty(PtySize {
             rows: self.rows,
             cols: self.cols,
@@ -1952,6 +2048,11 @@ impl TerminalBuilder {
             pixel_width: pixel_span(self.cols, self.cell_size.map(|(w, _)| w)),
             pixel_height: pixel_span(self.rows, self.cell_size.map(|(_, h)| h)),
         })?;
+        let mut opening = Opening {
+            pair: Some(pair),
+            writer: None,
+            lifecycle: Some(lifecycle),
+        };
 
         let mut cmd = CommandBuilder::new(program);
         cmd.args(&self.args);
@@ -2005,16 +2106,23 @@ impl TerminalBuilder {
         // buffered at teardown — see docs/DESIGN.md §2 — so the window
         // between child start and first read must be as close to zero as
         // userspace can make it.)
-        let reader: Box<dyn Read + Send> =
-            Box::new(MasterDup(Some(pair.master.try_clone_reader().map_err(
-                |e| Error::Pty(format!("cloning PTY reader failed: {e}")),
-            )?)));
-        let writer = pair
+        let reader: Box<dyn Read + Send> = Box::new(MasterDup(Some(
+            opening
+                .pair()
+                .master
+                .try_clone_reader()
+                .map_err(|e| Error::Pty(format!("cloning PTY reader failed: {e}")))?,
+        )));
+        let writer = opening
+            .pair()
             .master
             .take_writer()
             .map_err(|e| Error::Pty(format!("taking PTY writer failed: {e}")))?;
 
         let replies_pending = Arc::new(AtomicUsize::new(0));
+        // Whether the writer thread is inside `write(2)` right now, so a send
+        // that gives up can tell a blocked write from one not yet begun.
+        let writer_busy = Arc::new(AtomicBool::new(false));
         // Reply bytes waiting for the writer, so the drain can refuse on a
         // memory bound instead of on a queue-slot count.
         let queued_bytes = Arc::new(AtomicUsize::new(0));
@@ -2041,6 +2149,7 @@ impl TerminalBuilder {
             Arc::clone(&replies_pending),
         )));
         let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
+        opening.writer = Some(Arc::clone(&writer));
 
         // Everything written *to* the child goes through a thread of its
         // own: query replies from the drain, and typed input from the
@@ -2049,12 +2158,13 @@ impl TerminalBuilder {
         // would deadlock the harness (the child then blocks writing into
         // a full output buffer), and the test thread would hang with no
         // deadline and no diagnosis.
-        let write_tx = match dup_writer(pair.master.as_ref()) {
+        let write_tx = match dup_writer(opening.pair().master.as_ref()) {
             Some(pty_writer) => {
                 let mut pty_writer = MasterDup(Some(pty_writer));
                 let (tx, rx) = mpsc::channel::<WriteRequest>();
                 let written = Arc::clone(&replies_pending);
                 let drained = Arc::clone(&queued_bytes);
+                let busy = Arc::clone(&writer_busy);
                 thread::Builder::new()
                     .name("termlens-pty-writer".into())
                     .spawn(move || {
@@ -2073,9 +2183,11 @@ impl TerminalBuilder {
                                 replies += next.replies;
                             }
                             let queued = bytes.len();
+                            busy.store(true, Ordering::Relaxed);
                             let result = pty_writer
                                 .write_all(&bytes)
                                 .and_then(|()| pty_writer.flush());
+                            busy.store(false, Ordering::Relaxed);
                             // Only after the bytes are actually out: while
                             // this write is blocked, those replies are
                             // undelivered, and that is precisely what the
@@ -2128,24 +2240,23 @@ impl TerminalBuilder {
             })
             .map_err(Error::Io)?;
 
-        let child =
-            spawn_child(&pair, cmd, self.env_clear, &env).map_err(|reason| Error::Spawn {
+        let child = spawn_child(opening.pair(), cmd, self.env_clear, &env).map_err(|reason| {
+            Error::Spawn {
                 command: command_desc.clone(),
                 reason,
-            })?;
-        // Close the parent's slave handle so the master sees EOF once the
-        // child (and its descendants) release the terminal.
-        drop(pair.slave);
-        drop(lifecycle);
+            }
+        })?;
 
         Ok(Terminal {
             child,
-            master: Some(pair.master),
+            master: Some(opening.spawned()),
             writer,
             write_tx,
+            writer_busy,
             shared,
             default_timeout: self.timeout,
             exit_status: None,
+            reaped_elsewhere: false,
             exit_watch: ExitWatch::default(),
             command_desc,
             frame_cursor: 0,
@@ -2656,9 +2767,15 @@ pub struct Terminal {
     /// Queue to the writer thread. `None` only when no descriptor could
     /// be duplicated, in which case writes go through `writer` directly.
     write_tx: Option<mpsc::Sender<WriteRequest>>,
+    /// Set by the writer thread while it is inside `write(2)`.
+    writer_busy: Arc<AtomicBool>,
     shared: Arc<Monitor<EmuState>>,
     default_timeout: Duration,
     exit_status: Option<ExitStatus>,
+    /// The child was reaped by someone other than termlens, with its status
+    /// lost: the kernel, where SIGCHLD is ignored (#630). Its pid may name
+    /// another process now.
+    reaped_elsewhere: bool,
     /// Where nothing else says the child is gone, when it was first seen
     /// reaped — across waits, not per wait (#593).
     exit_watch: ExitWatch,
@@ -3009,8 +3126,8 @@ impl Terminal {
     ///
     /// Sends a press — and, when the application's
     /// tracking mode reports them, a release — encoded exactly as the
-    /// tracking mode and encoding **the application enabled** (SGR 1006
-    /// or the legacy byte form).
+    /// tracking mode and encoding **the application enabled** (SGR 1006,
+    /// urxvt 1015, UTF-8 1005, or the legacy byte form when none is).
     ///
     /// # Errors
     ///
@@ -3021,6 +3138,10 @@ impl Terminal {
     /// be misparsed as garbage keys), when `(col, row)` is outside the
     /// current grid, or when the position is unrepresentable in the legacy
     /// encoding (columns/rows beyond 222).
+    ///
+    /// Under X10 tracking (`CSI ? 9 h`) the report carries the button
+    /// alone, as xterm's does: modifiers given to
+    /// [`click_with`](Self::click_with) are not sent.
     pub fn click(&mut self, col: u16, row: u16) -> Result<()> {
         self.click_with(MouseButton::Left, col, row)
     }
@@ -3056,9 +3177,17 @@ impl Terminal {
         };
         let (cols, rows) = self.screen().size();
         check_mouse_in_grid(col, row, cols, rows)?;
-        let mut bytes = self.mouse_report(&modes, chord.code(), col, row, true)?;
+        // X10 reports the button alone: xterm sends no key state in that
+        // mode, so a modifier on the wire is one the application could
+        // never have seen from a terminal (#642).
+        let code = if press_only {
+            chord.button.code()
+        } else {
+            chord.code()
+        };
+        let mut bytes = self.mouse_report(&modes, code, col, row, true)?;
         if !press_only {
-            bytes.extend(self.mouse_report(&modes, chord.code(), col, row, false)?);
+            bytes.extend(self.mouse_report(&modes, code, col, row, false)?);
         }
         self.write_input(&bytes, "a mouse click")
     }
@@ -3151,7 +3280,7 @@ impl Terminal {
     ///
     /// # Errors
     ///
-    /// Same conditions as [`click`](Self::click).
+    /// Same conditions as [`scroll_with`](Self::scroll_with).
     pub fn scroll(&mut self, col: u16, row: u16, direction: Scroll) -> Result<()> {
         self.scroll_with(direction, col, row)
     }
@@ -3182,7 +3311,8 @@ impl Terminal {
     ///
     /// # Errors
     ///
-    /// Same conditions as [`click`](Self::click).
+    /// Same conditions as [`click`](Self::click), and [`Error::Input`] under
+    /// X10 tracking (`CSI ? 9 h`), in which a terminal reports no wheel.
     pub fn scroll_with(
         &mut self,
         direction: impl Into<ScrollChord>,
@@ -3192,8 +3322,19 @@ impl Terminal {
         self.ensure_deliverable("a mouse scroll")?;
         let chord = direction.into();
         let modes = self.input_modes();
-        if modes.mouse == MouseMode::None {
-            return Err(no_mouse_tracking());
+        match modes.mouse {
+            MouseMode::None => return Err(no_mouse_tracking()),
+            // xterm reports buttons 1 to 3 alone in X10 mode, so a wheel
+            // notch never reaches an application that asked for it (#642).
+            MouseMode::Press => {
+                return Err(Error::Input(
+                    "the application enabled X10 mouse tracking (CSI ?9 h), which \
+                     reports button presses only — a terminal sends no wheel \
+                     events in that mode"
+                        .into(),
+                ))
+            }
+            MouseMode::PressRelease | MouseMode::ButtonMotion | MouseMode::AnyMotion => {}
         }
         let (cols, rows) = self.screen().size();
         check_mouse_in_grid(col, row, cols, rows)?;
@@ -3217,17 +3358,25 @@ impl Terminal {
         if modes.mouse_encoding == MouseEncoding::Sgr {
             return Ok(mouse_sgr(button, col, row, press));
         }
+        // The legacy form is what a terminal sends when no extended encoding
+        // is enabled, so the message names the ones that would have reached
+        // this position rather than saying the application chose legacy:
+        // an application that enabled 1015 was told that before #640.
         if modes.mouse_encoding == MouseEncoding::Legacy && (col > 222 || row > 222) {
             return Err(Error::Input(format!(
                 "({col}, {row}) is unrepresentable in the legacy mouse \
-                 encoding the application selected (max 222)"
+                 encoding (max 222), which is in force because the \
+                 application enabled no extended one (SGR ?1006, urxvt \
+                 ?1015 or UTF-8 ?1005)"
             )));
         }
-        // Both remaining forms are `ESC [ M Cb Cx Cy`; they differ only in
-        // how a coordinate byte above 127 is written.
-        let button = if press { button } else { 3 }; // legacy: release is 3
+        // The remaining forms all report a release as button 3 and keep
+        // the `+ 32` on the button; the legacy and UTF-8 ones differ only
+        // in how a coordinate byte above 127 is written.
+        let button = if press { button } else { 3 };
         Ok(match modes.mouse_encoding {
             MouseEncoding::Utf8 => mouse_utf8(button, col, row),
+            MouseEncoding::Urxvt => mouse_urxvt(button, col, row),
             MouseEncoding::Legacy | MouseEncoding::Sgr => mouse_legacy(button, col, row),
         })
     }
@@ -3318,17 +3467,6 @@ impl Terminal {
             };
         };
 
-        // The write is not withdrawn: it is mid-`write(2)` on the writer
-        // thread, which no portable call can interrupt, and the rest of it
-        // follows once the application reads again (#590).
-        let not_reading = || {
-            format!(
-                "the application is not reading its input, and the PTY buffer is \
-                 full — no progress in {:?}; what was not written stays queued and \
-                 reaches the application if it reads again",
-                self.default_timeout
-            )
-        };
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
         let request = WriteRequest {
             bytes: bytes.to_vec(),
@@ -3343,10 +3481,33 @@ impl Terminal {
         if tx.send(request).is_err() {
             return Err("the terminal is closed".to_owned());
         }
-        match ack_rx.recv_timeout(self.default_timeout) {
+        let mut waited = self.default_timeout.max(ACK_FLOOR);
+        let busy = || self.writer_busy.load(Ordering::Relaxed);
+        let mut outcome = ack_rx.recv_timeout(waited);
+        // No write blocked means nothing stands between these bytes and the
+        // application but the writer thread getting to run, so it is given
+        // the floor once more before anything is reported.
+        if matches!(outcome, Err(mpsc::RecvTimeoutError::Timeout)) && !busy() {
+            outcome = ack_rx.recv_timeout(ACK_FLOOR);
+            waited += ACK_FLOOR;
+        }
+        match outcome {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(e.to_string()),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(not_reading()),
+            // The write is not withdrawn: it is mid-`write(2)` on the writer
+            // thread, which no portable call can interrupt, and the rest of
+            // it follows once the application reads again (#590). A full
+            // buffer is claimed only while a write is seen blocked, this one
+            // or one ahead of it (#632).
+            Err(mpsc::RecvTimeoutError::Timeout) if busy() => Err(format!(
+                "the application is not reading its input, and the PTY buffer is \
+                 full — a write into it was still blocked after {waited:?}; what was not \
+                 written stays queued and reaches the application if it reads again"
+            )),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+                "the bytes were not acknowledged within {waited:?}, and no write into \
+                 the PTY was blocked; they stay queued and reach the application in order"
+            )),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err("the terminal is closed".to_owned()),
         }
     }
@@ -3419,7 +3580,7 @@ impl Terminal {
         timeout: Duration,
     ) -> Result<()> {
         const WHAT: &str = "the screen predicate to hold";
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline_after(timeout);
         let mut seen_generation = None;
         let outcome = self.shared.wait_until(deadline, |state| {
             // Ahead of the generation check: a child that exited changes
@@ -3599,7 +3760,7 @@ impl Terminal {
         timeout: Duration,
     ) -> Result<Screen> {
         const WHAT: &str = "a complete frame matching the predicate";
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline_after(timeout);
         let cursor = self.frame_cursor;
         let mut seen_frame = None;
         let outcome = self.shared.wait_until(deadline, |state| {
@@ -3757,7 +3918,7 @@ impl Terminal {
     }
 
     fn wait_idle_deadline(&mut self, quiet: Duration, timeout: Duration) -> Result<()> {
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline_after(timeout);
         let mut guard = self.shared.lock();
         loop {
             self.exit_watch
@@ -3941,7 +4102,7 @@ impl Terminal {
     }
 
     fn wait_stable_deadline(&mut self, quiet: Duration, timeout: Duration) -> Result<Screen> {
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline_after(timeout);
         let mut guard = self.shared.lock();
         // The picture as last observed, and since when it has looked so.
         // Bytes are the only thing that can change the grid, so the last
@@ -4056,6 +4217,17 @@ impl Terminal {
                 self.command_desc
             )));
         }
+        if !self.reaped_elsewhere {
+            self.reaped_elsewhere = self.pid().is_some_and(gone_unwaited);
+        }
+        if self.reaped_elsewhere {
+            return Err(Error::Input(format!(
+                "cannot deliver {signal:?} to `{}`: it already exited and {}, so its pid \
+                 may be another process's now",
+                self.command_desc,
+                reaped_elsewhere_cause()
+            )));
+        }
         let Some(pid) = self.pid() else {
             return Err(Error::Input(format!(
                 "cannot deliver {signal:?} to `{}`: the platform reports no pid",
@@ -4098,10 +4270,30 @@ impl Terminal {
         if let Some(status) = self.exit_status.clone() {
             return Ok(status);
         }
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline_after(timeout);
         let mut backoff = INITIAL_BACKOFF;
         loop {
-            if let Some(status) = self.child.try_wait().map_err(Error::Io)? {
+            let polled = match self.child.try_wait() {
+                Err(error) if self.reaped_elsewhere || is_reaped_elsewhere(&error) => {
+                    self.reaped_elsewhere = true;
+                    // The final screen is as complete as it would have been.
+                    let _ = self
+                        .shared
+                        .wait_until(Instant::now() + DRAIN_GRACE, |state| {
+                            state.eof.then_some(())
+                        });
+                    return Err(Error::Io(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "`{}` exited and {}, so its exit status is lost ({error})",
+                            self.command_desc,
+                            reaped_elsewhere_cause()
+                        ),
+                    )));
+                }
+                polled => polled.map_err(Error::Io)?,
+            };
+            if let Some(status) = polled {
                 let status = ExitStatus::from_pty(&status);
                 self.exit_status = Some(status.clone());
                 self.exit_watch.reaped();
@@ -4337,6 +4529,67 @@ impl Terminal {
     }
 }
 
+/// Whether a wait's error means the child was reaped by someone else:
+/// `ECHILD`, no such child. The kernel reaps every child itself where
+/// SIGCHLD is ignored, which `spawn` already allows for, so there this is
+/// how every exit is seen (#630).
+#[cfg(unix)]
+fn is_reaped_elsewhere(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ECHILD)
+}
+
+#[cfg(not(unix))]
+fn is_reaped_elsewhere(_error: &io::Error) -> bool {
+    false
+}
+
+/// Whether the child is gone: reaped just now, or reaped by someone else.
+/// Either way nothing is left to stop or signal.
+fn reaped_now(child: &mut PtyChild) -> bool {
+    match child.try_wait() {
+        Ok(status) => status.is_some(),
+        Err(error) => is_reaped_elsewhere(&error),
+    }
+}
+
+/// Whether `pid`, our own child that no wait of ours has reaped, is gone all
+/// the same: asked with `WNOWAIT`, which leaves a child that has exited
+/// for the wait that will report it, rather than taking its status here.
+#[cfg(unix)]
+fn gone_unwaited(pid: u32) -> bool {
+    // SAFETY: waitid only writes the zeroed siginfo_t it is handed, which
+    // outlives the call.
+    #[allow(unsafe_code)]
+    // `id_t` is `u32` on Linux and macOS, and may be wider elsewhere.
+    #[allow(clippy::useless_conversion)]
+    let rc = unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        libc::waitid(
+            libc::P_PID,
+            pid.into(),
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    rc == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+}
+
+/// Who took the child's status, as best this process can tell.
+#[cfg(unix)]
+fn reaped_elsewhere_cause() -> &'static str {
+    if crate::spawn::children_reaped_by_the_kernel() {
+        "the kernel reaped it, because SIGCHLD is ignored in this process (or \
+         carries SA_NOCLDWAIT)"
+    } else {
+        "something else in this process reaped it"
+    }
+}
+
+#[cfg(not(unix))]
+fn reaped_elsewhere_cause() -> &'static str {
+    "something else reaped it"
+}
+
 /// How long a hung-up child has to exit on its own before it is killed:
 /// portable-pty's own grace, kept so a program's SIGHUP handler still runs.
 #[cfg(unix)]
@@ -4371,7 +4624,7 @@ fn stop_child(child: &mut PtyChild, deadline: Instant) {
 fn reaped_by(child: &mut PtyChild, deadline: Instant) -> bool {
     let mut backoff = INITIAL_BACKOFF;
     loop {
-        if matches!(child.try_wait(), Ok(Some(_))) {
+        if reaped_now(child) {
             return true;
         }
         let now = Instant::now();
@@ -4387,15 +4640,82 @@ fn reaped_by(child: &mut PtyChild, deadline: Instant) -> bool {
 /// reaped.
 #[cfg(unix)]
 fn send_signal(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
-    // SAFETY: kill(2) touches no memory. The pid is the caller's own
-    // un-reaped child: worst case a zombie, for which kill is defined and
-    // harmless — never an unrelated, recycled pid.
+    // SAFETY: kill(2) touches no memory. The pid is the caller's own child,
+    // which no wait of ours has reaped: worst case a zombie, for which kill
+    // is defined and harmless. Where the kernel reaps children itself
+    // (SIGCHLD ignored) there is no zombie to hold the pid, so callers first
+    // ask whether the child is gone (#630); one that exits between that
+    // question and this call frees its pid in a window no portable call
+    // closes.
     #[allow(unsafe_code)]
     let rc = unsafe { libc::kill(pid, signal) };
     if rc == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
+    }
+}
+
+/// Make every write and read on the master give up rather than wait, and
+/// empty the input queue nothing will read: for teardown, once the child has
+/// been stopped.
+///
+/// portable-pty's writer writes an EOT as it is dropped, a plain blocking
+/// `write(2)`. When the application left more input unread than its queue
+/// holds, which raw mode allows and which a send that gave up (#590) is the
+/// ordinary report of, that queue never drains, and on Linux the write then
+/// blocks with the child dead and reaped. Teardown drops the writer under the
+/// lifecycle lock, so it hung there, and so did every spawn in the binary
+/// after it (#628).
+///
+/// `O_NONBLOCK` belongs to the open file description, which every duplicate
+/// of the master shares, so the EOT and the reader's last read fail with
+/// `EAGAIN` instead of waiting. That alone does not reach a `write(2)` that
+/// is already asleep, the writer thread's, which then held its duplicate,
+/// and with it the PTY, for the life of the process. So the slave is opened
+/// and its input queue flushed: the flush makes room and the close wakes
+/// the sleeping write (on Linux the close alone does, measured), which sees
+/// the flag and returns, and the thread ends and closes its duplicate.
+/// Whoever could have read that input is gone or about to be hung up, and
+/// the EOT now finds room.
+///
+/// Neither step is a lifecycle edge: the master stays open throughout, and
+/// the slave opened here is closed as a child's own descriptors are. A step
+/// that fails leaves things as they were, which is no worse.
+#[cfg(unix)]
+fn unblock_teardown(master: &dyn portable_pty::MasterPty) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if let Some(fd) = master.as_raw_fd() {
+        // SAFETY: `fd` is the live master descriptor, owned by `master` for
+        // the whole call; F_GETFL and F_SETFL only read and set its status
+        // flags.
+        #[allow(unsafe_code)]
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags != -1 {
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+    }
+    // O_NOCTTY, so the device cannot become this process's controlling
+    // terminal; O_NONBLOCK, so the open cannot wait either.
+    let slave = master.tty_name().and_then(|name| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open(name)
+            .ok()
+    });
+    if let Some(slave) = slave {
+        // SAFETY: `slave` is an open descriptor for the whole call, and
+        // tcflush touches no memory.
+        #[allow(unsafe_code)]
+        unsafe {
+            libc::tcflush(slave.as_raw_fd(), libc::TCIFLUSH);
+        }
     }
 }
 
@@ -4413,13 +4733,21 @@ impl Drop for Terminal {
     /// anyone, and every spawn in the binary used to wait out the child's
     /// shutdown (#589).
     ///
+    /// Nothing after the stop may block either: an application that left
+    /// its input queue full would otherwise hold the lock forever (#628,
+    /// `unblock_teardown`).
+    ///
     /// The reap is bounded (`DROP_REAP_GRACE`). A child that cannot be
     /// reaped is a bad outcome; a test binary that never exits — which an
     /// unbounded `wait` here produced whenever the child was wedged — is a
     /// worse one, and unlike the first it cannot even be diagnosed.
     fn drop(&mut self) {
-        if self.exit_status.is_none() && !matches!(self.child.try_wait(), Ok(Some(_))) {
+        if self.exit_status.is_none() && !self.reaped_elsewhere && !reaped_now(&mut self.child) {
             stop_child(&mut self.child, Instant::now() + DROP_REAP_GRACE);
+        }
+        #[cfg(unix)]
+        if let Some(master) = &self.master {
+            unblock_teardown(master.as_ref());
         }
         let _lifecycle = pty_lifecycle_guard();
         // Close the PTY fds while holding the lock. Taking the writer
@@ -4446,7 +4774,7 @@ mod tests {
         cells_between, check_mouse_in_grid, check_size, history_note, panic_detail, reader_loop,
         EmuState, Graphics, Monitor, Responder, Scroll, ScrollChord,
     };
-    use crate::emu::{Emulator, InputModes, ModeState, MouseEncoding, Processed};
+    use crate::emu::{Emulator, InputModes, ModeState, MouseEncoding, Processed, Query};
     use crate::screen::{Cell, Style, TermState};
     use crate::{Error, Screen};
 
@@ -4481,6 +4809,14 @@ mod tests {
                 "the emulator must never be asked for a screen after it panicked"
             );
             Self::screen()
+        }
+        fn cursor_position(&self) -> (u16, u16) {
+            let (row, col, _) = Self::screen().cursor();
+            (row, col)
+        }
+        fn size(&self) -> (u16, u16) {
+            let (cols, rows) = Self::screen().size();
+            (rows, cols)
         }
         fn mid_sequence(&self) -> bool {
             false
@@ -4572,6 +4908,75 @@ mod tests {
         assert_eq!(reply.bytes, b"\x1b[1;6R");
         drop(state);
         reader.join().expect("the reader ends at EOF");
+    }
+
+    /// A reply to a cursor or size query costs the same on any grid. Each
+    /// used to snapshot the whole screen to read two numbers, so 2000
+    /// cursor-position queries at 200x50 took ten seconds in a debug build
+    /// and arrived in bursts several seconds apart (#618).
+    ///
+    /// Timed against the same replies on a tiny grid rather than against a
+    /// clock, so a slow or loaded machine slows both sides — the shape of
+    /// #584's search test. The large grid is the largest a terminal may be,
+    /// where one snapshot copies a million cells.
+    #[test]
+    fn a_query_reply_costs_the_same_on_any_grid() {
+        use std::time::{Duration, Instant};
+
+        // Loose on purpose. The regression is about 128,000 times the
+        // reference, so 100 still catches it with three orders of magnitude
+        // to spare, while 10 over microsecond timings is a ratio a loaded CI
+        // runner or a stress shard can reach by scheduling alone.
+        const BOUND: u32 = 100;
+        let state = |rows, cols| {
+            let mut emu =
+                super::Vt100Emulator::new(rows, cols, 0, crate::graphics::DEFAULT_CAPTURE, false);
+            emu.process(b"text\x1b[3;5H");
+            EmuState::new(
+                Box::new(emu),
+                Responder {
+                    respond: true,
+                    background: (0, 0, 0),
+                    foreground: (255, 255, 255),
+                    cell_size: Some((8, 16)),
+                    graphics: Graphics::default(),
+                    term_name: "xterm-256color".into(),
+                },
+                Arc::new(AtomicUsize::new(0)),
+            )
+        };
+        let fastest = |state: &mut EmuState, query: &Query| -> Duration {
+            (0..5)
+                .map(|_| {
+                    let start = Instant::now();
+                    for _ in 0..50 {
+                        std::hint::black_box(state.answer(query));
+                    }
+                    start.elapsed()
+                })
+                .min()
+                .expect("at least one run")
+        };
+        let mut small = state(2, 2);
+        let mut large = state(1000, 1000);
+        for (query, reply) in [
+            (Query::CursorPosition { private: false }, &b"\x1b[3;5R"[..]),
+            (Query::TextAreaSize, b"\x1b[8;1000;1000t"),
+            (Query::WindowSizePixels, b"\x1b[4;16000;8000t"),
+        ] {
+            assert_eq!(
+                large.answer(&query).as_deref(),
+                Some(reply),
+                "{query:?} is answered from the grid it asked about"
+            );
+            let reference = fastest(&mut small, &query);
+            let took = fastest(&mut large, &query);
+            assert!(
+                took < reference * BOUND,
+                "{query:?} took {took:?} on 1000x1000, {:.0} times its reply on 2x2 ({reference:?})",
+                took.as_secs_f64() / reference.as_secs_f64()
+            );
+        }
     }
 
     /// The reader turns an emulator panic into state every wait can report,
@@ -4769,6 +5174,133 @@ mod tests {
                 !path.contains(&(0, 0)),
                 "the press already reported the origin"
             );
+        }
+    }
+
+    /// Every handle a spawn opened closes under the lifecycle lock (#633),
+    /// told by probes that note, as each is dropped, whether this thread
+    /// held the lock.
+    #[cfg(unix)]
+    mod opening {
+        use std::io;
+        use std::sync::mpsc;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        use std::time::Duration;
+
+        use portable_pty::{CommandBuilder, MasterPty, PtyPair, PtySize, SlavePty};
+
+        use super::super::{pty_lifecycle_guard, MasterDup, Opening, HOLDS_LIFECYCLE};
+
+        type Log = Arc<Mutex<Vec<(&'static str, bool)>>>;
+
+        struct Probe(&'static str, Log);
+
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.1.lock().unwrap().push((self.0, HOLDS_LIFECYCLE.get()));
+            }
+        }
+
+        impl io::Write for Probe {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl SlavePty for Probe {
+            fn spawn_command(
+                &self,
+                _: CommandBuilder,
+            ) -> anyhow::Result<Box<dyn portable_pty::Child + Send + Sync>> {
+                anyhow::bail!("a probe spawns nothing")
+            }
+        }
+
+        impl MasterPty for Probe {
+            fn resize(&self, _: PtySize) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn get_size(&self) -> anyhow::Result<PtySize> {
+                Ok(PtySize::default())
+            }
+            fn try_clone_reader(&self) -> anyhow::Result<Box<dyn io::Read + Send>> {
+                anyhow::bail!("a probe has no reader")
+            }
+            fn take_writer(&self) -> anyhow::Result<Box<dyn io::Write + Send>> {
+                anyhow::bail!("a probe has no writer")
+            }
+            fn process_group_leader(&self) -> Option<libc::pid_t> {
+                None
+            }
+            fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+                None
+            }
+            fn tty_name(&self) -> Option<std::path::PathBuf> {
+                None
+            }
+        }
+
+        /// An opening, its writer shared with a reader thread that outlives
+        /// it, as a spawn's is.
+        fn opening(log: &Log) -> (Opening, super::super::SharedWriter) {
+            let writer: super::super::SharedWriter =
+                Arc::new(Mutex::new(Some(Box::new(Probe("writer", Arc::clone(log))))));
+            let opening = Opening {
+                pair: Some(PtyPair {
+                    slave: Box::new(Probe("slave", Arc::clone(log))),
+                    master: Box::new(Probe("master", Arc::clone(log))),
+                }),
+                writer: Some(Arc::clone(&writer)),
+                lifecycle: Some(pty_lifecycle_guard()),
+            };
+            (opening, writer)
+        }
+
+        #[test]
+        fn a_failed_spawn_closes_everything_before_it_releases_the_lock() {
+            let log = Log::default();
+            let (opening, _reader_s_copy) = opening(&log);
+            drop(opening);
+            assert_eq!(
+                *log.lock().unwrap(),
+                [("writer", true), ("slave", true), ("master", true)]
+            );
+            assert!(!HOLDS_LIFECYCLE.get(), "the lock outlived the opening");
+        }
+
+        #[test]
+        fn a_spawn_closes_the_slave_under_the_lock_and_keeps_the_master() {
+            let log = Log::default();
+            let (opening, _terminal_s_copy) = opening(&log);
+            let master = opening.spawned();
+            assert_eq!(*log.lock().unwrap(), [("slave", true)]);
+            assert!(!HOLDS_LIFECYCLE.get(), "the lock outlived the opening");
+            drop(master);
+            assert_eq!(*log.lock().unwrap(), [("slave", true), ("master", false)]);
+        }
+
+        /// A master duplicate dropped by a thread that holds the lock, as a
+        /// failing spawn drops its reader or a responder closure, closes
+        /// under that lock instead of waiting on it forever.
+        #[test]
+        fn a_master_duplicate_dropped_under_the_lock_does_not_wait_for_it() {
+            let log = Log::default();
+            let (done, finished) = mpsc::channel();
+            let held = Arc::clone(&log);
+            thread::spawn(move || {
+                let lifecycle = pty_lifecycle_guard();
+                drop(MasterDup(Some(Probe("duplicate", held))));
+                drop(lifecycle);
+                let _ = done.send(());
+            });
+            finished
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the drop deadlocked on the lock its own thread held");
+            assert_eq!(*log.lock().unwrap(), [("duplicate", true)]);
         }
     }
 }
