@@ -65,9 +65,9 @@ pub(crate) struct InputModes {
 }
 
 /// How the application asked for mouse coordinates to be encoded. The
-/// three schemes agree below column/row 95 and diverge past it, so
-/// sending the wrong one fails only at a position boundary — which is a
-/// miserable thing to debug from a test.
+/// legacy and UTF-8 schemes agree below column/row 95 and diverge past it,
+/// so sending the wrong one of those fails only at a position boundary —
+/// which is a miserable thing to debug from a test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MouseEncoding {
     /// The original byte-valued form: `ESC [ M Cb Cx Cy`, unusable past
@@ -78,6 +78,10 @@ pub(crate) enum MouseEncoding {
     /// UTF-8 (mode 1005): like the legacy form, but coordinates above 95
     /// are encoded as two-byte UTF-8 rather than a bare byte.
     Utf8,
+    /// urxvt (mode 1015): `ESC [ Cb ; col ; row M`, decimal and unbounded,
+    /// with the legacy `+ 32` kept on the button and a release sent as
+    /// button 3.
+    Urxvt,
 }
 
 /// What a `DECRQM` request can be told about a private mode.
@@ -115,6 +119,21 @@ pub(crate) trait Emulator: Send {
 
     /// Snapshot the current screen as an owned value.
     fn snapshot(&self) -> Screen;
+
+    /// The cursor as `(row, col)`, 0-based, exactly as [`snapshot`]
+    /// reports it.
+    ///
+    /// The query responder reads this rather than a snapshot: a snapshot
+    /// copies every cell, the history and the graphics log to answer with
+    /// two numbers, once per query, and an application that probes in a
+    /// batch waited seconds for the replies on a large grid (#618).
+    ///
+    /// [`snapshot`]: Self::snapshot
+    fn cursor_position(&self) -> (u16, u16);
+
+    /// The grid as `(rows, cols)`, for the same reason as
+    /// [`cursor_position`](Self::cursor_position).
+    fn size(&self) -> (u16, u16);
 
     /// True while the byte stream ends inside an unfinished escape sequence
     /// or an incomplete UTF-8 character — used by `wait_idle` to avoid

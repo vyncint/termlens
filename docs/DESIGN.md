@@ -570,7 +570,10 @@ scrolled nothing costs one length check. A hard reset (`RIS`, `ESC c`) is
 the exception: it rebuilds the screen and empties the history, so the feed
 is split at the reset byte — the rows that scrolled before it are captured
 while vt100 still holds them, and the capture after it sees an empty
-history, which is what re-syncs the mark (#391). At the length, vt100
+history, which is what re-syncs the mark (#391). An entry to the
+alternate screen splits the feed the same way, since from that byte every
+accessor reads the alternate grid and the main screen's newest rows are out
+of reach until it is back (#622). At the length, vt100
 evicts from the front and its length stops changing, so growth is no
 longer visible there — and there is no sound cheap substitute, since
 consecutive identical rows are ordinary output and comparing the ends of
@@ -1101,9 +1104,12 @@ environment `env_clear` promises is hermetic (#221).
 ## 6. Input encoding
 
 Mouse input is **mode-aware**: the emulator knows which tracking mode and
-encoding the application enabled (`?9/?1000/?1002/?1003`, SGR `?1006`),
+encoding the application enabled (`?9/?1000/?1002/?1003`; SGR `?1006`,
+urxvt `?1015`, UTF-8 `?1005`, the last one set winning as in xterm),
 `click`/`scroll` encode to match, and no tracking enabled is a typed
-error — never bytes the application would misparse as keys. Modifiers ride
+error — never bytes the application would misparse as keys. X10 (`?9`)
+is xterm's too: a press carries the button alone, with no modifiers, and
+a wheel notch is a typed error, since that mode reports neither. Modifiers ride
 on the button code the same way for a button and a wheel notch (`+4` shift,
 `+8` alt, `+16` ctrl), so `MouseButton::Left.ctrl()` and `Scroll::Up.ctrl()`
 are one idiom; the wheel gets a chord type of its own (`ScrollChord`) so

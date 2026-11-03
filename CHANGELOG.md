@@ -19,6 +19,44 @@ reads that marker.
 
 ### Changed
 
+- `unsupported()` is right about three more shapes (#625, #641). A window
+  title with a `;` in it (`OSC 2 ; make; test`) is no longer listed: the
+  title was always honoured, and `title()` reported it whole. An ANSI mode
+  list that names insert mode with another mode (`CSI 4;20 h`) is listed,
+  as `CSI 20;4 h` already was, since LNM is dropped either way.
+  XTSMGRAPHICS (`CSI ? Pi ; Pa ; Pv S`) is no longer listed; it is a
+  question now, named in the next timeout as LIMITATIONS promises for a
+  program blocked on one. A test that pins `unsupported()` exactly drops
+  any `^[]0;…`, `^[]2;…` or `^[[?…S` entry from its expected list and adds
+  a mode list such as `^[[4;20h` where its application sends one.
+
+- The urxvt mouse encoding (mode 1015) is honoured (#640). An application
+  that enables it gets xterm's `CSI 32;5;3M` form, decimal and with no 222
+  limit, where it got the legacy bytes; DECRQM answers for 1015; and the
+  last of 1005, 1006 and 1015 set is the one in force, as in xterm, so
+  resetting the one in force returns to the legacy form. The error for a
+  click past column 222 no longer says the application selected the legacy
+  encoding; it names the extended ones that would reach that far. A test
+  that read legacy reports from an application enabling 1015 reads the
+  urxvt form instead.
+
+- X10 mouse tracking (`CSI ? 9 h`) reports what xterm reports (#642).
+  `click_with` sends the button alone, without the modifier bits, and
+  `scroll` and `scroll_with` return `Error::Input`, since the mode reports
+  no wheel. A test that scrolled under X10 expects that error, or has its
+  application enable `?1000` instead.
+
+- Insert mode (`CSI 4 h`) reserves room a character at a time, at the
+  cursor, so the screen no longer depends on where the PTY split the output
+  (#624). A run that reached the right margin wrapped onto the next row over
+  its text when it arrived in one read, and pushed that row right from its
+  second character when it arrived in pieces; now the next row is pushed
+  right from the first character, as xterm does, which removes the
+  exception `docs/LIMITATIONS.md` documented. An emoji-presentation
+  selector that arrives in a read of its own reserves the column it widens
+  the emoji into, where it used to overwrite the next character. A test
+  that asserted the overwritten row should assert the pushed one.
+
 - The plain output of `termlens diff` ends with one newline, not a blank
   line, and an unchanged-row count of one reads `… 1 row unchanged`
   (#652). `ScreenDiff`'s `Display` already ended its last line, and the CLI
@@ -78,6 +116,55 @@ reads that marker.
   the lock exists to prevent; and a spawn that failed after opening the
   terminal but before starting the child could deadlock on the lock it
   held, instead of reporting why.
+
+- A cursor-position or size query is answered without building a snapshot
+  (#618). Each reply copied the whole grid, history and graphics log to
+  read two numbers, and 0.11.7 doubled that in debug builds, so 2000
+  `CSI 6 n` at 200x50 took 10 s to answer under `cargo test` and the
+  replies left in bursts several seconds apart; a reader with an
+  inter-byte timeout, like termlens-demo's, saw them stop. The same 2000
+  now take about 20 ms, and the reply is the one the snapshot gave.
+
+- `CSI ? 3 J` and `CSI 3:1 J` keep the history termlens had retained, as
+  `CSI 3 J` does (#621). vt100 erases its saved lines for both, and the
+  tracker missed them, so the emptied history read as rows pulled back
+  onto the screen and the kept copy was popped.
+
+- RIS turns focus reporting off and ends an open synchronized update
+  (#623). After `ESC c`, `focus_in` still typed `^[[I`, DECRQM answered
+  `Set` for 1004 and 2026, and an update begun before the reset never
+  ended, so every later `wait_stable` timed out. The half-drawn frame is
+  dropped.
+
+- A control character inside an escape sequence is carried out and the
+  sequence goes on, as the parser that feeds the grid does (#627). The
+  tracker dropped to plain text there, so `ESC CR` before line-drawing
+  text blanked the rest of the write, and the query in `ESC BEL [6n` went
+  unanswered with its bell uncounted. The same holds inside a CSI.
+
+- An emoji with a presentation selector (`⚠️`, `❤️`) drawn into the
+  bottom-right cell no longer panics the emulator when the row is redrawn
+  (#619). vt100 0.18.1 moved the wrong cell to the new bottom row and left
+  the emoji wide in the last column of the row above, where the next write
+  over it panicked on the reader thread and the screen stopped advancing.
+  termlens now moves the emoji itself, to the start of the new row, as
+  xterm does.
+
+- A resize round trip over a soft-wrapped line no longer makes the attribute
+  shadow diverge from the grid (#620). Copying the rows a wider, shorter
+  screen pushed into history widened them and cleared their wrap flags, in
+  the primary grid only unless styled history was on, so the resize back
+  pulled different rows into the two and a debug build panicked on the next
+  snapshot; with both moved, `row_wrapped` turned false and `logical_text()`
+  split the line. A history at its retention bound is still re-read whole
+  on the next output, and a row narrower than the screen loses its wrap
+  flag then.
+
+- Rows that scroll off in the same read that switches to the alternate
+  screen (`CSI ? 1049 h`, `? 47 h`, `? 1047 h`) are in `scrollback_text()`
+  while the alternate screen is up, and survive a reset before it comes
+  down (#622). They were copied only once the main screen was back, and a
+  RIS before that lost them for good.
 
 - `termlens render` and `termlens diff` accept `--` as the end of their
   options, as `inspect` does (#650), so a file whose name begins with `-`

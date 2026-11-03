@@ -388,6 +388,7 @@ impl Vt100Emulator {
         let at_cap = len == self.scrollback_len;
         if !at_cap && len == self.captured {
             screen.set_scrollback(0);
+            self.shadow.set_scrollback(0);
             return;
         }
         let from = if at_cap {
@@ -406,19 +407,24 @@ impl Vt100Emulator {
         // which matters: `Screen::cell` is O(row) per lookup.
         let mut i = from;
         while i < len {
+            // The shadow's view moves with the primary's, styled history or
+            // not. Moving a view is not only a read in vt100: it widens the
+            // history rows it shows to the screen's width, clearing their
+            // wrap flags, so a view moved in one parser alone left the two
+            // with different rows to pull back onto the grid (#620).
             screen.set_scrollback(len - i);
+            self.shadow.set_scrollback(len - i);
             let take = (len - i).min(usize::from(rows));
             for line in screen.rows(0, cols).take(take) {
                 self.history
                     .push_back(Arc::from(restore_replacement(line.trim_end()).as_ref()));
             }
-            // Styled history: the same rows as cells, the shadow moved to
+            // Styled history: the same rows as cells, read off the shadow at
             // the same offset so blink, conceal and strikethrough come
             // along — the correspondence invariant extended from the grid
             // to history. Cell reads are O(row) each in vt100, so this is
             // the cost the builder's knob documents.
             if let Some(cells) = &mut self.history_cells {
-                self.shadow.set_scrollback(len - i);
                 for row in 0..u16::try_from(take).unwrap_or(u16::MAX) {
                     let mut converted: Vec<Cell> = Vec::with_capacity(usize::from(cols));
                     for col in 0..cols {
@@ -435,7 +441,6 @@ impl Vt100Emulator {
                     }
                     cells.push_back(converted.into());
                 }
-                self.shadow.set_scrollback(0);
             }
             i += take;
         }
@@ -449,6 +454,7 @@ impl Vt100Emulator {
         }
         self.captured = len;
         screen.set_scrollback(0);
+        self.shadow.set_scrollback(0);
     }
     /// The cursor as a snapshot should report it: a column pending wrap
     /// sits one past the last cell inside the backend, and no terminal
@@ -461,6 +467,229 @@ impl Vt100Emulator {
         let (row, col) = screen.cursor_position();
         (row, col.min(size(screen).1.saturating_sub(1)))
     }
+
+    /// Resize both grids, the primary and the attribute shadow, alike.
+    fn resize_grids(&mut self, rows: u16, cols: u16) {
+        self.parser.screen_mut().set_size(nz(rows), nz(cols));
+        self.shadow.set_size(rows, cols);
+    }
+
+    /// Feed an emoji-presentation selector (U+FE0F) at the live cursor.
+    ///
+    /// The selector joins the cell before the cursor, and when that makes
+    /// the cell two columns wide vt100 widens it in place — or, when the
+    /// cell is the last column's, moves it to the start of the next row,
+    /// as xterm does. Two cases are not left to vt100:
+    ///
+    /// - The last column's, always. vt100 0.18.1 takes the cell to move
+    ///   *before* the row scrolls, so at the bottom margin it moves the
+    ///   blank cell of the new row and leaves the real one wide in the last
+    ///   column of the row above, with no second column; the next write
+    ///   over it panics inside vt100 (#619). The move is written out
+    ///   instead, in steps vt100 gets right: erase the cell, line feed —
+    ///   which scrolls exactly where the wrap would have — and draw the
+    ///   cell again at the start of the row. That is vt100's own result
+    ///   for a row that does not scroll, the row above left unwrapped
+    ///   included.
+    /// - Insert mode, which reserves the column the widening takes.
+    fn draw_selector(&mut self) {
+        let screen = self.parser.screen();
+        let (_, cols) = size(screen);
+        let (row, col) = screen.cursor_position();
+        // vt100's base cell: the one before the cursor, or the first half of
+        // a wide character whose second half that is.
+        let base = match col.checked_sub(1) {
+            Some(prev)
+                if prev > 0
+                    && screen
+                        .cell(row, prev)
+                        .is_some_and(::vt100::Cell::is_wide_continuation) =>
+            {
+                Some(prev - 1)
+            }
+            prev => prev,
+        };
+        let widened = base
+            .and_then(|base| screen.cell(row, base))
+            .filter(|cell| !cell.is_wide())
+            .map(|cell| cell.contents().to_owned())
+            .filter(|contents| widens(contents));
+        let insert = self.tracker.insert_mode();
+        match widened {
+            Some(contents) if col >= cols => {
+                let reserve = if insert { "\x1b[2@" } else { "" };
+                let moved = format!(
+                    "\x1b[{cols}G\x1b[X\n\x1b[1G{reserve}{contents}{}",
+                    crate::width::VS16
+                );
+                self.feed(moved.as_bytes());
+            }
+            Some(_) if insert => self.feed(b"\x1b[@\xef\xb8\x8f"),
+            _ => self.feed(VS16_BYTES),
+        }
+    }
+
+    /// Make room, in insert mode, for the characters starting at `text`
+    /// that the cursor's row takes as it stands, and return how many bytes
+    /// of `text` that covers.
+    ///
+    /// vt100 does not model IRM, so the room is reserved with the `ICH` it
+    /// does dispatch, sized in the columns the grid gives each character —
+    /// its own layout, which no `unicode-width` measure is (#580). A
+    /// reservation per character is what a terminal does, and one for a
+    /// run of them that fits on the row is the same reservation made once.
+    /// So the run stops where a character would wrap, and at a selector,
+    /// which widens the character before it and reserves for itself (see
+    /// `draw_selector`). A character that wraps is reserved for on the row
+    /// it lands on — see `reserve_after_wrap` — so the result no longer
+    /// depends on whether the PTY delivered the run whole (#624).
+    fn reserve_insert(&mut self, text: &[u8]) -> usize {
+        let run = &text[..text
+            .iter()
+            .position(|&b| !is_printable(b))
+            .unwrap_or(text.len())];
+        let run = match std::str::from_utf8(run) {
+            Ok(run) => run,
+            Err(e) => std::str::from_utf8(&run[..e.valid_up_to()]).unwrap_or_default(),
+        };
+        let screen = self.parser.screen();
+        let (_, cols) = size(screen);
+        let (row, col) = screen.cursor_position();
+        let room = usize::from(cols.saturating_sub(col));
+        let mut width = 0;
+        let mut end = 0;
+        for (at, c) in run.char_indices() {
+            if c == crate::width::VS16 && at > 0 {
+                break;
+            }
+            // A character wider than the screen is not drawn at all.
+            let w = crate::width::char_columns(c)
+                .filter(|&w| w <= usize::from(cols))
+                .unwrap_or(0);
+            if w > 0 && width + w > room {
+                if at == 0 {
+                    self.reserve_after_wrap(w, row, col);
+                    return c.len_utf8();
+                }
+                break;
+            }
+            width += w;
+            end = at + c.len_utf8();
+        }
+        if width > 0 {
+            self.feed(format!("\x1b[{width}@").as_bytes());
+        }
+        // Never zero, so the caller always moves on: a byte that is not
+        // UTF-8 cannot reach here past the reader's sanitizer, but if one
+        // did it would be fed as it always was.
+        end.max(1)
+    }
+
+    /// Reserve `width` columns for a character that wraps from `(row, col)`
+    /// onto the next row, where xterm inserts it: that row's text moves
+    /// right as any other row's does (#624).
+    ///
+    /// The wrap is vt100's: it scrolls, or not, and marks the row wrapped.
+    /// The reservation is made first, on the row the wrap lands on, and the
+    /// cursor put back where it was. A cursor down finds that row — it
+    /// stops where the wrap's line feed would scroll, and there the row the
+    /// character lands on is a new, blank one with nothing to move. A
+    /// cursor pending wrap cannot be put back by a cursor movement, only by
+    /// drawing the last column again, which is redrawn as it stands.
+    fn reserve_after_wrap(&mut self, width: usize, row: u16, col: u16) {
+        self.feed(b"\x1b[B");
+        if self.parser.screen().cursor_position().0 == row {
+            return;
+        }
+        self.feed(format!("\x1b[1G\x1b[{width}@\x1b[{}d", row + 1).as_bytes());
+        let (_, cols) = size(self.parser.screen());
+        if col < cols {
+            self.feed(format!("\x1b[{}G", col + 1).as_bytes());
+        } else {
+            self.redraw_last_column(row);
+        }
+    }
+
+    /// Draw the last column of `row` again, as it stands, leaving the cursor
+    /// pending wrap after it — the one way to put a cursor back there.
+    ///
+    /// The cell is drawn in its own attributes, which the two parsers hold
+    /// differently: the shadow's bold, italic and underline are the
+    /// primary's blink, conceal and strikethrough (`emu/shadow.rs`). So each
+    /// parser is handed its own SGR, then its own current attributes back.
+    /// An empty last column — erased while the cursor stood past it — is not
+    /// redrawn, and the cursor is left at the start of the next row: vt100
+    /// marks no wrap past an empty column, so there is none to recreate.
+    fn redraw_last_column(&mut self, row: u16) {
+        let screen = self.parser.screen();
+        let (_, cols) = size(screen);
+        let last = cols - 1;
+        let col = if last > 0
+            && screen
+                .cell(row, last)
+                .is_some_and(::vt100::Cell::is_wide_continuation)
+        {
+            last - 1
+        } else {
+            last
+        };
+        let Some(cell) = screen.cell(row, col).filter(|cell| cell.has_contents()) else {
+            self.feed(format!("\x1b[{}d\x1b[1G", row + 2).as_bytes());
+            return;
+        };
+        let at = format!("\x1b[{}G", col + 1);
+        let contents = cell.contents().to_owned();
+        let primary = format!(
+            "{at}{}{contents}{}",
+            primary_sgr(cell),
+            screen.attributes_formatted()
+        );
+        let shadow = self.shadow.redraw(row, col, &at, &contents);
+        self.parser.process(primary.as_bytes());
+        self.shadow.feed_verbatim(shadow.as_bytes());
+    }
+}
+
+/// U+FE0F as the bytes it arrives in. Its first byte is a UTF-8 lead byte,
+/// never a continuation or an ASCII byte, so matching it at a character
+/// boundary is enough, and no character-set glyph is ever staged from it.
+const VS16_BYTES: &[u8] = "\u{fe0f}".as_bytes();
+
+/// Whether an emoji-presentation selector joining a cell that holds
+/// `contents` makes it two columns wide: vt100's own test, on the contents
+/// it would hold (an empty cell gains a space first). A cell already
+/// holding 18 bytes takes no more characters at all, so nothing widens it.
+fn widens(contents: &str) -> bool {
+    use unicode_width::UnicodeWidthStr as _;
+    let base = if contents.is_empty() { " " } else { contents };
+    contents.len() < 18 && format!("{base}{}", crate::width::VS16).width() > 1
+}
+
+/// The SGR that sets `cell`'s attributes on the primary parser, from a
+/// reset: vt100's own reading of each, so the cell drawn with it is the
+/// cell it was.
+fn primary_sgr(cell: &::vt100::Cell) -> String {
+    let mut sgr = String::from("\x1b[0");
+    let color = |sgr: &mut String, color: ::vt100::Color, base: u8| match color {
+        ::vt100::Color::Default => {}
+        ::vt100::Color::Idx(i) => sgr.push_str(&format!(";{base};5;{i}")),
+        ::vt100::Color::Rgb(r, g, b) => sgr.push_str(&format!(";{base};2;{r};{g};{b}")),
+    };
+    color(&mut sgr, cell.fgcolor(), 38);
+    color(&mut sgr, cell.bgcolor(), 48);
+    for (on, param) in [
+        (cell.bold(), ";1"),
+        (cell.dim(), ";2"),
+        (cell.italic(), ";3"),
+        (cell.underline(), ";4"),
+        (cell.inverse(), ";7"),
+    ] {
+        if on {
+            sgr.push_str(param);
+        }
+    }
+    sgr.push('m');
+    sgr
 }
 
 impl Emulator for Vt100Emulator {
@@ -471,36 +700,28 @@ impl Emulator for Vt100Emulator {
         // it draws instead of being sliced through, and everything else is
         // fed in one go, exactly as before.
         let mut fed = 0;
-        // Where the current run of printable bytes ends while insert mode is
-        // on, so the room is reserved once per run rather than per byte.
+        // Where the bytes a reservation or a selector already accounted for
+        // end, so each character is looked at once.
         let mut run_until = 0;
         for (i, &byte) in bytes.iter().enumerate() {
-            // Insert mode: a printable run pushes the rest of the row right
-            // instead of overwriting it. vt100 does not model IRM, so the
-            // room is reserved with the `ICH` it does dispatch, sized in the
-            // columns the grid will give the run — its own layout, which no
-            // `unicode-width` measure is (#580) — and never past the right
-            // margin (#261). The bytes owed to the grid go first, so the
-            // cursor column the reservation is made at is current.
-            if i >= run_until
-                && self.tracker.insert_mode()
-                && !self.tracker.mid_sequence()
-                && is_printable(byte)
-            {
-                let end = bytes[i..]
-                    .iter()
-                    .position(|&b| !is_printable(b))
-                    .map_or(bytes.len(), |p| i + p);
-                run_until = end;
-                let width = crate::width::columns(&String::from_utf8_lossy(&bytes[i..end]));
-                self.feed_staged(&bytes[fed..i]);
-                fed = i;
-                let screen = self.parser.screen();
-                let (_, col) = screen.cursor_position();
-                let room = usize::from(size(screen).1.saturating_sub(col));
-                let reserve = width.min(room);
-                if reserve > 0 {
-                    self.feed(format!("\x1b[{reserve}@").as_bytes());
+            // A character is handled at the live cursor, with everything
+            // owed to the grid fed first, wherever it falls in the read:
+            // the screen must not depend on where the PTY split the output
+            // (#624). Two kinds need it. The emoji-presentation selector can
+            // widen the cell before it, which vt100 lays out wrong at the
+            // bottom margin (#619) and which insert mode must make room for.
+            // And in insert mode every character pushes the rest of its row
+            // right — see `reserve_insert`.
+            if i >= run_until && !self.tracker.mid_sequence() && is_printable(byte) {
+                if bytes[i..].starts_with(VS16_BYTES) {
+                    self.feed_staged(&bytes[fed..i]);
+                    self.draw_selector();
+                    fed = i + VS16_BYTES.len();
+                    run_until = fed;
+                } else if self.tracker.insert_mode() {
+                    self.feed_staged(&bytes[fed..i]);
+                    fed = i;
+                    run_until = i + self.reserve_insert(&bytes[i..]);
                 }
             }
             // Asked before the step, because whether this byte is a character
@@ -539,6 +760,9 @@ impl Emulator for Vt100Emulator {
                     None
                 }
                 SeqEvent::HardReset => {
+                    // The tracker closed any open update; the frame it
+                    // began is dropped with it (#623).
+                    self.frame_started = None;
                     self.feed_history_reset(&bytes[fed..i], &bytes[i..=i], true);
                     fed = i + 1;
                     None
@@ -546,6 +770,15 @@ impl Emulator for Vt100Emulator {
                 SeqEvent::ScrollbackErased => {
                     self.feed_history_reset(&bytes[fed..i], &bytes[i..=i], false);
                     fed = i + 1;
+                    None
+                }
+                SeqEvent::AlternateScreen => {
+                    // Everything before the final byte goes first, so the
+                    // capture that feed runs reads the main screen's history
+                    // while it is still the one on display (#622). The final
+                    // byte goes with the rest of the read.
+                    self.feed_staged(&bytes[fed..i]);
+                    fed = i;
                     None
                 }
                 SeqEvent::Tabs(op) => {
@@ -654,6 +887,16 @@ impl Emulator for Vt100Emulator {
         )
     }
 
+    fn cursor_position(&self) -> (u16, u16) {
+        // The inherent method, which `snapshot` uses too, so a reply and a
+        // snapshot cannot disagree — #401's clamp included.
+        Vt100Emulator::cursor_position(self)
+    }
+
+    fn size(&self) -> (u16, u16) {
+        size(self.parser.screen())
+    }
+
     fn mid_sequence(&self) -> bool {
         self.tracker.mid_sequence()
     }
@@ -666,11 +909,10 @@ impl Emulator for Vt100Emulator {
         let screen = self.parser.screen();
         InputModes {
             mouse: convert_mouse(screen.mouse_protocol_mode()),
-            mouse_encoding: match screen.mouse_protocol_encoding() {
-                ::vt100::MouseProtocolEncoding::Sgr => MouseEncoding::Sgr,
-                ::vt100::MouseProtocolEncoding::Utf8 => MouseEncoding::Utf8,
-                ::vt100::MouseProtocolEncoding::Default => MouseEncoding::Legacy,
-            },
+            // The tracker's, not vt100's: vt100 does not implement 1015,
+            // and so cannot say when it replaced or cleared the others
+            // (#640).
+            mouse_encoding: self.tracker.mouse_encoding(),
             bracketed_paste: screen.bracketed_paste(),
             application_cursor: screen.application_cursor(),
             focus_events: self.tracker.focus_events(),
@@ -700,14 +942,9 @@ impl Emulator for Vt100Emulator {
             // Tracked by termlens itself, so the state is exact — which is
             // what the honesty rule requires before answering.
             1004 => on(self.tracker.focus_events()),
-            1006 => on(matches!(
-                screen.mouse_protocol_encoding(),
-                ::vt100::MouseProtocolEncoding::Sgr
-            )),
-            1005 => on(matches!(
-                screen.mouse_protocol_encoding(),
-                ::vt100::MouseProtocolEncoding::Utf8
-            )),
+            1005 => on(self.tracker.mouse_encoding() == MouseEncoding::Utf8),
+            1006 => on(self.tracker.mouse_encoding() == MouseEncoding::Sgr),
+            1015 => on(self.tracker.mouse_encoding() == MouseEncoding::Urxvt),
             // The mouse tracking modes, each on its own evidence: the
             // tracker keeps the set the application asked for (#151). vt100
             // collapses the four into one value, so before this a probe for
@@ -730,11 +967,31 @@ impl Emulator for Vt100Emulator {
     }
 
     fn set_size(&mut self, rows: u16, cols: u16) {
-        self.parser.screen_mut().set_size(nz(rows), nz(cols));
-        self.shadow.set_size(rows, cols);
+        // Height and width are applied one at a time, in the order that has
+        // the rows a shorter screen pushes into history copied at the width
+        // they were pushed at. Reading a history row narrower than the
+        // screen makes vt100 widen it, and widening clears its wrap flag —
+        // so a row pushed by a wider, shorter resize lost its soft wrap the
+        // moment it was copied, and came back unwrapped when a taller
+        // screen pulled it onto the grid again (#620). Pushing first and
+        // widening after is vt100's own order inside one resize, so the
+        // grid ends the same; a taller screen goes the other way round,
+        // width first, so the rows it pulls back are cut to the new width
+        // and not to the old one. Only the height moves rows into or out of
+        // history, so only it is followed by a capture: at the retention
+        // bound a capture re-reads the whole history, at whatever width the
+        // screen then has.
+        let (old_rows, old_cols) = size(self.parser.screen());
+        if rows < old_rows {
+            self.resize_grids(rows, old_cols);
+            self.capture_scrolled_rows();
+            self.resize_grids(rows, cols);
+        } else {
+            self.resize_grids(old_rows, cols);
+            self.resize_grids(rows, cols);
+            self.capture_scrolled_rows();
+        }
         self.tracker.set_cols(cols);
-        // A resize can push rows into history on its own.
-        self.capture_scrolled_rows();
     }
 }
 
@@ -1187,6 +1444,70 @@ mod tests {
         assert!(!emu.in_sync_update());
     }
 
+    /// urxvt mouse mode is honoured, so DECRQM can answer for it, and the
+    /// encodings vt100 does know are answered from the same record: after
+    /// `?1006h ?1015h ?1015l` xterm is back on the legacy form, where vt100
+    /// alone still said SGR (#640).
+    #[test]
+    fn the_urxvt_mouse_encoding_is_tracked_and_reported() {
+        let emu = emu_with(b"\x1b[?1000h\x1b[?1015h");
+        assert_eq!(emu.input_modes().mouse_encoding, MouseEncoding::Urxvt);
+        assert_eq!(emu.mode_state(1015), ModeState::Set);
+        assert_eq!(emu.mode_state(1006), ModeState::Reset);
+
+        let emu = emu_with(b"\x1b[?1006h\x1b[?1015h\x1b[?1015l");
+        assert_eq!(emu.input_modes().mouse_encoding, MouseEncoding::Legacy);
+        assert_eq!(emu.mode_state(1015), ModeState::Reset);
+        assert_eq!(emu.mode_state(1006), ModeState::Reset);
+    }
+
+    /// After RIS, DECRQM, the input path and the frame clock all agree that
+    /// focus reporting is off and no update is open (#623).
+    #[test]
+    fn a_hard_reset_reports_focus_and_synchronized_output_reset() {
+        let mut emu = emu_with(b"\x1b[?1004h\x1b[?2026hhalf");
+        assert_eq!(emu.mode_state(1004), ModeState::Set);
+        assert_eq!(emu.mode_state(2026), ModeState::Set);
+        feed_all(&mut emu, b"\x1bcREADY");
+        assert_eq!(emu.mode_state(1004), ModeState::Reset);
+        assert_eq!(emu.mode_state(2026), ModeState::Reset);
+        assert!(!emu.input_modes().focus_events);
+        assert!(!emu.in_sync_update());
+        assert!(
+            emu.frame_started.is_none(),
+            "the half-drawn frame is dropped"
+        );
+        assert_eq!(emu.snapshot().row_text(0).trim_end(), "READY");
+    }
+
+    /// The grid and the tracker stay in step across a control inside an
+    /// escape (#627). The CR runs and the escape goes on, so the first `q`
+    /// ends it and the rest draw in the designated line art; before, the
+    /// tracker staged them as UTF-8 that vte swallowed inside the escape,
+    /// and the screen came out blank. And the query after a BEL there is
+    /// one the grid's parser runs, so it must be one the responder sees.
+    #[test]
+    fn a_control_inside_an_escape_keeps_the_grid_and_the_tracker_in_step() {
+        let emu = emu_with(b"\x1b(0\x1b\rqqqq\r\nxx");
+        assert_eq!(
+            emu.snapshot().text(),
+            "\u{2500}\u{2500}\u{2500}\n\u{2502}\u{2502}\n\n"
+        );
+
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+        let processed = emu.process(b"\x1b\x07[6nafter");
+        assert_eq!(
+            processed.stop,
+            Some(Stop::Query(super::super::Query::CursorPosition {
+                private: false
+            }))
+        );
+        feed_all(&mut emu, &b"\x1b\x07[6nafter"[processed.consumed..]);
+        let s = emu.snapshot();
+        assert_eq!(s.bells(), 1);
+        assert_eq!(s.row_text(0).trim_end(), "after");
+    }
+
     #[test]
     fn snapshot_carries_out_of_band_terminal_state() {
         let emu = emu_with(b"\x1b]0;my app\x07\x1b[?1049h\x1b[?2004h\x1b[?1h\x1b[?1002h");
@@ -1329,6 +1650,24 @@ mod tests {
     }
 
     #[test]
+    fn rows_that_scroll_in_the_read_that_enters_the_alternate_screen_are_kept() {
+        // Lines that scroll off and the switch to the alternate screen in
+        // one write, as a full-screen program that starts right after
+        // printing writes them. The capture ran once, after the whole feed,
+        // with the alternate screen up, so it copied nothing — and a reset
+        // before the main screen came back lost the rows for good (#622).
+        for mode in ["47", "1047", "1049"] {
+            for after in ["", "\x1bc"] {
+                let stream = format!("l1\r\nl2\r\nl3\r\nl4\r\nl5\x1b[?{mode}hTUI{after}");
+                let (whole, bytewise) = whole_and_bytewise(3, 10, 100, stream.as_bytes());
+                let label = format!("?{mode}h then {after:?}");
+                assert_eq!(whole.snapshot().scrollback_text(), "l1\nl2", "{label}");
+                assert_eq!(observed(&whole), observed(&bytewise), "{label}");
+            }
+        }
+    }
+
+    #[test]
     fn a_taller_screen_takes_its_rows_back_from_history() {
         // vt100 0.18 resizes as xterm does: a shorter screen with the cursor
         // on its last row pushes rows into history, and a taller one pulls
@@ -1375,6 +1714,55 @@ mod tests {
     }
 
     #[test]
+    fn a_resize_round_trip_keeps_a_soft_wrap_and_the_shadow_in_step() {
+        // Wider and shorter, then back: the rows the first resize pushes
+        // into history are narrower than the screen, and reading them made
+        // vt100 widen them and clear their wrap flags — in the primary
+        // only, without styled history, so the second resize pulled
+        // different rows back into the two grids and the lockstep
+        // assertion fired; and with both moved, the soft wrap was gone
+        // (#620).
+        //
+        // A history at its retention bound is re-read whole on every
+        // capture, so the second case holds only as long as the resize
+        // alone captures at the width the rows were pushed at.
+        for (styled, scrollback, before) in [
+            (false, 100, ""),
+            (true, 100, ""),
+            (false, 3, "x1\r\nx2\r\nx3\r\nx4\r\n"),
+        ] {
+            let mut emu =
+                Vt100Emulator::new(6, 10, scrollback, crate::graphics::DEFAULT_CAPTURE, styled);
+            feed_all(
+                &mut emu,
+                format!("{before}l1\r\nl2\r\nAAAAAAAAAABBBBB\r\nl4\r\nREADY").as_bytes(),
+            );
+            assert!(emu.snapshot().row_wrapped(2), "styled history {styled}");
+            emu.set_size(3, 20);
+            let s = emu.snapshot();
+            assert_eq!(
+                s.scrollback_text(),
+                "l1\nl2\nAAAAAAAAAA",
+                "styled history {styled}"
+            );
+            assert_eq!(s.text(), "BBBBB\nl4\nREADY", "styled history {styled}");
+            emu.set_size(6, 10);
+            let s = emu.snapshot();
+            assert_eq!(
+                s.text(),
+                "l1\nl2\nAAAAAAAAAA\nBBBBB\nl4\nREADY",
+                "styled history {styled}"
+            );
+            assert!(s.row_wrapped(2), "styled history {styled}: {s}");
+            assert_eq!(
+                s.logical_text(),
+                "l1\nl2\nAAAAAAAAAABBBBB\nl4\nREADY",
+                "styled history {styled}"
+            );
+        }
+    }
+
+    #[test]
     fn a_resize_while_the_alternate_screen_is_up_is_settled_on_return() {
         // The resize reaches the main screen's grid too, out of sight: rows
         // come back out of its history while the alternate screen is shown,
@@ -1412,6 +1800,26 @@ mod tests {
                 "split at {split}"
             );
             assert_eq!(s.text(), "3\n4\n5\n6", "split at {split}");
+        }
+    }
+
+    /// DECSED 3 and the sub-parameter form erase vt100's history exactly as
+    /// `CSI 3 J` does, and keep termlens's copy exactly as it does: before
+    /// #621 the tracker missed both, read the emptied history as rows pulled
+    /// back onto the screen, and popped the copy.
+    #[test]
+    fn every_spelling_of_erase_saved_lines_keeps_the_copy() {
+        for erase in [&b"\x1b[3J"[..], b"\x1b[?3J", b"\x1b[3:1J"] {
+            let mut emu = Vt100Emulator::new(3, 10, 100, crate::graphics::DEFAULT_CAPTURE, false);
+            feed_all(&mut emu, b"l1\r\nl2\r\nl3\r\nl4\r\nl5");
+            feed_all(&mut emu, erase);
+            let s = emu.snapshot();
+            let erase = String::from_utf8_lossy(erase);
+            assert_eq!(s.scrollback_text(), "l1\nl2", "{erase:?}");
+            assert_eq!(s.text(), "l3\nl4\nl5", "{erase:?}");
+            // And the mark starts over: what scrolls next is copied once.
+            feed_all(&mut emu, b"\r\nl6");
+            assert_eq!(emu.snapshot().scrollback_text(), "l1\nl2\nl3", "{erase:?}");
         }
     }
 
@@ -1886,5 +2294,264 @@ mod tests {
         let s = wide_emu(b"\x1b[5m\x1b[4G\x1bH\x1b[1Ga\tb\x1b[0m").snapshot();
         assert_eq!(s.find("b"), Some((0, 3)));
         assert!(s.cell(0, 3).unwrap().style().blink, "{s}");
+    }
+
+    /// The text, the cells, the cursor, the wrap flags and the history.
+    type Observed = (String, Vec<Cell>, (u16, u16, bool), Vec<bool>, String);
+
+    /// Everything a snapshot shows, as one comparable value.
+    fn observed(emu: &Vt100Emulator) -> Observed {
+        let s = emu.snapshot();
+        let (cols, rows) = s.size();
+        let cells = (0..rows)
+            .flat_map(|row| (0..cols).map(move |col| (row, col)))
+            .map(|(row, col)| s.cell(row, col).unwrap().clone())
+            .collect();
+        let wrapped = (0..rows).map(|row| s.row_wrapped(row)).collect();
+        (s.text(), cells, s.cursor(), wrapped, s.scrollback_text())
+    }
+
+    /// `bytes` fed whole, and again one byte at a time: a screen must not
+    /// depend on where the PTY split the output.
+    fn whole_and_bytewise(
+        rows: u16,
+        cols: u16,
+        scrollback: usize,
+        bytes: &[u8],
+    ) -> (Vt100Emulator, Vt100Emulator) {
+        let mut whole = Vt100Emulator::new(
+            rows,
+            cols,
+            scrollback,
+            crate::graphics::DEFAULT_CAPTURE,
+            false,
+        );
+        feed_all(&mut whole, bytes);
+        let mut bytewise = Vt100Emulator::new(
+            rows,
+            cols,
+            scrollback,
+            crate::graphics::DEFAULT_CAPTURE,
+            false,
+        );
+        // Split on character boundaries only, as the reader's UTF-8
+        // sanitizer hands them over.
+        let text = std::str::from_utf8(bytes).expect("test streams are UTF-8");
+        let mut buf = [0; 4];
+        for ch in text.chars() {
+            feed_all(&mut bytewise, ch.encode_utf8(&mut buf).as_bytes());
+        }
+        (whole, bytewise)
+    }
+
+    #[test]
+    fn a_selector_widened_emoji_at_the_bottom_right_moves_to_the_new_bottom_row() {
+        // `⚠` lands in the last column of the bottom row, and its selector
+        // widens it to two: it no longer fits, so it moves to the start of
+        // the next row, which here is a new one scrolled in. vt100 0.18.1
+        // took the cell to move before the scroll and moved a blank one,
+        // leaving `⚠️` wide in the last column of the row above — which the
+        // next write over it panicked on (#619).
+        let status = format!("\x1b[4;1H{:>19}\u{26a0}\u{fe0f}", "warn");
+        for styled in [false, true] {
+            let mut emu = Vt100Emulator::new(4, 20, 100, crate::graphics::DEFAULT_CAPTURE, styled);
+            feed_all(&mut emu, status.as_bytes());
+            let s = emu.snapshot();
+            assert_eq!(s.row_text(2).trim_end(), format!("{:>19}", "warn"), "{s}");
+            assert_eq!(s.row_text(3).trim_end(), "\u{26a0}\u{fe0f}", "{s}");
+            assert!(s.cell(3, 0).unwrap().is_wide(), "{s}");
+            assert!(s.cell(3, 1).unwrap().is_wide_continuation(), "{s}");
+            assert!(!s.cell(2, 19).unwrap().is_wide(), "{s}");
+            assert_eq!(s.cursor(), (3, 2, true));
+            // The redraw that panicked: one row up, over the whole row.
+            feed_all(&mut emu, format!("\x1b[A\r{:<20}", "redrawn").as_bytes());
+            let s = emu.snapshot();
+            assert_eq!(s.row_text(2).trim_end(), "redrawn", "{s}");
+            assert_eq!(s.row_text(3).trim_end(), "\u{26a0}\u{fe0f}", "{s}");
+        }
+        // Without the redraw, on the issue's 9x5: the row above keeps its
+        // nine columns, and the emoji and what follows it are on the new row.
+        let emu = emu_with_size(5, 9, "\x1b[5;9H\u{26a0}\u{fe0f}X".as_bytes());
+        let s = emu.snapshot();
+        assert_eq!(s.row_text(3), " ".repeat(9), "{s}");
+        assert_eq!(s.row_text(4).trim_end(), "\u{26a0}\u{fe0f}X", "{s}");
+        assert_eq!(s.find("X"), Some((4, 2)), "{s}");
+        // Inside a scroll region the rows outside it stay put.
+        let emu = emu_with_size(
+            5,
+            9,
+            "\x1b[5;1Hfoot\x1b[2;4r\x1b[4;9H\u{26a0}\u{fe0f}X".as_bytes(),
+        );
+        let s = emu.snapshot();
+        assert_eq!(s.row_text(2), " ".repeat(9), "{s}");
+        assert_eq!(s.row_text(3).trim_end(), "\u{26a0}\u{fe0f}X", "{s}");
+        assert_eq!(s.row_text(4).trim_end(), "foot", "{s}");
+    }
+
+    #[test]
+    fn a_selector_in_the_last_column_lays_out_the_same_however_it_is_split() {
+        // The bottom-right case and the one a row higher, where vt100 was
+        // already right, whole and a character at a time.
+        for at in ["\x1b[4;20H", "\x1b[2;20H"] {
+            let stream = format!("{at}\u{26a0}\u{fe0f}after\x1b[A\r{:<20}", "over");
+            let (whole, bytewise) = whole_and_bytewise(4, 20, 100, stream.as_bytes());
+            assert_eq!(observed(&whole), observed(&bytewise), "{at:?}");
+        }
+    }
+
+    #[test]
+    fn a_selector_moved_off_the_last_column_lands_where_vt100_puts_it() {
+        // Where the row does not scroll vt100 already moved the emoji
+        // right, and termlens now moves it itself: the result must be
+        // vt100's own, cell for cell, wrap flags and cursor included — over
+        // a wide character, too, whose second half the emoji lands on.
+        for stream in [
+            "\x1b[2;20H\u{26a0}\u{fe0f}X",
+            "\x1b[3;1H\u{6f22}bc\x1b[2;1H0123456789012345678\u{2764}\u{fe0f}",
+            "\x1b[44m\x1b[1;20Ha\u{301}\u{fe0f}\u{26a0}\x1b[0m\u{fe0f}",
+            "\x1b[44m\x1b[2;20H\u{26a0}\x1b[31m\u{fe0f}",
+        ] {
+            let mut raw = ::vt100::Parser::new(nz(4), nz(20), 0);
+            raw.process(stream.as_bytes());
+            let emu = emu_with_size(4, 20, stream.as_bytes());
+            let ours = emu.parser.screen();
+            assert_eq!(ours.contents(), raw.screen().contents(), "{stream:?}");
+            assert_eq!(
+                ours.cursor_position(),
+                raw.screen().cursor_position(),
+                "{stream:?}"
+            );
+            for row in 0..4 {
+                assert_eq!(
+                    ours.row_wrapped(row),
+                    raw.screen().row_wrapped(row),
+                    "{stream:?}"
+                );
+                for col in 0..20 {
+                    assert_eq!(
+                        ours.cell(row, col),
+                        raw.screen().cell(row, col),
+                        "{stream:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn insert_mode_lays_out_the_same_however_the_input_is_split() {
+        // The issue's two streams on a 2x5 grid (#624), and the shapes
+        // around them. A run that reaches the right margin wraps and pushes
+        // the next row right, as xterm does, rather than overwriting it.
+        for (stream, expected) in [
+            ("\x1b[2;1H12345\x1b[1;4H\x1b[4hXYZW", "   XY\nZW123"),
+            ("XYZ\x1b[H\x1b[4h\u{26a0}\u{fe0f}", "\u{26a0}\u{fe0f}XYZ\n"),
+            // A wide character that does not fit in the last column.
+            ("\x1b[2;1H12345\x1b[1;5H\x1b[4h\u{6f22}", "\n\u{6f22}123"),
+            // The bottom row: the wrap scrolls, and the new row is blank.
+            ("\x1b[2;1H12345\x1b[2;4H\x1b[4hXYZ", "123XY\nZ"),
+            // A selector widening the last column's emoji in insert mode.
+            (
+                "\x1b[2;1H12345\x1b[1;5H\x1b[4h\u{26a0}\u{fe0f}",
+                "\n\u{26a0}\u{fe0f}123",
+            ),
+        ] {
+            let (whole, bytewise) = whole_and_bytewise(2, 5, 0, stream.as_bytes());
+            assert_eq!(whole.snapshot().text(), expected, "{stream:?} whole");
+            assert_eq!(observed(&whole), observed(&bytewise), "{stream:?}");
+        }
+    }
+
+    #[test]
+    fn an_inserted_character_that_wraps_keeps_the_row_marked_wrapped() {
+        // The wrap stays vt100's, so the row it leaves is marked as a soft
+        // wrap and `logical_text` joins the two — the last column is
+        // redrawn in its own attributes to put the cursor back past it,
+        // and both parsers keep theirs (blink lives in the shadow).
+        let emu = emu_with_size(
+            3,
+            5,
+            b"\x1b[2;1Habcde\x1b[1;1H\x1b[31m123\x1b[5;1m45\x1b[0;32m\x1b[4hXY",
+        );
+        let s = emu.snapshot();
+        // `de` is pushed off the end of its row, as `ICH` pushes it.
+        assert_eq!(s.text(), "12345\nXYabc\n", "{s}");
+        assert!(s.row_wrapped(0), "{s}");
+        assert!(s.logical_text().starts_with("12345XYabc\n"), "{s}");
+        let five = *s.cell(0, 4).unwrap().style();
+        assert!(
+            five.blink && five.bold && five.fg == Color::Indexed(1),
+            "{five:?}"
+        );
+        // The application's own attributes carry on after the redraw.
+        let x = *s.cell(1, 0).unwrap().style();
+        assert!(!x.blink && !x.bold && x.fg == Color::Indexed(2), "{x:?}");
+    }
+
+    #[test]
+    fn wide_characters_selectors_and_insert_mode_never_depend_on_the_split() {
+        // A seeded sweep over the shapes #619 and #624 came from: emoji with
+        // and without selectors, wide and combining characters, insert mode
+        // on and off, scroll regions, origin mode and cursor movement, the
+        // alternate screen and resets, on small grids where everything
+        // reaches a margin. Each stream must neither panic nor lay out —
+        // or keep its history — differently fed a character at a time.
+        const PIECES: &[&str] = &[
+            "a",
+            "bc",
+            "\u{6f22}",
+            "\u{26a0}",
+            "\u{fe0f}",
+            "\u{26a0}\u{fe0f}",
+            "\u{301}",
+            "\u{2764}",
+            "\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}",
+            "\r",
+            "\n",
+            "\x1b[A",
+            "\x1b[B",
+            "\x1b[C",
+            "\x1b[H",
+            "\x1b[4h",
+            "\x1b[4l",
+            "\x1b[2;3r",
+            "\x1b[r",
+            "\x1b[?6h",
+            "\x1b[?6l",
+            "\x1b[K",
+            "\x1b[1K",
+            "\x1b[@",
+            "\x1b[P",
+            "\x1b[3;5H",
+            "\x1b[1;99H",
+            "\x1b[99;1H",
+            "\x1b[99;99H",
+            "\x1b[5m",
+            "\x1b[31;1m",
+            "\x1b[0m",
+            "\x1b[2b",
+            "\x1b[?1049h",
+            "\x1b[?1049l",
+            "\x1b[?47h",
+            "\x1b[?47l",
+            "\x1bc",
+        ];
+        let mut seed: u64 = 0x5eed_0619_0624;
+        let mut next = move |n: usize| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(seed >> 33).unwrap() % n
+        };
+        for case in 0..3000 {
+            let (rows, cols) = [(2, 5), (3, 4), (4, 7)][case % 3];
+            let stream: String = (0..24).map(|_| PIECES[next(PIECES.len())]).collect();
+            let (whole, bytewise) = whole_and_bytewise(rows, cols, 10, stream.as_bytes());
+            assert_eq!(
+                observed(&whole),
+                observed(&bytewise),
+                "case {case}: {stream:?}"
+            );
+        }
     }
 }

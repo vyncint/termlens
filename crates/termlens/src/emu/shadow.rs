@@ -145,6 +145,35 @@ impl AttrShadow {
         self.parser.process(&shadowed);
     }
 
+    /// The bytes that draw `contents` with the cursor moved by `at`, in the
+    /// attributes the shadow's cell `(row, col)` holds now, then set the
+    /// shadow's current attributes back — the shadow's half of redrawing a
+    /// cell as it stands. Its carriers are its only attributes, since every
+    /// other SGR parameter is dropped on the way in.
+    pub(super) fn redraw(&self, row: u16, col: u16, at: &str, contents: &str) -> String {
+        let screen = self.parser.screen();
+        let mut sgr = String::from("\x1b[0");
+        if let Some(cell) = screen.cell(row, col) {
+            for (on, param) in [
+                (cell.bold(), ";1"),
+                (cell.italic(), ";3"),
+                (cell.underline(), ";4"),
+            ] {
+                if on {
+                    sgr.push_str(param);
+                }
+            }
+        }
+        sgr.push('m');
+        format!("{at}{sgr}{contents}{}", screen.attributes_formatted())
+    }
+
+    /// Feed bytes already in the shadow's own form, carriers and all, past
+    /// the rewrite: what [`redraw`](Self::redraw) builds.
+    pub(super) fn feed_verbatim(&mut self, bytes: &[u8]) {
+        self.parser.process(bytes);
+    }
+
     /// The shadow form of `bytes`: identical except that complete plain SGR
     /// sequences are replaced by their carrier form. Held-back bytes carry
     /// over to the next call, so a sequence split across chunks is neither
