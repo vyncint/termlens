@@ -40,6 +40,11 @@ reads that marker.
   `<rect>`. The span now carries the foreground blended 60% over the
   background, the colour the SVG's text composites to, so the two
   renderings paint the same picture.
+- `Recording::to_asciicast` places each frame's cursor (#646). An event
+  repainted the grid and wrote nothing for the cursor, so `asciinema play`
+  and `agg` drew a visible cursor after the last row of every frame, even
+  for a program that had hidden it. Each event now ends by moving the
+  cursor to where the test saw it and showing or hiding it as it was.
 
 ## [0.11.7] - 2026-10-27
 
