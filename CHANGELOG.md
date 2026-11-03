@@ -17,6 +17,43 @@ reads that marker.
 
 ## [Unreleased]
 
+### Changed
+
+- Insert mode (`CSI 4 h`) reserves room a character at a time, at the
+  cursor, so the screen no longer depends on where the PTY split the output
+  (#624). A run that reached the right margin wrapped onto the next row over
+  its text when it arrived in one read, and pushed that row right from its
+  second character when it arrived in pieces; now the next row is pushed
+  right from the first character, as xterm does, which removes the
+  exception `docs/LIMITATIONS.md` documented. An emoji-presentation
+  selector that arrives in a read of its own reserves the column it widens
+  the emoji into, where it used to overwrite the next character. A test
+  that asserted the overwritten row should assert the pushed one.
+
+### Fixed
+
+- An emoji with a presentation selector (`⚠️`, `❤️`) drawn into the
+  bottom-right cell no longer panics the emulator when the row is redrawn
+  (#619). vt100 0.18.1 moved the wrong cell to the new bottom row and left
+  the emoji wide in the last column of the row above, where the next write
+  over it panicked on the reader thread and the screen stopped advancing.
+  termlens now moves the emoji itself, to the start of the new row, as
+  xterm does.
+- A resize round trip over a soft-wrapped line no longer makes the attribute
+  shadow diverge from the grid (#620). Copying the rows a wider, shorter
+  screen pushed into history widened them and cleared their wrap flags, in
+  the primary grid only unless styled history was on, so the resize back
+  pulled different rows into the two and a debug build panicked on the next
+  snapshot; with both moved, `row_wrapped` turned false and `logical_text()`
+  split the line. A history at its retention bound is still re-read whole
+  on the next output, and a row narrower than the screen loses its wrap
+  flag then.
+- Rows that scroll off in the same read that switches to the alternate
+  screen (`CSI ? 1049 h`, `? 47 h`, `? 1047 h`) are in `scrollback_text()`
+  while the alternate screen is up, and survive a reset before it comes
+  down (#622). They were copied only once the main screen was back, and a
+  RIS before that lost them for good.
+
 ## [0.11.7] - 2026-10-27
 
 ### Changed
