@@ -2,6 +2,14 @@ name: CI
 
 on:
   pull_request:
+    # labeled and unlabeled because the semver gate's release type follows
+    # the `breaking` label, and the default types (opened, synchronize,
+    # reopened) never fire when a maintainer applies it, so the documented
+    # flow worked only when the label came with the pull request (#655).
+    # Any label change re-runs the whole workflow: a run that skipped the
+    # other jobs would leave required-green red, or, taught to accept the
+    # skips, green on a run that checked nothing.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches: [main]
   # Reused by release.yml so a release re-runs the exact same gates.
@@ -10,8 +18,14 @@ on:
 permissions:
   contents: read
 
+# One group per commit on main. A group holds one pending run, and GitHub
+# cancels the pending one when another queues, cancel-in-progress or not:
+# merges that landed close together left commits on main with no CI run of
+# their own (#656), and the semver gate's push check, which compares a
+# commit with the one before it, then compared against a commit nobody had
+# checked. A pull request keeps one group, so a push supersedes its last.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -305,6 +319,9 @@ jobs:
   semver:
     name: semver
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # the `breaking` label, read when the job runs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -319,9 +336,23 @@ jobs:
         with:
           tool: cargo-semver-checks
       - run: tools/semver-gate-selftest/run.sh
+      # The label as it is now rather than as the event recorded it: a
+      # re-run replays the event, so an old run re-run after the label came
+      # off still passed under `major` (#655). Off a pull request there is
+      # no label, and check-semver.sh reads an unset BREAKING_LABEL as false.
+      - name: Read the breaking label as it is now
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          labels="$(gh api --paginate "repos/${REPO}/issues/${PR}/labels" --jq '.[].name')"
+          if printf '%s\n' "$labels" | grep -qx breaking; then breaking=true; else breaking=false; fi
+          echo "BREAKING_LABEL=${breaking}"
+          echo "BREAKING_LABEL=${breaking}" >> "$GITHUB_ENV"
       - run: .github/scripts/check-semver.sh 0.11.7
         env:
-          BREAKING_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'breaking') }}
           # The commit this change lands on: a pull request's base, or the
           # commit a push to main moved from. A push that creates its ref
           # reports forty zeros, which the script reads as no base; that is

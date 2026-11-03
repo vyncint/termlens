@@ -20,9 +20,13 @@ on:
 permissions:
   contents: read
 
+# One group per commit on main, and nothing on main cancelled: a push that
+# landed while the last one was still being checked cancelled that check,
+# and a group's pending run is dropped when another queues (#656). A pull
+# request keeps one group, so a push supersedes its last.
 concurrency:
-  group: commit-policy-${{ github.ref }}
-  cancel-in-progress: true
+  group: commit-policy-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   commit-policy:
