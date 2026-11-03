@@ -1655,8 +1655,9 @@ impl Screen {
         let Ok(extra) = u16::try_from(segments.len() - 1) else {
             return;
         };
-        self.for_each_multirow_match(&segments, |row| {
-            let (first_line, cols) = self.searchable_row(row);
+        let rows = self.searchable_rows();
+        self.for_each_multirow_match(&rows, &segments, |row| {
+            let (first_line, cols) = &rows[usize::from(row)];
             let first = first_line.trim_end();
             // The needle's first character: on this row for a non-empty
             // first segment, else the first character after the leading
@@ -1688,29 +1689,42 @@ impl Screen {
     /// [`mask_matching`](Self::mask_matching) — so they cannot disagree
     /// about what matched, which is exactly how a mask came to leave a
     /// needle `find_all` reported (#300).
-    fn for_each_multirow_match(&self, segments: &[&str], mut visit: impl FnMut(u16) -> bool) {
+    ///
+    /// `rows` is [`searchable_rows`](Self::searchable_rows), built once per
+    /// call and shared with the caller, which needs the column maps. Each
+    /// row used to be rebuilt for every candidate start row it was compared
+    /// from, so the cost grew with the needle's height times the screen's
+    /// (#647). The whole rows in the middle of the needle are found with
+    /// one KMP pass over the rows, each row a symbol, so a tall needle over
+    /// rows that nearly match costs a pass rather than a comparison per row
+    /// per candidate.
+    fn for_each_multirow_match(
+        &self,
+        rows: &[(String, Vec<u16>)],
+        segments: &[&str],
+        mut visit: impl FnMut(u16) -> bool,
+    ) {
         let Ok(extra) = u16::try_from(segments.len().saturating_sub(1)) else {
             return;
         };
         let Some(last_start) = self.rows.checked_sub(extra) else {
             return;
         };
+        if extra == 0 {
+            // A needle with no newline is not a multi-row needle; the
+            // callers never pass one, and `row += extra` would not advance.
+            return;
+        }
+        let lines: Vec<&str> = rows.iter().map(|(text, _)| text.trim_end()).collect();
+        let (first, last) = (segments[0], segments[usize::from(extra)]);
+        let middle = whole_rows_at(&lines, &segments[1..usize::from(extra)]);
         let mut row = 0;
         while row < last_start {
-            let (first_line, _) = self.searchable_row(row);
-            let first = first_line.trim_end();
-            let tail_matches = || {
-                segments[1..].iter().enumerate().all(|(i, seg)| {
-                    let (line, _) = self.searchable_row(row + 1 + i as u16);
-                    let line = line.trim_end();
-                    if i as u16 == extra - 1 {
-                        line.starts_with(seg) // last segment: prefix
-                    } else {
-                        line == *seg // middle segments: whole rows
-                    }
-                })
-            };
-            if !first.ends_with(segments[0]) || !tail_matches() {
+            let at = usize::from(row);
+            let matched = lines[at].ends_with(first) // first segment: suffix
+                && middle[at + 1] // middle segments: whole rows
+                && lines[at + usize::from(extra)].starts_with(last); // last: prefix
+            if !matched {
                 row += 1;
                 continue;
             }
@@ -1811,10 +1825,11 @@ impl Screen {
         };
         let width = usize::from(self.cols);
         let mut hits = vec![false; self.cells.len()];
-        self.for_each_multirow_match(&segments, |row| {
+        let rows = self.searchable_rows();
+        self.for_each_multirow_match(&rows, &segments, |row| {
             for (index, segment) in segments.iter().enumerate() {
                 let at = row + index as u16;
-                let (text, cols) = self.searchable_row(at);
+                let (text, cols) = &rows[usize::from(at)];
                 let line = text.trim_end();
                 // The same shape the matcher just checked: the first segment
                 // ends its row, the last starts one, the rest are whole rows.
@@ -2078,6 +2093,8 @@ impl Screen {
     /// whole screen, a pass over every cell, on each row visited is what
     /// made every search quadratic (#584).
     fn searchable_row(&self, row: u16) -> (String, Vec<u16>) {
+        #[cfg(test)]
+        search_work::tick();
         let mut text = String::with_capacity(usize::from(self.cols));
         let mut cols = Vec::with_capacity(usize::from(self.cols));
         for col in 0..self.cols {
@@ -2100,6 +2117,13 @@ impl Screen {
         // the last column instead of falling off the map.
         cols.push(self.cols.saturating_sub(1));
         (text, cols)
+    }
+
+    /// Every row's [`searchable_row`](Self::searchable_row), top to bottom:
+    /// built once for a multi-row search, which reads each row from many
+    /// candidate starts (#647).
+    fn searchable_rows(&self) -> Vec<(String, Vec<u16>)> {
+        (0..self.rows).map(|row| self.searchable_row(row)).collect()
     }
 
     /// This screen rendered **with its styles**: the normal
@@ -2261,6 +2285,73 @@ fn clamp_range(range: &impl RangeBounds<u16>, len: u16, axis: &str, caller: &str
         "{caller}: {axis} range starts at {start} but ends at {end}"
     );
     (start.min(len), end.min(len))
+}
+
+/// `at[p]` is whether `lines[p..p + pattern.len()]` equals `pattern` row for
+/// row, for every `p` up to `lines.len()` inclusive (an empty pattern is
+/// found everywhere). Knuth–Morris–Pratt with a row as the symbol, so it
+/// makes at most about `2 * (lines.len() + pattern.len())` row comparisons
+/// however often the rows nearly match (#647).
+fn whole_rows_at(lines: &[&str], pattern: &[&str]) -> Vec<bool> {
+    let mut at = vec![pattern.is_empty(); lines.len() + 1];
+    if pattern.is_empty() {
+        return at;
+    }
+    let same = |a: &str, b: &str| {
+        #[cfg(test)]
+        search_work::tick();
+        a == b
+    };
+    // `fail[i]`: the length of the longest proper prefix of
+    // `pattern[..=i]` that is also its suffix.
+    let mut fail = vec![0; pattern.len()];
+    let mut k = 0;
+    for i in 1..pattern.len() {
+        while k > 0 && !same(pattern[i], pattern[k]) {
+            k = fail[k - 1];
+        }
+        if same(pattern[i], pattern[k]) {
+            k += 1;
+        }
+        fail[i] = k;
+    }
+    let mut k = 0;
+    for (i, line) in lines.iter().enumerate() {
+        while k > 0 && !same(line, pattern[k]) {
+            k = fail[k - 1];
+        }
+        if same(line, pattern[k]) {
+            k += 1;
+        }
+        if k == pattern.len() {
+            at[i + 1 - k] = true;
+            k = fail[k - 1];
+        }
+    }
+    at
+}
+
+/// A count of the work a search does — rows built and rows compared — for
+/// the unit tests that hold multi-row search to linear cost (#647). A
+/// count, not a clock, so the bound holds on any machine.
+#[cfg(test)]
+mod search_work {
+    use std::cell::Cell;
+
+    thread_local! {
+        static WORK: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn tick() {
+        WORK.with(|w| w.set(w.get() + 1));
+    }
+
+    /// The work `f` did on this thread.
+    pub(super) fn of<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        let before = WORK.with(Cell::get);
+        let out = f();
+        (out, WORK.with(Cell::get) - before)
+    }
 }
 
 impl Style {
@@ -2646,6 +2737,57 @@ mod tests {
         assert_eq!(s.rect_text(8..99, ..1), "89");
         assert_eq!(s.rect_text(.., 1..99), "abcdefghij\nxyz");
         assert_eq!(s.rect_text(5..5, ..), "\n\n"); // empty but not inverted
+    }
+
+    /// A multi-row search does work linear in the screen and the needle,
+    /// however tall the needle (#647). It rebuilt every row it compared,
+    /// for every candidate start row, so on rows of `a` the needle
+    /// `"a\n" * k + "b"` cost rows x k row builds where `contains` costs one
+    /// pass. Counted, not timed: rows built plus rows compared.
+    #[test]
+    fn a_multi_row_search_costs_work_linear_in_the_screen_and_the_needle() {
+        const ROWS: u16 = 1000;
+        let mut lines = vec!["a"; usize::from(ROWS)];
+        lines[usize::from(ROWS) - 1] = "b";
+        let s = screen(40, ROWS, &lines);
+        for k in [10_u16, 100, 400, 998] {
+            let needle = format!("{}b", "a\n".repeat(usize::from(k)));
+            let bound = 4 * (usize::from(ROWS) + usize::from(k));
+            let expected = (ROWS - 1 - k, 0);
+            let (found, work) = search_work::of(|| s.find(&needle));
+            assert_eq!(found, Some(expected), "k = {k}");
+            assert!(work <= bound, "find, k = {k}: {work} > {bound}");
+            let (all, work) = search_work::of(|| s.find_all(&needle));
+            assert_eq!(all, [expected], "k = {k}");
+            assert!(work <= bound, "find_all, k = {k}: {work} > {bound}");
+            let (masked, work) = search_work::of(|| s.mask_matching(&needle, '#'));
+            assert_eq!(masked.row_text(ROWS - 1).trim_end(), "#", "k = {k}");
+            assert_eq!(masked.row_text(ROWS - 2 - k).trim_end(), "a", "k = {k}");
+            assert!(work <= bound, "mask_matching, k = {k}: {work} > {bound}");
+            // And a needle that is nowhere: the rows of `a` all nearly match.
+            let absent = format!("{}c", "a\n".repeat(usize::from(k)));
+            let (none, work) = search_work::of(|| s.find(&absent));
+            assert_eq!(none, None, "k = {k}");
+            assert!(work <= bound, "find, absent, k = {k}: {work} > {bound}");
+        }
+    }
+
+    /// The middle rows of a needle are matched as a sequence of whole rows,
+    /// overlapping candidates included: a pattern whose prefix recurs must
+    /// still be found after a partial match fails (the KMP fallback).
+    #[test]
+    fn whole_rows_are_found_after_a_partial_match() {
+        let lines = ["x", "a", "a", "b", "a", "a", "a", "b", "y"];
+        let at = whole_rows_at(&lines, &["a", "a", "b"]);
+        let starts: Vec<usize> = (0..at.len()).filter(|&p| at[p]).collect();
+        assert_eq!(starts, [1, 5]);
+        let at = whole_rows_at(&lines, &["a", "a"]);
+        let starts: Vec<usize> = (0..at.len()).filter(|&p| at[p]).collect();
+        assert_eq!(starts, [1, 4, 5]);
+        assert!(whole_rows_at(&lines, &[]).iter().all(|&b| b));
+        let s = screen(4, 9, &lines);
+        assert_eq!(s.find_all("x\na\na\nb\na"), [(0, 0)]);
+        assert_eq!(s.find_all("\na\na\nb\n"), [(1, 0), (5, 0)]);
     }
 
     /// An open end is "to the edge", so it clamps like an explicit one past

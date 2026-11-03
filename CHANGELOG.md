@@ -45,6 +45,13 @@ reads that marker.
   and `agg` drew a visible cursor after the last row of every frame, even
   for a program that had hidden it. Each event now ends by moving the
   cursor to where the test saw it and showing or hiding it as it was.
+- `Screen::find`, `find_all` and `mask_matching` with a needle that spans
+  rows no longer slow down with the needle's height (#647). Every row was
+  rebuilt for each candidate start row it was compared from, so on a
+  1000x1000 screen a 400-row needle took 565 ms where `contains` took
+  5 ms. Each row is now built once per call and the whole rows in the
+  middle of the needle are matched in one pass; the same search takes as
+  long as `contains` whatever the needle's height.
 
 ## [0.11.7] - 2026-10-27
 
