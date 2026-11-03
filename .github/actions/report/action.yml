@@ -23,7 +23,9 @@ inputs:
   artifact-dir:
     description: >-
       The directory the tests were run with as TERMLENS_ARTIFACT_DIR. Defaults
-      to that variable when set for the job, else $RUNNER_TEMP/termlens.
+      to that variable when set for the job or the workflow, else
+      $RUNNER_TEMP/termlens. A test step's own env: does not reach this
+      action, so pass the value here when it is set there.
     required: false
     default: ""
   cli:
@@ -75,7 +77,9 @@ runs:
         set -euo pipefail
         dir="${ARTIFACT_DIR_INPUT:-${TERMLENS_ARTIFACT_DIR:-${RUNNER_TEMP}/termlens}}"
         out="${RUNNER_TEMP}/termlens-report"
-        mkdir -p "$out"
+        # Working files stay out of $out, which is uploaded as the artifact.
+        work="${RUNNER_TEMP}/termlens-report-work"
+        mkdir -p "$out" "$work"
         termlens() { "${RUNNER_TEMP}/termlens-cli/bin/termlens" "$@"; }
 
         # What to show: every .snap.new outside target/, then every file the
@@ -83,25 +87,55 @@ runs:
         # `find` exits 1 on any directory it cannot read, a root-owned cache
         # or a chmod 000 fixture, after printing everything it could; under
         # pipefail that status ended the step before the summary had a line
-        # in it (#597). The output is kept and the status is not.
+        # in it (#597). The output is kept and the status is not. Names are
+        # NUL-separated: a file name may hold a newline, and one read line by
+        # line became two entries, neither of them a file (#648).
         {
-          find . -path ./target -prune -o -name '*.snap.new' -print 2>/dev/null || true
-          if [ -d "$dir" ]; then find "$dir" -type f -print || true; fi
-        } | sort > "${out}/files.txt"
+          find . -path ./target -prune -o -name '*.snap.new' -print0 2>/dev/null || true
+          if [ -d "$dir" ]; then find "$dir" -type f -print0 || true; fi
+        } | sort -z > "${work}/files.z"
 
         {
           echo "## termlens: screens from the failing tests"
           echo
-          if [ ! -s "${out}/files.txt" ]; then
+          if [ ! -s "${work}/files.z" ]; then
             echo "No \`.snap.new\` files and nothing under \`${dir}\`: the failures left no screen behind."
             echo "On CI, insta writes a \`.snap.new\` only when the test step sets \`INSTA_UPDATE: new\`; inline snapshots (\`.pending-snap\`) are not rendered here."
           fi
         } >> "$GITHUB_STEP_SUMMARY"
 
+        # A file name goes into HTML, so its markup is escaped, and a newline
+        # becomes a character reference: a blank line would end the HTML block
+        # it sits in and turn the rest of the entry into Markdown.
+        html() {
+          printf '%s' "$1" | awk 'BEGIN { ORS = "" } {
+            gsub(/&/, "\\&amp;"); gsub(/</, "\\&lt;"); gsub(/>/, "\\&gt;"); gsub(/"/, "\\&quot;")
+            if (NR > 1) print "&#10;"
+            print
+          }'
+        }
+        # `fenced <file>`: the file in a code block whose fence is one
+        # backtick longer than the longest run of backticks inside it, which
+        # is the only fence CommonMark guarantees that content cannot close.
+        # A screen row of three backticks closed a fixed ``` early, and every
+        # row after it rendered as Markdown (#648).
+        fenced() {
+          fence="$(awk 'BEGIN { m = 2 }
+            { s = $0; while (match(s, /`+/)) { if (RLENGTH > m) m = RLENGTH; s = substr(s, RSTART + RLENGTH) } }
+            END { f = ""; for (i = 0; i <= m; i++) f = f "`"; print f }' "$1")"
+          echo "$fence"
+          cat "$1"
+          # A last line without its newline would carry the fence with it.
+          if [ -s "$1" ] && [ -n "$(tail -c 1 "$1")" ]; then echo; fi
+          echo "$fence"
+        }
+
         n=0
-        while IFS= read -r file; do
+        while IFS= read -r -d '' file; do
           n=$((n + 1))
-          base="$(basename "$file")"
+          # upload-artifact refuses a path holding any of these, and then the
+          # whole upload fails; the summary keeps the name as it is.
+          base="$(printf '%s' "$(basename -- "$file")" | tr '":<>|*?\r\n' '_________')"
           stem="${n}-${base}"
           # Renderings for the artifact; the summary holds the text. --out
           # rather than a redirect (0.11.1, #313): the shell truncates the
@@ -109,28 +143,27 @@ runs:
           # used to leave an empty .svg in the artifact. Now it leaves none.
           termlens render --svg  --out "${out}/${stem}.svg"  "$file" || true
           termlens render --html --out "${out}/${stem}.html" "$file" || true
+          termlens render --text "$file" > "${work}/screen.txt" \
+            || echo "(termlens could not read this file)" >> "${work}/screen.txt"
           {
-            echo "<details><summary><code>${file}</code></summary>"
+            echo "<details><summary><code>$(html "$file")</code></summary>"
             echo
-            echo '```'
-            termlens render --text "$file" || echo "(termlens could not read this file)"
-            echo '```'
+            fenced "${work}/screen.txt"
             case "$file" in
               *.snap.new)
                 snap="${file%.new}"
                 if [ -f "$snap" ]; then
+                  termlens diff --color never "$snap" "$file" > "${work}/diff.txt" || true
                   echo
-                  echo "Against \`${snap}\`:"
+                  echo "<p>Against <code>$(html "$snap")</code>:</p>"
                   echo
-                  echo '```'
-                  termlens diff --color never "$snap" "$file" || true
-                  echo '```'
+                  fenced "${work}/diff.txt"
                 fi ;;
             esac
             echo "</details>"
             echo
           } >> "$GITHUB_STEP_SUMMARY"
-        done < "${out}/files.txt"
+        done < "${work}/files.z"
         if [ "$n" -gt 0 ]; then
           echo "SVG and HTML renderings of each are in the \`${ARTIFACT_NAME:-termlens-report}\` artifact." >> "$GITHUB_STEP_SUMMARY"
         fi
