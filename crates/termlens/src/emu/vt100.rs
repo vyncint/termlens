@@ -157,16 +157,23 @@ impl Vt100Emulator {
                 }
                 let image = match payload.action() {
                     GraphicsAction::TransmitAndPlace => payload.size(),
-                    // A placement of an image sent earlier: its size is the
-                    // last transmission of that id still in the log.
+                    // A placement of an image sent earlier: its size is that
+                    // of the last transmission of that id still in the log.
+                    // The last one, even when it declared no size: kitty
+                    // replaces an image on retransmission (`handle_add_command`
+                    // frees the existing image's resources), so the size of
+                    // one sent before it describes nothing on screen (#626).
                     GraphicsAction::Place => {
                         let id = payload.id()?;
-                        self.graphics.iter().rev().find_map(|earlier| {
-                            (earlier.protocol() == GraphicsProtocol::Kitty
-                                && earlier.id() == Some(id))
-                            .then(|| earlier.size())
-                            .flatten()
-                        })
+                        self.graphics
+                            .iter()
+                            .rev()
+                            .find(|earlier| {
+                                earlier.protocol() == GraphicsProtocol::Kitty
+                                    && earlier.action().carries_image()
+                                    && earlier.id() == Some(id)
+                            })
+                            .and_then(GraphicsPayload::size)
                     }
                     _ => return None,
                 };
@@ -2071,6 +2078,42 @@ mod tests {
     }
 
     #[test]
+    fn a_kitty_placement_takes_its_size_from_the_newest_transmission_of_the_id() {
+        // An id sent as 20x40 RGB and then again as a PNG: the image kitty
+        // holds is the PNG (a retransmission replaces it), whose size the
+        // escape does not state — so the placement cannot be sized and the
+        // cursor stays, as it does for the PNG alone (#626). It moved by
+        // the RGB image's 2x2 cells.
+        let emu = graphics_emu(
+            Graphics::Kitty,
+            6,
+            10,
+            b"\x1b_Ga=t,f=24,s=20,v=40,i=1;AAAA\x1b\\\x1b_Ga=t,f=100,i=1;iVBORw0KGgo=\x1b\\\
+              \x1b_Ga=p,i=1\x1b\\X",
+        );
+        assert_eq!(x_at(&emu), Some((0, 0)));
+        // The other way round, the newest transmission is sized: 2x2.
+        let emu = graphics_emu(
+            Graphics::Kitty,
+            6,
+            10,
+            b"\x1b_Ga=t,f=100,i=1;iVBORw0KGgo=\x1b\\\x1b_Ga=t,f=24,s=20,v=40,i=1;AAAA\x1b\\\
+              \x1b_Ga=p,i=1\x1b\\X",
+        );
+        assert_eq!(x_at(&emu), Some((1, 2)));
+        // A placement is no transmission: a second `a=p` of the same id is
+        // sized by the image, not by the first placement, which states none.
+        let emu = graphics_emu(
+            Graphics::Kitty,
+            6,
+            10,
+            b"\x1b_Ga=t,f=24,s=20,v=40,i=1;AAAA\x1b\\\x1b_Ga=p,i=1\x1b\\\x1b[H\
+              \x1b_Ga=p,i=1\x1b\\X",
+        );
+        assert_eq!(x_at(&emu), Some((1, 2)));
+    }
+
+    #[test]
     fn a_sixel_moves_the_cursor_to_its_last_text_row_and_keeps_the_column() {
         // xterm, sixel scrolling on: 45 px over 20-px cells is three rows,
         // so the cursor goes down two, in the column the image started at.
@@ -2092,6 +2135,57 @@ mod tests {
                 Some((0, 2)),
                 "{support:?}"
             );
+        }
+    }
+
+    /// The cursor moves past a sixel by its full height whatever the
+    /// capture bound kept of it (#635): xterm's height is the larger of the
+    /// raster's and the painted one, and both are measured as the stream
+    /// arrives. Past the bound the move used to come from whatever was kept
+    /// — at bound 0, nothing, so the cursor stayed.
+    #[test]
+    fn a_sixel_moves_the_cursor_the_same_at_every_capture_bound() {
+        // Declared 45 px over 20-px cells: three rows, painted two.
+        let declared = b"\x1b[1;2H\x1bPq\"1;1;8;45#0;2;100;0;0!8~-!8~\x1b\\X";
+        // Undeclared, five bands painted: 30 px, two rows.
+        let painted = b"\x1b[1;2H\x1bPq#0;2;100;0;0~-~-~-~-~\x1b\\X";
+        for capture in [crate::graphics::DEFAULT_CAPTURE, 20, 16, 0] {
+            for (wire, at, size) in [
+                (&declared[..], (2, 1), Some((8, 45))),
+                (&painted[..], (1, 1), None),
+            ] {
+                let mut emu = Vt100Emulator::new(6, 10, 100, capture, false);
+                emu.declare_graphics(Graphics::Sixel, Some((10, 20)));
+                feed_all(&mut emu, wire);
+                assert_eq!(x_at(&emu), Some(at), "capture {capture}");
+                let screen = emu.snapshot();
+                assert_eq!(
+                    screen.graphics().last().and_then(GraphicsPayload::size),
+                    size,
+                    "capture {capture}"
+                );
+            }
+        }
+    }
+
+    /// `u32::MAX` in a placement's `c=`, `r=`, `s=` or `v=` is a number the
+    /// program under test may send, and must neither panic the emulator nor
+    /// wrap into a small move (#634). Each panicked in a debug build.
+    #[test]
+    fn a_kitty_placement_of_any_size_moves_the_cursor_without_overflowing() {
+        for (keys, at) in [
+            // So many rows the screen scrolls through, and so many columns
+            // the cursor wraps: the last row's start.
+            ("s=1,v=1,c=4294967295", (5, 0)),
+            ("s=1,v=1,r=4294967295", (5, 0)),
+            // 429496730 columns, one row: wraps to the next row.
+            ("s=4294967295,v=1,X=5", (1, 0)),
+            // One column, 214748366 rows: to the bottom, one column on.
+            ("s=1,v=4294967295,Y=7", (5, 1)),
+        ] {
+            let wire = format!("\x1b_Ga=T,f=24,{keys};AAAA\x1b\\X");
+            let emu = graphics_emu(Graphics::Kitty, 6, 10, wire.as_bytes());
+            assert_eq!(x_at(&emu), Some(at), "{keys}");
         }
     }
 

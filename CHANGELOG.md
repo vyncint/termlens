@@ -19,6 +19,16 @@ reads that marker.
 
 ### Changed
 
+- A `Graphics::Kitty` terminal answers kitty's `a=q` query as kitty does
+  (#639): `ESC _Gi=<id>;OK ESC \` for a query naming an image id, and
+  nothing for one that names none (`i=` absent or 0, or `I=` alone) or asks
+  for quiet (`q=1` suppresses an `OK`, `q=2` every reply). termlens used to
+  answer all of these `OK`, with `i=0` when there was no id, which put bytes
+  into the input of an application that had asked for none. A query without
+  an id is now named in the next timeout instead; a quiet one is not, since
+  the application asked for silence. A test that read the `i=0;OK` reply
+  should send `i=` with a nonzero id, as kitty requires.
+
 - `unsupported()` is right about three more shapes (#625, #641). A window
   title with a `;` in it (`OSC 2 ; make; test`) is no longer listed: the
   title was always honoured, and `title()` reported it whole. An ANSI mode
@@ -67,6 +77,37 @@ reads that marker.
   line and, where the count is one, the `s` of `rows`.
 
 ### Fixed
+
+- A kitty `a=p` placement takes its size from the newest transmission of
+  its image id (#626). When that one declared no size, a PNG for instance,
+  the size of an older transmission of the same id moved the cursor, though
+  kitty replaces an image on retransmission.
+
+- A kitty placement with a huge `c=`, `r=`, `s=` or `v=` no longer panics
+  the emulator in a debug build, or moves the cursor by a wrapped amount in
+  a release one (#634). The cells are computed in 64 bits and saturate.
+
+- A sixel past the capture bound keeps its declared size, and the cursor
+  still moves past it by its full height (#635). Both were read off the
+  retained data, so `capture_graphics(0)` reported `size() == None` and left
+  the cursor where the image started. They are now measured as the stream
+  arrives, at no extra memory.
+
+- A kitty placement (`a=p`), animation (`a=a`) or compose (`a=c`) that
+  arrives during a chunked upload is a payload of its own, and the upload
+  goes on to its last chunk (#636). It used to be swallowed as the upload's
+  next chunk, so the placement was lost and neither image decoded. A
+  transmission from a file or shared memory (`t=f`, `t=t`, `t=s`) arriving
+  mid-upload starts an image of its own, as kitty does.
+
+- Kitty data whose chunks each end in base64 padding decodes (#637). kitty
+  decodes every escape's payload on its own and the protocol allows a padded
+  chunk, but `decode()` read the joined body once and called it bad base64.
+
+- A sixel that paints past its declared raster size decodes to everything it
+  painted (#638), as xterm draws it: the larger of the declared and the
+  painted extent on each axis, still within the 4096-pixel cap. It was
+  cropped to the declared size.
 
 - `Screen::parse` and `termlens render` read two text snapshots earlier
   releases wrote and 0.11.7 refused (#643): a visible cursor one past the
