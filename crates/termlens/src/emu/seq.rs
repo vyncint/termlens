@@ -407,6 +407,12 @@ pub(crate) enum SeqEvent {
     /// reset: the emulator saves the rows that scrolled before this byte,
     /// and the history it reads next starts over.
     ScrollbackErased,
+    /// `CSI ? 47 h`, `? 1047 h` or `? 1049 h` is about to switch to the
+    /// alternate screen. Every grid accessor reads the screen on display,
+    /// so the rows that scrolled off the main screen before this byte have
+    /// to be copied before it is fed, or they are out of reach until the
+    /// main screen is back — and gone if a reset comes first (#622).
+    AlternateScreen,
     /// The application asked the terminal a question.
     Query(Query),
     /// An inline graphics payload completed. Carried out of the tracker
@@ -581,6 +587,9 @@ pub(crate) struct SeqTracker {
     /// Whether a completed parameter of the current CSI was `4`: insert
     /// mode, when the final byte turns out to be a plain `h` or `l`.
     csi_saw_irm: bool,
+    /// Whether the current CSI's parameter list names an alternate-screen
+    /// mode (`47`, `1047`, `1049`), for [`SeqEvent::AlternateScreen`].
+    csi_saw_alternate: bool,
     /// The mouse tracking modes (`9`, `1000`, `1002`, `1003`) named in the
     /// current CSI's parameter list, as [`mouse_bit`]s — the same scan as
     /// `csi_saw_1004`, for a group rather than one mode.
@@ -743,6 +752,7 @@ impl SeqTracker {
             csi_saw_2026: false,
             csi_saw_1004: false,
             csi_saw_irm: false,
+            csi_saw_alternate: false,
             csi_saw_mouse: 0,
             csi_saw_encodings: 0,
             csi_last_encoding: None,
@@ -1067,6 +1077,7 @@ impl SeqTracker {
         self.csi_saw_2026 = false;
         self.csi_saw_1004 = false;
         self.csi_saw_irm = false;
+        self.csi_saw_alternate = false;
         self.csi_saw_mouse = 0;
         self.csi_saw_encodings = 0;
         self.csi_last_encoding = None;
@@ -1101,6 +1112,9 @@ impl SeqTracker {
         }
         if self.csi_param == 4 {
             self.csi_saw_irm = true;
+        }
+        if matches!(self.csi_param, 47 | 1047 | 1049) {
+            self.csi_saw_alternate = true;
         }
         self.csi_saw_mouse |= mouse_bit(self.csi_param);
         if let Some(encoding) = mouse_encoding_of(self.csi_param) {
@@ -1280,6 +1294,15 @@ impl SeqTracker {
                 }
                 _ => {}
             }
+        }
+
+        // The alternate screen, announced rather than tracked: vt100 holds
+        // the state, and the emulator only needs to know where the switch
+        // falls in the stream. After 2026, whose Begin returns first from a
+        // list naming both: a frame boundary missed is worse than rows
+        // copied only once the main screen is back, as they were before.
+        if self.csi_prefix == b'?' && self.csi_saw_alternate && b == b'h' {
+            return SeqEvent::AlternateScreen;
         }
 
         // Insert mode (`IRM`, ANSI mode 4): `smir`/`rmir` in the terminfo
@@ -3167,6 +3190,33 @@ mod tests {
         );
         // A shift inside an escape still shifts.
         assert_eq!(drawn(b"\x1b)0\x1b\x0e[mq"), "\u{2500}");
+    }
+
+    /// Entering the alternate screen is announced at its final byte, so
+    /// the emulator can copy the main screen's history before the switch
+    /// (#622). Leaving it, and the same numbers as ANSI modes, are not.
+    #[test]
+    fn entering_the_alternate_screen_fires_an_event() {
+        let last = |bytes: &[u8]| {
+            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+            bytes.iter().map(|&b| t.step(b)).last().unwrap()
+        };
+        for entry in [
+            &b"\x1b[?47h"[..],
+            b"\x1b[?1047h",
+            b"\x1b[?1049h",
+            b"\x1b[?25;1049h",
+        ] {
+            assert_eq!(last(entry), SeqEvent::AlternateScreen, "{entry:?}");
+        }
+        for other in [
+            &b"\x1b[?1049l"[..],
+            b"\x1b[1049h",
+            b"\x1b[?104h",
+            b"\x1b[?10490h",
+        ] {
+            assert_eq!(last(other), SeqEvent::None, "{other:?}");
+        }
     }
 
     #[test]

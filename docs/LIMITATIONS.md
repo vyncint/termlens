@@ -45,12 +45,11 @@ CHANGELOG entry.
 - **Insert mode (`IRM`, `CSI 4 h`) pushes the rest of the row right**, as
   ncurses's `insch` expects on a terminal advertising `smir`; `RIS` and
   `DECSTR` clear it, and `Screen::insert_mode()` reports an application
-  that left it on. Two exceptions: the characters REP (`CSI n b`) repeats
-  overwrite the row even in insert mode, where xterm inserts them; and an
-  inserted run that reaches the right margin wraps onto the next row over
-  its text, where xterm pushes that row right as well. Other
-  ANSI modes the backend drops (`LNM` and the rest) are not modelled — and
-  *say so*: `Screen::unsupported()` lists every sequence the emulator did
+  that left it on. A character that wraps pushes the next row right as
+  well, as xterm does. One exception: the characters REP (`CSI n b`)
+  repeats overwrite the row even in insert mode, where xterm inserts them.
+  Other ANSI modes the backend drops (`LNM` and the rest) are not
+  modelled — and *say so*: `Screen::unsupported()` lists every sequence the emulator did
   not implement, in the form `^[[20h`, so a test can tell a
   plausible-looking wrong grid from a right one.
 - **A soft-wrapped line is two rows.** `contains` and `find` read the grid

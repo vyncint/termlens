@@ -268,3 +268,105 @@ fn a_hard_reset_neither_drops_the_history_before_it_nor_the_rows_after_it() -> t
     }
     Ok(())
 }
+
+/// Lines that scroll off and the switch to the alternate screen in one
+/// write, as a full-screen program that starts right after printing writes
+/// them. The scrolled rows were copied only once the main screen came back,
+/// and a reset before that lost them (#622). The same rows with the switch
+/// in a write of its own are the control: history must not depend on where
+/// the PTY split the output.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY carries out the alternate-screen switch and re-renders the screen itself, so the bytes termlens reads are not the ones the child wrote (#149)"
+)]
+fn rows_that_scroll_in_the_write_that_enters_the_alternate_screen_stay_in_history(
+) -> termlens::Result<()> {
+    let shapes: [(&str, &[&str]); 3] = [
+        (
+            "one write",
+            &["--raw", "l1\nl2\nl3\nl4\nl5\\e[?1049hTUI", "--wait"],
+        ),
+        (
+            "the switch in a write of its own",
+            &[
+                "--raw",
+                "l1\nl2\nl3\nl4\nl5",
+                "--sleep",
+                "100ms",
+                "--raw",
+                "\\e[?1049hTUI",
+                "--wait",
+            ],
+        ),
+        (
+            "a reset before the main screen is back",
+            &["--raw", "l1\nl2\nl3\nl4\nl5\\e[?1049hTUI\\ecDONE", "--wait"],
+        ),
+    ];
+    for (name, steps) in shapes {
+        let mut t = common::spawn_emit(
+            Terminal::builder()
+                .size(10, 3)
+                .scrollback(100)
+                .timeout(Duration::from_secs(10)),
+            steps,
+        )?;
+        let last = if name.starts_with("a reset") {
+            "DONE"
+        } else {
+            "TUI"
+        };
+        t.wait_until(|s| s.contains(last))?;
+        let s = t.screen();
+        assert_eq!(s.scrollback_text(), "l1\nl2", "{name}: {s}");
+        t.send(Key::Enter)?;
+        assert!(t.wait_exit()?.success(), "{name}");
+    }
+    Ok(())
+}
+
+/// Wider and shorter, then back, over a soft-wrapped line: the rows the
+/// first resize pushed into history were widened when they were copied,
+/// which cleared the wrap — in the primary grid only, so the second resize
+/// pulled different rows back into it and into the attribute shadow, and a
+/// debug build panicked on the next snapshot (#620).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY applies a resize on its own thread and re-renders the screen itself, so the rows termlens holds after it are conhost's layout (#149)"
+)]
+fn a_resize_round_trip_keeps_a_soft_wrapped_line_wrapped() -> termlens::Result<()> {
+    for styled in [false, true] {
+        let mut t = common::spawn_emit(
+            Terminal::builder()
+                .size(10, 6)
+                .scrollback_styles(styled)
+                .timeout(Duration::from_secs(10)),
+            &["l1\nl2\nAAAAAAAAAABBBBB\nl4\nREADY", "--wait"],
+        )?;
+        t.wait_until(|s| s.contains("READY"))?;
+        assert!(t.screen().row_wrapped(2), "styled history {styled}");
+        t.resize(20, 3)?;
+        assert_eq!(
+            t.screen().scrollback_text(),
+            "l1\nl2\nAAAAAAAAAA",
+            "styled history {styled}"
+        );
+        t.resize(10, 6)?;
+        let s = t.screen();
+        assert_eq!(
+            s.text(),
+            "l1\nl2\nAAAAAAAAAA\nBBBBB\nl4\nREADY",
+            "styled history {styled}"
+        );
+        assert!(s.row_wrapped(2), "styled history {styled}: {s}");
+        assert!(
+            s.logical_text().contains("AAAAAAAAAABBBBB"),
+            "styled history {styled}: {s}"
+        );
+        t.send(Key::Enter)?;
+        assert!(t.wait_exit()?.success(), "styled history {styled}");
+    }
+    Ok(())
+}
