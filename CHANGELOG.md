@@ -34,6 +34,12 @@ reads that marker.
   at 10", a range the caller never wrote, so a pane read such as
   `rect_text(split.., ..)` panicked as soon as the terminal was narrowed
   below `split`. A range written backwards still panics.
+- `Screen::to_html` dims a run's text and no longer its background (#645).
+  The run's span carried `opacity:0.6`, which faded a coloured background
+  into the page, while `to_svg` faded only the text over a full-strength
+  `<rect>`. The span now carries the foreground blended 60% over the
+  background, the colour the SVG's text composites to, so the two
+  renderings paint the same picture.
 
 ## [0.11.7] - 2026-10-27
 

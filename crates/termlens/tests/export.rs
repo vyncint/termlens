@@ -183,7 +183,9 @@ fn every_style_attribute_reaches_every_rendering() -> termlens::Result<()> {
             "font-weight:bold",
             "\x1b[0;1m",
         ),
-        ("dim", Some("opacity=\"0.6\""), "opacity:0.6", "\x1b[0;2m"),
+        // HTML dim is the foreground blended 60% over the background
+        // (#645): #d4d4d4 over #1e1e1e.
+        ("dim", Some("opacity=\"0.6\""), "color:#8b8b8b", "\x1b[0;2m"),
         (
             "italic",
             Some("font-style=\"italic\""),
@@ -244,7 +246,7 @@ fn every_style_attribute_reaches_every_rendering() -> termlens::Result<()> {
     // Dim and blink together, the pair the two animate differently: an SMIL
     // animation outranks the opacity attribute it animates, so the SVG's
     // values have to carry dim's 0.6; the HTML animates `color`, so its
-    // `opacity:0.6` and the background stay untouched. Without either, a
+    // dimmed colour and the background stay untouched. Without either, a
     // dim blink would flash back to full brightness.
     let both = Screen::parse("size: 2x1  cursor: hidden\nab\n\nstyles:\n0: 0-1 blink dim")?;
     let svg = both.to_svg();
@@ -254,10 +256,72 @@ fn every_style_attribute_reaches_every_rendering() -> termlens::Result<()> {
     );
     let html = both.to_html();
     assert!(
-        html.contains("opacity:0.6;animation:termlens-blink"),
+        html.contains("color:#8b8b8b;background:#1e1e1e;animation:termlens-blink"),
         "a dim blink keeps dim, and its background paints:\n{html}"
     );
     Ok(())
+}
+
+/// SGR 2 fades the glyph, not the cell (#645). Over a coloured background
+/// the SVG draws the `<rect>` at full strength and gives only the `<text>`
+/// `opacity="0.6"`; the HTML must paint the same picture, so its span keeps
+/// the background whole and carries the foreground already blended — with
+/// no `opacity` that would fade the background too.
+#[test]
+fn a_dim_run_fades_its_text_and_not_its_background_in_svg_and_html() -> termlens::Result<()> {
+    let s = Screen::parse("size: 10x1  cursor: hidden\nstatus\n\nstyles:\n0: 0-9 bg=4 dim")?;
+    let svg = s.to_svg();
+    assert!(
+        svg.contains("fill=\"#2472c8\"/>"),
+        "the rect is painted:\n{svg}"
+    );
+    let rect = svg
+        .lines()
+        .find(|l| l.contains("#2472c8"))
+        .expect("the background rect");
+    assert!(!rect.contains("opacity"), "the rect is not faded: {rect}");
+    let text = svg
+        .lines()
+        .find(|l| l.contains(">status"))
+        .expect("the text");
+    assert!(
+        text.contains("fill=\"#d4d4d4\"") && text.contains("opacity=\"0.6\""),
+        "the text is: {text}"
+    );
+
+    let html = s.to_html();
+    assert!(
+        !html.contains("opacity"),
+        "nothing in the HTML fades the background:\n{html}"
+    );
+    // 0.6 * fg + 0.4 * bg per channel: d4/24 -> 8e, d4/72 -> ad, d4/c8 -> cf.
+    assert!(
+        html.contains("<span style=\"color:#8eadcf;background:#2472c8\">status    </span>"),
+        "the HTML paints what the SVG composites to:\n{html}"
+    );
+    // Reverse swaps first and dim fades what is then the foreground.
+    let reversed =
+        Screen::parse("size: 2x1  cursor: hidden\nab\n\nstyles:\n0: 0-1 fg=4 reverse dim")?;
+    let html = reversed.to_html();
+    assert!(
+        html.contains(&format!(
+            "color:#{};background:#2472c8",
+            blend("1e1e1e", "2472c8")
+        )),
+        "{html}"
+    );
+    Ok(())
+}
+
+/// The channel-wise 60/40 blend the HTML writes for dim, for the test above.
+fn blend(fg: &str, bg: &str) -> String {
+    (0..3)
+        .map(|at| {
+            let f = u32::from_str_radix(&fg[2 * at..2 * at + 2], 16).unwrap();
+            let b = u32::from_str_radix(&bg[2 * at..2 * at + 2], 16).unwrap();
+            format!("{:02x}", (f * 6 + b * 4 + 5) / 10)
+        })
+        .collect()
 }
 
 /// Every character of `doc` is one XML 1.0 allows (the `Char` production)

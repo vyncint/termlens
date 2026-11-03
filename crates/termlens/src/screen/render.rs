@@ -59,6 +59,22 @@ fn painted(style: &Style) -> (String, String) {
     }
 }
 
+/// `fg` faded toward `bg` the way SGR 2 fades a glyph: 60% of the
+/// foreground over the background, the colour the SVG's `opacity="0.6"`
+/// text composites to over its `<rect>`. Both are `#rrggbb`, as
+/// [`css_color`] writes them.
+fn dimmed(fg: &str, bg: &str) -> String {
+    let channel = |hex: &str, at: usize| u32::from_str_radix(&hex[1 + 2 * at..3 + 2 * at], 16);
+    let mut out = String::from("#");
+    for at in 0..3 {
+        let (Ok(f), Ok(b)) = (channel(fg, at), channel(bg, at)) else {
+            unreachable!("css_color writes #rrggbb, got {fg} and {bg}");
+        };
+        let _ = write!(out, "{:02x}", (f * 6 + b * 4 + 5) / 10);
+    }
+    out
+}
+
 /// The SGR parameters that set `style` from a reset terminal.
 fn sgr(style: &Style) -> String {
     let mut params = vec!["0".to_owned()];
@@ -305,7 +321,10 @@ impl Screen {
     /// same run model as [`to_svg`](Self::to_svg); concealed text is shown
     /// as blanks, and blink is a `termlens-blink` animation on the run's
     /// colour — not its opacity — so a dim blinking run keeps its dim and
-    /// the run's background keeps painting, as it does in a terminal. The
+    /// the run's background keeps painting, as it does in a terminal. Dim
+    /// is the same picture as the SVG's: the foreground at 60% over the
+    /// run's background, written as that blended colour, so the background
+    /// stays at full strength. The
     /// `@keyframes` live in a `<style>` element inside the `<pre>` (a
     /// `style` attribute cannot hold one) and travel only when a run
     /// blinks, so a screen without one renders as it always has. A
@@ -337,15 +356,16 @@ impl Screen {
                     continue;
                 }
                 let (fg, bg) = painted(&style);
+                // Dim fades the glyph and not the cell, as the SVG's text
+                // opacity does over its `<rect>`: an `opacity` on the span
+                // would fade the run's background with it (#645).
+                let fg = if style.dim { dimmed(&fg, &bg) } else { fg };
                 let mut css = format!("color:{fg};background:{bg}");
                 if style.bold {
                     css.push_str(";font-weight:bold");
                 }
                 if style.italic {
                     css.push_str(";font-style:italic");
-                }
-                if style.dim {
-                    css.push_str(";opacity:0.6");
                 }
                 if style.blink {
                     css.push_str(";animation:termlens-blink 1s step-end infinite");
