@@ -529,6 +529,10 @@ fn mouse_reports_follow_the_urxvt_encoding() -> termlens::Result<()> {
 /// and the message says the legacy form is in force because nothing else
 /// was enabled — not that the application selected it (#640).
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward the mode sets an application sends, so mouse and focus modes are never observed (#149)"
+)]
 fn the_legacy_limit_names_the_encodings_that_would_reach_past_it() -> termlens::Result<()> {
     let mut t = util::spawn_emit(
         Terminal::builder()
