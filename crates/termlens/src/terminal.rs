@@ -1853,12 +1853,9 @@ impl TerminalBuilder {
     /// Off by default because it is not free, and the cost is in the one
     /// place a test suite feels it: every read that scrolls captures the
     /// scrolled rows as cells — one `Cell` per column instead of one string
-    /// per row — and once history is *full* the backend no longer says how
-    /// many rows a read scrolled, so the whole retained window is re-read as
-    /// cells on every read that scrolls. Measured on 20,000 lines through an
-    /// 80x24 screen with the default 1,000-row history, release build: about
-    /// 40 ms text-only, about 90 ms styled — 2.5x on a workload well past
-    /// what a test drives, and one that `scrollback(n)` bounds directly. A
+    /// per row. Measured on 20,000 lines through an 80x24 screen with the
+    /// default 1,000-row history, release build: about 70 ms text-only,
+    /// about 90 ms styled, on a workload well past what a test drives. A
     /// snapshot pays one refcount per retained row either way, so the cost
     /// of a wait does not grow with the depth of history.
     ///

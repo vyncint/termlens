@@ -16,6 +16,10 @@
 //! reach vt100's callbacks, because the bytes are fed through. They are
 //! filtered here by shape, so the list means what its name says: sequences
 //! **termlens** did not honour.
+//!
+//! The same callback set counts the rows vt100 drops off the front of the
+//! main screen's history, which is the one thing its history cannot tell
+//! afterwards: at the retention bound the length stops changing (#671).
 
 use std::sync::Arc;
 
@@ -34,6 +38,9 @@ pub(super) struct Unhandled {
     shared: Arc<[Arc<str>]>,
     overflow: u64,
     visual_bells: u64,
+    /// Rows dropped off the front of the main screen's history since the
+    /// emulator last took the count — see [`take_evicted`](Self::take_evicted).
+    evicted: usize,
 }
 
 impl Default for Unhandled {
@@ -43,6 +50,7 @@ impl Default for Unhandled {
             shared: Arc::from([] as [Arc<str>; 0]),
             overflow: 0,
             visual_bells: 0,
+            evicted: 0,
         }
     }
 }
@@ -61,6 +69,19 @@ impl Unhandled {
     /// `ESC g` seen.
     pub(super) fn visual_bells(&self) -> u64 {
         self.visual_bells
+    }
+
+    /// How many rows vt100 has dropped off the front of the main screen's
+    /// history since the last call, and the count started over.
+    ///
+    /// vt100 drops one for every row a full history takes at the back, one
+    /// for every row a single scroll moves past the history's whole length
+    /// without keeping it, and every row ED 3 erases — each through
+    /// `on_scroll`, which is what counts them here. The emulator needs the
+    /// number because at the retention bound the history's length no
+    /// longer moves when rows scroll in (#671).
+    pub(super) fn take_evicted(&mut self) -> usize {
+        std::mem::take(&mut self.evicted)
     }
 
     fn record(&mut self, shape: String) {
@@ -123,6 +144,14 @@ pub(super) const SHADOW_SGR_PARAMS: &[u16] = &[5, 6, 8, 9, 25, 28, 29];
 impl Callbacks for Unhandled {
     fn visual_bell(&mut self, _: &mut vt100::Screen) {
         self.visual_bells = self.visual_bells.saturating_add(1);
+    }
+
+    fn on_scroll(&mut self, _: vt100::capture::RowContents<'_>, alternate_screen: bool) {
+        // The alternate screen keeps no history: every row it scrolls off
+        // arrives here, and none of them is the main screen's.
+        if !alternate_screen {
+            self.evicted = self.evicted.saturating_add(1);
+        }
     }
 
     fn resize(&mut self, _: &mut vt100::Screen, (rows, cols): (u16, u16)) {
@@ -292,6 +321,33 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect()
+    }
+
+    /// The rows vt100 drops off the front of the main screen's history are
+    /// counted, and taking the count starts it over (#671). The alternate
+    /// screen keeps no history, and its rows are none of the main one's.
+    #[test]
+    fn the_rows_a_full_history_drops_are_counted_and_the_alternate_screens_are_not() {
+        let mut parser = vt100::Parser::new_with_callbacks(
+            super::super::vt100::nz(2),
+            super::super::vt100::nz(10),
+            2,
+            Unhandled::default(),
+        );
+        // Three rows scroll off a two-row screen into a two-row history,
+        // which keeps the last two of them.
+        parser.process(b"1\r\n2\r\n3\r\n4\r\n5");
+        assert_eq!(parser.screen().scrollback_len(), 2);
+        assert_eq!(parser.callbacks_mut().take_evicted(), 1);
+        assert_eq!(parser.callbacks_mut().take_evicted(), 0);
+        parser.process(b"\x1b[?1049ha\r\nb\r\nc\r\nd\x1b[?1049l");
+        assert_eq!(parser.callbacks_mut().take_evicted(), 0);
+        // A shorter screen pushes a row and drops one, through the parser's
+        // own resize; ED 3 erases the two left.
+        parser.set_size(super::super::vt100::nz(1), super::super::vt100::nz(10));
+        assert_eq!(parser.callbacks_mut().take_evicted(), 1);
+        parser.process(b"\x1b[3J");
+        assert_eq!(parser.callbacks_mut().take_evicted(), 2);
     }
 
     #[test]

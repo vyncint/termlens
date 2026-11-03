@@ -290,9 +290,18 @@ reads that marker.
   the primary grid only unless styled history was on, so the resize back
   pulled different rows into the two and a debug build panicked on the next
   snapshot; with both moved, `row_wrapped` turned false and `logical_text()`
-  split the line. A history at its retention bound is still re-read whole
-  on the next output, and a row narrower than the screen loses its wrap
-  flag then.
+  split the line.
+
+- A history at its retention bound is copied a row at a time, as below it,
+  rather than read again whole on every output. vt100's length stops
+  changing at the bound, so termlens re-read the window, and that read cut
+  every retained row to the screen's width at the moment, losing the text
+  past it after a narrower resize, and cleared the wrap flag of a row a
+  wider resize had left narrow. The rows vt100 drops off the front are
+  counted instead. The count also settles a resize made while the
+  alternate screen is up: a shorter screen that pushed a row, then a
+  taller one that pulled it back, dropped the newest retained row from
+  `scrollback_text()` although vt100 still held it (#671).
 
 - Rows that scroll off in the same read that switches to the alternate
   screen (`CSI ? 1049 h`, `? 47 h`, `? 1047 h`) are in `scrollback_text()`
