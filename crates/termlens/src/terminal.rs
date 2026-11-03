@@ -26,7 +26,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use crate::emu::{Emulator, InputModes, MouseEncoding, Query, Stop, Vt100Emulator};
 use crate::error::{Error, Result};
 use crate::keys::Input;
-use crate::keys::{mouse_legacy, mouse_sgr, mouse_utf8};
+use crate::keys::{mouse_legacy, mouse_sgr, mouse_urxvt, mouse_utf8};
 use crate::screen::{MouseMode, Screen};
 use crate::spawn::{spawn_child, PtyChild};
 use crate::utf8::Utf8Sanitizer;
@@ -1261,9 +1261,9 @@ impl EmuState {
         let reply = match query {
             Query::CursorPosition { private } => {
                 // Report exactly the cursor as of the query byte: the
-                // emulator stopped there, so this snapshot cannot include
-                // later output. 1-based on the wire.
-                let (row, col, _) = self.emu.snapshot().cursor();
+                // emulator stopped there, so this cannot include later
+                // output. 1-based on the wire.
+                let (row, col) = self.emu.cursor_position();
                 let prefix = if *private { "?" } else { "" };
                 format!("\x1b[{prefix}{};{}R", row + 1, col + 1).into_bytes()
             }
@@ -1278,8 +1278,8 @@ impl EmuState {
             },
             Query::SecondaryDa => b"\x1b[>1;10;0c".to_vec(),
             Query::TextAreaSize => {
-                let screen = self.emu.snapshot();
-                format!("\x1b[8;{};{}t", screen.rows(), screen.cols()).into_bytes()
+                let (rows, cols) = self.emu.size();
+                format!("\x1b[8;{rows};{cols}t").into_bytes()
             }
             // Pixel geometry, answered only from a declared cell size.
             // Unconfigured, these stay unanswered and named in the next
@@ -1296,9 +1296,9 @@ impl EmuState {
             },
             Query::WindowSizePixels => match self.cell_size {
                 Some((w, h)) => {
-                    let screen = self.emu.snapshot();
-                    let height = u32::from(screen.rows()) * u32::from(h);
-                    let width = u32::from(screen.cols()) * u32::from(w);
+                    let (rows, cols) = self.emu.size();
+                    let height = u32::from(rows) * u32::from(h);
+                    let width = u32::from(cols) * u32::from(w);
                     format!("\x1b[4;{height};{width}t").into_bytes()
                 }
                 None => {
@@ -3009,8 +3009,8 @@ impl Terminal {
     ///
     /// Sends a press — and, when the application's
     /// tracking mode reports them, a release — encoded exactly as the
-    /// tracking mode and encoding **the application enabled** (SGR 1006
-    /// or the legacy byte form).
+    /// tracking mode and encoding **the application enabled** (SGR 1006,
+    /// urxvt 1015, UTF-8 1005, or the legacy byte form when none is).
     ///
     /// # Errors
     ///
@@ -3021,6 +3021,10 @@ impl Terminal {
     /// be misparsed as garbage keys), when `(col, row)` is outside the
     /// current grid, or when the position is unrepresentable in the legacy
     /// encoding (columns/rows beyond 222).
+    ///
+    /// Under X10 tracking (`CSI ? 9 h`) the report carries the button
+    /// alone, as xterm's does: modifiers given to
+    /// [`click_with`](Self::click_with) are not sent.
     pub fn click(&mut self, col: u16, row: u16) -> Result<()> {
         self.click_with(MouseButton::Left, col, row)
     }
@@ -3056,9 +3060,17 @@ impl Terminal {
         };
         let (cols, rows) = self.screen().size();
         check_mouse_in_grid(col, row, cols, rows)?;
-        let mut bytes = self.mouse_report(&modes, chord.code(), col, row, true)?;
+        // X10 reports the button alone: xterm sends no key state in that
+        // mode, so a modifier on the wire is one the application could
+        // never have seen from a terminal (#642).
+        let code = if press_only {
+            chord.button.code()
+        } else {
+            chord.code()
+        };
+        let mut bytes = self.mouse_report(&modes, code, col, row, true)?;
         if !press_only {
-            bytes.extend(self.mouse_report(&modes, chord.code(), col, row, false)?);
+            bytes.extend(self.mouse_report(&modes, code, col, row, false)?);
         }
         self.write_input(&bytes, "a mouse click")
     }
@@ -3151,7 +3163,7 @@ impl Terminal {
     ///
     /// # Errors
     ///
-    /// Same conditions as [`click`](Self::click).
+    /// Same conditions as [`scroll_with`](Self::scroll_with).
     pub fn scroll(&mut self, col: u16, row: u16, direction: Scroll) -> Result<()> {
         self.scroll_with(direction, col, row)
     }
@@ -3182,7 +3194,8 @@ impl Terminal {
     ///
     /// # Errors
     ///
-    /// Same conditions as [`click`](Self::click).
+    /// Same conditions as [`click`](Self::click), and [`Error::Input`] under
+    /// X10 tracking (`CSI ? 9 h`), in which a terminal reports no wheel.
     pub fn scroll_with(
         &mut self,
         direction: impl Into<ScrollChord>,
@@ -3192,8 +3205,19 @@ impl Terminal {
         self.ensure_deliverable("a mouse scroll")?;
         let chord = direction.into();
         let modes = self.input_modes();
-        if modes.mouse == MouseMode::None {
-            return Err(no_mouse_tracking());
+        match modes.mouse {
+            MouseMode::None => return Err(no_mouse_tracking()),
+            // xterm reports buttons 1 to 3 alone in X10 mode, so a wheel
+            // notch never reaches an application that asked for it (#642).
+            MouseMode::Press => {
+                return Err(Error::Input(
+                    "the application enabled X10 mouse tracking (CSI ?9 h), which \
+                     reports button presses only — a terminal sends no wheel \
+                     events in that mode"
+                        .into(),
+                ))
+            }
+            MouseMode::PressRelease | MouseMode::ButtonMotion | MouseMode::AnyMotion => {}
         }
         let (cols, rows) = self.screen().size();
         check_mouse_in_grid(col, row, cols, rows)?;
@@ -3217,17 +3241,25 @@ impl Terminal {
         if modes.mouse_encoding == MouseEncoding::Sgr {
             return Ok(mouse_sgr(button, col, row, press));
         }
+        // The legacy form is what a terminal sends when no extended encoding
+        // is enabled, so the message names the ones that would have reached
+        // this position rather than saying the application chose legacy:
+        // an application that enabled 1015 was told that before #640.
         if modes.mouse_encoding == MouseEncoding::Legacy && (col > 222 || row > 222) {
             return Err(Error::Input(format!(
                 "({col}, {row}) is unrepresentable in the legacy mouse \
-                 encoding the application selected (max 222)"
+                 encoding (max 222), which is in force because the \
+                 application enabled no extended one (SGR ?1006, urxvt \
+                 ?1015 or UTF-8 ?1005)"
             )));
         }
-        // Both remaining forms are `ESC [ M Cb Cx Cy`; they differ only in
-        // how a coordinate byte above 127 is written.
-        let button = if press { button } else { 3 }; // legacy: release is 3
+        // The remaining forms all report a release as button 3 and keep
+        // the `+ 32` on the button; the legacy and UTF-8 ones differ only
+        // in how a coordinate byte above 127 is written.
+        let button = if press { button } else { 3 };
         Ok(match modes.mouse_encoding {
             MouseEncoding::Utf8 => mouse_utf8(button, col, row),
+            MouseEncoding::Urxvt => mouse_urxvt(button, col, row),
             MouseEncoding::Legacy | MouseEncoding::Sgr => mouse_legacy(button, col, row),
         })
     }
@@ -4446,7 +4478,7 @@ mod tests {
         cells_between, check_mouse_in_grid, check_size, history_note, panic_detail, reader_loop,
         EmuState, Graphics, Monitor, Responder, Scroll, ScrollChord,
     };
-    use crate::emu::{Emulator, InputModes, ModeState, MouseEncoding, Processed};
+    use crate::emu::{Emulator, InputModes, ModeState, MouseEncoding, Processed, Query};
     use crate::screen::{Cell, Style, TermState};
     use crate::{Error, Screen};
 
@@ -4481,6 +4513,14 @@ mod tests {
                 "the emulator must never be asked for a screen after it panicked"
             );
             Self::screen()
+        }
+        fn cursor_position(&self) -> (u16, u16) {
+            let (row, col, _) = Self::screen().cursor();
+            (row, col)
+        }
+        fn size(&self) -> (u16, u16) {
+            let (cols, rows) = Self::screen().size();
+            (rows, cols)
         }
         fn mid_sequence(&self) -> bool {
             false
@@ -4572,6 +4612,75 @@ mod tests {
         assert_eq!(reply.bytes, b"\x1b[1;6R");
         drop(state);
         reader.join().expect("the reader ends at EOF");
+    }
+
+    /// A reply to a cursor or size query costs the same on any grid. Each
+    /// used to snapshot the whole screen to read two numbers, so 2000
+    /// cursor-position queries at 200x50 took ten seconds in a debug build
+    /// and arrived in bursts several seconds apart (#618).
+    ///
+    /// Timed against the same replies on a tiny grid rather than against a
+    /// clock, so a slow or loaded machine slows both sides — the shape of
+    /// #584's search test. The large grid is the largest a terminal may be,
+    /// where one snapshot copies a million cells.
+    #[test]
+    fn a_query_reply_costs_the_same_on_any_grid() {
+        use std::time::{Duration, Instant};
+
+        // Loose on purpose. The regression is about 128,000 times the
+        // reference, so 100 still catches it with three orders of magnitude
+        // to spare, while 10 over microsecond timings is a ratio a loaded CI
+        // runner or a stress shard can reach by scheduling alone.
+        const BOUND: u32 = 100;
+        let state = |rows, cols| {
+            let mut emu =
+                super::Vt100Emulator::new(rows, cols, 0, crate::graphics::DEFAULT_CAPTURE, false);
+            emu.process(b"text\x1b[3;5H");
+            EmuState::new(
+                Box::new(emu),
+                Responder {
+                    respond: true,
+                    background: (0, 0, 0),
+                    foreground: (255, 255, 255),
+                    cell_size: Some((8, 16)),
+                    graphics: Graphics::default(),
+                    term_name: "xterm-256color".into(),
+                },
+                Arc::new(AtomicUsize::new(0)),
+            )
+        };
+        let fastest = |state: &mut EmuState, query: &Query| -> Duration {
+            (0..5)
+                .map(|_| {
+                    let start = Instant::now();
+                    for _ in 0..50 {
+                        std::hint::black_box(state.answer(query));
+                    }
+                    start.elapsed()
+                })
+                .min()
+                .expect("at least one run")
+        };
+        let mut small = state(2, 2);
+        let mut large = state(1000, 1000);
+        for (query, reply) in [
+            (Query::CursorPosition { private: false }, &b"\x1b[3;5R"[..]),
+            (Query::TextAreaSize, b"\x1b[8;1000;1000t"),
+            (Query::WindowSizePixels, b"\x1b[4;16000;8000t"),
+        ] {
+            assert_eq!(
+                large.answer(&query).as_deref(),
+                Some(reply),
+                "{query:?} is answered from the grid it asked about"
+            );
+            let reference = fastest(&mut small, &query);
+            let took = fastest(&mut large, &query);
+            assert!(
+                took < reference * BOUND,
+                "{query:?} took {took:?} on 1000x1000, {:.0} times its reply on 2x2 ({reference:?})",
+                took.as_secs_f64() / reference.as_secs_f64()
+            );
+        }
     }
 
     /// The reader turns an emulator panic into state every wait can report,

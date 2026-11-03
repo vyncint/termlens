@@ -54,6 +54,7 @@
 
 use std::sync::Arc;
 
+use super::MouseEncoding;
 use crate::graphics::{GraphicsBuilder, GraphicsCounts, GraphicsPayload, Placement};
 use crate::screen::{Clipboard, Link, MouseModes};
 
@@ -530,6 +531,28 @@ fn mouse_bit(mode: u32) -> u8 {
     }
 }
 
+/// The coordinate encoding a DEC private mode selects, if it selects one:
+/// UTF-8 (1005), SGR (1006) or urxvt (1015).
+fn mouse_encoding_of(mode: u32) -> Option<MouseEncoding> {
+    match mode {
+        1005 => Some(MouseEncoding::Utf8),
+        1006 => Some(MouseEncoding::Sgr),
+        1015 => Some(MouseEncoding::Urxvt),
+        _ => None,
+    }
+}
+
+/// An encoding's bit in a parameter list's set of them; zero for the
+/// legacy form, which no mode selects.
+fn encoding_bit(encoding: MouseEncoding) -> u8 {
+    match encoding {
+        MouseEncoding::Legacy => 0,
+        MouseEncoding::Utf8 => 1,
+        MouseEncoding::Sgr => 2,
+        MouseEncoding::Urxvt => 4,
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct SeqTracker {
     state: State,
@@ -543,6 +566,13 @@ pub(crate) struct SeqTracker {
     /// Intermediate byte seen in the current CSI (only `$` matters).
     csi_intermediate: u8,
     csi_invalid: bool,
+    /// The current CSI wrote a sub-parameter (`:`). Only ED reads one —
+    /// see [`scan_csi_byte`](Self::scan_csi_byte) — so for every other
+    /// final byte this makes the sequence unrecognized, as it always was.
+    csi_colon: bool,
+    /// Digits now belong to a sub-parameter of the current parameter, not
+    /// to the parameter itself, until the next `;`.
+    csi_in_subparam: bool,
     csi_first: bool,
     csi_param: u32,
     csi_has_digits: bool,
@@ -564,6 +594,12 @@ pub(crate) struct SeqTracker {
     /// current CSI's parameter list, as [`mouse_bit`]s — the same scan as
     /// `csi_saw_1004`, for a group rather than one mode.
     csi_saw_mouse: u8,
+    /// The mouse encodings (1005, 1006, 1015) named in the current CSI's
+    /// parameter list, as bits, and the last of them: a set selects the
+    /// last one named, since each replaces the one before, and a reset
+    /// clears the one in force if it is named anywhere in the list.
+    csi_saw_encodings: u8,
+    csi_last_encoding: Option<MouseEncoding>,
     /// Raw capture of the current sequence (from ESC), for diagnostics
     /// and DCS query recognition. Bounded; long sequences truncate.
     seq_buf: [u8; 24],
@@ -623,6 +659,14 @@ pub(crate) struct SeqTracker {
     /// set is kept here so `DECRQM` can answer each mode on its own
     /// evidence and a snapshot can report what was requested (#151).
     mouse_tracking: u8,
+    /// How mouse coordinates are encoded: the last of 1005, 1006 and 1015
+    /// set and not since reset, as in xterm, where each replaces the one
+    /// before and a reset clears only the one in force. Tracked here and
+    /// not read from vt100, which follows the same rule for 1005 and 1006
+    /// but does not implement 1015 — so after `?1006h ?1015h ?1015l` it
+    /// would still say SGR where xterm has gone back to the legacy form
+    /// (#640).
+    mouse_encoding: MouseEncoding,
     /// The raw `DECSCUSR` parameter the application last asked for, or
     /// `None` while it has never asked. Kept as the parameter rather than
     /// as a decoded shape so the one place that knows what `5` means is
@@ -698,6 +742,8 @@ impl SeqTracker {
             csi_prefix: 0,
             csi_intermediate: 0,
             csi_invalid: false,
+            csi_colon: false,
+            csi_in_subparam: false,
             csi_first: true,
             csi_param: 0,
             csi_has_digits: false,
@@ -708,6 +754,8 @@ impl SeqTracker {
             csi_saw_irm: false,
             csi_saw_alternate: false,
             csi_saw_mouse: 0,
+            csi_saw_encodings: 0,
+            csi_last_encoding: None,
             seq_buf: [0; 24],
             seq_len: 0,
             osc_buf: Vec::new(),
@@ -725,6 +773,7 @@ impl SeqTracker {
             frame_printable: 0,
             focus_events: false,
             mouse_tracking: 0,
+            mouse_encoding: MouseEncoding::Legacy,
             cursor_style: None,
             esc_intermediate: 0,
             g0: Charset::Ascii,
@@ -888,6 +937,11 @@ impl SeqTracker {
         MouseModes::from_bits(self.mouse_tracking)
     }
 
+    /// The mouse coordinate encoding in force — see `mouse_encoding`.
+    pub(crate) fn mouse_encoding(&self) -> MouseEncoding {
+        self.mouse_encoding
+    }
+
     /// The raw `DECSCUSR` parameter last requested, `None` if never.
     pub(crate) fn cursor_style(&self) -> Option<u8> {
         self.cursor_style
@@ -963,6 +1017,7 @@ impl SeqTracker {
         self.cursor_style = None;
         self.focus_events = false;
         self.mouse_tracking = 0;
+        self.mouse_encoding = MouseEncoding::Legacy;
         self.insert_mode = false;
         self.tabs.reset();
     }
@@ -1012,6 +1067,8 @@ impl SeqTracker {
         self.csi_prefix = 0;
         self.csi_intermediate = 0;
         self.csi_invalid = false;
+        self.csi_colon = false;
+        self.csi_in_subparam = false;
         self.csi_first = true;
         self.csi_param = 0;
         self.csi_has_digits = false;
@@ -1022,6 +1079,8 @@ impl SeqTracker {
         self.csi_saw_irm = false;
         self.csi_saw_alternate = false;
         self.csi_saw_mouse = 0;
+        self.csi_saw_encodings = 0;
+        self.csi_last_encoding = None;
     }
 
     fn push_seq(&mut self, b: u8) {
@@ -1058,18 +1117,25 @@ impl SeqTracker {
             self.csi_saw_alternate = true;
         }
         self.csi_saw_mouse |= mouse_bit(self.csi_param);
+        if let Some(encoding) = mouse_encoding_of(self.csi_param) {
+            self.csi_saw_encodings |= encoding_bit(encoding);
+            self.csi_last_encoding = Some(encoding);
+        }
         if self.csi_param_count == 0 {
             self.csi_first_param = self.csi_param;
         }
         self.csi_param_count = self.csi_param_count.saturating_add(1);
         self.csi_param = 0;
         self.csi_has_digits = false;
+        self.csi_in_subparam = false;
     }
 
     /// Track one CSI parameter/intermediate byte.
     fn scan_csi_byte(&mut self, b: u8) {
         match b {
             b'?' | b'>' | b'=' if self.csi_first => self.csi_prefix = b,
+            // A sub-parameter's digits are not the parameter's.
+            b'0'..=b'9' if self.csi_in_subparam => {}
             b'0'..=b'9' => {
                 self.csi_param = self
                     .csi_param
@@ -1078,6 +1144,16 @@ impl SeqTracker {
                 self.csi_has_digits = true;
             }
             b';' => self.end_csi_param(),
+            // A sub-parameter (`3:1`). vt100 reads the first value of the
+            // first parameter for ED and ignores the rest, so `CSI 3:1 J`
+            // erases the saved lines there — and a tracker that refused the
+            // shape let the erase through unseen, which cost the rows
+            // termlens had already kept (#621). Kept to the parameter it
+            // belongs to; `csi_final` decides which sequences may carry one.
+            b':' => {
+                self.csi_colon = true;
+                self.csi_in_subparam = true;
+            }
             // `$` is the intermediate of the DECRQM request (`CSI ? n $ p`),
             // `SP` of DECSCUSR (`CSI Ps SP q`) and `!` of DECSTR
             // (`CSI ! p`); recording them keeps those sequences
@@ -1092,7 +1168,7 @@ impl SeqTracker {
 
     /// The event (if any) implied by a CSI final byte.
     fn csi_final(&mut self, b: u8) -> SeqEvent {
-        if self.csi_invalid {
+        if self.csi_invalid || (self.csi_colon && b != b'J') {
             return SeqEvent::None;
         }
         if self.csi_has_digits {
@@ -1175,6 +1251,21 @@ impl SeqTracker {
             match b {
                 b'h' => self.mouse_tracking |= self.csi_saw_mouse,
                 b'l' => self.mouse_tracking &= !self.csi_saw_mouse,
+                _ => {}
+            }
+        }
+
+        // The mouse encodings, by xterm's rule — see `mouse_encoding`.
+        if self.csi_prefix == b'?' {
+            match b {
+                b'h' => {
+                    if let Some(last) = self.csi_last_encoding {
+                        self.mouse_encoding = last;
+                    }
+                }
+                b'l' if self.csi_saw_encodings & encoding_bit(self.mouse_encoding) != 0 => {
+                    self.mouse_encoding = MouseEncoding::Legacy;
+                }
                 _ => {}
             }
         }
@@ -1263,6 +1354,15 @@ impl SeqTracker {
                 _ => {}
             }
         }
+        // DECSED 3 (`CSI ? 3 J`): vt100 treats it as ED 3, as xterm does,
+        // so it erases the same history and must be seen the same way
+        // (#621).
+        if self.csi_prefix == b'?' && b == b'J' && !params_empty && self.csi_first_param == 3 {
+            return SeqEvent::ScrollbackErased;
+        }
+        if self.csi_colon {
+            return SeqEvent::None;
+        }
 
         // Queries. Classification only — answering policy lives upstream.
         let query = match (self.csi_prefix, b) {
@@ -1282,6 +1382,13 @@ impl SeqTracker {
             (0, b't') if single(16) => Some(Query::CellSizePixels),
             // Questions we can recognize but not answer.
             (_, b'n') | (b'=', b'c') => Some(Query::Unanswerable(self.seq_printable())),
+            // XTSMGRAPHICS (`CSI ? Pi ; Pa ; Pv S`): sixel programs ask it
+            // for the colour registers and the geometry right after DA1
+            // claims sixel. Every form gets a reply from xterm, a set
+            // included, so every form is a question; none is answered here,
+            // since the register count would be a claim about a renderer
+            // termlens does not have (#641).
+            (b'?', b'S') => Some(Query::Unanswerable(self.seq_printable())),
             (b'?', b'u') if params_empty => {
                 // kitty keyboard probe. Its protocol pairs this with DA1;
                 // our DA1 answer unblocks the probe like any non-kitty
@@ -1567,10 +1674,18 @@ impl SeqTracker {
                 self.seq_len = 0;
                 self.push_seq(b);
             }
-        } else {
+        } else if !self.passes_through(b) {
             self.push_seq(b);
         }
         self.transition(b)
+    }
+
+    /// Whether `b` is outside the sequence it arrived in: a C0 control
+    /// the parser executes in passing, or a byte it ignores there. Neither
+    /// is part of the sequence's shape, so neither is captured into it.
+    fn passes_through(&self, b: u8) -> bool {
+        matches!(self.state, State::Esc | State::EscIntermediate | State::Csi)
+            && matches!(b, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f..=0xff)
     }
 
     fn transition(&mut self, b: u8) -> SeqEvent {
@@ -1679,6 +1794,17 @@ impl SeqTracker {
                 }
                 ESC => State::Esc,
                 CAN | SUB => State::Ground,
+                // A C0 control inside an escape is executed and the escape
+                // goes on, and DEL and the bytes from 0x80 are ignored —
+                // vte's `advance_esc`, which is what feeds the grid. Dropping
+                // to ground here put the two out of step (#627): in
+                // `ESC CR [6n` the parser answers a CSI the tracker never
+                // saw, and a byte the invoked set redraws was staged as
+                // UTF-8 the parser then swallowed inside the escape.
+                0x00..=0x1f | 0x7f..=0xff => {
+                    self.execute_in_sequence(b);
+                    State::Esc
+                }
                 // RIS (`ESC c`), the hard reset: the terminal returns to its
                 // power-on state, so the cursor is the terminal's default
                 // again, all four character sets are ASCII with G0 invoked,
@@ -1704,7 +1830,18 @@ impl SeqTracker {
                     self.cursor_style = None;
                     self.reset_charsets();
                     self.saved_charsets = None;
+                    // Focus reporting and an open synchronized update are
+                    // modes the terminal holds, so a reset ends both. Left
+                    // set, `focus_in` typed `^[[I` at a program that never
+                    // asked again, and an update begun before the reset
+                    // never ended, so `wait_stable` could not succeed
+                    // (#623). The half-drawn frame is dropped, not
+                    // completed: nothing after the reset belongs to it.
+                    self.focus_events = false;
+                    self.sync_update = false;
+                    self.frame_printable = 0;
                     self.mouse_tracking = 0;
+                    self.mouse_encoding = MouseEncoding::Legacy;
                     self.insert_mode = false;
                     self.tabs.reset();
                     self.close_link();
@@ -1784,7 +1921,11 @@ impl SeqTracker {
                     self.designate(b);
                     State::Ground
                 }
-                _ => State::Ground,
+                // C0 executes and the rest is ignored, as in `Esc` (#627).
+                _ => {
+                    self.execute_in_sequence(b);
+                    State::EscIntermediate
+                }
             },
             State::Csi => match b {
                 0x40..=0x7e => {
@@ -1793,6 +1934,13 @@ impl SeqTracker {
                 }
                 ESC => State::Esc,
                 CAN | SUB => State::Ground,
+                // Executed or ignored in passing, as in `Esc`: vte's CSI
+                // states do the same, so `CSI 6 CR n` is still a question
+                // (#627).
+                0x00..=0x1f | 0x7f..=0xff => {
+                    self.execute_in_sequence(b);
+                    State::Csi
+                }
                 // Parameter/intermediate bytes (and embedded C0 controls).
                 _ => {
                     self.scan_csi_byte(b);
@@ -1845,6 +1993,26 @@ impl SeqTracker {
             },
         };
         event
+    }
+
+    /// A byte that arrived inside an escape and is not part of it: a C0
+    /// control is carried out as in ground state, and anything else (DEL,
+    /// 0x80 and up) is ignored. CAN, SUB and ESC never reach here; they end
+    /// or restart the sequence.
+    ///
+    /// Only the tracker's own share of the control is done. `HT` is not
+    /// turned into a tab-stop request: the column it moves to would be
+    /// written as a `CHA` while the parser is still inside the escape,
+    /// which would abort that escape there and not here. vt100 moves it by
+    /// its own fixed stops instead — a divergence confined to a tab inside
+    /// an escape, against a desynchronised parser for everything after it.
+    fn execute_in_sequence(&mut self, b: u8) {
+        match b {
+            0x07 => self.bells = self.bells.saturating_add(1),
+            0x0e => self.shifted_out = true,
+            0x0f => self.shifted_out = false,
+            _ => {}
+        }
     }
 
     fn track_utf8(&mut self, b: u8) {
@@ -2883,6 +3051,147 @@ mod tests {
         assert!(!events.contains(&SeqEvent::HardReset));
     }
 
+    /// The mouse encoding is the last of 1005, 1006 and 1015 set, and a
+    /// reset clears only the one in force — xterm's rule, which vt100 keeps
+    /// for the two it implements and which 1015 joins here (#640).
+    #[test]
+    fn the_mouse_encoding_is_the_last_one_set() {
+        let encoding = |bytes: &[u8]| fed(bytes).mouse_encoding();
+        assert_eq!(encoding(b""), MouseEncoding::Legacy);
+        assert_eq!(encoding(b"\x1b[?1000h"), MouseEncoding::Legacy);
+        assert_eq!(encoding(b"\x1b[?1015h"), MouseEncoding::Urxvt);
+        assert_eq!(encoding(b"\x1b[?1005h"), MouseEncoding::Utf8);
+        assert_eq!(encoding(b"\x1b[?1006h\x1b[?1015h"), MouseEncoding::Urxvt);
+        assert_eq!(encoding(b"\x1b[?1015h\x1b[?1006h"), MouseEncoding::Sgr);
+        // In one list, the last named wins, as vt100 applies them in order.
+        assert_eq!(encoding(b"\x1b[?1000;1006;1015h"), MouseEncoding::Urxvt);
+        assert_eq!(encoding(b"\x1b[?1015;1006h"), MouseEncoding::Sgr);
+        // Resetting the one in force goes back to the legacy form, not to
+        // the one it replaced; resetting another leaves it alone.
+        assert_eq!(
+            encoding(b"\x1b[?1006h\x1b[?1015h\x1b[?1015l"),
+            MouseEncoding::Legacy
+        );
+        assert_eq!(
+            encoding(b"\x1b[?1006h\x1b[?1015h\x1b[?1006l"),
+            MouseEncoding::Urxvt
+        );
+        assert_eq!(
+            encoding(b"\x1b[?1015h\x1b[?1006;1015l"),
+            MouseEncoding::Legacy
+        );
+        // Both resets return it to power-on.
+        assert_eq!(encoding(b"\x1b[?1015h\x1b[!p"), MouseEncoding::Legacy);
+        assert_eq!(encoding(b"\x1b[?1015h\x1bc"), MouseEncoding::Legacy);
+        // An ANSI mode of the same number is not a mouse encoding.
+        assert_eq!(encoding(b"\x1b[1015h"), MouseEncoding::Legacy);
+    }
+
+    /// RIS returns focus reporting and synchronized output to power-on, as
+    /// `DECSTR` already did for focus: left on, `focus_in` typed at a
+    /// program that had reset, and an update begun before the reset stayed
+    /// open for good (#623).
+    #[test]
+    fn a_hard_reset_ends_focus_reporting_and_an_open_synchronized_update() {
+        let mut t = fed(b"\x1b[?1004h\x1b[?2026hhalf");
+        assert!(
+            t.focus_events() && t.in_sync_update(),
+            "set before the reset"
+        );
+        let events: Vec<SeqEvent> = b"\x1bc".iter().map(|&b| t.step(b)).collect();
+        assert_eq!(events.last(), Some(&SeqEvent::HardReset));
+        assert!(
+            !events.contains(&SeqEvent::SyncEnd),
+            "the half-drawn update is dropped, not completed as a frame"
+        );
+        assert!(!t.focus_events(), "focus reporting is off after RIS");
+        assert!(!t.in_sync_update(), "no update is open after RIS");
+        // A fresh update after the reset counts only what it draws.
+        t.feed(b"\x1b[?2026hab");
+        assert_eq!(t.take_frame_printable(), 2);
+    }
+
+    /// The three spellings vt100 reads as "erase the saved lines" are all
+    /// seen as that, so the rows termlens kept survive each one (#621):
+    /// DECSED 3 and the sub-parameter form erased them unseen.
+    #[test]
+    fn every_spelling_of_erase_saved_lines_is_seen() {
+        let erased = |bytes: &[u8]| {
+            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+            bytes
+                .iter()
+                .filter(|&&b| t.step(b) == SeqEvent::ScrollbackErased)
+                .count()
+        };
+        for erase in [
+            &b"\x1b[3J"[..],
+            b"\x1b[?3J",
+            b"\x1b[3:1J",
+            b"\x1b[?3:1J",
+            b"\x1b[3;1J",
+        ] {
+            assert_eq!(erased(erase), 1, "{}", printable(erase));
+        }
+        // Only the first value of the first parameter is read, as vt100 reads
+        // it: a sub-parameter of 3 is not an erase, and nor is another ED.
+        for other in [
+            &b"\x1b[2J"[..],
+            b"\x1b[?2J",
+            b"\x1b[2:3J",
+            b"\x1b[J",
+            b"\x1b[>3J",
+            b"\x1b[1;3J",
+        ] {
+            assert_eq!(erased(other), 0, "{}", printable(other));
+        }
+        // A sub-parameter still leaves every other sequence unrecognized.
+        assert!(queries_of(b"\x1b[6:1n").is_empty());
+        assert!(!fed(b"\x1b[?2026:1h").in_sync_update());
+    }
+
+    /// A C0 control inside an escape is executed and the escape goes on;
+    /// DEL and bytes from 0x80 are ignored there. That is vte's rule, and
+    /// vte is what feeds the grid: a tracker that dropped to ground missed
+    /// the CSI the parser then ran (#627).
+    #[test]
+    fn a_control_inside_an_escape_is_executed_and_the_escape_goes_on() {
+        let cpr = [Query::CursorPosition { private: false }];
+        for stream in [
+            &b"\x1b\x07[6n"[..],
+            b"\x1b\r[6n",
+            b"\x1b\x7f[6n",
+            b"\x1b\xc3[6n",
+            b"\x1b[\x076n",
+            b"\x1b[6\rn",
+            b"\x1b[6\x7fn",
+        ] {
+            assert_eq!(queries_of(stream), cpr, "{}", printable(stream));
+        }
+        // The bell rang, once each, wherever it sat.
+        assert_eq!(fed(b"\x1b\x07[6n").bells(), 1);
+        assert_eq!(fed(b"\x1b[\x076n").bells(), 1);
+        assert_eq!(fed(b"\x1b(\x07").bells(), 1);
+        // The control is not part of the sequence: an unanswered query is
+        // named as the application would recognise it.
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let named: Vec<SeqEvent> = b"\x1b[\r?u".iter().map(|&b| t.step(b)).collect();
+        assert_eq!(
+            named.last(),
+            Some(&SeqEvent::Query(Query::Unanswerable("^[[?u".into())))
+        );
+        // A designation goes on through a control too.
+        assert_eq!(drawn(b"\x1b(\r0q"), "\u{2500}");
+        // The issue's reproduction: the CR runs inside the escape and the
+        // first `q` ends it, so the rest are drawn, in line art (`x` is
+        // the vertical bar there).
+        assert_eq!(
+            drawn(b"\x1b(0\x1b\rqqqq\r\nxx"),
+            "\u{2500}\u{2500}\u{2500}\u{2502}\u{2502}"
+        );
+        // A shift inside an escape still shifts.
+        assert_eq!(drawn(b"\x1b)0\x1b\x0e[mq"), "\u{2500}");
+    }
+
     /// Entering the alternate screen is announced at its final byte, so
     /// the emulator can copy the main screen's history before the switch
     /// (#622). Leaving it, and the same numbers as ANSI modes, are not.
@@ -3182,6 +3491,22 @@ mod tests {
             queries_of(b"\x1bP$qm\x1b\\"),
             vec![Query::Unanswerable("^[P$qm^[\\".into())]
         );
+        // XTSMGRAPHICS, in every form: xterm replies to a set too (#641).
+        for xtsm in [
+            &b"\x1b[?1;1;0S"[..],
+            b"\x1b[?2;1;0S",
+            b"\x1b[?2;4;0S",
+            b"\x1b[?1;3;256S",
+        ] {
+            assert_eq!(
+                queries_of(xtsm),
+                vec![Query::Unanswerable(printable(xtsm))],
+                "{}",
+                printable(xtsm)
+            );
+        }
+        // Scroll up (`CSI n S`) is not a question.
+        assert!(queries_of(b"\x1b[2S").is_empty());
         // Palette query and clipboard read.
         assert_eq!(
             queries_of(b"\x1b]4;1;?\x07"),
