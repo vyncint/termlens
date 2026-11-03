@@ -159,6 +159,20 @@ fn extra(version: &str, shape: &str, ext: &str) -> PathBuf {
         .join(format!("{shape}.{ext}"))
 }
 
+/// Every extra shape is a text file and its JSON twin, and the text parses
+/// in every configuration, so a listed file that goes missing fails here
+/// rather than shrinking what is pinned. The JSON half is read under
+/// `serde`, in `json::every_extra_shape_reads_from_json_and_back_through_text`.
+#[test]
+fn every_extra_shape_is_a_text_file_with_its_json_twin() {
+    for (version, shape) in EXTRA_SHAPES {
+        let text = extra(version, shape, "txt");
+        let json = extra(version, shape, "json");
+        assert!(json.is_file(), "{} has no JSON twin", text.display());
+        Screen::parse(&read(&text)).unwrap_or_else(|e| panic!("{}: {e}", text.display()));
+    }
+}
+
 /// 0.11.1 wrote a visible cursor at `col == cols` into the text header.
 /// It reads, clamped onto the last cell as the JSON reader clamps the same
 /// column (#375) — so the header renders back with `1,5`, the one byte the
