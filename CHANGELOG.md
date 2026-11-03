@@ -31,6 +31,23 @@ reads that marker.
   the application asked for silence. A test that read the `i=0;OK` reply
   should send `i=` with a nonzero id, as kitty requires.
 
+- A kitty `a=q` query naming both an image id and an image number is
+  refused as kitty refuses it (#672): the reply echoes its `i=` and `I=`
+  (and `p=`, if it names one) with
+  `EINVAL:Must not specify both image id and image number`, and only `q=2`
+  silences it. It was answered `OK`. A test that read `OK` there should
+  drop one of the two keys.
+
+- A kitty query with its data in the escape is part of the upload in
+  progress, as in kitty (#672): its data is the upload's next chunk.
+  Without `m=1` it is the last one, and the upload's image is counted and
+  placed before the query is answered `OK`. With `m=1` kitty removes the
+  image being loaded: no image comes of the upload, the query gets no
+  reply (and is named in the next timeout), and the next chunk is refused —
+  a query sent then is answered `EILSEQ`. termlens used to leave the upload
+  alone and answer the query `OK` on its own. A test should finish an
+  upload before it probes, as the protocol requires of the client.
+
 - `unsupported()` is right about three more shapes (#625, #641). A window
   title with a `;` in it (`OSC 2 ; make; test`) is no longer listed: the
   title was always honoured, and `title()` reported it whole. An ANSI mode
@@ -78,6 +95,18 @@ reads that marker.
   file saved from 0.11.7 or earlier should drop that file's final empty
   line and, where the count is one, the `s` of `rows`.
 
+- A multi-row needle no longer matches in cells a previous match used, in
+  `Screen::find_all` and `mask_matching` (#670). The scan resumed on the
+  row a match ended on and took any match starting there, so on four rows
+  reading `a`, `find_all("a\na")` was three matches, each sharing a cell
+  with the next, and the mask covered all of them, where the rustdoc said
+  matches do not overlap. A match may still start on that row to the right
+  of the last cell the previous one used, counted in grid columns, so on
+  `xxxa`, `axxxa`, `axxx` the needle is still found twice. A test that
+  asserts `find_all(…).len()` for such a needle expects the
+  non-overlapping count, `[(0, 0), (2, 0)]` above rather than three, and a
+  snapshot of such a mask shows the rows no match now covers unmasked.
+
 ### Fixed
 
 - The report action writes each screen into the step summary verbatim
@@ -109,6 +138,11 @@ reads that marker.
   (#658). They sit at the foot of CHANGELOG.md, and the v0.11.0 notes
   showed `` [`Unsupported`] `` in brackets, linked to nothing, as v0.11.1's
   did `[Keep a Changelog]`.
+- A label quoted inside a code span or a fenced block no longer counts as a
+  use, so release notes no longer end with definitions nothing in them links
+  to (#674). Quoting the two above in this file was enough to append both
+  to these notes, and the v0.11.1 notes gained today's `[Unreleased]`
+  compare link. A link whose text is code, as in 0.11.0, still counts.
 
 - A kitty `a=p` placement takes its size from the newest transmission of
   its image id (#626). When that one declared no size, a PNG for instance,
@@ -140,6 +174,13 @@ reads that marker.
   painted (#638), as xterm draws it: the larger of the declared and the
   painted extent on each axis, still within the 4096-pixel cap. It was
   cropped to the declared size.
+
+- A kitty `a=p` of an image a delete freed no longer moves the cursor
+  (#672). After `d=I` of its id, or `d=R` over a range that holds it, kitty
+  has forgotten the image and refuses the placement; termlens sized it from
+  the deleted image, `c=` and `r=` or not. A lower-case delete keeps the
+  image, as in kitty. The deletes termlens cannot attribute are listed in
+  `docs/LIMITATIONS.md`.
 
 - `Screen::parse` and `termlens render` read two text snapshots earlier
   releases wrote and 0.11.7 refused (#643): a visible cursor one past the
@@ -275,9 +316,18 @@ reads that marker.
   the primary grid only unless styled history was on, so the resize back
   pulled different rows into the two and a debug build panicked on the next
   snapshot; with both moved, `row_wrapped` turned false and `logical_text()`
-  split the line. A history at its retention bound is still re-read whole
-  on the next output, and a row narrower than the screen loses its wrap
-  flag then (#671).
+  split the line.
+
+- A history at its retention bound is copied a row at a time, as below it,
+  rather than read again whole on every output. vt100's length stops
+  changing at the bound, so termlens re-read the window, and that read cut
+  every retained row to the screen's width at the moment, losing the text
+  past it after a narrower resize, and cleared the wrap flag of a row a
+  wider resize had left narrow. The rows vt100 drops off the front are
+  counted instead. The count also settles a resize made while the
+  alternate screen is up: a shorter screen that pushed a row, then a
+  taller one that pulled it back, dropped the newest retained row from
+  `scrollback_text()` although vt100 still held it (#671).
 
 - Rows that scroll off in the same read that switches to the alternate
   screen (`CSI ? 1049 h`, `? 47 h`, `? 1047 h`) are in `scrollback_text()`

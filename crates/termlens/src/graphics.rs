@@ -954,7 +954,9 @@ impl GraphicsSeen {
     /// 4096-byte chunks is one image, and an action carrying no picture — a
     /// delete above all — is not one at all. Nor is an upload abandoned
     /// before its last chunk: a delete aborts one, as the protocol requires,
-    /// and so does a sixel or a hard reset (`RIS`) arriving in the middle.
+    /// and so does a sixel or a hard reset (`RIS`) arriving in the middle —
+    /// and so does a query with `m=1`, after which kitty refuses the next
+    /// chunk as well.
     #[must_use]
     pub fn kitty(&self) -> u32 {
         self.counts.kitty
@@ -1063,6 +1065,11 @@ pub(crate) struct Placement {
     /// sixel: the image's height in pixels as xterm measures it, the larger
     /// of the raster attributes' and the painted rows'.
     pub(crate) height: u32,
+    /// kitty's `a=d`: the image ids, first to last, whose images the delete
+    /// frees, so that a later `a=p` of one is not sized from an image kitty
+    /// has forgotten (#672). `None` for every other escape, and for a delete
+    /// whose effect depends on placements termlens does not track.
+    pub(crate) forgets: Option<(u32, u32)>,
 }
 
 /// A payload under construction, owned by the sequence tracker: kitty splits
@@ -1159,7 +1166,11 @@ impl GraphicsBuilder {
                 cell_y: value(b"Y"),
                 moves: value(b"C") != 1 && value(b"U") != 1 && key(control, b"P").is_none(),
                 height: 0,
+                forgets: None,
             };
+            if self.action == GraphicsAction::Delete {
+                self.placement.forgets = forgets(control);
+            }
         }
     }
 
@@ -1376,6 +1387,36 @@ impl SixelMeter {
     }
 }
 
+/// The image ids, first to last, whose images a kitty delete frees — as
+/// kitty's `handle_delete_command` (`graphics.c`) frees them — or `None`
+/// where that is not knowable here.
+///
+/// Only the upper-case deletes free an image with an id; the lower-case ones
+/// remove its placements and keep it ("The uppercase variants will delete
+/// the image data as well", the protocol's "Deleting images"). And only the
+/// deletes by id are
+/// decided by the escape alone, without `p=`: `d=I` frees the image with that
+/// id, placed or not, and `d=R` every image whose id lies in `x=` to `y=`
+/// (`id_range_filter_func`). Naming one placement (`p=`) frees the image
+/// only if it was the last, and the deletes by position, number or frame
+/// free what is placed there — facts about placements, which termlens does
+/// not keep; `docs/LIMITATIONS.md` says so.
+fn forgets(control: &[u8]) -> Option<(u32, u32)> {
+    let value = |name: &[u8]| number(control, name).unwrap_or(0);
+    if value(b"p") != 0 {
+        return None;
+    }
+    match key(control, b"d") {
+        Some(b"I") => Some((value(b"i"), value(b"i"))).filter(|&(id, _)| id != 0),
+        // An image without an id is in no range: kitty's filter asks for a
+        // client id first.
+        Some(b"R") => {
+            Some((value(b"x").max(1), value(b"y"))).filter(|&(first, last)| first <= last)
+        }
+        _ => None,
+    }
+}
+
 /// The cells a kitty placement covers, `(cols, rows)`, computed as kitty
 /// computes them (`update_dest_rect` in kitty's `graphics.c`): `c=` and `r=`
 /// when both are given; otherwise from the source rectangle — `w=`/`h=` or
@@ -1525,6 +1566,7 @@ mod tests {
                 cell_y: 5,
                 moves: true,
                 height: 0,
+                forgets: None,
             }
         );
         for control in [&b"a=T,C=1"[..], b"a=T,U=1", b"a=p,i=1,P=2"] {
@@ -1533,6 +1575,44 @@ mod tests {
             builder.chunk(0, b"", true, usize::MAX);
             let (_, placement) = builder.finish_placed().expect("a payload");
             assert!(!placement.moves, "{}", String::from_utf8_lossy(control));
+        }
+    }
+
+    /// What a delete frees, as kitty's `handle_delete_command` frees it:
+    /// only the upper-case deletes by id say so on their own, and only
+    /// without `p=` (#672). Every other escape forgets nothing.
+    #[test]
+    fn a_kitty_delete_says_which_images_it_frees() {
+        let forgotten = |control: &[u8]| {
+            let mut builder = GraphicsBuilder::default();
+            builder.kitty(control);
+            builder.chunk(0, b"", true, usize::MAX);
+            builder.finish_placed().expect("a payload").1.forgets
+        };
+        assert_eq!(forgotten(b"a=d,d=I,i=7"), Some((7, 7)));
+        assert_eq!(
+            forgotten(b"a=d,d=I,i=7,p=0"),
+            Some((7, 7)),
+            "p=0 is no placement"
+        );
+        assert_eq!(forgotten(b"a=d,d=R,x=3,y=9"), Some((3, 9)));
+        assert_eq!(forgotten(b"a=d,d=R,y=9"), Some((1, 9)), "no image has id 0");
+        for keeps in [
+            &b"a=d,d=i,i=7"[..],
+            b"a=d,d=r,x=3,y=9",
+            b"a=d,d=I,i=7,p=2",
+            b"a=d,d=R,x=3,y=9,p=2",
+            b"a=d,d=R,x=9,y=3",
+            b"a=d,d=I",
+            b"a=d",
+            b"a=d,d=A",
+            b"a=d,d=N,I=7",
+            b"a=d,d=C",
+            b"a=d,d=Z,z=-1",
+            b"a=t,d=I,i=7",
+            b"a=p,d=I,i=7",
+        ] {
+            assert_eq!(forgotten(keeps), None, "{}", String::from_utf8_lossy(keeps));
         }
     }
 

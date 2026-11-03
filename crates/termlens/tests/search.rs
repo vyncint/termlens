@@ -56,6 +56,71 @@ fn find_all_does_not_overlap_and_keeps_real_columns() -> termlens::Result<()> {
     Ok(())
 }
 
+/// A multi-row match does not start in a cell the previous one used (#670).
+/// The scan resumed on the previous match's last row and took any match
+/// starting there, so on four rows of `a`, `"a\na"` was three matches, each
+/// sharing a cell with the next — while the rustdoc said matches do not
+/// overlap.
+#[test]
+fn a_multi_row_match_does_not_start_in_a_cell_the_previous_one_used() -> termlens::Result<()> {
+    let s = Screen::parse("size: 3x4  cursor: 0,0\na\na\na\na")?;
+    assert_eq!(s.find_all("a\na"), [(0, 0), (2, 0)]);
+    assert_eq!(
+        s.find("a\na"),
+        Some((0, 0)),
+        "find is the first of the scan"
+    );
+    // Three rows tall: the second match may not start on row 2, the first
+    // one's last row, so it starts on row 3.
+    let s = Screen::parse("size: 3x6  cursor: 0,0\na\na\na\na\na\na")?;
+    assert_eq!(s.find_all("a\na\na"), [(0, 0), (3, 0)]);
+    Ok(())
+}
+
+/// The row a match ends on is not spent whole: the next match may start on
+/// it, to the right of what the first used. On `xxxa`, `axxxa`, `axxx`, row
+/// 1's first `a` ends one match and its last `a` starts the next, sharing
+/// the row and no cell. This is what a fix that resumed below the match
+/// would lose.
+#[test]
+fn a_multi_row_match_may_start_on_the_row_the_previous_one_ended() -> termlens::Result<()> {
+    let s = Screen::parse("size: 5x3  cursor: 0,0\nxxxa\naxxxa\naxxx")?;
+    assert_eq!(s.find_all("a\na"), [(0, 3), (1, 4)]);
+    assert_eq!(s.mask_matching("a\na", '#').text(), "xxx#\n#xxx#\n#xxx");
+    Ok(())
+}
+
+/// The cells are compared in grid columns, so a wide character a match used
+/// is used in both of its columns (#670). `東東` ending one match leaves no
+/// room on its row for a match whose first `東` is the row's second; a count
+/// of characters (two) would have taken it as starting after the first
+/// match's end. To the right of a used wide character, a match does start.
+#[test]
+fn a_wide_character_a_match_used_is_used_in_both_its_columns() -> termlens::Result<()> {
+    let s = Screen::parse("size: 4x3  cursor: 0,0\na東\n東東\n東東")?;
+    assert_eq!(s.find_all("東\n東東"), [(0, 1)]);
+    let s = Screen::parse("size: 6x3  cursor: 0,0\na東\n東x東\n東")?;
+    assert_eq!(s.find_all("東\n東"), [(0, 1), (1, 3)]);
+    Ok(())
+}
+
+/// `mask_matching` masks the cells `find_all` reports and no others, where
+/// the matches meet on a row (#670). The two share the matching engine, so
+/// they agreed before too — on cells no match should have taken.
+#[test]
+fn mask_matching_masks_exactly_the_cells_find_all_reports() -> termlens::Result<()> {
+    // Five rows of `a`: two matches, rows 0–1 and 2–3, and row 4 in none.
+    let s = Screen::parse("size: 3x5  cursor: 0,0\na\na\na\na\na")?;
+    assert_eq!(s.mask_matching("a\na", '#').text(), "#\n#\n#\n#\na");
+    assert_eq!(s.find_all("a\na"), [(0, 0), (2, 0)]);
+    // The wide rows: one match, rows 0–1, so row 2 keeps its text; a masked
+    // wide character is two fill cells.
+    let s = Screen::parse("size: 4x3  cursor: 0,0\na東\n東東\n東東")?;
+    assert_eq!(s.mask_matching("東\n東東", '#').text(), "a##\n####\n東東");
+    assert_eq!(s.find_all("東\n東東"), [(0, 1)]);
+    Ok(())
+}
+
 #[test]
 fn mask_rect_blanks_the_rectangle_and_keeps_everything_else() -> termlens::Result<()> {
     let mut t = emit(&[

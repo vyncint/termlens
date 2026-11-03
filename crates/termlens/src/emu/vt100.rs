@@ -55,6 +55,11 @@ pub(crate) struct Vt100Emulator {
     /// Inline graphics payloads, oldest first, behind an `Arc` so a
     /// snapshot costs one refcount rather than a copy of every image.
     graphics: Arc<Vec<GraphicsPayload>>,
+    /// For each payload in `graphics`, the image ids a kitty delete freed
+    /// ([`Placement::forgets`]), so a later `a=p` of one is not sized from
+    /// an image kitty has forgotten (#672). Kept in lockstep with
+    /// `graphics`, one entry each, and so bounded by the same two bounds.
+    graphics_forgets: VecDeque<Option<(u32, u32)>>,
     /// Payload bytes currently retained, so eviction is a subtraction
     /// rather than a walk.
     graphics_bytes: usize,
@@ -124,6 +129,7 @@ impl Vt100Emulator {
             captured: 0,
             history_reset: false,
             graphics: Arc::new(Vec::new()),
+            graphics_forgets: VecDeque::new(),
             graphics_bytes: 0,
             capture,
             image_support: Graphics::None,
@@ -163,17 +169,28 @@ impl Vt100Emulator {
                     // replaces an image on retransmission (`handle_add_command`
                     // frees the existing image's resources), so the size of
                     // one sent before it describes nothing on screen (#626).
+                    //
+                    // Unless a delete that frees the image came after it.
+                    // kitty has then forgotten the image, and refuses the
+                    // placement ("Put command refers to non-existent image",
+                    // `handle_put_command`): nothing is placed, so nothing
+                    // moves — even with `c=` and `r=` given (#672). It was
+                    // sized from the image kitty no longer has.
                     GraphicsAction::Place => {
                         let id = payload.id()?;
-                        self.graphics
-                            .iter()
-                            .rev()
-                            .find(|earlier| {
-                                earlier.protocol() == GraphicsProtocol::Kitty
-                                    && earlier.action().carries_image()
-                                    && earlier.id() == Some(id)
-                            })
-                            .and_then(GraphicsPayload::size)
+                        let newest = self.graphics.iter().zip(&self.graphics_forgets).rev().find(
+                            |(earlier, forgets)| {
+                                forgets.is_some_and(|(first, last)| (first..=last).contains(&id))
+                                    || (earlier.protocol() == GraphicsProtocol::Kitty
+                                        && earlier.action().carries_image()
+                                        && earlier.id() == Some(id))
+                            },
+                        );
+                        match newest {
+                            Some((_, Some(_))) => return None,
+                            Some((earlier, None)) => earlier.size(),
+                            None => None,
+                        }
                     }
                     _ => return None,
                 };
@@ -299,17 +316,32 @@ impl Vt100Emulator {
     /// labels.
     ///
     /// [`move_past_image`]: Self::move_past_image
-    fn record_graphics(&mut self, mut payload: GraphicsPayload) {
+    fn record_graphics(&mut self, mut payload: GraphicsPayload, forgets: Option<(u32, u32)>) {
         payload.place(self.cursor_position());
         let kept = payload.data().map_or(0, <[u8]>::len);
         let log = Arc::make_mut(&mut self.graphics);
         log.push(payload);
+        self.graphics_forgets.push_back(forgets);
         self.graphics_bytes += kept;
         // Evict oldest-first, on both bounds. A snapshot already taken keeps
         // its own view: it holds an `Arc` to the vector as it stood.
         while log.len() > HISTORY || (self.graphics_bytes > self.capture && log.len() > 1) {
             let dropped = log.remove(0);
+            self.graphics_forgets.pop_front();
             self.graphics_bytes -= dropped.data().map_or(0, <[u8]>::len);
+        }
+    }
+
+    /// Carry out a completed payload: stamp it, file it, and move the cursor
+    /// past it as the declared terminal does.
+    fn place_graphics(&mut self, payload: GraphicsPayload, placement: &Placement) {
+        // Sized before the payload joins the log, so a placement finds the
+        // earlier transmission and not itself; moved after it is stamped, so
+        // `at` is the top-left corner.
+        let step = self.image_step(&payload, placement);
+        self.record_graphics(payload, placement.forgets);
+        if let Some(step) = step {
+            self.move_past_image(step);
         }
     }
 
@@ -348,66 +380,57 @@ impl Vt100Emulator {
         // screen's history emptied. Reading it as that restarted the mark,
         // and leaving the alternate screen then copied the whole history a
         // second time (#576). The main screen's history waits, untouched,
-        // until the main screen is back.
+        // until the main screen is back — and so does the count of the rows
+        // a resize dropped from it meanwhile.
         if self.parser.screen().alternate_screen() {
             return;
         }
-        let (rows, cols) = size(self.parser.screen());
-        let screen = self.parser.screen_mut();
-        let len = screen.scrollback_len();
+        let evicted = self.parser.callbacks_mut().take_evicted();
+        let len = self.parser.screen().scrollback_len();
 
-        // Rows only scroll *into* history, so below the cap the new rows
-        // are exactly `captured..len`, and an unchanged length means nothing
-        // scrolled. Three writes shorten it instead. RIS and ED 3 empty it,
+        // The copy's newest `captured` rows are the history vt100 held at
+        // the last capture. Rows only scroll *into* it at the back, and
+        // vt100 drops rows off the front — one for each it takes once the
+        // history is at its bound, every one of them counted (see
+        // `take_evicted`) — so the rows the copy and vt100 still share are
+        // the `captured` less the dropped, and anything past them is new.
+        // The length alone cannot say that: at the bound it stops changing
+        // when rows scroll in, and reading the whole history again there,
+        // as the copy used to, widened every row narrower than the screen
+        // and cleared its wrap flag (#671).
+        //
+        // Two things shorten the history instead. RIS and ED 3 empty it,
         // while the rows already copied here survive: the mark starts over,
         // and the rows now at the front are read from the start (#391). A
         // resize that makes the screen taller pulls the newest rows back
         // out of history onto the grid (vt100 0.18, as xterm does): those
         // rows are on screen again, so they leave the copy too, newest
-        // first, and the mark follows them down. Nothing else shortens it,
-        // and a resize applied while the alternate screen was up is settled
-        // here, the first time the main screen is read again.
+        // first. A resize applied while the alternate screen was up is
+        // settled here, the first time the main screen is read again, and
+        // the count tells the two ends apart: a shorter screen that pushed
+        // a row and dropped one at the bound, then a taller one that pulled
+        // the row back, leaves the history one row shorter at the front.
         if std::mem::take(&mut self.history_reset) {
             self.captured = 0;
-        } else if len < self.captured {
-            for _ in len..self.captured {
-                self.history.pop_back();
-                if let Some(cells) = &mut self.history_cells {
-                    cells.pop_back();
-                }
-            }
-            self.captured = len;
         }
-        //
-        // At the cap, vt100 evicts from the front and the length stops
-        // changing, so it no longer reveals growth — and an unchanged
-        // length is no longer evidence of an unchanged history. There is no
-        // sound cheap test for "did it scroll?" either: consecutive
-        // identical rows are ordinary output, so comparing the ends of the
-        // history would miss real scrolls. So at the cap we re-read the
-        // window vt100 still holds, which is by definition the newest `cap`
-        // rows — exactly what we should be retaining. That costs O(cap) row
-        // reads per chunk, and only for a run that has already overflowed
-        // its history. Measured on 50,000 lines through an 80x24 screen:
-        // 352ms with retention off, 327ms below the cap (free, within
-        // noise), 639ms on this path — under 2x, for a workload well past
-        // what a test drives.
-        let at_cap = len == self.scrollback_len;
-        if !at_cap && len == self.captured {
-            screen.set_scrollback(0);
-            self.shadow.set_scrollback(0);
+        let kept = self.captured.saturating_sub(evicted);
+        for _ in len..kept {
+            self.history.pop_back();
+            if let Some(cells) = &mut self.history_cells {
+                cells.pop_back();
+            }
+        }
+        self.copy_history(kept.min(len), len);
+        self.captured = len;
+    }
+
+    /// Append vt100's history rows `from..len` to the copy, oldest first,
+    /// and keep the copy within its bound.
+    fn copy_history(&mut self, from: usize, len: usize) {
+        if from >= len {
             return;
         }
-        let from = if at_cap {
-            self.history.clear();
-            if let Some(cells) = &mut self.history_cells {
-                cells.clear();
-            }
-            0
-        } else {
-            self.captured
-        };
-
+        let (rows, _) = size(self.parser.screen());
         // At offset `k` the visible window starts at history row `len - k`,
         // so `set_scrollback(len - i)` puts history row `i` at the top and
         // the next `rows` rows follow. `Screen::rows` walks the window once,
@@ -418,51 +441,68 @@ impl Vt100Emulator {
             // not. Moving a view is not only a read in vt100: it widens the
             // history rows it shows to the screen's width, clearing their
             // wrap flags, so a view moved in one parser alone left the two
-            // with different rows to pull back onto the grid (#620).
-            screen.set_scrollback(len - i);
+            // with different rows to pull back onto the grid (#620). Only
+            // the rows being copied are ever in view, so a row is widened at
+            // most once, as it is copied — and a row a resize pushed, which
+            // is copied off the grid, never.
+            self.parser.screen_mut().set_scrollback(len - i);
             self.shadow.set_scrollback(len - i);
             let take = (len - i).min(usize::from(rows));
-            for line in screen.rows(0, cols).take(take) {
-                self.history
-                    .push_back(Arc::from(restore_replacement(line.trim_end()).as_ref()));
-            }
-            // Styled history: the same rows as cells, read off the shadow at
-            // the same offset so blink, conceal and strikethrough come
-            // along — the correspondence invariant extended from the grid
-            // to history. Cell reads are O(row) each in vt100, so this is
-            // the cost the builder's knob documents.
-            if let Some(cells) = &mut self.history_cells {
-                for row in 0..u16::try_from(take).unwrap_or(u16::MAX) {
-                    let mut converted: Vec<Cell> = Vec::with_capacity(usize::from(cols));
-                    for col in 0..cols {
-                        let mut cell = screen.cell(row, col).map_or_else(
-                            || Cell::new(String::new(), Style::default(), false, false),
-                            |cell| convert_cell(cell, self.shadow.cell(row, col)),
-                        );
-                        if col > 0 && cell.is_wide_continuation() {
-                            if let Some(lead) = converted.last() {
-                                cell = Cell::new(String::new(), *lead.style(), false, true);
-                            }
-                        }
-                        converted.push(cell);
-                    }
-                    cells.push_back(converted.into());
-                }
-            }
+            self.copy_top_rows(take);
             i += take;
         }
-        while self.history.len() > self.scrollback_len {
-            self.history.pop_front();
+        self.parser.screen_mut().set_scrollback(0);
+        self.shadow.set_scrollback(0);
+    }
+
+    /// Append the top `take` rows of the view on display to the copy, then
+    /// trim the copy to its bound from the front.
+    ///
+    /// Each row is read whole, at the width it has — the width it was
+    /// pushed at, or the screen's if that is wider — and never again: a
+    /// history row a narrower screen later shows is not cut to fit it.
+    fn copy_top_rows(&mut self, take: usize) {
+        let screen = self.parser.screen();
+        let (_, cols) = size(screen);
+        for line in screen.rows(0, u16::MAX).take(take) {
+            self.history
+                .push_back(Arc::from(restore_replacement(line.trim_end()).as_ref()));
         }
+        // Styled history: the same rows as cells, read off the shadow at
+        // the same offset so blink, conceal and strikethrough come along —
+        // the correspondence invariant extended from the grid to history.
+        // Cell reads are O(row) each in vt100, so this is the cost the
+        // builder's knob documents.
         if let Some(cells) = &mut self.history_cells {
+            for row in 0..u16::try_from(take).unwrap_or(u16::MAX) {
+                let mut converted: Vec<Cell> = Vec::with_capacity(usize::from(cols));
+                // A row in view is at least as wide as the screen, and a
+                // row pushed wider is as wide as it was.
+                for col in
+                    (0..=u16::MAX).take_while(|&col| col < cols || screen.cell(row, col).is_some())
+                {
+                    let mut cell = screen.cell(row, col).map_or_else(
+                        || Cell::new(String::new(), Style::default(), false, false),
+                        |cell| convert_cell(cell, self.shadow.cell(row, col)),
+                    );
+                    if col > 0 && cell.is_wide_continuation() {
+                        if let Some(lead) = converted.last() {
+                            cell = Cell::new(String::new(), *lead.style(), false, true);
+                        }
+                    }
+                    converted.push(cell);
+                }
+                cells.push_back(converted.into());
+            }
             while cells.len() > self.scrollback_len {
                 cells.pop_front();
             }
         }
-        self.captured = len;
-        screen.set_scrollback(0);
-        self.shadow.set_scrollback(0);
+        while self.history.len() > self.scrollback_len {
+            self.history.pop_front();
+        }
     }
+
     /// The cursor as a snapshot should report it: a column pending wrap
     /// sits one past the last cell inside the backend, and no terminal
     /// reports a column its own width does not have (#401). Clamping here
@@ -475,10 +515,34 @@ impl Vt100Emulator {
         (row, col.min(size(screen).1.saturating_sub(1)))
     }
 
-    /// Resize both grids, the primary and the attribute shadow, alike.
-    fn resize_grids(&mut self, rows: u16, cols: u16) {
-        self.parser.screen_mut().set_size(nz(rows), nz(cols));
-        self.shadow.set_size(rows, cols);
+    /// Copy the rows a resize to `rows` is about to push into history, off
+    /// the grid, before they get there.
+    ///
+    /// vt100 pushes the top rows of a shorter screen into history at the
+    /// width they have, and a wider screen leaves them that width; reading
+    /// them out of history afterwards would widen them and clear their wrap
+    /// flags (#620). On the grid they can be read as they are. How many
+    /// rows go is vt100's own rule — the rows below the cursor are dropped
+    /// first, and only the rest of the shortfall is pushed — and the mark
+    /// is moved past them, so the capture after the resize finds them
+    /// already copied. The alternate screen hides the main grid, so a
+    /// resize while it is up is left to the capture that runs once it is
+    /// down.
+    fn copy_rows_a_resize_pushes(&mut self, rows: u16) {
+        let (old_rows, _) = size(self.parser.screen());
+        if self.scrollback_len == 0 || self.parser.screen().alternate_screen() || rows >= old_rows {
+            return;
+        }
+        // Every feed ends in a capture, so this finds nothing to do; it is
+        // what lets the mark below count on the copy being current.
+        self.capture_scrolled_rows();
+        let screen = self.parser.screen();
+        let below = old_rows - screen.cursor_position().0 - 1;
+        let pushed = (old_rows - rows).saturating_sub(below);
+        if pushed > 0 {
+            self.copy_top_rows(usize::from(pushed));
+            self.captured += usize::from(pushed);
+        }
     }
 
     /// Feed an emoji-presentation selector (U+FE0F) at the live cursor.
@@ -745,15 +809,16 @@ impl Emulator for Vt100Emulator {
                 SeqEvent::Graphics(payload, placement) => {
                     self.feed_staged(&bytes[fed..=i]);
                     fed = i + 1;
-                    // Sized before the payload joins the log, so a placement
-                    // finds the earlier transmission and not itself; moved
-                    // after it is stamped, so `at` is the top-left corner.
-                    let step = self.image_step(&payload, &placement);
-                    self.record_graphics(*payload);
-                    if let Some(step) = step {
-                        self.move_past_image(step);
-                    }
+                    self.place_graphics(*payload, &placement);
                     None
+                }
+                // The upload a query completed is placed before the query
+                // is answered, as kitty places it before it replies (#672).
+                SeqEvent::GraphicsQuery(payload, placement, query) => {
+                    self.feed_staged(&bytes[fed..=i]);
+                    fed = i + 1;
+                    self.place_graphics(*payload, &placement);
+                    Some(Stop::Query(query))
                 }
                 SeqEvent::SoftReset => {
                     // The tracker has reset what it holds; the grid's
@@ -974,31 +1039,16 @@ impl Emulator for Vt100Emulator {
     }
 
     fn set_size(&mut self, rows: u16, cols: u16) {
-        // Height and width are applied one at a time, in the order that has
-        // the rows a shorter screen pushes into history copied at the width
-        // they were pushed at. Reading a history row narrower than the
-        // screen makes vt100 widen it, and widening clears its wrap flag —
-        // so a row pushed by a wider, shorter resize lost its soft wrap the
-        // moment it was copied, and came back unwrapped when a taller
-        // screen pulled it onto the grid again (#620). Pushing first and
-        // widening after is vt100's own order inside one resize, so the
-        // grid ends the same; a taller screen goes the other way round,
-        // width first, so the rows it pulls back are cut to the new width
-        // and not to the old one. Only the height moves rows into or out of
-        // history, so only it is followed by a capture: at the retention
-        // bound a capture re-reads the whole history, at whatever width the
-        // screen then has.
-        let (old_rows, old_cols) = size(self.parser.screen());
-        if rows < old_rows {
-            self.resize_grids(rows, old_cols);
-            self.capture_scrolled_rows();
-            self.resize_grids(rows, cols);
-        } else {
-            self.resize_grids(old_rows, cols);
-            self.resize_grids(rows, cols);
-            self.capture_scrolled_rows();
-        }
+        self.copy_rows_a_resize_pushes(rows);
+        // The parser's own resize, not the screen's: it reports each row it
+        // drops off the front of a full history, which the capture below
+        // counts on (#671). The shadow keeps no count and needs none.
+        self.parser.set_size(nz(rows), nz(cols));
+        self.shadow.set_size(rows, cols);
         self.tracker.set_cols(cols);
+        // A resize can push rows into history on its own, drop rows from
+        // its front, or pull rows back out of it.
+        self.capture_scrolled_rows();
     }
 }
 
@@ -1580,9 +1630,9 @@ mod tests {
 
     #[test]
     fn a_history_kept_at_the_cap_keeps_advancing() {
-        // The rebuild path: once at the cap vt100's length stops changing,
-        // so a naive "did the length grow?" check would freeze the history
-        // at its first full window.
+        // Once at the cap vt100's length stops changing, so a naive "did
+        // the length grow?" check would freeze the history at its first
+        // full window: the rows it drops off the front are counted instead.
         let mut emu = Vt100Emulator::new(4, 10, 2, crate::graphics::DEFAULT_CAPTURE, false);
         feed_all(&mut emu, b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\n");
         assert_eq!(emu.snapshot().scrollback_text(), "b\nc");
@@ -1730,42 +1780,273 @@ mod tests {
         // assertion fired; and with both moved, the soft wrap was gone
         // (#620).
         //
-        // A history at its retention bound is re-read whole on every
-        // capture, so the second case holds only as long as the resize
-        // alone captures at the width the rows were pushed at.
-        for (styled, scrollback, before) in [
-            (false, 100, ""),
-            (true, 100, ""),
-            (false, 3, "x1\r\nx2\r\nx3\r\nx4\r\n"),
+        // A history at its retention bound used to be read again whole by
+        // every capture, the one the next output runs included, and that
+        // read widened the narrow row too (#671): the last cases redraw a
+        // row between the two resizes, which scrolls nothing.
+        let at_bound = "x1\r\nx2\r\nx3\r\nx4\r\n";
+        for (styled, scrollback, before, between) in [
+            (false, 100, "", ""),
+            (true, 100, "", ""),
+            (false, 3, at_bound, ""),
+            (false, 3, at_bound, "\rREADY"),
+            (true, 3, at_bound, "\rREADY"),
         ] {
+            let label = format!("styled history {styled}, {scrollback} rows, then {between:?}");
             let mut emu =
                 Vt100Emulator::new(6, 10, scrollback, crate::graphics::DEFAULT_CAPTURE, styled);
             feed_all(
                 &mut emu,
                 format!("{before}l1\r\nl2\r\nAAAAAAAAAABBBBB\r\nl4\r\nREADY").as_bytes(),
             );
-            assert!(emu.snapshot().row_wrapped(2), "styled history {styled}");
+            assert!(emu.snapshot().row_wrapped(2), "{label}");
             emu.set_size(3, 20);
             let s = emu.snapshot();
-            assert_eq!(
-                s.scrollback_text(),
-                "l1\nl2\nAAAAAAAAAA",
-                "styled history {styled}"
-            );
-            assert_eq!(s.text(), "BBBBB\nl4\nREADY", "styled history {styled}");
+            assert_eq!(s.scrollback_text(), "l1\nl2\nAAAAAAAAAA", "{label}");
+            assert_eq!(s.text(), "BBBBB\nl4\nREADY", "{label}");
+            feed_all(&mut emu, between.as_bytes());
             emu.set_size(6, 10);
             let s = emu.snapshot();
-            assert_eq!(
-                s.text(),
-                "l1\nl2\nAAAAAAAAAA\nBBBBB\nl4\nREADY",
-                "styled history {styled}"
-            );
-            assert!(s.row_wrapped(2), "styled history {styled}: {s}");
+            assert_eq!(s.text(), "l1\nl2\nAAAAAAAAAA\nBBBBB\nl4\nREADY", "{label}");
+            assert!(s.row_wrapped(2), "{label}: {s}");
             assert_eq!(
                 s.logical_text(),
                 "l1\nl2\nAAAAAAAAAABBBBB\nl4\nREADY",
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_history_at_its_bound_copies_only_the_rows_that_scrolled() {
+        // At the bound vt100 drops a row off the front for every row it
+        // takes at the back, so its length says nothing; the rows it drops
+        // are counted instead, and only the new ones are read (#671). The
+        // narrow row a resize pushed is never read again, so it keeps its
+        // soft wrap when a taller screen pulls it back — while rows keep
+        // scrolling at the bound in between.
+        for styled in [false, true] {
+            let mut emu = Vt100Emulator::new(6, 10, 3, crate::graphics::DEFAULT_CAPTURE, styled);
+            feed_all(
+                &mut emu,
+                b"x1\r\nx2\r\nx3\r\nx4\r\nl1\r\nl2\r\nAAAAAAAAAABBBBB\r\nl4\r\nREADY",
+            );
+            emu.set_size(3, 20);
+            assert_eq!(emu.snapshot().scrollback_text(), "l1\nl2\nAAAAAAAAAA");
+            // One row scrolls off at the bound, and `l1` is dropped for it.
+            feed_all(&mut emu, b"\r\nnext");
+            let s = emu.snapshot();
+            assert_eq!(
+                s.scrollback_text(),
+                "l2\nAAAAAAAAAA\nBBBBB",
                 "styled history {styled}"
             );
+            assert_eq!(s.text(), "l4\nREADY\nnext", "styled history {styled}");
+            emu.set_size(6, 10);
+            let s = emu.snapshot();
+            assert_eq!(s.scrollback_text(), "", "styled history {styled}");
+            assert_eq!(
+                s.text(),
+                "l2\nAAAAAAAAAA\nBBBBB\nl4\nREADY\nnext",
+                "styled history {styled}"
+            );
+            assert!(s.row_wrapped(1), "styled history {styled}: {s}");
+            assert_eq!(
+                s.logical_text(),
+                "l2\nAAAAAAAAAABBBBB\nl4\nREADY\nnext",
+                "styled history {styled}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_history_at_its_bound_keeps_rows_wider_than_a_narrowed_screen() {
+        // Read again whole at the bound, the history was read at the width
+        // the screen had then: after a narrower resize, the next output cut
+        // every retained row to it. A row is read once now, as it scrolled
+        // off (#671).
+        let mut emu = Vt100Emulator::new(4, 10, 2, crate::graphics::DEFAULT_CAPTURE, false);
+        feed_all(&mut emu, b"0123456789\r\nabcdefghij\r\nx\r\ny\r\nz\r\nw");
+        assert_eq!(emu.snapshot().scrollback_text(), "0123456789\nabcdefghij");
+        emu.set_size(4, 5);
+        feed_all(&mut emu, b"\r\nv");
+        assert_eq!(emu.snapshot().scrollback_text(), "abcdefghij\nx");
+    }
+
+    #[test]
+    fn a_shorter_wider_resize_leaves_the_cursor_where_vt100_puts_it() {
+        // The rows a shorter screen pushes are copied off the grid before
+        // the resize, so the resize itself is vt100's, in one step. Made in
+        // two — the height, then the width — it clamped a cursor pending
+        // wrap to the old last column, and the next character overwrote the
+        // one before it.
+        let stream = b"1\r\n2\r\n3\r\nabcde";
+        let mut emu = Vt100Emulator::new(4, 5, 100, crate::graphics::DEFAULT_CAPTURE, false);
+        feed_all(&mut emu, stream);
+        emu.set_size(3, 8);
+        feed_all(&mut emu, b"X");
+        let mut raw = ::vt100::Parser::new(nz(4), nz(5), 100);
+        raw.process(stream);
+        raw.set_size(nz(3), nz(8));
+        raw.process(b"X");
+        let s = emu.snapshot();
+        assert_eq!(s.text(), "2\n3\nabcdeX");
+        assert_eq!(s.text(), raw.screen().contents());
+        assert_eq!(
+            emu.parser.screen().cursor_position(),
+            raw.screen().cursor_position()
+        );
+        assert_eq!(s.scrollback_text(), "1");
+    }
+
+    #[test]
+    fn a_resize_while_the_alternate_screen_is_up_keeps_the_rows_still_in_history() {
+        // At the bound, a shorter main screen pushed `g1` and dropped `a`,
+        // and a taller one pulled `g1` back, all while a full-screen program
+        // had the alternate screen up. The history came back one shorter,
+        // and the copy took that as the newest row pulled back: it dropped
+        // `c`, which vt100 still held, and kept `a`. Counting what vt100
+        // drops from the front tells the two ends apart (#671).
+        let mut emu = Vt100Emulator::new(4, 10, 3, crate::graphics::DEFAULT_CAPTURE, false);
+        feed_all(&mut emu, b"a\r\nb\r\nc\r\ng1\r\ng2\r\ng3\r\ng4");
+        assert_eq!(emu.snapshot().scrollback_text(), "a\nb\nc");
+        feed_all(&mut emu, b"\x1b[?1049hTUI");
+        emu.set_size(3, 10);
+        emu.set_size(4, 10);
+        feed_all(&mut emu, b"\x1b[?1049l");
+        let s = emu.snapshot();
+        // `a` left vt100's history while out of sight, and the copy keeps
+        // it, as it keeps rows across a reset: nothing is on record twice
+        // and nothing still in the terminal is missing.
+        assert_eq!(s.scrollback_text(), "a\nb\nc");
+        assert_eq!(s.full_text(), "a\nb\nc\ng1\ng2\ng3\ng4");
+        // And the copy carries on from there.
+        feed_all(&mut emu, b"\r\ng5");
+        assert_eq!(emu.snapshot().scrollback_text(), "b\nc\ng1");
+    }
+
+    #[test]
+    fn a_history_at_its_bound_is_the_terminal_s_own_through_any_scroll_or_resize() {
+        // The copy against vt100's own history, read the slow way, after
+        // every step of a seeded sweep that keeps the history at a small
+        // bound: line feeds, wraps, scroll-ups, scroll regions (which keep
+        // no history), resizes both ways, the alternate screen, RIS and
+        // ED 3. A miscount of the rows vt100 dropped would put the copy out
+        // of step (#671), and the snapshot's lockstep assertion checks the
+        // shadow on the way.
+        //
+        // The copy outlives vt100's history by design across RIS and ED 3,
+        // so from the first of those on vt100's history must be the copy's
+        // newest rows rather than all of it. A resize while the alternate
+        // screen hides the main one is settled only when it is back, from
+        // the lengths and the count alone, so a row it pulled back and
+        // pushed again at another width keeps the text it was copied with;
+        // after one, only the bound is checked, until a reset starts over.
+        const PIECES: &[&str] = &[
+            "a",
+            "bc",
+            "\r\n",
+            "\n",
+            "AAAAAAAAAAAAAAAAAAAAAAA",
+            "\x1b[S",
+            "\x1b[3S",
+            "\x1b[2;3r",
+            "\x1b[r",
+            "\x1b[H",
+            "\x1b[99;1H",
+            "\x1b[K",
+            // The rest only in the second half of the sweep, so the first
+            // half holds the copy to all of vt100's history throughout.
+            "\x1b[?1049h",
+            "\x1b[?1049l",
+            "\x1bc",
+            "\x1b[3J",
+        ];
+        let plain = PIECES.iter().position(|&p| p == "\x1b[?1049h").unwrap();
+        // vt100's history as text, each row whole: a row keeps the width it
+        // was pushed at, and the copy keeps the text it read then, so the
+        // screen's width now is the wrong one to read it at.
+        fn reference(parser: &mut ::vt100::Parser) -> Vec<String> {
+            let screen = parser.screen_mut();
+            let (rows, _) = size(screen);
+            let len = screen.scrollback_len();
+            let mut lines = Vec::new();
+            let mut i = 0;
+            while i < len {
+                screen.set_scrollback(len - i);
+                let take = (len - i).min(usize::from(rows));
+                lines.extend(
+                    screen
+                        .rows(0, u16::MAX)
+                        .take(take)
+                        .map(|l| l.trim_end().to_owned()),
+                );
+                i += take;
+            }
+            screen.set_scrollback(0);
+            lines
+        }
+        let mut seed: u64 = 0x0671_5eed;
+        let mut next = move |n: usize| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(seed >> 33).unwrap() % n
+        };
+        for case in 0..600 {
+            let styled = case % 2 == 1;
+            let pieces = if case < 300 { &PIECES[..plain] } else { PIECES };
+            let (mut rows, mut cols) = (4, 8);
+            let mut emu =
+                Vt100Emulator::new(rows, cols, 5, crate::graphics::DEFAULT_CAPTURE, styled);
+            let mut raw = ::vt100::Parser::new(nz(rows), nz(cols), 5);
+            // `Some(true)`: the copy is vt100's history; `Some(false)`: it
+            // ends with it; `None`: a resize was settled out of sight.
+            let mut exact = Some(true);
+            for step in 0..40 {
+                let alternate = raw.screen().alternate_screen();
+                if next(5) == 0 {
+                    rows = 2 + u16::try_from(next(5)).unwrap();
+                    cols = 3 + u16::try_from(next(10)).unwrap();
+                    emu.set_size(rows, cols);
+                    raw.set_size(nz(rows), nz(cols));
+                    if alternate {
+                        exact = None;
+                    }
+                } else {
+                    let piece = pieces[next(pieces.len())];
+                    feed_all(&mut emu, piece.as_bytes());
+                    raw.process(piece.as_bytes());
+                    if piece == "\x1bc" || (piece == "\x1b[3J" && !alternate) {
+                        exact = Some(false);
+                    }
+                }
+                let s = emu.snapshot();
+                let ours = s.scrollback_text();
+                let ours: Vec<&str> = if s.scrollback_rows() == 0 {
+                    Vec::new()
+                } else {
+                    ours.split('\n').collect()
+                };
+                let theirs = reference(&mut raw);
+                let theirs: Vec<&str> = theirs.iter().map(String::as_str).collect();
+                let at = format!("case {case}, step {step}: {ours:?} against {theirs:?}");
+                assert!(ours.len() <= 5, "{at}");
+                // vt100's accessors read the grid on display, and the
+                // alternate one has no history to compare with.
+                match exact {
+                    _ if raw.screen().alternate_screen() => {}
+                    Some(true) => assert_eq!(ours, theirs, "{at}"),
+                    Some(false) => assert!(ours.ends_with(&theirs), "{at}"),
+                    None => {}
+                }
+                let grid: Vec<String> = raw
+                    .screen()
+                    .rows(0, cols)
+                    .map(|l| l.trim_end().to_owned())
+                    .collect();
+                assert_eq!(s.text(), grid.join("\n"), "{at}");
+            }
         }
     }
 
@@ -2111,6 +2392,97 @@ mod tests {
               \x1b_Ga=p,i=1\x1b\\X",
         );
         assert_eq!(x_at(&emu), Some((1, 2)));
+    }
+
+    /// A delete that frees an image makes kitty forget it, and a later
+    /// `a=p` of it is refused ("Put command refers to non-existent image",
+    /// `handle_put_command` in kitty's `graphics.c`): nothing is placed, so
+    /// nothing moves, `c=` and `r=` or not (#672). It was sized from the
+    /// image in the payload log. `d=I` frees the image with that id and
+    /// `d=R` every id from `x=` to `y=`; the lower-case forms remove only
+    /// placements and keep the image ("The uppercase variants will delete
+    /// the image data as well", the protocol's "Deleting images").
+    #[test]
+    fn a_kitty_placement_of_an_image_a_delete_freed_does_not_move() {
+        let sent = b"\x1b_Ga=t,f=24,s=20,v=40,i=7;AAAA\x1b\\";
+        for (delete, at) in [
+            (&b"\x1b_Ga=d,d=I,i=7\x1b\\"[..], (0, 0)),
+            (b"\x1b_Ga=d,d=R,x=5,y=9\x1b\\", (0, 0)),
+            (b"\x1b_Ga=d,d=i,i=7\x1b\\", (1, 2)),
+            (b"\x1b_Ga=d,d=r,x=5,y=9\x1b\\", (1, 2)),
+            (b"\x1b_Ga=d,d=I,i=8\x1b\\", (1, 2)),
+            (b"\x1b_Ga=d,d=R,x=8,y=9\x1b\\", (1, 2)),
+            (b"\x1b_Ga=d\x1b\\", (1, 2)),
+        ] {
+            let wire = [&sent[..], delete, b"\x1b_Ga=p,i=7\x1b\\X"].concat();
+            let emu = graphics_emu(Graphics::Kitty, 6, 10, &wire);
+            assert_eq!(x_at(&emu), Some(at), "{}", String::from_utf8_lossy(delete));
+        }
+        // Refused, the placement has no size to give: `c=` and `r=` do not
+        // place what kitty has not got.
+        let wire = [
+            &sent[..],
+            b"\x1b_Ga=d,d=I,i=7\x1b\\\x1b_Ga=p,i=7,c=3,r=2\x1b\\X",
+        ]
+        .concat();
+        assert_eq!(
+            x_at(&graphics_emu(Graphics::Kitty, 6, 10, &wire)),
+            Some((0, 0))
+        );
+        // Sent again after the delete, it is an image kitty has: 2x2.
+        let wire = [
+            &sent[..],
+            b"\x1b_Ga=d,d=I,i=7\x1b\\",
+            sent,
+            b"\x1b_Ga=p,i=7\x1b\\X",
+        ]
+        .concat();
+        assert_eq!(
+            x_at(&graphics_emu(Graphics::Kitty, 6, 10, &wire)),
+            Some((1, 2))
+        );
+    }
+
+    /// The delete facts are kept one for one with the payload log, through
+    /// its eviction: a log that has evicted its oldest entries still pairs
+    /// each delete with itself, so the newest transmission is not taken for
+    /// a deleted one (#672).
+    #[test]
+    fn delete_facts_stay_paired_with_the_payloads_through_eviction() {
+        let mut wire = Vec::new();
+        for _ in 0..HISTORY + 10 {
+            wire.extend_from_slice(b"\x1b_Ga=d,d=I,i=7\x1b\\");
+        }
+        wire.extend_from_slice(b"\x1b_Ga=t,f=24,s=20,v=40,i=8;AAAA\x1b\\\x1b_Ga=p,i=8\x1b\\X");
+        let emu = graphics_emu(Graphics::Kitty, 6, 10, &wire);
+        assert_eq!(x_at(&emu), Some((1, 2)));
+        assert_eq!(emu.graphics.len(), emu.graphics_forgets.len());
+    }
+
+    /// A query that kitty took as an upload's last chunk completes the
+    /// upload, and an `a=T` upload is then placed — `handle_put_command`
+    /// runs for it in kitty's `grman_handle_command` — before the query is
+    /// answered (#672).
+    #[test]
+    fn a_query_that_completes_an_upload_places_its_image_first() {
+        let mut emu = Vt100Emulator::new(6, 10, 100, crate::graphics::DEFAULT_CAPTURE, false);
+        emu.declare_graphics(Graphics::Kitty, Some((10, 20)));
+        let wire = b"\x1b_Ga=T,f=24,s=1,v=1,c=3,r=2,i=5,m=1;AA\x1b\\\x1b_Ga=q,i=31;AA\x1b\\X";
+        let processed = emu.process(wire);
+        assert!(
+            matches!(processed.stop, Some(Stop::Query(_))),
+            "stops for the query: {:?}",
+            processed.stop
+        );
+        feed_all(&mut emu, &wire[processed.consumed..]);
+        assert_eq!(x_at(&emu), Some((1, 3)));
+        let screen = emu.snapshot();
+        let seen = screen.graphics();
+        let image = seen.last().expect("the upload's image");
+        assert_eq!(
+            (image.id(), image.chunks(), image.at()),
+            (Some(5), 2, (0, 0))
+        );
     }
 
     #[test]

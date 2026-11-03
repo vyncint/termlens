@@ -15,9 +15,23 @@
 #   - a `## [` line in a code fence is not a section heading
 #   - the oldest section stops above the foot; an empty [Unreleased] prints
 #     nothing and passes; a missing or empty numbered section fails
+#   - a `[label]` only inside a code span, of one backtick or more and
+#     across a line break, or escaped, or only inside a fenced block, names
+#     nothing and appends nothing (#674): the #658 entry quoted
+#     `[Keep a Changelog]` and `` [`Unsupported`] `` as code, and the 0.11.8
+#     notes ended with both definitions
+#   - a fence closes only on a run of its character at least as long: a
+#     shorter one inside, and a `## [` line after that, are still text
+#   - a real reference whose text holds code, [`Thing`] or
+#     [`the guide`][guide], still appends its definition. The script before
+#     #674 passes this case, since it appended every mention; it is here
+#     against the opposite mistake, deleting code spans whole, which loses
+#     these labels and fails it
 #
-# and then every section of the real CHANGELOG.md: each `[label]` it names
-# whose definition is in the file must have that definition in its notes.
+# and then every section of the real CHANGELOG.md, both ways: the
+# definitions in its notes are exactly the ones its text names outside code,
+# out of those the file defines. That is computed here in Python, by
+# regex, rather than by the script's awk, so the two do not share a mistake.
 # v0.11.0's `Unsupported` is asserted by name.
 #
 # Usage: tools/release-notes-selftest/run.sh
@@ -36,6 +50,26 @@ cat > "$scratch/CHANGELOG.md" <<'EOF'
 Follows [Keep a Changelog].
 
 ## [Unreleased]
+
+## [0.6.0] - 2026-06-01
+
+- Quotes `[plain]`, ``[`Thing`]`` and `` [`Thing`] `` as code, and
+  `[Keep a
+  Changelog]` across a line, and \[guide] escaped: none of it is a link.
+
+## [0.5.0] - 2026-05-01
+
+- A fenced example, indented under its item:
+
+  ```markdown
+  See [plain] and [`Thing`].
+  ```
+
+## [0.4.0] - 2026-04-01
+
+- Real links whose text holds code: [`Thing`], [`the guide`][guide],
+  and [Keep a
+  Changelog] across a line.
 
 ## [0.3.0] - 2026-03-01
 
@@ -65,19 +99,22 @@ Follows [Keep a Changelog].
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [`Thing`]: https://docs.rs/thing
 [guide]: https://example.com/guide
+[plain]: https://example.com/plain
 [unused]: https://example.com/unused
 
 [Unreleased]: https://example.com/compare/v0.3.0...HEAD
 [0.3.0]: https://example.com/compare/v0.2.0...v0.3.0
 EOF
 
-# `expect <label> <version> <zero|nonzero> [expected output file]`
+# `expect <label> <version> <zero|nonzero> [expected output file]`, against
+# the changelog named by $fixture.
+fixture="$scratch/CHANGELOG.md"
 expect() {
   label=$1
   version=$2
   want=$3
   got=0
-  "$extract" "$version" "$scratch/CHANGELOG.md" > "$scratch/out.md" 2> "$scratch/err.log" || got=$?
+  "$extract" "$version" "$fixture" > "$scratch/out.md" 2> "$scratch/err.log" || got=$?
   case "$want:$got" in
     zero:0 | nonzero:[1-9]*) ;;
     *)
@@ -113,6 +150,73 @@ cat > "$scratch/0.3.0.md" <<'EOF'
 [guide]: https://example.com/guide
 EOF
 expect "a section carries the definitions it names, and only those" 0.3.0 zero "$scratch/0.3.0.md"
+cat > "$scratch/0.6.0.md" <<'EOF'
+- Quotes `[plain]`, ``[`Thing`]`` and `` [`Thing`] `` as code, and
+  `[Keep a
+  Changelog]` across a line, and \[guide] escaped: none of it is a link.
+EOF
+expect "a label only in code spans or escaped appends nothing (#674)" 0.6.0 zero "$scratch/0.6.0.md"
+cat > "$scratch/0.5.0.md" <<'EOF'
+- A fenced example, indented under its item:
+
+  ```markdown
+  See [plain] and [`Thing`].
+  ```
+EOF
+expect "a label only in a fenced block appends nothing (#674)" 0.5.0 zero "$scratch/0.5.0.md"
+
+# A fence closes only on a run at least as long as the one that opened it:
+# a shorter one inside is text, and so is a heading after it. Its own file,
+# since a reader that closed the fence early misreads everything below.
+mkdir -p "$scratch/nested"
+cat > "$scratch/nested/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## [1.0.0] - 2027-01-01
+
+- An example of markdown, which shows a shorter fence:
+
+  ````markdown
+  ```
+  ## [0.0.8] - not a heading
+  [guide] is not a link here
+  ````
+
+- After the example, a real [plain] link.
+
+## [0.9.0] - 2026-12-01
+
+- Older.
+
+[guide]: https://example.com/guide
+[plain]: https://example.com/plain
+EOF
+cat > "$scratch/1.0.0.md" <<'EOF'
+- An example of markdown, which shows a shorter fence:
+
+  ````markdown
+  ```
+  ## [0.0.8] - not a heading
+  [guide] is not a link here
+  ````
+
+- After the example, a real [plain] link.
+
+[plain]: https://example.com/plain
+EOF
+fixture="$scratch/nested/CHANGELOG.md"
+expect "a shorter fence inside a fence closes nothing" 1.0.0 zero "$scratch/1.0.0.md"
+fixture="$scratch/CHANGELOG.md"
+cat > "$scratch/0.4.0.md" <<'EOF'
+- Real links whose text holds code: [`Thing`], [`the guide`][guide],
+  and [Keep a
+  Changelog] across a line.
+
+[Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
+[`Thing`]: https://docs.rs/thing
+[guide]: https://example.com/guide
+EOF
+expect "a real reference whose text holds code still counts" 0.4.0 zero "$scratch/0.4.0.md"
 printf -- '- Uses nothing.\n' > "$scratch/0.2.0.md"
 expect "a section that names none gets none" v0.2.0 zero "$scratch/0.2.0.md"
 printf -- '- First, linking [Keep a Changelog].\n\n[Keep a Changelog]: https://keepachangelog.com/en/1.1.0/\n' > "$scratch/0.1.0.md"
@@ -122,13 +226,10 @@ expect "an empty [Unreleased] prints nothing" Unreleased zero "$scratch/empty.md
 expect "an empty numbered section fails" 0.0.1 nonzero
 expect "a missing section fails" 9.9.9 nonzero
 
-# The real file: every label a section names, if the file defines it, is
-# defined in that section's notes. Code spans are left out first, since a
-# `[label]` in one is text. Checked by grep rather than by the script's
-# own awk, so the two do not share a mistake.
+# The real file, both ways: the definitions a section's notes end with are
+# exactly the labels its text names outside code that the file defines.
 cd "$root"
-grep -E '^ {0,3}\[[^]]+\]:' CHANGELOG.md | sed -E 's/^ *\[([^]]+)\]:.*/\1/' \
-  | tr '[:upper:]' '[:lower:]' | sort -u > "$scratch/defined"
+grep -E '^ {0,3}\[[^]]+\]:' CHANGELOG.md > "$scratch/defined"
 checked=0
 real_ok=1
 for version in $(sed -n 's/^## \[\([^]]*\)\].*/\1/p' CHANGELOG.md); do
@@ -139,24 +240,59 @@ for version in $(sed -n 's/^## \[\([^]]*\)\].*/\1/p' CHANGELOG.md); do
     continue
   fi
   checked=$((checked + 1))
-  grep -vE '^ {0,3}\[[^]]+\]:' "$scratch/notes.md" | sed -E 's/`[^`]*`//g' \
-    | grep -oE '\[[^]]+\]' | tr -d '[]' | tr '[:upper:]' '[:lower:]' | sort -u > "$scratch/named" || true
-  # `[`Unsupported`]` loses its code span above; the definition keeps it.
-  grep -oE '\[`[^]`]+`\]' "$scratch/notes.md" | tr -d '[]' | tr '[:upper:]' '[:lower:]' \
-    | sort -u >> "$scratch/named" || true
-  while IFS= read -r name; do
-    [ -z "$name" ] && continue
-    grep -Fxq -- "$name" "$scratch/defined" || continue
-    if ! grep -E '^ {0,3}\[[^]]+\]:' "$scratch/notes.md" | sed -E 's/^ *\[([^]]+)\]:.*/\1/' \
-      | tr '[:upper:]' '[:lower:]' | grep -Fxq -- "$name"; then
-      printf '  FAIL  %-58s [%s] has no definition in its notes\n' "CHANGELOG.md $version" "$name" >&2
-      status=1
-      real_ok=0
-    fi
-  done < "$scratch/named"
+  if ! python3 - "$scratch/notes.md" "$scratch/defined" > "$scratch/check.log" 2>&1 <<'PY'
+import re, sys
+
+DEF = re.compile(r"^ {0,3}\[([^\]]+)\]:")
+norm = lambda s: " ".join(s.lower().split())
+defined = {norm(m.group(1)) for m in map(DEF.match, open(sys.argv[2])) if m}
+lines = open(sys.argv[1]).read().split("\n")
+appended = {norm(m.group(1)) for m in map(DEF.match, lines) if m}
+
+# Blocks of text outside fences: a blank line, a fence or a list item
+# starts a new one, so a code span cannot pair backticks across them.
+blocks, block, fence = [], [], None
+for line in lines:
+    if DEF.match(line):
+        continue
+    t = line.strip()
+    f = re.match(r"(`{3,}|~{3,})", t)
+    if fence:
+        if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence) and t == f.group(1):
+            fence = None
+        continue
+    # A backtick fence's info string holds no backtick: `` `x` `` is a span.
+    if f and not (f.group(1)[0] == "`" and "`" in t[len(f.group(1)):]):
+        blocks.append(" ".join(block)); block = []
+        fence = f.group(1)
+        continue
+    if not t or re.match(r"([-*+]|\d+[.)])(\s|$)", t):
+        blocks.append(" ".join(block)); block = []
+    if t:
+        block.append(t)
+blocks.append(" ".join(block))
+
+named = set()
+for b in blocks:
+    b = re.sub(r"\\[][`]", "", b)  # escaped: literal text
+    # A code span: a run of backticks to the next run exactly as long.
+    b = re.sub(r"(?<!`)(`+)(?!`)(.*?)(?<!`)\1(?!`)",
+               lambda m: m.group(0).replace("[", "").replace("]", ""), b)
+    named |= {norm(x) for x in re.findall(r"\[([^\]]+)\]", b)}
+
+want = named & defined
+if want != appended:
+    print("missing: %s; not named: %s" % (sorted(want - appended), sorted(appended - want)))
+    sys.exit(1)
+PY
+  then
+    printf '  FAIL  %-58s %s\n' "CHANGELOG.md $version" "$(cat "$scratch/check.log")" >&2
+    status=1
+    real_ok=0
+  fi
 done
 if [ "$real_ok" -eq 1 ]; then
-  printf '  ok    %-58s %s sections\n' "every CHANGELOG.md section's references resolve" "$checked"
+  printf '  ok    %-58s %s sections\n' "every section's notes define exactly what it names" "$checked"
 fi
 if "$extract" 0.11.0 | grep -Fxq '[`Unsupported`]: https://docs.rs/termlens/0.11.0/termlens/struct.Unsupported.html'; then
   printf '  ok    %-58s\n' "v0.11.0's notes define [\`Unsupported\`]"

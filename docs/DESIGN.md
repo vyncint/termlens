@@ -575,13 +575,19 @@ alternate screen splits the feed the same way, since from that byte every
 accessor reads the alternate grid and the main screen's newest rows are out
 of reach until it is back (#622). At the length, vt100
 evicts from the front and its length stops changing, so growth is no
-longer visible there — and there is no sound cheap substitute, since
-consecutive identical rows are ordinary output and comparing the ends of
-the history would miss real scrolls. So at the bound the window vt100
-still holds is re-read, which is by definition the newest N rows.
-Measured on 50,000 lines through an 80x24 screen: 352ms with retention
-off, 327ms below the bound (free, within noise), 639ms on the re-read
-path.
+longer visible there — and the rows cannot say it either, since
+consecutive identical rows are ordinary output. vt100 reports each row it
+drops off the front through its `on_scroll` callback, though, so the
+emulator counts them (`emu/unhandled.rs`) and copies only the rows past
+the ones it already holds, at the bound as below it. It used to read the
+whole window again at the bound, on every chunk. That read was at the
+screen's width of the moment, so after a narrower resize it cut every
+retained row to the new width, and reading a row through vt100's view
+widens it to the screen, which cleared the wrap flag of a row a wider
+resize had left narrow (#671). Now each row is read once, whole. Measured
+on 50,000 lines through an 80x24 screen, release build, end to end: 40 ms
+with retention off and 84 ms with the default 1,000-row history, which
+re-reading the window had taken to 90 ms.
 
 History is text unless the builder asks for styles (`scrollback_styles`),
 in which case the scrolled rows are captured as cells too and the shadow
