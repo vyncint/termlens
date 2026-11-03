@@ -30,6 +30,15 @@ reads that marker.
   the emoji into, where it used to overwrite the next character. A test
   that asserted the overwritten row should assert the pushed one.
 
+- The plain output of `termlens diff` ends with one newline, not a blank
+  line, and an unchanged-row count of one reads `… 1 row unchanged`
+  (#652). `ScreenDiff`'s `Display` already ended its last line, and the CLI
+  printed a second newline after it; "no difference" and the coloured
+  output were not affected. The library's `Display` says "1 row" too. A
+  script that compares `diff --color never` output byte for byte against a
+  file saved from 0.11.7 or earlier should drop that file's final empty
+  line and, where the count is one, the `s` of `rows`.
+
 ### Fixed
 
 - An emoji with a presentation selector (`⚠️`, `❤️`) drawn into the
@@ -39,6 +48,7 @@ reads that marker.
   over it panicked on the reader thread and the screen stopped advancing.
   termlens now moves the emoji itself, to the start of the new row, as
   xterm does.
+
 - A resize round trip over a soft-wrapped line no longer makes the attribute
   shadow diverge from the grid (#620). Copying the rows a wider, shorter
   screen pushed into history widened them and cleared their wrap flags, in
@@ -48,11 +58,31 @@ reads that marker.
   split the line. A history at its retention bound is still re-read whole
   on the next output, and a row narrower than the screen loses its wrap
   flag then.
+
 - Rows that scroll off in the same read that switches to the alternate
   screen (`CSI ? 1049 h`, `? 47 h`, `? 1047 h`) are in `scrollback_text()`
   while the alternate screen is up, and survive a reset before it comes
   down (#622). They were copied only once the main screen was back, and a
   RIS before that lost them for good.
+
+- `termlens render` and `termlens diff` accept `--` as the end of their
+  options, as `inspect` does (#650), so a file whose name begins with `-`
+  can be named: `termlens render --text -- -x.snap`. A `-` after `--` is
+  still standard input.
+
+- `termlens diff missing.snap -` reports the missing file at once (#651).
+  Both operands were read before either result was looked at, so `diff`
+  first waited for standard input to end, which at a terminal meant
+  Ctrl-D.
+
+- `termlens render` and `termlens diff` refuse an input larger than 1 GiB
+  with exit code 2 and a message saying so (#653). They read a whole file
+  or stream into memory with no bound, so `render --text /dev/zero` or
+  `yes | termlens render --text -` grew until the allocator or the OOM
+  killer stopped them. The largest screen termlens writes — 1000x1000
+  cells, each styled differently, as the pretty-printed JSON — is about
+  600 MB, so every saved screen an earlier release wrote still reads. A
+  regular file past the bound is refused before it is read.
 
 ## [0.11.7] - 2026-10-27
 
