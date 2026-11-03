@@ -338,8 +338,10 @@ impl fmt::Display for ScreenDiff {
             let marks = marks.trim_end();
             writeln!(f, "    │{}│{marks}", pad(marks, width))?;
         }
-        if self.unchanged_rows > 0 {
-            writeln!(f, "… {} rows unchanged", self.unchanged_rows)?;
+        match self.unchanged_rows {
+            0 => {}
+            1 => writeln!(f, "… 1 row unchanged")?,
+            n => writeln!(f, "… {n} rows unchanged")?,
         }
         for (row, before, after) in &self.style_changes {
             writeln!(f, "styles: {row}: {before} → {after}")?;
@@ -465,6 +467,29 @@ mod tests {
             separator_columns(marks),
             "{rendered}"
         );
+    }
+
+    /// One unchanged row is "1 row", not "1 rows" (#652).
+    #[test]
+    fn the_unchanged_count_agrees_with_its_number() {
+        let screen = |rows: &[&str]| {
+            let mut cells = Vec::new();
+            for text in rows {
+                for ch in text.chars() {
+                    cells.push(Cell::new(ch.to_string(), Style::default(), false, false));
+                }
+            }
+            let height = u16::try_from(rows.len()).unwrap();
+            Screen::from_parts(2, height, 0, 0, true, cells, TermState::default())
+        };
+        let one = screen(&["ab", "cd"])
+            .diff(&screen(&["ab", "cX"]))
+            .to_string();
+        assert!(one.ends_with("\n… 1 row unchanged\n"), "{one}");
+        let two = screen(&["ab", "cd", "ef"])
+            .diff(&screen(&["ab", "cX", "ef"]))
+            .to_string();
+        assert!(two.ends_with("\n… 2 rows unchanged\n"), "{two}");
     }
 
     /// The pad measured a row as a string, where a ZWJ family is one

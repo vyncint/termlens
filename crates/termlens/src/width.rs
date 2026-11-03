@@ -27,12 +27,8 @@ pub(crate) fn columns(text: &str) -> usize {
     let mut cell = String::new();
     let mut cell_width = 0;
     for c in text.chars() {
-        let width = match c.width() {
-            Some(width) => width.min(2),
-            // vt100 draws no control character, and treats any other
-            // character without a width as one column.
-            None if u32::from(c) < 256 => continue,
-            None => 1,
+        let Some(width) = char_columns(c) else {
+            continue;
         };
         if width > 0 {
             total += width;
@@ -49,6 +45,17 @@ pub(crate) fn columns(text: &str) -> usize {
         }
     }
     total
+}
+
+/// The columns the emulator gives `c` on its own: its width, at most two,
+/// or `None` for a control character, which it does not draw. A character
+/// without a width that is not a control takes one.
+pub(crate) fn char_columns(c: char) -> Option<usize> {
+    match c.width() {
+        Some(width) => Some(width.min(2)),
+        None if u32::from(c) < 256 => None,
+        None => Some(1),
+    }
 }
 
 /// Whether a cell holding `contents` is two columns wide: its first

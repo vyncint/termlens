@@ -132,3 +132,49 @@ fn a_wide_character_reserves_two_columns() -> termlens::Result<()> {
     assert!(t.wait_exit()?.success());
     Ok(())
 }
+
+/// The same output must give the same screen however the PTY splits it
+/// (#624). Each stream is written whole and in pieces with a pause between,
+/// and both must render as xterm does: a run that wraps pushes the next row
+/// right too, and an emoji's presentation selector arriving on its own
+/// reserves the column it widens the emoji into.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward the mode sets an application sends, so insert mode is never observed — it performs the insert itself (#149)"
+)]
+fn the_screen_does_not_depend_on_where_the_input_was_split() -> termlens::Result<()> {
+    let cases: [(&str, &[&str], (&str, &str)); 2] = [
+        (
+            "a run that wraps",
+            &["--raw", "\\e[2;1Habcdefghij\\e[1;19H\\e[4hXY", "ZW"],
+            ("         DONE     XY", "ZWabcdefghij"),
+        ),
+        (
+            "a selector in a read of its own",
+            &["--raw", "XYZ\\e[H\\e[4h\u{26a0}", "\u{fe0f}"],
+            ("\u{26a0}\u{fe0f}XYZ    DONE", ""),
+        ),
+    ];
+    for (name, pieces, (row0, row1)) in cases {
+        let whole: String = pieces[1..].concat();
+        let shapes: [(&str, Vec<&str>); 2] = [
+            ("whole", vec!["--raw", &whole]),
+            (
+                "split",
+                vec!["--raw", pieces[1], "--sleep", "100ms", "--raw", pieces[2]],
+            ),
+        ];
+        for (shape, mut steps) in shapes {
+            steps.extend(["--raw", "\\e[4l\\e[1;10HDONE", "--wait"]);
+            let mut t = emit(&steps)?;
+            t.wait_until(|s| s.contains("DONE"))?;
+            let s = t.screen();
+            assert_eq!(s.row_text(0).trim_end(), row0, "{name}, {shape}: {s}");
+            assert_eq!(s.row_text(1).trim_end(), row1, "{name}, {shape}: {s}");
+            t.send(Key::Enter)?;
+            assert!(t.wait_exit()?.success(), "{name}, {shape}");
+        }
+    }
+    Ok(())
+}

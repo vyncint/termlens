@@ -2250,3 +2250,207 @@ fn inspect_leaves_the_artifact_dir_alone_on_a_normal_run() {
         .into_owned();
     assert!(shown.contains(&name), "the program saw: {shown}");
 }
+
+/// `--` ends the options of `render` and `diff` as it does `inspect`'s
+/// (#650), so a file whose name begins with `-` can be named; a `-` after
+/// it is still standard input. Without it the same name is an option.
+#[test]
+fn render_and_diff_double_dash_ends_the_options() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("termlens-double-dash-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    std::fs::copy(data("before.snap"), dir.join("-x.snap")).expect("a dash-named copy");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_termlens"))
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .expect("termlens runs")
+    };
+    let expected = run(&["render", "--text", &data("before.snap")]);
+    assert_eq!(expected.status.code(), Some(0), "{expected:?}");
+
+    let out = run(&["render", "--text", "--", "-x.snap"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(out.stdout, expected.stdout);
+    // Options before `--` still count, and nothing after it is one.
+    let out = run(&["render", "--out", "x.txt", "--text", "--", "-x.snap"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(std::fs::read(dir.join("x.txt")).unwrap(), expected.stdout);
+    let out = run(&["render", "--", "--text", "-x.snap"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "`--text` after `--` is a file: {out:?}"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).starts_with("usage: termlens render"));
+
+    let out = run(&["diff", "--", "-x.snap", "-x.snap"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(out.stdout, b"no difference\n");
+    let out = run(&[
+        "diff",
+        "--color",
+        "never",
+        "--",
+        "-x.snap",
+        &data("after.snap.new"),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+
+    let without = run(&["render", "--text", "-x.snap"]);
+    assert_eq!(without.status.code(), Some(2), "{without:?}");
+    assert!(
+        String::from_utf8_lossy(&without.stderr).contains(r#"unknown option "-x.snap""#),
+        "{without:?}"
+    );
+    let without = run(&["diff", "-x.snap", "-x.snap"]);
+    assert!(
+        String::from_utf8_lossy(&without.stderr).contains(r#"unknown option "-x.snap""#),
+        "{without:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // `-` after `--` is standard input, in both commands.
+    let before = std::fs::read_to_string(data("before.snap")).unwrap();
+    let piped = with_stdin(&["render", "--text", "--", "-"], &before);
+    assert_eq!(piped.status.code(), Some(0), "{piped:?}");
+    assert_eq!(piped.stdout, expected.stdout);
+    let piped = with_stdin(&["diff", "--", &data("before.snap"), "-"], &before);
+    assert_eq!(piped.status.code(), Some(0), "{piped:?}");
+}
+
+/// `diff missing.snap -` reports the missing file without reading standard
+/// input first (#651). Under a PTY stdin never ends, so a `diff` that read
+/// it before looking at the left operand would never exit, and the wait
+/// below would time out.
+#[test]
+fn diff_reports_an_unreadable_left_operand_before_reading_stdin() -> termlens::Result<()> {
+    let mut t = termlens::bin!(
+        "termlens",
+        size(200, 10),
+        args(["diff", &data("missing.snap"), "-"])
+    )?;
+    assert_eq!(t.wait_exit()?.code(), Some(2), "{}", t.screen());
+    assert!(
+        t.screen().contains("termlens: ") && t.screen().contains("missing.snap"),
+        "{}",
+        t.screen()
+    );
+    Ok(())
+}
+
+/// Every rendering of `diff` ends in exactly one newline (#652). The plain
+/// one already ends its last line, and a second newline was printed after
+/// it; "no difference" and the coloured rendering do not, and need one.
+/// One unchanged row is "1 row".
+#[test]
+fn diff_output_ends_with_exactly_one_newline() {
+    let dir = std::env::temp_dir().join(format!("termlens-diff-newline-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let a = dir.join("a.snap");
+    let b = dir.join("b.snap");
+    std::fs::write(&a, "size: 2x2  cursor: 0,0\nab\ncd\n").unwrap();
+    std::fs::write(&b, "size: 2x2  cursor: 0,0\nab\ncX\n").unwrap();
+    let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
+
+    let plain = with_stdin(&["diff", "--color", "never", a, b], "");
+    assert_eq!(plain.status.code(), Some(1), "{plain:?}");
+    let stdout = String::from_utf8(plain.stdout).unwrap();
+    assert!(
+        stdout.ends_with("\n… 1 row unchanged\n"),
+        "one newline, after a count that agrees with its number: {stdout:?}"
+    );
+
+    let before = data("before.snap");
+    let after = data("after.snap.new");
+    for args in [
+        ["diff", "--color", "never", &before, &after],
+        ["diff", "--color", "always", &before, &after],
+        ["diff", "--color", "never", &before, &before],
+        ["diff", "--color", "always", &before, &before],
+    ] {
+        let out = with_stdin(&args, "");
+        assert!(matches!(out.status.code(), Some(0 | 1)), "{out:?}");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            stdout.ends_with('\n') && !stdout.ends_with("\n\n"),
+            "{args:?} ends in exactly one newline: {stdout:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `diff` and `render` refuse an input past their 1 GiB bound (#653). A
+/// regular file says how long it is, so a sparse one past the bound — no
+/// disk, no memory — is refused before a byte is read.
+#[test]
+fn render_and_diff_refuse_a_file_past_the_size_bound() {
+    let dir = std::env::temp_dir().join(format!("termlens-size-bound-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let big = dir.join("big.snap");
+    std::fs::File::create(&big)
+        .and_then(|file| file.set_len((1 << 30) + 1))
+        .expect("a sparse file one byte past the bound");
+    let big = big.to_str().unwrap();
+    let before = data("before.snap");
+    for args in [
+        &["render", "--text", big][..],
+        &["diff", big, &before][..],
+        &["diff", &before, big][..],
+    ] {
+        let out = with_stdin(args, "");
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            stderr,
+            format!("termlens: {big}: larger than 1 GiB, which no saved screen is\n"),
+            "{args:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A stream says nothing about its length, so the read itself is bounded
+/// (#653): `/dev/zero`, as a file operand and as standard input, is refused
+/// once a byte past 1 GiB has arrived. The child runs under a 1.25 GiB
+/// address-space cap, so the read must stop at the bound and must not
+/// reserve the 2 GiB a doubling buffer would for the extra byte; an
+/// unbounded read fails the assertion with "out of memory" instead of
+/// taking the machine's memory.
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "`ulimit -v` caps the child's address space only on Linux"
+)]
+fn render_and_diff_refuse_a_stream_past_the_size_bound() {
+    use std::process::{Command, Stdio};
+    let capped = |args: &[&str], stdin: Stdio| {
+        Command::new("sh")
+            .arg("-c")
+            .arg(r#"ulimit -v 1310720 && exec "$0" "$@""#)
+            .arg(env!("CARGO_BIN_EXE_termlens"))
+            .args(args)
+            .stdin(stdin)
+            .output()
+            .expect("sh runs")
+    };
+    let zero = || Stdio::from(std::fs::File::open("/dev/zero").expect("/dev/zero"));
+    for (args, stdin, name) in [
+        (
+            &["render", "--text", "/dev/zero"][..],
+            Stdio::null(),
+            "/dev/zero",
+        ),
+        (&["render", "--text", "-"][..], zero(), "<stdin>"),
+        (&["diff", "-", &data("before.snap")][..], zero(), "<stdin>"),
+    ] {
+        let out = capped(args, stdin);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!("termlens: {name}: larger than 1 GiB, which no saved screen is\n"),
+            "{args:?}"
+        );
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+    }
+}

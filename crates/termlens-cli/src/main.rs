@@ -31,14 +31,15 @@ usage: termlens <command> [options]
 
 commands:
   inspect [options] <program> [args…]  run a program in a PTY and print its screen
-  diff [--color WHEN] <a> <b>          compare two saved screens; exit 1 when they differ
-  render --svg|--html|--ansi|--text|--json [--out PATH] <a>  render a saved screen
+  diff [--color WHEN] [--] <a> <b>     compare two saved screens; exit 1 when they differ
+  render --svg|--html|--ansi|--text|--json [--out PATH] [--] <a>  render a saved screen
 
 A saved screen is the snapshot text format termlens prints — what `inspect`
 writes to stdout, an insta .snap with or without its header, the block a
 wait error prints, a TERMLENS_ARTIFACT_DIR file — or the JSON the crate's
 `serde` feature writes. `diff` and `render` read `-` as standard input; only
-one of diff's two operands can be, since stdin is read once.
+one of diff's two operands can be, since stdin is read once. Either refuses
+an input larger than 1 GiB, which no saved screen is.
 
 Exit code 0: the command ran (diff: the screens are the same picture).
 Exit code 1: diff found a difference. Exit code 2: termlens itself could not
@@ -84,10 +85,12 @@ still running when the wait ended — goes to stderr. Exit code 2 means inspect
 itself could not run: bad arguments, or a program that could not be spawned.";
 
 const DIFF_USAGE: &str = "\
-usage: termlens diff [--color auto|always|never] <a> <b>
+usage: termlens diff [--color auto|always|never] [--] <a> <b>
 
 Either <a> or <b> may be `-`, meaning standard input — not both, since
-stdin is read once.
+stdin is read once. -- ends the options, so a file whose name begins with
+`-` can follow it; a `-` after it is still standard input. An input larger
+than 1 GiB is refused, since no saved screen is that large.
 
 Parses two saved screens and prints what changed from <a> to <b>: the rows
 that differ side by side, the size and cursor deltas, the style runs before
@@ -101,14 +104,17 @@ diff itself could not run — bad arguments, or a file that is missing or not
 a saved screen.";
 
 const RENDER_USAGE: &str = "\
-usage: termlens render (--svg | --html | --ansi | --text | --json) [--out PATH] <a>
+usage: termlens render (--svg | --html | --ansi | --text | --json) [--out PATH] [--] <a>
 
 Prints a saved screen as an SVG image, an HTML fragment, the screen in ANSI
 colour for a terminal, the plain text format with its styles: block, or the
 format-1 JSON document the crate's `serde` feature writes.
 
-<a> may be `-`, meaning standard input. --out writes to PATH instead of
-stdout; `--out -` is standard output, and a file named `-` is still `./-`.
+<a> may be `-`, meaning standard input. -- ends the options, so a file
+whose name begins with `-` can follow it; a `-` after it is still standard
+input. An input larger than 1 GiB is refused, since no saved screen is that
+large. --out writes to PATH instead of stdout; `--out -` is standard
+output, and a file named `-` is still `./-`.
 --out creates nothing when the render fails — unlike a shell redirect,
 which truncates the file before termlens runs. Every option that takes a
 value also accepts it attached with `=`, as in --out=screen.svg.
@@ -219,18 +225,45 @@ fn main() -> ExitCode {
 /// it a moment earlier. Only the reading changes; the parser already took a
 /// `&str` rather than a path.
 fn load(path: &str) -> Result<Screen, String> {
-    let raw = if path == STDIN {
-        let mut raw = String::new();
-        io::stdin()
-            .read_to_string(&mut raw)
-            .map_err(|e| format!("{STDIN_NAME}: {e}"))?;
-        raw
-    } else {
-        std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?
+    let name = name_of(path);
+    let too_large = || {
+        format!(
+            "{name}: larger than {} GiB, which no saved screen is",
+            MAX_INPUT >> 30
+        )
     };
+    let raw = if path == STDIN {
+        read_bounded(io::stdin().lock(), 0, MAX_INPUT)
+    } else {
+        let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+        // A regular file says how long it is, so one past the bound is
+        // refused before a byte is read, and one inside it is read into a
+        // buffer of its own size. A pipe or a device (`/dev/zero`) says 0
+        // and is bounded by the read itself.
+        let len = match file.metadata() {
+            Ok(meta) if meta.is_file() => meta.len(),
+            _ => 0,
+        };
+        if len > MAX_INPUT as u64 {
+            return Err(too_large());
+        }
+        read_bounded(file, len as usize, MAX_INPUT)
+    }
+    .map_err(|e| format!("{name}: {e}"))?;
+    let Some(raw) = raw else {
+        return Err(too_large());
+    };
+    // The words `read_to_string` used, which this read replaced.
+    let raw = String::from_utf8(raw)
+        .map_err(|_| format!("{name}: stream did not contain valid UTF-8"))?;
     // A checkout on Windows may have given the file CRLF endings; the
-    // formats are line-based and neither cares.
-    let raw = raw.replace("\r\n", "\n");
+    // formats are line-based and neither cares. Only copied when there is
+    // one, since the input may be hundreds of megabytes.
+    let raw = if raw.contains("\r\n") {
+        raw.replace("\r\n", "\n")
+    } else {
+        raw
+    };
     let body = strip_insta_header(&raw).trim_start_matches('\n');
     if body.starts_with('{') {
         return serde_json::from_str(body)
@@ -246,6 +279,48 @@ fn load(path: &str) -> Result<Screen, String> {
 const STDIN: &str = "-";
 /// What a diagnostic calls it, since `-: ...` reads as a stray flag.
 const STDIN_NAME: &str = "<stdin>";
+
+/// The most `diff` and `render` read of one input, in bytes (#653). Without
+/// a bound, `render --text /dev/zero` or `yes | render --text -` grew until
+/// the allocator or the OOM killer stopped it.
+///
+/// A saved screen has a ceiling of its own — at most 1000x1000 cells since
+/// #583 — but the bound has to sit above the largest file termlens itself
+/// writes, or a release would refuse its own output: a 1000x1000 screen with
+/// every cell differently styled and carrying combining marks is about
+/// 80 MB in the text format and about 600 MB as the pretty-printed JSON
+/// `render --json` writes. 1 GiB clears that with room for a JSON writer
+/// that indents more.
+const MAX_INPUT: usize = 1 << 30;
+
+/// Read all of `reader`, or `None` once it holds more than `limit` bytes
+/// ([`MAX_INPUT`] outside the tests). `hint` is the expected length (a
+/// regular file's size, else 0).
+///
+/// The buffer never grows past `limit + 1` bytes: each round reads at
+/// most what the buffer already has room for, and the room is doubled up to
+/// that cap, so the refusal costs the bound and not the next power of two a
+/// plain `read_to_end` would have reserved for the extra byte. A reservation
+/// the allocator refuses is an error to report, not an abort.
+fn read_bounded(mut reader: impl Read, hint: usize, limit: usize) -> io::Result<Option<Vec<u8>>> {
+    let cap = limit + 1;
+    let mut buf: Vec<u8> = Vec::new();
+    // One more than the hint, so a file read in full is seen to end
+    // without growing the buffer for the probe.
+    buf.try_reserve_exact(hint.saturating_add(1).max(8 * 1024).min(cap))?;
+    loop {
+        let room = buf.capacity() - buf.len();
+        let read = (&mut reader).take(room as u64).read_to_end(&mut buf)?;
+        if buf.len() > limit {
+            return Ok(None);
+        }
+        if read < room {
+            return Ok(Some(buf));
+        }
+        let grown = buf.capacity().saturating_mul(2).min(cap);
+        buf.try_reserve_exact(grown - buf.len())?;
+    }
+}
 
 /// How long `inspect` gives the reap to land after the wait ends, so the
 /// trailer says exited when the program did exit. Only ever paid in full by
@@ -377,7 +452,14 @@ fn diff(args: &[String]) -> ExitCode {
                     Err(e) => return fail(&e),
                 }
             }
-            other if other.starts_with('-') && other != "-" => {
+            // The end of the options (#650), as for `inspect`: everything
+            // after it is an operand, so a file whose name begins with `-`
+            // can be named. A `-` after it is still standard input.
+            "--" => {
+                files.extend(args.by_ref());
+                break;
+            }
+            other if other.starts_with('-') && other != STDIN => {
                 return fail(&format!(
                     "unknown option {other:?} (try `termlens diff --help`)"
                 ));
@@ -395,10 +477,17 @@ fn diff(args: &[String]) -> ExitCode {
         return fail("only one of the two screens can be `-`: stdin is read once");
     }
     // Left first, so `diff a.snap -` and `diff - b.snap` both read the pipe
-    // at the point the argument order says they do.
-    let (before, after) = match (load(a), load(b)) {
-        (Ok(a), Ok(b)) => (a, b),
-        (Err(e), _) | (_, Err(e)) => return fail(&e),
+    // at the point the argument order says they do — and a left operand
+    // that cannot be read is reported before the right one is touched, so
+    // `diff missing.snap -` does not sit waiting for a stdin it will never
+    // use (#651).
+    let before = match load(a) {
+        Ok(screen) => screen,
+        Err(e) => return fail(&e),
+    };
+    let after = match load(b) {
+        Ok(screen) => screen,
+        Err(e) => return fail(&e),
     };
     let diff = before.diff(&after);
     let rendered = if color.enabled() {
@@ -406,7 +495,15 @@ fn diff(args: &[String]) -> ExitCode {
     } else {
         diff.to_string()
     };
-    let code = print(&format!("{rendered}\n"));
+    // Exactly one newline at the end, whichever rendering this is: the
+    // plain one already ends its last line, "no difference" and the
+    // coloured one do not. Adding one regardless left a blank line after
+    // every plain diff, in a pipe and in the report action's summary (#652).
+    let code = if rendered.ends_with('\n') {
+        print(&rendered)
+    } else {
+        print(&format!("{rendered}\n"))
+    };
     if code != ExitCode::SUCCESS {
         return code;
     }
@@ -588,6 +685,11 @@ fn render(args: &[String]) -> ExitCode {
                     return render_usage_error("--out is given twice; render writes one file");
                 }
                 out_path = Some(path);
+            }
+            // The end of the options (#650); see `diff`.
+            "--" => {
+                files.extend(args.by_ref());
+                break;
             }
             other if other.starts_with('-') && other != STDIN => {
                 return fail(&format!(
@@ -885,4 +987,60 @@ fn inspect(args: Vec<OsString>) -> ExitCode {
         return ExitCode::from(2);
     }
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_bounded;
+
+    /// A reader that hands out at most `chunk` bytes per call, so the
+    /// bounded read is exercised across many short reads, as a pipe gives.
+    struct Trickle<'a> {
+        data: &'a [u8],
+        chunk: usize,
+    }
+
+    impl std::io::Read for Trickle<'_> {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.data.len().min(self.chunk).min(out.len());
+            out[..n].copy_from_slice(&self.data[..n]);
+            self.data = &self.data[n..];
+            Ok(n)
+        }
+    }
+
+    /// The bound is inclusive, one byte past it is refused, and the buffer
+    /// never reserves more than one byte past it on the way (#653).
+    #[test]
+    fn read_bounded_takes_the_limit_and_refuses_one_byte_more() {
+        let limit = 100_000;
+        let data = vec![b'x'; limit + 1];
+        for chunk in [1, 7, 4096, limit + 1] {
+            for hint in [0, limit, limit + 1, usize::MAX] {
+                let whole = read_bounded(
+                    Trickle {
+                        data: &data[..limit],
+                        chunk,
+                    },
+                    hint,
+                    limit,
+                )
+                .expect("an in-memory read")
+                .expect("exactly the limit is read");
+                assert_eq!(whole.len(), limit);
+                assert!(
+                    whole.capacity() <= limit + 1,
+                    "{} for {hint}",
+                    whole.capacity()
+                );
+                let over = read_bounded(Trickle { data: &data, chunk }, hint, limit)
+                    .expect("an in-memory read");
+                assert!(over.is_none(), "{chunk}/{hint}");
+            }
+        }
+        let empty = read_bounded(&b""[..], 0, limit).unwrap().unwrap();
+        assert!(empty.is_empty());
+        let small = read_bounded(&b"size"[..], 4, limit).unwrap().unwrap();
+        assert_eq!(small, b"size");
+    }
 }

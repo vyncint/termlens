@@ -407,6 +407,21 @@ pub(crate) fn mouse_utf8(button: u8, col: u16, row: u16) -> Vec<u8> {
     out
 }
 
+/// urxvt (mode 1015) mouse report: `ESC [ Cb ; Cx ; Cy M`, every value in
+/// decimal. The button keeps the legacy `+ 32` — xterm writes the same
+/// value it would have sent as a byte — while the coordinates are plain
+/// 1-based numbers, which is what lifts the 222 limit. A release is button
+/// 3 and the same final `M`, as in the legacy form.
+pub(crate) fn mouse_urxvt(button: u8, col: u16, row: u16) -> Vec<u8> {
+    format!(
+        "\x1b[{};{};{}M",
+        u32::from(button) + 32,
+        u32::from(col) + 1,
+        u32::from(row) + 1
+    )
+    .into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,6 +544,13 @@ mod tests {
         assert_eq!(mouse_sgr(80, 0, 0, true), b"\x1b[<80;1;1M");
         assert_eq!(mouse_sgr(69, 2, 3, true), b"\x1b[<69;3;4M"); // shift + wheel down
         assert_eq!(mouse_legacy(80, 0, 0), b"\x1b[M\x70\x21\x21"); // 32 + 80
+                                                                   // urxvt: xterm's `CSI 32;5;3M` for a left press at (4, 2), the
+                                                                   // button's `+ 32` kept and the coordinates plain; and nothing caps
+                                                                   // them at 222 (#640).
+        assert_eq!(mouse_urxvt(0, 4, 2), b"\x1b[32;5;3M");
+        assert_eq!(mouse_urxvt(3, 4, 2), b"\x1b[35;5;3M");
+        assert_eq!(mouse_urxvt(80, 228, 1), b"\x1b[112;229;2M");
+        assert_eq!(mouse_urxvt(0, u16::MAX, 0), b"\x1b[32;65536;1M");
     }
 
     /// `u16::MAX + 1` used to wrap to 0 in release and panic in debug.

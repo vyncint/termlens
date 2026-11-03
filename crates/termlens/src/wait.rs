@@ -23,6 +23,26 @@ pub(crate) fn next_backoff(current: Duration) -> Duration {
     (current * 2).min(Duration::from_millis(20))
 }
 
+/// The instant `timeout` from now, or the furthest the clock can represent
+/// when that is past its range.
+///
+/// `Duration::MAX` is the usual way to say "no deadline", and `Instant + it`
+/// panics with "overflow when adding duration to instant", in every wait and
+/// in every default-deadline wait of a builder given it (#629). Halving keeps
+/// the answer within a factor of two of the furthest representable instant,
+/// which is centuries away on every platform, so the wait is as unbounded as
+/// asked; it ends at zero, which always adds.
+pub(crate) fn deadline_after(timeout: Duration) -> Instant {
+    let now = Instant::now();
+    let mut step = timeout;
+    loop {
+        if let Some(deadline) = now.checked_add(step) {
+            return deadline;
+        }
+        step /= 2;
+    }
+}
+
 /// Marker error: the deadline expired inside [`Monitor::wait_until`].
 #[derive(Debug)]
 pub(crate) struct Expired;
@@ -126,6 +146,16 @@ mod tests {
         let res = monitor.wait_until(start + Duration::from_millis(60), |()| None::<()>);
         assert!(res.is_err());
         assert!(start.elapsed() >= Duration::from_millis(60));
+    }
+
+    #[test]
+    fn a_deadline_past_the_clock_s_range_is_the_furthest_it_can_say() {
+        let before = Instant::now();
+        let far = deadline_after(Duration::MAX);
+        // A hundred years is past any wait and well inside every clock.
+        assert!(far > before + Duration::from_secs(100 * 365 * 24 * 3600));
+        let near = deadline_after(Duration::from_secs(1));
+        assert!(near >= before + Duration::from_secs(1) && near < far);
     }
 
     #[test]
