@@ -320,6 +320,35 @@ fn a_query_the_app_moved_past_is_context_not_a_cause() {
     );
 }
 
+/// XTSMGRAPHICS is a question, and one a sixel program asks right after
+/// DA1 claims sixel — so with `Graphics::Sixel` declared, a program blocked
+/// on its answer must be named, as LIMITATIONS promises. It was not
+/// recognised, and the timeout said only that time ran out (#641).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
+fn a_sixel_geometry_query_is_named_when_it_goes_unanswered() {
+    let mut t = alive_then_blocked(
+        Terminal::builder()
+            .graphics(termlens::Graphics::Sixel)
+            .timeout(Duration::from_secs(10)),
+        &["--csi", "?2;1;0S", "--wait", "never"],
+    );
+    let msg = expire_until_named(&["^[[?2;1;0S"], || {
+        t.wait_until_for(|s| s.contains("never"), Duration::from_millis(400))
+            .unwrap_err()
+            .to_string()
+    });
+    assert!(
+        msg.contains("queried the terminal (^[[?2;1;0S)"),
+        "the blocking query is not named: {msg}"
+    );
+    // Named as a question, not listed as a sequence nobody honoured.
+    assert!(t.screen().unsupported().is_empty(), "{}", t.screen());
+}
+
 /// Every unanswered query is named, not just the most recent one.
 #[test]
 fn all_unanswered_queries_are_named() {

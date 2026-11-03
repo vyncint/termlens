@@ -65,9 +65,9 @@ pub(crate) struct InputModes {
 }
 
 /// How the application asked for mouse coordinates to be encoded. The
-/// three schemes agree below column/row 95 and diverge past it, so
-/// sending the wrong one fails only at a position boundary — which is a
-/// miserable thing to debug from a test.
+/// legacy and UTF-8 schemes agree below column/row 95 and diverge past it,
+/// so sending the wrong one of those fails only at a position boundary —
+/// which is a miserable thing to debug from a test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MouseEncoding {
     /// The original byte-valued form: `ESC [ M Cb Cx Cy`, unusable past
@@ -78,6 +78,10 @@ pub(crate) enum MouseEncoding {
     /// UTF-8 (mode 1005): like the legacy form, but coordinates above 95
     /// are encoded as two-byte UTF-8 rather than a bare byte.
     Utf8,
+    /// urxvt (mode 1015): `ESC [ Cb ; col ; row M`, decimal and unbounded,
+    /// with the legacy `+ 32` kept on the button and a release sent as
+    /// button 3.
+    Urxvt,
 }
 
 /// What a `DECRQM` request can be told about a private mode.

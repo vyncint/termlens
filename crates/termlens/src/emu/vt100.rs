@@ -539,6 +539,9 @@ impl Emulator for Vt100Emulator {
                     None
                 }
                 SeqEvent::HardReset => {
+                    // The tracker closed any open update; the frame it
+                    // began is dropped with it (#623).
+                    self.frame_started = None;
                     self.feed_history_reset(&bytes[fed..i], &bytes[i..=i], true);
                     fed = i + 1;
                     None
@@ -676,11 +679,10 @@ impl Emulator for Vt100Emulator {
         let screen = self.parser.screen();
         InputModes {
             mouse: convert_mouse(screen.mouse_protocol_mode()),
-            mouse_encoding: match screen.mouse_protocol_encoding() {
-                ::vt100::MouseProtocolEncoding::Sgr => MouseEncoding::Sgr,
-                ::vt100::MouseProtocolEncoding::Utf8 => MouseEncoding::Utf8,
-                ::vt100::MouseProtocolEncoding::Default => MouseEncoding::Legacy,
-            },
+            // The tracker's, not vt100's: vt100 does not implement 1015,
+            // and so cannot say when it replaced or cleared the others
+            // (#640).
+            mouse_encoding: self.tracker.mouse_encoding(),
             bracketed_paste: screen.bracketed_paste(),
             application_cursor: screen.application_cursor(),
             focus_events: self.tracker.focus_events(),
@@ -710,14 +712,9 @@ impl Emulator for Vt100Emulator {
             // Tracked by termlens itself, so the state is exact — which is
             // what the honesty rule requires before answering.
             1004 => on(self.tracker.focus_events()),
-            1006 => on(matches!(
-                screen.mouse_protocol_encoding(),
-                ::vt100::MouseProtocolEncoding::Sgr
-            )),
-            1005 => on(matches!(
-                screen.mouse_protocol_encoding(),
-                ::vt100::MouseProtocolEncoding::Utf8
-            )),
+            1005 => on(self.tracker.mouse_encoding() == MouseEncoding::Utf8),
+            1006 => on(self.tracker.mouse_encoding() == MouseEncoding::Sgr),
+            1015 => on(self.tracker.mouse_encoding() == MouseEncoding::Urxvt),
             // The mouse tracking modes, each on its own evidence: the
             // tracker keeps the set the application asked for (#151). vt100
             // collapses the four into one value, so before this a probe for
@@ -1197,6 +1194,70 @@ mod tests {
         assert!(!emu.in_sync_update());
     }
 
+    /// urxvt mouse mode is honoured, so DECRQM can answer for it, and the
+    /// encodings vt100 does know are answered from the same record: after
+    /// `?1006h ?1015h ?1015l` xterm is back on the legacy form, where vt100
+    /// alone still said SGR (#640).
+    #[test]
+    fn the_urxvt_mouse_encoding_is_tracked_and_reported() {
+        let emu = emu_with(b"\x1b[?1000h\x1b[?1015h");
+        assert_eq!(emu.input_modes().mouse_encoding, MouseEncoding::Urxvt);
+        assert_eq!(emu.mode_state(1015), ModeState::Set);
+        assert_eq!(emu.mode_state(1006), ModeState::Reset);
+
+        let emu = emu_with(b"\x1b[?1006h\x1b[?1015h\x1b[?1015l");
+        assert_eq!(emu.input_modes().mouse_encoding, MouseEncoding::Legacy);
+        assert_eq!(emu.mode_state(1015), ModeState::Reset);
+        assert_eq!(emu.mode_state(1006), ModeState::Reset);
+    }
+
+    /// After RIS, DECRQM, the input path and the frame clock all agree that
+    /// focus reporting is off and no update is open (#623).
+    #[test]
+    fn a_hard_reset_reports_focus_and_synchronized_output_reset() {
+        let mut emu = emu_with(b"\x1b[?1004h\x1b[?2026hhalf");
+        assert_eq!(emu.mode_state(1004), ModeState::Set);
+        assert_eq!(emu.mode_state(2026), ModeState::Set);
+        feed_all(&mut emu, b"\x1bcREADY");
+        assert_eq!(emu.mode_state(1004), ModeState::Reset);
+        assert_eq!(emu.mode_state(2026), ModeState::Reset);
+        assert!(!emu.input_modes().focus_events);
+        assert!(!emu.in_sync_update());
+        assert!(
+            emu.frame_started.is_none(),
+            "the half-drawn frame is dropped"
+        );
+        assert_eq!(emu.snapshot().row_text(0).trim_end(), "READY");
+    }
+
+    /// The grid and the tracker stay in step across a control inside an
+    /// escape (#627). The CR runs and the escape goes on, so the first `q`
+    /// ends it and the rest draw in the designated line art; before, the
+    /// tracker staged them as UTF-8 that vte swallowed inside the escape,
+    /// and the screen came out blank. And the query after a BEL there is
+    /// one the grid's parser runs, so it must be one the responder sees.
+    #[test]
+    fn a_control_inside_an_escape_keeps_the_grid_and_the_tracker_in_step() {
+        let emu = emu_with(b"\x1b(0\x1b\rqqqq\r\nxx");
+        assert_eq!(
+            emu.snapshot().text(),
+            "\u{2500}\u{2500}\u{2500}\n\u{2502}\u{2502}\n\n"
+        );
+
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+        let processed = emu.process(b"\x1b\x07[6nafter");
+        assert_eq!(
+            processed.stop,
+            Some(Stop::Query(super::super::Query::CursorPosition {
+                private: false
+            }))
+        );
+        feed_all(&mut emu, &b"\x1b\x07[6nafter"[processed.consumed..]);
+        let s = emu.snapshot();
+        assert_eq!(s.bells(), 1);
+        assert_eq!(s.row_text(0).trim_end(), "after");
+    }
+
     #[test]
     fn snapshot_carries_out_of_band_terminal_state() {
         let emu = emu_with(b"\x1b]0;my app\x07\x1b[?1049h\x1b[?2004h\x1b[?1h\x1b[?1002h");
@@ -1422,6 +1483,26 @@ mod tests {
                 "split at {split}"
             );
             assert_eq!(s.text(), "3\n4\n5\n6", "split at {split}");
+        }
+    }
+
+    /// DECSED 3 and the sub-parameter form erase vt100's history exactly as
+    /// `CSI 3 J` does, and keep termlens's copy exactly as it does: before
+    /// #621 the tracker missed both, read the emptied history as rows pulled
+    /// back onto the screen, and popped the copy.
+    #[test]
+    fn every_spelling_of_erase_saved_lines_keeps_the_copy() {
+        for erase in [&b"\x1b[3J"[..], b"\x1b[?3J", b"\x1b[3:1J"] {
+            let mut emu = Vt100Emulator::new(3, 10, 100, crate::graphics::DEFAULT_CAPTURE, false);
+            feed_all(&mut emu, b"l1\r\nl2\r\nl3\r\nl4\r\nl5");
+            feed_all(&mut emu, erase);
+            let s = emu.snapshot();
+            let erase = String::from_utf8_lossy(erase);
+            assert_eq!(s.scrollback_text(), "l1\nl2", "{erase:?}");
+            assert_eq!(s.text(), "l3\nl4\nl5", "{erase:?}");
+            // And the mark starts over: what scrolls next is copied once.
+            feed_all(&mut emu, b"\r\nl6");
+            assert_eq!(emu.snapshot().scrollback_text(), "l1\nl2\nl3", "{erase:?}");
         }
     }
 

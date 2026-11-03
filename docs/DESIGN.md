@@ -1094,9 +1094,12 @@ environment `env_clear` promises is hermetic (#221).
 ## 6. Input encoding
 
 Mouse input is **mode-aware**: the emulator knows which tracking mode and
-encoding the application enabled (`?9/?1000/?1002/?1003`, SGR `?1006`),
+encoding the application enabled (`?9/?1000/?1002/?1003`; SGR `?1006`,
+urxvt `?1015`, UTF-8 `?1005`, the last one set winning as in xterm),
 `click`/`scroll` encode to match, and no tracking enabled is a typed
-error — never bytes the application would misparse as keys. Modifiers ride
+error — never bytes the application would misparse as keys. X10 (`?9`)
+is xterm's too: a press carries the button alone, with no modifiers, and
+a wheel notch is a typed error, since that mode reports neither. Modifiers ride
 on the button code the same way for a button and a wheel notch (`+4` shift,
 `+8` alt, `+16` ctrl), so `MouseButton::Left.ctrl()` and `Scroll::Up.ctrl()`
 are one idiom; the wheel gets a chord type of its own (`ScrollChord`) so

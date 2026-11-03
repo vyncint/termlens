@@ -469,6 +469,132 @@ fn press_release_tracking_still_gets_no_motion_at_all() -> termlens::Result<()> 
     Ok(())
 }
 
+/// urxvt mouse mode (1015) is honoured: decimal values, the button's
+/// `+ 32` kept, and no 222 limit — xterm's `CSI 32;5;3M` for a press at
+/// (4, 2). termlens used to send the legacy bytes, and past column 222 it
+/// refused with an error blaming a legacy encoding the application had not
+/// chosen (#640).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "the wire is read in raw mode, a tcsetattr, and ConPTY turns typed bytes into console events rather than forwarding them (#149)"
+)]
+fn mouse_reports_follow_the_urxvt_encoding() -> termlens::Result<()> {
+    let press_release_near = b"\x1b[32;5;3M\x1b[35;5;3M";
+    let press_release_far = b"\x1b[32;230;3M\x1b[35;230;3M";
+    let total = press_release_near.len() + press_release_far.len();
+    let mut t = util::spawn_emit(
+        Terminal::builder()
+            .size(240, 6)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\e[?1000h\e[?1015h",
+            "READY",
+            "--read-hex",
+            &total.to_string(),
+            " WIRE-EOF",
+            "--wait",
+        ],
+    )?;
+    t.wait_until(|s| s.contains("READY"))?;
+
+    t.click(4, 2)?;
+    t.click(229, 2)?;
+    t.wait_until(|s| s.contains("WIRE-EOF"))?;
+
+    let row = t.screen().row_text(0);
+    let hex = row
+        .trim_start_matches("READY")
+        .split(" WIRE-EOF")
+        .next()
+        .unwrap_or_default();
+    let wire: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .filter_map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect();
+    let expected = [&press_release_near[..], &press_release_far[..]].concat();
+    assert_eq!(
+        String::from_utf8_lossy(&wire),
+        String::from_utf8_lossy(&expected),
+        "{row}"
+    );
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// With no extended encoding enabled, a click past column 222 is refused,
+/// and the message says the legacy form is in force because nothing else
+/// was enabled — not that the application selected it (#640).
+#[test]
+fn the_legacy_limit_names_the_encodings_that_would_reach_past_it() -> termlens::Result<()> {
+    let mut t = util::spawn_emit(
+        Terminal::builder()
+            .size(240, 6)
+            .timeout(Duration::from_secs(10)),
+        &["--csi", "?1000h", "READY", "--wait"],
+    )?;
+    t.wait_until(|s| s.contains("READY"))?;
+    let err = t.click(229, 2).expect_err("the legacy form stops at 222");
+    let message = err.to_string();
+    assert!(matches!(err, Error::Input(_)), "got: {err}");
+    assert!(!message.contains("selected"), "{message}");
+    assert!(message.contains("?1015"), "{message}");
+    assert!(message.contains("?1006"), "{message}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// X10 mode (`?9`) reports a press as the button alone, with no key state,
+/// and reports no wheel at all — xterm's `EmitButtonCode` and
+/// `EditorButton`. termlens sent the modifier bits and the wheel (#642).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "the wire is read in raw mode, a tcsetattr, and ConPTY turns typed bytes into console events rather than forwarding them (#149)"
+)]
+fn x10_reports_the_button_alone_and_never_the_wheel() -> termlens::Result<()> {
+    let mut t = util::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--csi",
+            "?9h",
+            "READY",
+            "--read-hex",
+            "6",
+            " WIRE-EOF",
+            "--wait",
+        ],
+    )?;
+    t.wait_until(|s| s.contains("READY"))?;
+
+    let err = t
+        .scroll(4, 2, termlens::Scroll::Up)
+        .expect_err("X10 reports no wheel");
+    assert!(matches!(err, Error::Input(_)), "got: {err}");
+    assert!(err.to_string().contains("X10"), "unhelpful: {err}");
+    let err = t
+        .scroll_with(termlens::Scroll::Down.ctrl(), 4, 2)
+        .expect_err("nor a modified one");
+    assert!(matches!(err, Error::Input(_)), "got: {err}");
+
+    // Ctrl is dropped: the button byte is 32 + 0, not 32 + 16.
+    t.click_with(termlens::MouseButton::Left.ctrl(), 4, 2)?;
+    t.wait_until(|s| s.contains("WIRE-EOF"))?;
+    let wire = t.screen().row_text(0);
+    assert!(
+        wire.contains("READY1b5b4d202523 WIRE-EOF"),
+        "expected ESC [ M 0x20 0x25 0x23, got: {wire}"
+    );
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// A drag is refused under X10, where there is no release to report —
 /// the same standard `click` applies to "no tracking at all".
 #[test]
