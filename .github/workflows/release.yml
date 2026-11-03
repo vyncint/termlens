@@ -48,6 +48,13 @@ jobs:
     name: ci
     needs: verify-version
     uses: ./.github/workflows/ci.yml
+    # A called workflow's jobs get at most what this job grants, and a job
+    # asking for more fails the whole run before it starts. ci.yml's semver
+    # job reads a pull request's labels (#655); on a tag there is none, so
+    # it reads nothing here, but it still asks.
+    permissions:
+      contents: read
+      pull-requests: read # ci.yml semver job: the `breaking` label (#655)
 
   publish:
     name: publish to crates.io

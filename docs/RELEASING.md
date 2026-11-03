@@ -34,8 +34,11 @@ before 1.0. What that means for a release:
   restarts the observation window of the
   [1.0 readiness criteria](STABILITY.md#the-10-readiness-criteria). Its
   pull request carries the **`breaking` label** (a maintainer applies it;
-  the gate then runs with `--release-type major`), its description pastes
-  the diagnostics the *forced* run produced (run
+  the gate then runs with `--release-type major`). Applying or removing
+  the label starts a new CI run, and the gate reads the label when its job
+  runs rather than from the event, so a re-run of an older run sees it as
+  it is now. Its description pastes the diagnostics the *forced* run
+  produced (run
   `.github/scripts/check-semver.sh <baseline>` without the label, and
   before the bullet below is written, to get them), and its CHANGELOG
   entry is a bullet beginning **`- **Breaking:**`** under **Changed** or

@@ -61,7 +61,7 @@ RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --all-features
 .github/scripts/check-candidate-statement.sh              # README, CHANGELOG and STABILITY state the candidate in the same words
 .github/scripts/check-report-pin.sh                       # the three report@v refs agree with the workspace version
 .github/scripts/check-package-contents.sh                 # neither published crate ships its tests/, which cannot pass outside the workspace
-.github/scripts/check-skill-snippets.sh                   # every Rust block in SKILL.md still compiles
+.github/scripts/check-skill-snippets.sh                   # every Rust block in SKILL.md and README.md still compiles
 cargo deny check                          # cargo install cargo-deny
 pipx run zizmor==1.29.0 --persona=pedantic .github/   # workflow and action audit; needs GH_TOKEN for the online checks
 cargo +1.85 check --workspace --exclude ratatui-app --locked --all-targets    # the MSRV: `rust-version` in Cargo.toml (the ratatui fixture needs 1.88)
@@ -74,7 +74,10 @@ tools/report-pin-gate-selftest/run.sh                   # …and the report-pin 
 tools/attribution-gate-selftest/run.sh                  # …and the AI-attribution gate, likewise
 tools/dco-gate-selftest/run.sh                          # …and the DCO gate, its one-commit squash exemption included
 tools/preflight-selftest/run.sh                         # …and the runner accounts for each gate it runs, failures included
-tools/report-action-selftest/run.sh                     # …and the report action writes its summary past a directory it cannot read
+tools/report-action-selftest/run.sh                     # …and the report action writes its summary past a directory it cannot read, a fence or a newline in a name
+tools/gates-listed-selftest/run.sh                      # …and the gates-listed gate, named, quoted and folded gates included
+tools/snippet-gate-selftest/run.sh                      # …and the snippet gate reads indented and variant-tagged Rust blocks
+tools/release-notes-selftest/run.sh                     # …and the release notes carry the link definitions their section uses
 .github/scripts/check-semver.sh 0.11.7                  # …and the public API is compatible with the last published release
 ```
 
@@ -119,7 +122,8 @@ cargo insta review            # inspect and accept/reject each diff
 - `skills/termlens/` — the skill for AI coding agents that write tests
   *with* termlens (`AGENTS.md` briefs agents working *on* it). Every Rust
   block in `SKILL.md` is compiled against the crate by
-  `.github/scripts/check-skill-snippets.sh`; run it after editing the file.
+  `.github/scripts/check-skill-snippets.sh`, and so is every one in
+  `README.md`; run it after editing either file.
   `.claude/skills/termlens` links to it so Claude Code finds it here.
 - `tools/` — contributor tooling. `preflight.sh` runs §1's gate list in
   order, one line per gate (`--fast` for fmt, clippy and the tests), and

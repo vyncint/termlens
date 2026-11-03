@@ -4,8 +4,9 @@
 #
 # The step's `run:` block is read out of .github/actions/report/action.yml
 # and run as the runner runs it, under bash with `set -euo pipefail`, in a
-# scratch workspace. termlens-cli is a stub that echoes its arguments: what
-# is under test is the shell around the CLI, not the CLI.
+# scratch workspace. termlens-cli is a stub: `render --text` prints the file
+# as it is, `--out` creates the file it names, and anything else echoes its
+# arguments. What is under test is the shell around the CLI, not the CLI.
 #
 #   - a directory nobody can read beside a .snap.new: `find` exits 1 on it,
 #     and that status ended the step before the summary had a line (#597);
@@ -14,6 +15,11 @@
 #     a second `find`
 #   - nothing to show, with a .snap.new under target/ that must stay out:
 #     the summary says so and names INSTA_UPDATE
+#   - a screen with a row of three backticks and a `# heading` row, beside
+#     its .snap: the screen and the diff each sit verbatim in one code block
+#     that nothing inside closes, and nothing leaks out as Markdown (#648)
+#   - a file name holding a newline and markup: one entry, not two, with the
+#     name escaped, and an artifact file name upload-artifact accepts (#648)
 #
 # Root reads a chmod 000 directory anyway, so as root the first two cases
 # cannot fail and are skipped by name rather than passed.
@@ -49,7 +55,14 @@ workspace() {
   artifacts="$scratch/$1/artifacts"
   rt="$scratch/$1/runner-temp"
   mkdir -p "$ws" "$artifacts" "$rt/termlens-cli/bin"
-  printf '#!/bin/sh\necho "stub termlens $*"\n' > "$rt/termlens-cli/bin/termlens"
+  cat > "$rt/termlens-cli/bin/termlens" <<'STUB'
+#!/bin/sh
+case "$1 $2" in
+  "render --text") exec cat "$3" ;;
+  "render --svg" | "render --html") : > "$4" ;;
+esac
+echo "stub termlens $*"
+STUB
   chmod +x "$rt/termlens-cli/bin/termlens"
 }
 
@@ -115,6 +128,80 @@ mkdir -p "$ws/target/debug"
 printf 'a screen\n' > "$ws/target/debug/build.snap.new"
 expect "nothing to show names INSTA_UPDATE, and target/ stays out" \
   "No \`.snap.new\` files" "INSTA_UPDATE: new" ".pending-snap"
+
+# `verbatim <label> <n> <file …>`: the summary of the last case holds the
+# files' contents, in this order, each as the whole of one fenced block,
+# read the way CommonMark reads one — a fence closes only on a run of
+# backticks at least as long as the one that opened it, with nothing after
+# — and has exactly <n> entries, and no line outside a block that Markdown
+# would turn into a heading.
+verbatim() {
+  label=$1
+  entries=$2
+  shift 2
+  awk -v dir="$scratch/blocks" '
+    function ticks(s,   n) { n = 0; while (substr(s, n + 1, 1) == "`") n++; return n }
+    fence == 0 && ticks($0) >= 3 { fence = ticks($0); f = sprintf("%s/%d", dir, ++b); printf "" > f; next }
+    fence > 0 && ticks($0) >= fence && $0 ~ /^`+$/ { fence = 0; close(f); next }
+    fence > 0 { print > f; next }
+    /^<details>/ { d++ }
+    /^#/ && $0 != "## termlens: screens from the failing tests" { print "heading outside a block: " $0 > "/dev/stderr"; bad = 1 }
+    END { if (fence) { print "a block is never closed" > "/dev/stderr"; bad = 1 }
+          print d + 0 > (dir "/entries"); exit bad }
+  ' dir="$scratch/blocks" "$rt/summary.md" 2> "$rt/verbatim.log" || {
+    printf '  FAIL  %-58s %s\n' "$label" "$(cat "$rt/verbatim.log")" >&2
+    sed 's/^/        /' "$rt/summary.md" >&2
+    status=1
+    return
+  }
+  if [ "$(cat "$scratch/blocks/entries")" -ne "$entries" ]; then
+    printf '  FAIL  %-58s %s entries, expected %s\n' "$label" "$(cat "$scratch/blocks/entries")" "$entries" >&2
+    sed 's/^/        /' "$rt/summary.md" >&2
+    status=1
+    return
+  fi
+  i=0
+  for want in "$@"; do
+    i=$((i + 1))
+    if ! diff "$want" "$scratch/blocks/$i" > "$rt/verbatim.log" 2>&1; then
+      printf '  FAIL  %-58s block %s is not %s verbatim\n' "$label" "$i" "$want" >&2
+      sed 's/^/        /' "$rt/verbatim.log" "$rt/summary.md" >&2
+      status=1
+      return
+    fi
+  done
+  printf '  ok    %-58s %s entries, verbatim\n' "$label" "$entries"
+}
+
+workspace fence
+mkdir -p "$ws/tests/snapshots" "$scratch/blocks"
+printf '%s\n' 'a screen' '```' '# not a heading' '````' 'the last row' > "$ws/tests/snapshots/app__fence.snap.new"
+printf 'the old screen\n' > "$ws/tests/snapshots/app__fence.snap"
+printf 'stub termlens diff --color never ./tests/snapshots/app__fence.snap ./tests/snapshots/app__fence.snap.new\n' > "$scratch/diff.want"
+expect "a row of backticks stays inside its code block" "<code>./tests/snapshots/app__fence.snap.new</code>" \
+  "<p>Against <code>./tests/snapshots/app__fence.snap</code>:</p>"
+verbatim "  and the screen and its diff render verbatim" 1 \
+  "$ws/tests/snapshots/app__fence.snap.new" "$scratch/diff.want"
+
+workspace newline-name
+rm -rf "$scratch/blocks"; mkdir -p "$scratch/blocks"
+odd="$artifacts/weird
+<b>&\"name.txt"
+printf 'one screen\n' > "$odd"
+expect "a file name with a newline is one entry, escaped" \
+  "<code>$artifacts/weird&#10;&lt;b&gt;&amp;&quot;name.txt</code>"
+verbatim "  holding its screen verbatim" 1 "$odd"
+label="  and its artifact file has a name upload-artifact accepts"
+if [ -f "$rt/termlens-report/1-weird__b_&_name.txt.svg" ]; then
+  printf '  ok    %-58s\n' "$label"
+else
+  printf '  FAIL  %-58s artifact holds: %s\n' "$label" "$(ls "$rt/termlens-report")" >&2
+  status=1
+fi
+if ! grep -Fq "rendered 1 screen(s)" "$rt/out.log"; then
+  printf '  FAIL  %-58s %s\n' "  and the step counts one screen" "$(tail -1 "$rt/out.log")" >&2
+  status=1
+fi
 
 if [ "$status" -eq 0 ]; then
   echo "report action selftest: the render step writes its summary in every case"

@@ -122,9 +122,10 @@ your test ── send(Key) · click · paste · resize ──▶ PTY     └─�
 8. **`wait_frame` only works for applications that emit DEC 2026
    synchronized updates.** Stock ratatui 0.30 with crossterm does **not**
    (measured: `repaints()` stays 0), so `wait_frame` times out against it
-   with a message saying exactly that, and `Terminal::record()` refuses
-   for the same reason. Default to `snapshot_after`. Use `wait_frame` only
-   if the application brackets its repaints in `BeginSynchronizedUpdate` /
+   with a message saying exactly that, and `record().stop()` refuses for
+   the same reason (`record()` itself cannot fail, so it takes no `?`).
+   Default to `snapshot_after`. Use `wait_frame` only if the application
+   brackets its repaints in `BeginSynchronizedUpdate` /
    `EndSynchronizedUpdate` — then a `wait_frame` timeout also shows the
    diff from the last frame it returned to the live screen.
 
@@ -575,6 +576,22 @@ directory (see §9b).
   `INSTA_UPDATE: new` is not optional: insta's default writes no `.snap.new`
   when `CI` is set, and GitHub sets it on every runner. Inline snapshots are
   not rendered; insta keeps their new values in `.pending-snap` files.
+  Give the action `with: artifact-dir:` set to the same directory, because
+  a step's `env:` does not reach the next step, and in a matrix a
+  `name: termlens-report-${{ matrix.os }}` of its own per leg, because
+  upload-artifact refuses a second artifact of one name in a run:
+
+  ```yaml
+  - run: cargo test
+    env:
+      TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens
+      INSTA_UPDATE: new
+  - uses: vyncint/termlens/.github/actions/report@v0.11.7
+    if: failure()
+    with:
+      artifact-dir: ${{ runner.temp }}/termlens
+      name: termlens-report-${{ matrix.os }}
+  ```
 
 ## 10. A checklist before you finish
 
