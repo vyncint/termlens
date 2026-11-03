@@ -563,7 +563,10 @@ scrolled nothing costs one length check. A hard reset (`RIS`, `ESC c`) is
 the exception: it rebuilds the screen and empties the history, so the feed
 is split at the reset byte — the rows that scrolled before it are captured
 while vt100 still holds them, and the capture after it sees an empty
-history, which is what re-syncs the mark (#391). At the length, vt100
+history, which is what re-syncs the mark (#391). An entry to the
+alternate screen splits the feed the same way, since from that byte every
+accessor reads the alternate grid and the main screen's newest rows are out
+of reach until it is back (#622). At the length, vt100
 evicts from the front and its length stops changing, so growth is no
 longer visible there — and there is no sound cheap substitute, since
 consecutive identical rows are ordinary output and comparing the ends of
