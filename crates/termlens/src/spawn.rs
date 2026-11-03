@@ -224,17 +224,27 @@ mod unix {
             let file = dir.join(program);
             return runnable(&file).then_some(file);
         }
-        // `sub/x` in `dir`, then along PATH; a bare name along PATH only.
-        if program.components().count() > 1 {
-            let file = dir.join(program);
-            if runnable(&file) {
-                return Some(file);
-            }
-        }
         // Each PATH entry taken relative to `dir`.
-        std::env::split_paths(path?)
-            .map(|entry| dir.join(entry).join(program))
-            .find(|file| runnable(file))
+        let along_path = || {
+            std::env::split_paths(path?)
+                .map(|entry| dir.join(entry).join(program))
+                .find(|file| runnable(file))
+        };
+        // A bare name along PATH only.
+        if program.components().count() == 1 {
+            return along_path();
+        }
+        // `sub/x` in `dir`, then along PATH. Found in neither, it is still
+        // `dir`'s file that is meant, so the exec of that file says why it
+        // cannot run, with the errno the OS gave: `EACCES` for the
+        // `target/debug/app` an artifact download left without its
+        // executable bit, `ENOENT` for one that is not there. The PTY layer
+        // reported a PATH search instead, the one place not to look (#631).
+        let file = dir.join(program);
+        if runnable(&file) {
+            return Some(file);
+        }
+        Some(along_path().unwrap_or(file))
     }
 
     /// access(2) with `X_OK`, as the PTY layer's resolution asks it: the

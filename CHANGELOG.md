@@ -31,6 +31,14 @@ reads that marker.
   a second, and the error claims a full buffer only when a write into it is
   seen blocked; it reads "a write into it was still blocked after …" where
   it read "no progress in …".
+- `spawn("sub/prog")` of a file in the working directory that cannot be
+  executed, or is not there, fails with the reason the OS gave for that
+  file, "cannot execute …/sub/prog: Permission denied (os error 13)" or
+  "No such file or directory (os error 2)" (#631). It reported a PATH
+  search, "No viable candidates found in PATH", the one place the file was
+  never meant to be; the usual case is a `target/debug/app` downloaded as
+  an artifact without its executable bit. A program a PATH entry provides
+  under the same name is still found.
 - Dropping a terminal returns when the application left more input unread
   than its terminal holds, which a raw-mode application that stops reading
   allows (#628). The PTY layer writes an end-of-file as its writer is
