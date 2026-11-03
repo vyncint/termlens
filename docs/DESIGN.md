@@ -402,7 +402,10 @@ screen dump** — a CI log alone answers "what was the app showing?".
   before returning. Idempotent via a cached status.
 
 `Drop` kills + reaps the child unconditionally (unless already reaped):
-tests never leak zombies, including on panic.
+tests never leak zombies, including on panic. A child the kernel reaped,
+where the test process ignores SIGCHLD, counts as reaped: nothing is
+signalled, `wait_exit` says why there is no status, and `signal` refuses
+(#630).
 
 ### `screen()` is the live grid, frames or no frames
 

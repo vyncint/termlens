@@ -57,6 +57,13 @@ pub(crate) fn spawn_child(
         .map_err(|error| error.to_string())
 }
 
+/// Whether this process's children are reaped by the kernel the moment they
+/// exit, so that no wait of ours can ever see their status.
+#[cfg(unix)]
+pub(crate) fn children_reaped_by_the_kernel() -> bool {
+    unix::children_reaped_by_the_kernel()
+}
+
 #[cfg(unix)]
 mod unix {
     use std::ffi::{CString, OsStr, OsString};
@@ -188,7 +195,7 @@ mod unix {
     /// Whether this process's children are reaped by the kernel the moment
     /// they exit: SIGCHLD ignored, or `SA_NOCLDWAIT` set on it, either
     /// inherited from whatever started the test.
-    fn children_reaped_by_the_kernel() -> bool {
+    pub(super) fn children_reaped_by_the_kernel() -> bool {
         // SAFETY: with a null new action, sigaction only writes the current
         // one into `current`, and a zeroed sigaction is a valid value for it
         // to overwrite.

@@ -2256,6 +2256,7 @@ impl TerminalBuilder {
             shared,
             default_timeout: self.timeout,
             exit_status: None,
+            reaped_elsewhere: false,
             exit_watch: ExitWatch::default(),
             command_desc,
             frame_cursor: 0,
@@ -2771,6 +2772,10 @@ pub struct Terminal {
     shared: Arc<Monitor<EmuState>>,
     default_timeout: Duration,
     exit_status: Option<ExitStatus>,
+    /// The child was reaped by someone other than termlens, with its status
+    /// lost: the kernel, where SIGCHLD is ignored (#630). Its pid may name
+    /// another process now.
+    reaped_elsewhere: bool,
     /// Where nothing else says the child is gone, when it was first seen
     /// reaped — across waits, not per wait (#593).
     exit_watch: ExitWatch,
@@ -4180,6 +4185,17 @@ impl Terminal {
                 self.command_desc
             )));
         }
+        if !self.reaped_elsewhere {
+            self.reaped_elsewhere = self.pid().is_some_and(gone_unwaited);
+        }
+        if self.reaped_elsewhere {
+            return Err(Error::Input(format!(
+                "cannot deliver {signal:?} to `{}`: it already exited and {}, so its pid \
+                 may be another process's now",
+                self.command_desc,
+                reaped_elsewhere_cause()
+            )));
+        }
         let Some(pid) = self.pid() else {
             return Err(Error::Input(format!(
                 "cannot deliver {signal:?} to `{}`: the platform reports no pid",
@@ -4225,7 +4241,27 @@ impl Terminal {
         let deadline = deadline_after(timeout);
         let mut backoff = INITIAL_BACKOFF;
         loop {
-            if let Some(status) = self.child.try_wait().map_err(Error::Io)? {
+            let polled = match self.child.try_wait() {
+                Err(error) if self.reaped_elsewhere || is_reaped_elsewhere(&error) => {
+                    self.reaped_elsewhere = true;
+                    // The final screen is as complete as it would have been.
+                    let _ = self
+                        .shared
+                        .wait_until(Instant::now() + DRAIN_GRACE, |state| {
+                            state.eof.then_some(())
+                        });
+                    return Err(Error::Io(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "`{}` exited and {}, so its exit status is lost ({error})",
+                            self.command_desc,
+                            reaped_elsewhere_cause()
+                        ),
+                    )));
+                }
+                polled => polled.map_err(Error::Io)?,
+            };
+            if let Some(status) = polled {
                 let status = ExitStatus::from_pty(&status);
                 self.exit_status = Some(status.clone());
                 self.exit_watch.reaped();
@@ -4461,6 +4497,67 @@ impl Terminal {
     }
 }
 
+/// Whether a wait's error means the child was reaped by someone else:
+/// `ECHILD`, no such child. The kernel reaps every child itself where
+/// SIGCHLD is ignored, which `spawn` already allows for, so there this is
+/// how every exit is seen (#630).
+#[cfg(unix)]
+fn is_reaped_elsewhere(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ECHILD)
+}
+
+#[cfg(not(unix))]
+fn is_reaped_elsewhere(_error: &io::Error) -> bool {
+    false
+}
+
+/// Whether the child is gone: reaped just now, or reaped by someone else.
+/// Either way nothing is left to stop or signal.
+fn reaped_now(child: &mut PtyChild) -> bool {
+    match child.try_wait() {
+        Ok(status) => status.is_some(),
+        Err(error) => is_reaped_elsewhere(&error),
+    }
+}
+
+/// Whether `pid`, our own child that no wait of ours has reaped, is gone all
+/// the same: asked with `WNOWAIT`, which leaves a child that has exited
+/// for the wait that will report it, rather than taking its status here.
+#[cfg(unix)]
+fn gone_unwaited(pid: u32) -> bool {
+    // SAFETY: waitid only writes the zeroed siginfo_t it is handed, which
+    // outlives the call.
+    #[allow(unsafe_code)]
+    // `id_t` is `u32` on Linux and macOS, and may be wider elsewhere.
+    #[allow(clippy::useless_conversion)]
+    let rc = unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        libc::waitid(
+            libc::P_PID,
+            pid.into(),
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    rc == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+}
+
+/// Who took the child's status, as best this process can tell.
+#[cfg(unix)]
+fn reaped_elsewhere_cause() -> &'static str {
+    if crate::spawn::children_reaped_by_the_kernel() {
+        "the kernel reaped it, because SIGCHLD is ignored in this process (or \
+         carries SA_NOCLDWAIT)"
+    } else {
+        "something else in this process reaped it"
+    }
+}
+
+#[cfg(not(unix))]
+fn reaped_elsewhere_cause() -> &'static str {
+    "something else reaped it"
+}
+
 /// How long a hung-up child has to exit on its own before it is killed:
 /// portable-pty's own grace, kept so a program's SIGHUP handler still runs.
 #[cfg(unix)]
@@ -4495,7 +4592,7 @@ fn stop_child(child: &mut PtyChild, deadline: Instant) {
 fn reaped_by(child: &mut PtyChild, deadline: Instant) -> bool {
     let mut backoff = INITIAL_BACKOFF;
     loop {
-        if matches!(child.try_wait(), Ok(Some(_))) {
+        if reaped_now(child) {
             return true;
         }
         let now = Instant::now();
@@ -4511,9 +4608,13 @@ fn reaped_by(child: &mut PtyChild, deadline: Instant) -> bool {
 /// reaped.
 #[cfg(unix)]
 fn send_signal(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
-    // SAFETY: kill(2) touches no memory. The pid is the caller's own
-    // un-reaped child: worst case a zombie, for which kill is defined and
-    // harmless — never an unrelated, recycled pid.
+    // SAFETY: kill(2) touches no memory. The pid is the caller's own child,
+    // which no wait of ours has reaped: worst case a zombie, for which kill
+    // is defined and harmless. Where the kernel reaps children itself
+    // (SIGCHLD ignored) there is no zombie to hold the pid, so callers first
+    // ask whether the child is gone (#630); one that exits between that
+    // question and this call frees its pid in a window no portable call
+    // closes.
     #[allow(unsafe_code)]
     let rc = unsafe { libc::kill(pid, signal) };
     if rc == 0 {
@@ -4609,7 +4710,7 @@ impl Drop for Terminal {
     /// unbounded `wait` here produced whenever the child was wedged — is a
     /// worse one, and unlike the first it cannot even be diagnosed.
     fn drop(&mut self) {
-        if self.exit_status.is_none() && !matches!(self.child.try_wait(), Ok(Some(_))) {
+        if self.exit_status.is_none() && !self.reaped_elsewhere && !reaped_now(&mut self.child) {
             stop_child(&mut self.child, Instant::now() + DROP_REAP_GRACE);
         }
         #[cfg(unix)]

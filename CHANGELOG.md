@@ -39,6 +39,15 @@ reads that marker.
   never meant to be; the usual case is a `target/debug/app` downloaded as
   an artifact without its executable bit. A program a PATH entry provides
   under the same name is still found.
+- In a test process that ignores SIGCHLD, a terminal drops at once instead
+  of taking two seconds, and nothing is signalled after the child has gone
+  (#630). The kernel reaps every child itself there, and teardown read the
+  child it had already reaped as one still running: it sent SIGHUP and
+  SIGKILL to a pid that could belong to another process by then, and waited
+  out its whole reap grace. `wait_exit` now fails naming the cause ("…the
+  kernel reaped it, because SIGCHLD is ignored…") where it gave a bare "No
+  child processes", and `signal` refuses with `Error::Input`, as it does for
+  a child already waited for.
 - Dropping a terminal returns when the application left more input unread
   than its terminal holds, which a raw-mode application that stops reading
   allows (#628). The PTY layer writes an end-of-file as its writer is
