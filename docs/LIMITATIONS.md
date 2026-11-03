@@ -110,7 +110,8 @@ CHANGELOG entry.
 - **The cursor moves past an image as the declared terminal moves it**,
   and only as far as the escape says. A `Graphics::Kitty` terminal moves
   it for a placement whose size in cells is known: from `c=` and `r=`, or
-  from the pixel size and `cell_size()`. A PNG (`f=100`) placed without
+  from the pixel size and `cell_size()` — for `a=p`, the pixel size of the
+  newest transmission of that image id. A PNG (`f=100`) placed without
   `c=` and `r=`, or a placement of an image whose transmission has left
   the payload log, does not move it. Whether kitty would have loaded the
   image at all is not knowable here, so a placement is taken to succeed. A

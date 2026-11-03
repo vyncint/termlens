@@ -54,7 +54,7 @@
 
 use std::sync::Arc;
 
-use crate::graphics::{GraphicsBuilder, GraphicsCounts, GraphicsPayload, Placement};
+use crate::graphics::{GraphicsBuilder, GraphicsCounts, GraphicsPayload, Placement, SixelMeter};
 use crate::screen::{Clipboard, Link, MouseModes};
 
 /// OSC strings are captured whole (titles must not truncate), but bounded:
@@ -459,6 +459,9 @@ pub(crate) enum Query {
     KittyGraphics {
         /// The `i=` value, if the probe gave one.
         id: Option<u32>,
+        /// The `q=` value, 0 when absent: 1 suppresses an `OK`, 2 every
+        /// reply (#639).
+        quiet: u32,
         /// Printable rendering, for the timeout note when unanswered.
         shape: String,
     },
@@ -486,6 +489,52 @@ fn kitty_key(control: &[u8], key: &[u8]) -> Option<u32> {
         .find_map(|pair| pair.strip_prefix(key))
         .and_then(|digits| std::str::from_utf8(digits).ok())
         .and_then(|digits| digits.parse().ok())
+}
+
+/// What a kitty escape arriving in the middle of a chunked upload does to
+/// it — kitty's `grman_handle_command` (`graphics.c`), case by case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MidUpload {
+    /// The upload's next chunk. A direct transmission with no action, or
+    /// with `t` or `T`, continues the load in progress in kitty's
+    /// `handle_add_command`, and one with `f` in
+    /// `handle_animation_frame_load_command`; both then read only `m=` (and
+    /// `q=`) off the escape — "Subsequent chunks must have only the m and
+    /// optionally q keys" (the protocol's "Remote client" section).
+    Continues,
+    /// Abandons it. "If an image is being loaded in chunks and the upload
+    /// is not complete when any delete command is received, the partial
+    /// upload must be aborted" (the protocol's "Deleting images"); and a
+    /// transmission whose `t=` names a file or shared memory starts a new
+    /// image in `handle_add_command`, dropping the load.
+    Aborts,
+    /// Leaves it alone: `a=p`, `a=a`, `a=c` and any other action have
+    /// their own `case` in `grman_handle_command`, none of which touches
+    /// the load in progress (#636).
+    Beside,
+}
+
+impl MidUpload {
+    fn of(keys: &[u8]) -> Self {
+        let action = keys
+            .split(|&b| b == b',')
+            .find_map(|pair| pair.strip_prefix(b"a="));
+        match action {
+            None | Some(b"t" | b"T" | b"f") => {
+                let direct = keys
+                    .split(|&b| b == b',')
+                    .find_map(|pair| pair.strip_prefix(b"t="))
+                    .is_none_or(|medium| medium == b"d");
+                if direct {
+                    MidUpload::Continues
+                } else {
+                    MidUpload::Aborts
+                }
+            }
+            Some(b"d") => MidUpload::Aborts,
+            Some(_) => MidUpload::Beside,
+        }
+    }
 }
 
 /// Whether a kitty control block sets `key` to exactly `value`.
@@ -672,6 +721,10 @@ pub(crate) struct SeqTracker {
     /// the whole payload or the start of one.
     dcs_body: Vec<u8>,
     dcs_body_full: bool,
+    /// A sixel's raster attributes and painted height, measured over every
+    /// byte of its stream rather than over the bounded `dcs_body`: they
+    /// describe the image, and stay exact past the capture bound (#635).
+    sixel_meter: SixelMeter,
     /// Where the tab stops are. Sized to the grid, so `set_cols` follows
     /// every resize.
     tabs: TabStops,
@@ -732,6 +785,7 @@ impl SeqTracker {
             dcs_head_len: 0,
             dcs_body: Vec::new(),
             dcs_body_full: true,
+            sixel_meter: SixelMeter::default(),
             tabs: TabStops::new(cols),
             insert_mode: false,
         }
@@ -996,6 +1050,7 @@ impl SeqTracker {
         self.dcs_head_len = 0;
         self.dcs_body.clear();
         self.dcs_body_full = true;
+        self.sixel_meter = SixelMeter::default();
     }
 
     fn reset_csi_scanner(&mut self) {
@@ -1386,17 +1441,42 @@ impl SeqTracker {
             let keys = control.strip_prefix(b"G").unwrap_or(&control);
             let is_query = keys.split(|&b| b == b',').any(|pair| pair == b"a=q");
             if !is_query {
-                // A delete is never an upload's last chunk: it aborts the
-                // upload in progress and is then a delete like any other.
-                if key_is(keys, b"a", b"d") {
-                    self.abandon_upload();
+                let at = self.dcs_payload_start();
+                if self.building.in_progress() {
+                    match MidUpload::of(keys) {
+                        MidUpload::Continues => {}
+                        // A delete is never an upload's last chunk: it
+                        // aborts the upload in progress and is then a
+                        // delete like any other. A transmission from
+                        // outside the stream starts an image of its own.
+                        MidUpload::Aborts => self.abandon_upload(),
+                        // A placement, an animation or a compose: a
+                        // payload of its own, and the upload goes on
+                        // (#636). It was taken as the upload's next chunk.
+                        MidUpload::Beside => {
+                            let mut beside = GraphicsBuilder::default();
+                            beside.kitty(keys);
+                            beside.chunk(
+                                self.dcs_data_len,
+                                &self.dcs_body[at..],
+                                self.dcs_body_full,
+                                self.capture,
+                            );
+                            return match beside.finish_placed() {
+                                Some((payload, placement)) => {
+                                    self.counts.record(&payload);
+                                    SeqEvent::Graphics(Box::new(payload), placement)
+                                }
+                                None => SeqEvent::None,
+                            };
+                        }
+                    }
                 }
                 // One image, however many escapes it took. `m=1` says
                 // another follows; the transmission is not an image until
                 // one arrives without it, and counting each escape instead
                 // reported a 4.9 KB chart as two pictures.
                 self.building.kitty(keys);
-                let at = self.dcs_payload_start();
                 self.building.chunk(
                     self.dcs_data_len,
                     &self.dcs_body[at..],
@@ -1420,8 +1500,10 @@ impl SeqTracker {
             // every application that draws — a false diagnosis, and a loud
             // one.
             let id = kitty_key(keys, b"i=");
+            let quiet = kitty_key(keys, b"q=").unwrap_or(0);
             return SeqEvent::Query(Query::KittyGraphics {
                 id,
+                quiet,
                 shape: self.seq_printable(),
             });
         }
@@ -1432,7 +1514,7 @@ impl SeqTracker {
             // No part of a kitty upload, so it abandons one still in
             // progress rather than being built on top of it.
             self.abandon_upload();
-            self.building.sixel();
+            self.building.sixel(&self.sixel_meter);
             let at = self.dcs_payload_start();
             self.building.chunk(
                 self.dcs_data_len,
@@ -1510,6 +1592,11 @@ impl SeqTracker {
         // are a handful of bytes against an image's thousands, and counting
         // them uniformly is easier to reason about than two rules.
         self.dcs_data_len += 1;
+        // A sixel's data: everything after the `q` that closes a header with
+        // no intermediate — which is the test the terminator applies too.
+        if self.dcs_introducer == b'P' && self.dcs_final == b'q' && self.dcs_intermediate == 0 {
+            self.sixel_meter.feed(b);
+        }
         if self.dcs_introducer != b'_' && self.dcs_final == 0 {
             match b {
                 // Parameter and private bytes stay in the header.
@@ -2102,6 +2189,99 @@ mod tests {
         assert_eq!(seen[0].data(), Some(&b"AAAACCCC"[..]));
     }
 
+    /// A placement in the middle of an upload is kitty's `case 'p'`, which
+    /// never touches the load in progress (`grman_handle_command`); the
+    /// action-less chunk after it then completes the load (#636). The
+    /// placement was taken as the upload's last chunk instead, and the real
+    /// last chunk as a transmission of its own: two images, neither of which
+    /// decoded, and the `i=9` placement gone.
+    #[test]
+    fn a_placement_mid_upload_is_its_own_payload_and_the_upload_goes_on() {
+        let wire: &[u8] = b"\x1b_Ga=T,f=24,s=2,v=1,i=1,m=1;/wAA\x1b\\\
+            \x1b_Ga=p,i=9,c=2,r=1\x1b\\\
+            \x1b_Gm=0;AAD/\x1b\\";
+        let seen = payloads(wire);
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        let (placed, image) = (&seen[0], &seen[1]);
+        assert_eq!(placed.action(), GraphicsAction::Place, "{placed:?}");
+        assert_eq!(placed.id(), Some(9));
+        assert_eq!(placed.cells(), Some((2, 1)));
+        assert_eq!(placed.chunks(), 1);
+        assert_eq!(image.action(), GraphicsAction::TransmitAndPlace);
+        assert_eq!(image.id(), Some(1));
+        assert_eq!(image.chunks(), 2);
+        assert_eq!(image.data(), Some(&b"/wAAAAD/"[..]));
+        let counts = fed(wire).graphics();
+        assert_eq!(counts.kitty, 1, "one image: {counts:?}");
+        assert_eq!(counts.bytes, wire.len() as u64 - 12, "every escape's cost");
+        // Animation and compose have their own cases too.
+        for beside in [&b"\x1b_Ga=a,i=1,s=3\x1b\\"[..], b"\x1b_Ga=c,i=1,r=2\x1b\\"] {
+            let seen = payloads(&[UPLOAD_OF_5, beside, b"\x1b_Gm=0;BBBB\x1b\\"].concat());
+            assert_eq!(seen.len(), 2, "{seen:?}");
+            assert_eq!(seen[0].action(), GraphicsAction::Other);
+            assert_eq!(seen[1].id(), Some(5), "{seen:?}");
+            assert_eq!(seen[1].data(), Some(&b"AAAABBBB"[..]));
+        }
+    }
+
+    /// The transmit actions are kitty's chunk continuations
+    /// (`handle_add_command` continues the load in progress for any direct
+    /// transmission), so they are left as they were; one from outside the
+    /// stream (`t=f`) starts an image of its own there, dropping the load.
+    #[test]
+    fn a_transmission_mid_upload_continues_it_unless_it_names_a_file() {
+        let seen = payloads(&[UPLOAD_OF_5, b"\x1b_Ga=t,i=8,m=0;BBBB\x1b\\"].concat());
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].id(), Some(5), "the upload's own keys: {seen:?}");
+        assert_eq!(seen[0].data(), Some(&b"AAAABBBB"[..]));
+
+        let file: &[u8] = b"\x1b_Ga=t,t=f,i=8;L3RtcC94\x1b\\";
+        let seen = payloads(&[UPLOAD_OF_5, file].concat());
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].id(), Some(8), "its own image: {seen:?}");
+        assert_eq!(seen[0].chunks(), 1);
+        assert_eq!(fed(&[UPLOAD_OF_5, file].concat()).graphics().kitty, 1);
+    }
+
+    /// Chunks each padded on their own, as the protocol allows: kitty
+    /// decodes every escape's base64 by itself, so `/w==` then `AAA=` is
+    /// the bytes `ff` `00 00` — one RGB pixel (#637). The joined body
+    /// failed as "bad base64".
+    #[cfg(feature = "decode")]
+    #[test]
+    fn kitty_chunks_padded_one_by_one_decode() {
+        let seen = payloads(b"\x1b_Ga=T,f=24,s=1,v=1,m=1;/w==\x1b\\\x1b_Gm=0;AAA=\x1b\\");
+        assert_eq!(seen[0].data(), Some(&b"/w==AAA="[..]));
+        let bitmap = seen[0].decode().expect("decodes");
+        assert_eq!(bitmap.pixel(0, 0), Some([0xff, 0, 0, 0xff]));
+    }
+
+    /// A sixel past the capture bound keeps its declared size: the raster
+    /// attributes are measured as the bytes arrive, not read back off the
+    /// data the bound kept (#635). At bound 0 and at a bound that cuts the
+    /// stream inside the raster record, `size()` was `None`.
+    #[test]
+    fn a_sixel_keeps_its_declared_size_at_every_capture_bound() {
+        let wire: &[u8] = b"\x1bPq\"1;1;8;45#0;2;100;0;0~~~~~~~~-~~~~~~~~\x1b\\";
+        for capture in [crate::graphics::DEFAULT_CAPTURE, 20, 6, 0] {
+            let mut tracker = SeqTracker::new(capture, TEST_COLS);
+            let mut seen = None;
+            for &byte in wire {
+                if let SeqEvent::Graphics(payload, placement) = tracker.step(byte) {
+                    seen = Some((*payload, placement));
+                }
+            }
+            let (payload, placement) = seen.expect("a payload");
+            assert_eq!(payload.size(), Some((8, 45)), "capture {capture}");
+            assert_eq!(placement.height, 45, "capture {capture}");
+            assert_eq!(
+                payload.data().is_some(),
+                capture == crate::graphics::DEFAULT_CAPTURE,
+                "capture {capture}"
+            );
+        }
+    }
+
     /// A payload past the capture bound keeps every count and drops the
     /// data, rather than handing back a prefix that would decode into a
     /// plausible-looking wrong picture.
@@ -2147,7 +2327,7 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                SeqEvent::Query(Query::KittyGraphics { id: Some(1), shape })
+                SeqEvent::Query(Query::KittyGraphics { id: Some(1), shape, .. })
                     if shape.contains("_G")
             )),
             "the query must be classified, with its id, for a reply or a \
@@ -3085,9 +3265,30 @@ mod tests {
             queries_of(b"\x1b_Ga=q;\x1b\\"),
             vec![Query::KittyGraphics {
                 id: None,
+                quiet: 0,
                 shape: "^[_Ga=q;^[\\".into()
             }]
         );
+    }
+
+    /// `q=` is carried with the id: whether kitty replies depends on both
+    /// (#639).
+    #[test]
+    fn a_kitty_probe_carries_its_quiet_level() {
+        for (wire, id, quiet) in [
+            (&b"\x1b_Gi=31,a=q,q=1;\x1b\\"[..], Some(31), 1),
+            (b"\x1b_Ga=q,q=2,i=31;\x1b\\", Some(31), 2),
+            (b"\x1b_Ga=q,I=7;\x1b\\", None, 0),
+        ] {
+            match &queries_of(wire)[..] {
+                [Query::KittyGraphics {
+                    id: got_id,
+                    quiet: got_quiet,
+                    ..
+                }] => assert_eq!((*got_id, *got_quiet), (id, quiet)),
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     #[test]

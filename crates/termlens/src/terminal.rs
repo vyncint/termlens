@@ -424,7 +424,9 @@ pub enum Graphics {
     None,
     /// Sixel: DA1 gains `4`, so a probing application sees the capability.
     Sixel,
-    /// Kitty graphics: the `a=q` capability probe is answered `OK`.
+    /// Kitty graphics: the `a=q` capability probe is answered `OK`, as
+    /// kitty answers it — echoing its `i=`, and not at all when it names no
+    /// image id or asks for quiet with `q=`.
     Kitty,
 }
 
@@ -1309,13 +1311,36 @@ impl EmuState {
             // The kitty capability probe. Answered only when a test declared
             // kitty support; otherwise it stays a named-but-unanswered query,
             // which is what it was before there was any way to declare.
-            Query::KittyGraphics { id, shape } => {
-                if self.graphics == Graphics::Kitty {
-                    let id = id.unwrap_or(0);
-                    format!("\x1b_Gi={id};OK\x1b\\").into_bytes()
-                } else {
+            //
+            // Declared, it is answered as kitty answers it
+            // (`grman_handle_command` and `finish_command_response_with_keys`
+            // in kitty's `graphics.c`), which is not always (#639): a query
+            // naming no image id (`i=` absent or 0, whatever `I=` says) is
+            // refused with no reply at all, `q=1` suppresses an `OK` and
+            // `q=2` every reply. "Set it to 1 to suppress OK responses and to
+            // 2 to suppress failure responses" (the protocol's "Suppressing
+            // responses from the terminal"). termlens used to answer all
+            // four `OK`, putting bytes into an input stream the application
+            // had asked to keep clean.
+            Query::KittyGraphics { id, quiet, shape } => {
+                if self.graphics != Graphics::Kitty {
                     self.note_unanswered(shape.clone());
                     return None;
+                }
+                match (id.filter(|&id| id != 0), quiet) {
+                    (Some(id), 0) => format!("\x1b_Gi={id};OK\x1b\\").into_bytes(),
+                    // Asked for silence, and given it: naming the query in
+                    // a timeout would blame it for a reply the application
+                    // said it did not want.
+                    (Some(_), _) | (None, 2..) => return None,
+                    // kitty refuses it ("Query graphics command without
+                    // image id") and its error reply needs an id to go to,
+                    // so nothing comes back. Named, since an application
+                    // that waits for an answer will wait for ever.
+                    (None, _) => {
+                        self.note_unanswered(shape.clone());
+                        return None;
+                    }
                 }
             }
             Query::OscColor {
@@ -4516,6 +4541,78 @@ mod tests {
             },
             Arc::new(AtomicUsize::new(0)),
         ))
+    }
+
+    /// A responder simulating kitty graphics, for asking `answer` directly.
+    fn kitty_responder() -> EmuState {
+        EmuState::new(
+            Box::new(super::Vt100Emulator::new(
+                4,
+                20,
+                0,
+                crate::graphics::DEFAULT_CAPTURE,
+                false,
+            )),
+            Responder {
+                respond: true,
+                background: (0, 0, 0),
+                foreground: (255, 255, 255),
+                cell_size: None,
+                graphics: Graphics::Kitty,
+                term_name: "xterm-256color".into(),
+            },
+            Arc::new(AtomicUsize::new(0)),
+        )
+    }
+
+    fn kitty_query(id: Option<u32>, quiet: u32) -> crate::emu::Query {
+        crate::emu::Query::KittyGraphics {
+            id,
+            quiet,
+            shape: format!("^[_Ga=q,i={id:?},q={quiet}^[\\"),
+        }
+    }
+
+    /// kitty answers `a=q` with `i=31;OK` (the protocol's "Querying support
+    /// and available transmission mediums").
+    #[test]
+    fn a_kitty_query_with_an_id_is_answered_ok() {
+        let mut state = kitty_responder();
+        assert_eq!(
+            state.answer(&kitty_query(Some(31), 0)).as_deref(),
+            Some(&b"\x1b_Gi=31;OK\x1b\\"[..])
+        );
+    }
+
+    /// No `i=` (or `I=` alone, which reaches here as no id): kitty reports
+    /// "Query graphics command without image id" and, with no id to send
+    /// the error to, replies nothing (#639). termlens answered `i=0;OK`.
+    /// Named instead, since an application waiting on it waits for ever.
+    #[test]
+    fn a_kitty_query_without_an_id_gets_no_reply_as_from_kitty() {
+        for id in [None, Some(0)] {
+            let mut state = kitty_responder();
+            assert_eq!(state.answer(&kitty_query(id, 0)), None, "{id:?}");
+            assert_eq!(state.unanswered.len(), 1, "named: {id:?}");
+        }
+    }
+
+    /// `q=1` suppresses an `OK` (#639). Asked for, so not named either.
+    #[test]
+    fn a_kitty_query_with_q_1_gets_no_ok() {
+        let mut state = kitty_responder();
+        assert_eq!(state.answer(&kitty_query(Some(31), 1)), None);
+        assert!(state.unanswered.is_empty(), "{:?}", state.unanswered);
+    }
+
+    /// `q=2` suppresses every reply (#639), with an id or without one.
+    #[test]
+    fn a_kitty_query_with_q_2_gets_no_reply_at_all() {
+        for id in [Some(31), None] {
+            let mut state = kitty_responder();
+            assert_eq!(state.answer(&kitty_query(id, 2)), None, "{id:?}");
+            assert!(state.unanswered.is_empty(), "{:?}", state.unanswered);
+        }
     }
 
     /// A waiter that first sees the screen a query was drawn on finds the
