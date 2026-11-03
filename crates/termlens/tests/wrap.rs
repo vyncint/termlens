@@ -111,3 +111,36 @@ fn logical_text_differs_from_text_only_by_the_joined_wrap() -> termlens::Result<
     assert!(t.wait_exit()?.success());
     Ok(())
 }
+
+/// A right-aligned status line ending in an emoji with a presentation
+/// selector, on the bottom row, then a redraw of the row above: the emoji
+/// no longer fits in the last column and moves to the start of a new
+/// bottom row, as xterm moves it. vt100 0.18.1 left it wide in the last
+/// column of the row above, and the redraw panicked inside it, on the
+/// reader thread, so the screen stopped advancing (#619).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY lays out the emoji and re-renders the screen itself, so the bytes termlens reads are conhost's (#149)"
+)]
+fn a_selector_widened_emoji_in_the_bottom_right_cell_survives_a_redraw() -> termlens::Result<()> {
+    let mut t = emit(&[
+        "--csi",
+        "4;1H",
+        "               warn\u{26a0}\u{fe0f}",
+        "--csi",
+        "A",
+        "\rredrawn             ",
+        "--csi",
+        "1;1HDONE",
+        "--wait",
+    ])?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    assert_eq!(s.row_text(2).trim_end(), "redrawn", "{s}");
+    assert_eq!(s.row_text(3).trim_end(), "\u{26a0}\u{fe0f}", "{s}");
+    assert!(s.cell(3, 0).is_some_and(termlens::Cell::is_wide), "{s}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}

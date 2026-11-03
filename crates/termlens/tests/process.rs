@@ -214,6 +214,54 @@ fn a_program_with_a_directory_part_is_found_from_the_working_directory() -> term
     Ok(())
 }
 
+/// A program with a directory part that is in the working directory but
+/// cannot run, or is not there at all, fails naming the reason the OS gave
+/// for that file. The PTY layer was handed the name to search PATH for, so
+/// the reason read "No viable candidates found in PATH", which sends the
+/// reader to the one place the file was never meant to be: the common case
+/// is a `target/debug/app` downloaded as an artifact without its
+/// executable bit (#631).
+#[cfg(unix)]
+#[test]
+fn a_program_with_a_directory_part_that_cannot_run_names_the_os_s_reason() -> termlens::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("dir-part-refused-{}", std::process::id()));
+    std::fs::create_dir_all(scratch.join("sub"))?;
+    let plain = scratch.join("sub/plain");
+    common::write_script(&plain, "#!/bin/sh\necho unreachable\n");
+    std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644))?;
+    for (program, reason) in [
+        ("sub/plain", "Permission denied"),
+        ("sub/missing", "No such file or directory"),
+    ] {
+        for clear in [false, true] {
+            let mut builder = Terminal::builder()
+                .timeout(Duration::from_secs(10))
+                .current_dir(&scratch);
+            if clear {
+                builder = builder.env_clear();
+            }
+            match builder.spawn(program) {
+                Ok(_) => panic!("{program} spawned, and it cannot run"),
+                Err(Error::Spawn { reason: given, .. }) => {
+                    let file = scratch.join(program);
+                    assert!(
+                        given.starts_with(&format!("cannot execute {}: ", file.display()))
+                            && given.contains(reason)
+                            && !given.contains("PATH"),
+                        "{program}, env_clear: {clear}: {given}"
+                    );
+                }
+                Err(other) => panic!("{program}: not a spawn error: {other}"),
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    Ok(())
+}
+
 /// A child that ignores the hang-up is gone all the same once `drop`
 /// returns: it gets the hang-up's grace, then SIGKILL. `drop` now stops the
 /// child itself, outside the lifecycle lock (#589), and must still not

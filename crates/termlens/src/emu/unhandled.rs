@@ -187,12 +187,18 @@ impl Callbacks for Unhandled {
             (None, None, 't') => {
                 params.len() == 1 && matches!(first, Some(11 | 13 | 14 | 16 | 18 | 19 | 20 | 21))
             }
-            (None, None, 'h' | 'l') => first == Some(4),
+            // Insert mode is the one ANSI mode honoured, so a list is
+            // handled only when it names nothing else: `CSI 4;20 h` sets
+            // LNM too, which nobody models, and checking the first
+            // parameter alone let it through while `CSI 20;4 h` was named
+            // (#625).
+            (None, None, 'h' | 'l') => params.iter().flat_map(|p| p.iter()).all(|&m| m == 4),
             // DECSTR, DECSCUSR, DECRQM and the mode reports.
             (None, Some(b'!'), 'p') | (None, Some(b' '), 'q') => true,
             (_, Some(b'$'), 'p' | 'y') => true,
-            // DA2, and the kitty keyboard probe the responder names.
-            (Some(b'>'), None, 'c') | (Some(b'?'), None, 'u') => true,
+            // DA2, the kitty keyboard probe and XTSMGRAPHICS, all of which
+            // the responder names in a timeout (#641).
+            (Some(b'>'), None, 'c') | (Some(b'?'), None, 'u' | 'S') => true,
             // The private modes the tracker keeps; any other private mode
             // vt100 declined is one nobody honoured.
             (Some(b'?'), None, 'h' | 'l') => params
@@ -245,7 +251,12 @@ impl Callbacks for Unhandled {
             Some(&b"4") => matches!(params.last(), Some(&b"?")),
             _ => false,
         };
-        if matches!(params.first(), Some(&b"8" | &b"52")) || colour_query {
+        // The title is the tracker's too, in every form that names one:
+        // vt100 takes only the exact two-operand `0;title` and `2;title`,
+        // so a title with a `;` in it — a shell's `make; test` — reached
+        // here while `title()` reported it whole (#625).
+        let title = matches!(params.first(), Some(&b"0" | &b"2")) && params.len() > 1;
+        if matches!(params.first(), Some(&b"8" | &b"52")) || colour_query || title {
             return;
         }
         let mut shape = String::from("^[]");
@@ -317,6 +328,36 @@ mod tests {
         assert!(shapes(b"\x1b[11t\x1b[13t\x1b[19t\x1b[20t\x1b[21t").is_empty());
         // Multi-parameter forms the responder does not claim.
         assert_eq!(shapes(b"\x1b[18;0t"), ["^[[18;0t"]);
+    }
+
+    /// The title is the tracker's in every form it reads one from, `;` in
+    /// it or not; vt100 takes only the exact two-operand shape, and the rest
+    /// reached this record while `title()` reported them whole (#625).
+    #[test]
+    fn a_title_is_never_unsupported_whatever_it_contains() {
+        assert!(shapes(b"\x1b]2;make; test\x07ok").is_empty());
+        assert!(shapes(b"\x1b]0;a;b;c\x1b\\ok").is_empty());
+        // An OSC 0 or 2 with no title at all sets nothing, and says so.
+        assert_eq!(shapes(b"\x1b]2\x07"), ["^[]2"]);
+        // The icon name is not modelled, with or without a `;`.
+        assert_eq!(shapes(b"\x1b]1;a;b\x07"), ["^[]1;a;b"]);
+    }
+
+    /// A mode list is handled only when every mode in it is: insert mode
+    /// with LNM is LNM dropped, in either order (#625).
+    #[test]
+    fn an_ansi_mode_list_is_handled_only_when_every_mode_is() {
+        assert_eq!(shapes(b"x\x1b[4;20h"), ["^[[4;20h"]);
+        assert_eq!(shapes(b"x\x1b[20;4h"), ["^[[20;4h"]);
+        assert_eq!(shapes(b"x\x1b[4;20l"), ["^[[4;20l"]);
+        assert!(shapes(b"x\x1b[4h\x1b[4;4l").is_empty());
+    }
+
+    /// XTSMGRAPHICS is a question the responder names in a timeout, so it
+    /// is accounted for there and not here (#641).
+    #[test]
+    fn xtsmgraphics_is_a_question_not_an_unsupported_sequence() {
+        assert!(shapes(b"\x1b[?1;1;0S\x1b[?2;1;0S").is_empty());
     }
 
     #[test]

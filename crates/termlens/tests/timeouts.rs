@@ -142,3 +142,73 @@ fn a_short_per_call_timeout_fails_fast() {
         start.elapsed()
     );
 }
+
+/// Run `body` on a thread of its own and fail if it has not finished in a
+/// minute. A wait given no deadline that never sees its condition would hang
+/// the suite; this turns that regression into a failure here.
+fn bounded(body: impl FnOnce() -> termlens::Result<()> + Send + 'static) -> termlens::Result<()> {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(body());
+    });
+    match finished.recv_timeout(Duration::from_secs(60)) {
+        Ok(outcome) => outcome,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("a wait with no deadline never saw what it waited for")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("a wait panicked; see above")
+        }
+    }
+}
+
+/// Draws one complete frame, then holds the terminal open for an Enter.
+fn ready_frame(timeout: Duration) -> termlens::Result<Terminal> {
+    common::spawn_emit(
+        Terminal::builder().timeout(timeout),
+        &["--raw", r"\e[?2026hready\e[?2026l", "--wait"],
+    )
+}
+
+/// `Duration::MAX` says "no deadline", and every per-call wait takes it.
+/// Each computed `Instant::now() + timeout`, which panics with "overflow
+/// when adding duration to instant" (#629).
+#[test]
+fn every_wait_takes_duration_max_as_no_deadline() -> termlens::Result<()> {
+    bounded(|| {
+        let mut t = ready_frame(Duration::from_secs(10))?;
+        t.wait_until_for(|s| s.contains("ready"), Duration::MAX)?;
+        // ConPTY closes the bracket before what it wrapped (#149).
+        #[cfg(not(windows))]
+        t.wait_frame_for(|s| s.contains("ready"), Duration::MAX)?;
+        t.wait_idle_for(Duration::from_millis(50), Duration::MAX)?;
+        t.wait_stable_for(Duration::from_millis(50), Duration::MAX)?;
+        t.snapshot_after_for(|s| s.contains("ready"), Duration::MAX)?;
+        #[cfg(feature = "regex")]
+        t.wait_until_matches_for(&regex::Regex::new("rea.y").expect("a regex"), Duration::MAX)?;
+        t.send(Key::Enter)?;
+        assert!(t.wait_exit_for(Duration::MAX)?.success());
+        Ok(())
+    })
+}
+
+/// A builder timeout of `Duration::MAX` is every default deadline, and
+/// every wait that uses it takes it, as does the send that waits for its
+/// acknowledgement (#629).
+#[test]
+fn a_builder_timeout_of_duration_max_reaches_every_wait() -> termlens::Result<()> {
+    bounded(|| {
+        let mut t = ready_frame(Duration::MAX)?;
+        t.wait_until(|s| s.contains("ready"))?;
+        #[cfg(not(windows))]
+        t.wait_frame(|s| s.contains("ready"))?;
+        t.wait_idle(Duration::from_millis(50))?;
+        t.wait_stable(Duration::from_millis(50))?;
+        t.snapshot_after(|s| s.contains("ready"))?;
+        #[cfg(feature = "regex")]
+        t.wait_until_matches(&regex::Regex::new("rea.y").expect("a regex"))?;
+        t.send(Key::Enter)?;
+        assert!(t.wait_exit()?.success());
+        Ok(())
+    })
+}

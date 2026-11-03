@@ -79,6 +79,31 @@ fn an_application_using_only_what_is_implemented_reports_nothing() -> termlens::
     Ok(())
 }
 
+/// `unsupported()` is right in both directions for two common shapes
+/// (#625). A title with a `;` in it — a shell showing the command it runs —
+/// is honoured, so it is not listed; and `CSI 4;20 h` sets LNM, which
+/// nobody models, so it is listed as `CSI 20;4 h` always was.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY renders what it implements and drops the rest before termlens sees a byte, so the record there is the console's, not the application's (#149)"
+)]
+fn a_semicolon_title_is_honoured_and_a_mode_list_is_judged_whole() -> termlens::Result<()> {
+    let mut t = emit(&["--raw", r"\e]2;make; test\aok", " DONE", "--wait"])?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    assert_eq!(t.screen().title(), "make; test");
+    assert_eq!(shapes(&t), Vec::<String>::new(), "{}", t.screen());
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+
+    let mut t = emit(&["x", "--csi", "4;20h", "--csi", "4l", " DONE", "--wait"])?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    assert_eq!(shapes(&t), ["^[[4;20h"], "{}", t.screen());
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// A visual bell is a different event from an audible one, and a request to
 /// resize the window is recorded rather than honoured.
 #[test]

@@ -28,8 +28,9 @@ CHANGELOG entry.
   reflowed** by a `resize`: rows keep the width they were captured at, by
   decision (`Terminal::resize` says why). The visible grid stays the
   fully-featured surface. History also outlives what clears a terminal's
-  own: RIS and ED 3 (`CSI 3 J`, which `clear` sends) empty a terminal's
-  scrollback, and termlens keeps the rows it had already retained.
+  own: RIS and ED 3 (`CSI 3 J`, which `clear` sends, and its `CSI ? 3 J`
+  and `CSI 3:1 J` spellings) empty a terminal's scrollback, and termlens
+  keeps the rows it had already retained.
 
 ## Character sets, modes and tab stops
 
@@ -44,12 +45,11 @@ CHANGELOG entry.
 - **Insert mode (`IRM`, `CSI 4 h`) pushes the rest of the row right**, as
   ncurses's `insch` expects on a terminal advertising `smir`; `RIS` and
   `DECSTR` clear it, and `Screen::insert_mode()` reports an application
-  that left it on. Two exceptions: the characters REP (`CSI n b`) repeats
-  overwrite the row even in insert mode, where xterm inserts them; and an
-  inserted run that reaches the right margin wraps onto the next row over
-  its text, where xterm pushes that row right as well. Other
-  ANSI modes the backend drops (`LNM` and the rest) are not modelled — and
-  *say so*: `Screen::unsupported()` lists every sequence the emulator did
+  that left it on. A character that wraps pushes the next row right as
+  well, as xterm does. One exception: the characters REP (`CSI n b`)
+  repeats overwrite the row even in insert mode, where xterm inserts them.
+  Other ANSI modes the backend drops (`LNM` and the rest) are not
+  modelled — and *say so*: `Screen::unsupported()` lists every sequence the emulator did
   not implement, in the form `^[[20h`, so a test can tell a
   plausible-looking wrong grid from a right one.
 - **A soft-wrapped line is two rows.** `contains` and `find` read the grid
@@ -80,7 +80,9 @@ CHANGELOG entry.
   everything else waits with `wait_until`, under the three rules in
   [DESIGN.md](DESIGN.md) §2.
 - Some questions stay deliberately unanswered — kitty's `CSI ? u`, DECRQSS,
-  DA3, XTVERSION, the `OSC 4` palette query, `OSC 12`, `OSC 52` *reads*, and
+  DA3, XTVERSION, XTSMGRAPHICS (`CSI ? Pi ; Pa ; Pv S`, which sixel programs
+  ask once DA1 claims sixel), the `OSC 4` palette query, `OSC 12`,
+  `OSC 52` *reads*, and
   the other `CSI … t` reports, such as `11 t` and `19 t` (`18 t`, the
   text-area size, is answered, and the pixel sizes `14 t` and `16 t` are
   once a cell size is declared) — because a guessed reply is worse than

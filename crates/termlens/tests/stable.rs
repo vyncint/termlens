@@ -162,6 +162,30 @@ fn wait_stable_does_not_settle_inside_an_open_synchronized_update() -> termlens:
     Ok(())
 }
 
+/// RIS is the "start over" sequence, and it ends an update the application
+/// had begun: left open, every later `wait_stable` timed out naming an
+/// unfinished update that no longer existed (#623). It ends focus reporting
+/// too, so `focus_in` refuses rather than typing `^[[I` at a program that
+/// reset.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY turns focus reporting on for itself, so focus_events() is true from the first byte (#149)"
+)]
+fn a_hard_reset_ends_an_open_synchronized_update() -> termlens::Result<()> {
+    let mut t = emit(&[
+        "--csi", "?1004h", "--csi", "?2026h", "half", "--esc", "c", "READY", "--wait",
+    ])?;
+    t.wait_until(|s| s.contains("READY"))?;
+    let screen = t.wait_stable(Duration::from_millis(50))?;
+    assert!(!screen.focus_events(), "RIS turned focus reporting off");
+    let err = t.focus_in().unwrap_err();
+    assert!(matches!(err, Error::Input(_)), "got: {err}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// Stillness before the call counts, and so does EOF: a grid that has been
 /// quiet longer than `quiet` returns without waiting it out again, and an
 /// exited child's final screen is still by definition.

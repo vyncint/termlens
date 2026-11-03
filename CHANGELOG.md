@@ -29,33 +29,202 @@ reads that marker.
   the application asked for silence. A test that read the `i=0;OK` reply
   should send `i=` with a nonzero id, as kitty requires.
 
+- `unsupported()` is right about three more shapes (#625, #641). A window
+  title with a `;` in it (`OSC 2 ; make; test`) is no longer listed: the
+  title was always honoured, and `title()` reported it whole. An ANSI mode
+  list that names insert mode with another mode (`CSI 4;20 h`) is listed,
+  as `CSI 20;4 h` already was, since LNM is dropped either way.
+  XTSMGRAPHICS (`CSI ? Pi ; Pa ; Pv S`) is no longer listed; it is a
+  question now, named in the next timeout as LIMITATIONS promises for a
+  program blocked on one. A test that pins `unsupported()` exactly drops
+  any `^[]0;…`, `^[]2;…` or `^[[?…S` entry from its expected list and adds
+  a mode list such as `^[[4;20h` where its application sends one.
+
+- The urxvt mouse encoding (mode 1015) is honoured (#640). An application
+  that enables it gets xterm's `CSI 32;5;3M` form, decimal and with no 222
+  limit, where it got the legacy bytes; DECRQM answers for 1015; and the
+  last of 1005, 1006 and 1015 set is the one in force, as in xterm, so
+  resetting the one in force returns to the legacy form. The error for a
+  click past column 222 no longer says the application selected the legacy
+  encoding; it names the extended ones that would reach that far. A test
+  that read legacy reports from an application enabling 1015 reads the
+  urxvt form instead.
+
+- X10 mouse tracking (`CSI ? 9 h`) reports what xterm reports (#642).
+  `click_with` sends the button alone, without the modifier bits, and
+  `scroll` and `scroll_with` return `Error::Input`, since the mode reports
+  no wheel. A test that scrolled under X10 expects that error, or has its
+  application enable `?1000` instead.
+
+- Insert mode (`CSI 4 h`) reserves room a character at a time, at the
+  cursor, so the screen no longer depends on where the PTY split the output
+  (#624). A run that reached the right margin wrapped onto the next row over
+  its text when it arrived in one read, and pushed that row right from its
+  second character when it arrived in pieces; now the next row is pushed
+  right from the first character, as xterm does, which removes the
+  exception `docs/LIMITATIONS.md` documented. An emoji-presentation
+  selector that arrives in a read of its own reserves the column it widens
+  the emoji into, where it used to overwrite the next character. A test
+  that asserted the overwritten row should assert the pushed one.
+
+- The plain output of `termlens diff` ends with one newline, not a blank
+  line, and an unchanged-row count of one reads `… 1 row unchanged`
+  (#652). `ScreenDiff`'s `Display` already ended its last line, and the CLI
+  printed a second newline after it; "no difference" and the coloured
+  output were not affected. The library's `Display` says "1 row" too. A
+  script that compares `diff --color never` output byte for byte against a
+  file saved from 0.11.7 or earlier should drop that file's final empty
+  line and, where the count is one, the `s` of `rows`.
+
 ### Fixed
 
 - A kitty `a=p` placement takes its size from the newest transmission of
   its image id (#626). When that one declared no size, a PNG for instance,
   the size of an older transmission of the same id moved the cursor, though
   kitty replaces an image on retransmission.
+
 - A kitty placement with a huge `c=`, `r=`, `s=` or `v=` no longer panics
   the emulator in a debug build, or moves the cursor by a wrapped amount in
   a release one (#634). The cells are computed in 64 bits and saturate.
+
 - A sixel past the capture bound keeps its declared size, and the cursor
   still moves past it by its full height (#635). Both were read off the
   retained data, so `capture_graphics(0)` reported `size() == None` and left
   the cursor where the image started. They are now measured as the stream
   arrives, at no extra memory.
+
 - A kitty placement (`a=p`), animation (`a=a`) or compose (`a=c`) that
   arrives during a chunked upload is a payload of its own, and the upload
   goes on to its last chunk (#636). It used to be swallowed as the upload's
   next chunk, so the placement was lost and neither image decoded. A
   transmission from a file or shared memory (`t=f`, `t=t`, `t=s`) arriving
   mid-upload starts an image of its own, as kitty does.
+
 - Kitty data whose chunks each end in base64 padding decodes (#637). kitty
   decodes every escape's payload on its own and the protocol allows a padded
   chunk, but `decode()` read the joined body once and called it bad base64.
+
 - A sixel that paints past its declared raster size decodes to everything it
   painted (#638), as xterm draws it: the larger of the declared and the
   painted extent on each axis, still within the 4096-pixel cap. It was
   cropped to the declared size.
+
+- Every wait takes `Duration::MAX` as "no deadline", per call or as the
+  builder's `timeout` (#629). Each one added the timeout to the current
+  instant and panicked with "overflow when adding duration to instant"; the
+  deadline is now the furthest instant the clock can represent.
+
+- A send under a builder `timeout` of zero, or of a few microseconds, no
+  longer fails while its bytes are delivered (#632). It waited for the
+  writer thread's acknowledgement for exactly the deadline, which expired
+  before that thread had run, and the error then said the application was
+  not reading and the buffer was full. A send now waits at least a tenth of
+  a second, and the error claims a full buffer only when a write into it is
+  seen blocked; it reads "a write into it was still blocked after …" where
+  it read "no progress in …".
+
+- `spawn("sub/prog")` of a file in the working directory that cannot be
+  executed, or is not there, fails with the reason the OS gave for that
+  file, "cannot execute …/sub/prog: Permission denied (os error 13)" or
+  "No such file or directory (os error 2)" (#631). It reported a PATH
+  search, "No viable candidates found in PATH", the one place the file was
+  never meant to be; the usual case is a `target/debug/app` downloaded as
+  an artifact without its executable bit. A program a PATH entry provides
+  under the same name is still found.
+
+- In a test process that ignores SIGCHLD, a terminal drops at once instead
+  of taking two seconds, and nothing is signalled after the child has gone
+  (#630). The kernel reaps every child itself there, and teardown read the
+  child it had already reaped as one still running: it sent SIGHUP and
+  SIGKILL to a pid that could belong to another process by then, and waited
+  out its whole reap grace. `wait_exit` now fails naming the cause ("…the
+  kernel reaped it, because SIGCHLD is ignored…") where it gave a bare "No
+  child processes", and `signal` refuses with `Error::Input`, as it does for
+  a child already waited for.
+
+- Dropping a terminal returns when the application left more input unread
+  than its terminal holds, which a raw-mode application that stops reading
+  allows (#628). The PTY layer writes an end-of-file as its writer is
+  dropped, and that write waited forever on the full queue, with the child
+  already gone, while holding the lock every spawn in the test binary takes:
+  the binary never exited. Teardown now makes the terminal's writes give up
+  rather than wait and empties the queue nothing will read, so the writer
+  thread stuck behind it ends too, instead of keeping the PTY open.
+
+- A spawn that fails closes the terminal it opened before it releases the
+  PTY lifecycle lock (#633). It released the lock first, so on macOS the
+  close could revoke a device another thread had just opened, the failure
+  the lock exists to prevent; and a spawn that failed after opening the
+  terminal but before starting the child could deadlock on the lock it
+  held, instead of reporting why.
+
+- A cursor-position or size query is answered without building a snapshot
+  (#618). Each reply copied the whole grid, history and graphics log to
+  read two numbers, and 0.11.7 doubled that in debug builds, so 2000
+  `CSI 6 n` at 200x50 took 10 s to answer under `cargo test` and the
+  replies left in bursts several seconds apart; a reader with an
+  inter-byte timeout, like termlens-demo's, saw them stop. The same 2000
+  now take about 20 ms, and the reply is the one the snapshot gave.
+
+- `CSI ? 3 J` and `CSI 3:1 J` keep the history termlens had retained, as
+  `CSI 3 J` does (#621). vt100 erases its saved lines for both, and the
+  tracker missed them, so the emptied history read as rows pulled back
+  onto the screen and the kept copy was popped.
+
+- RIS turns focus reporting off and ends an open synchronized update
+  (#623). After `ESC c`, `focus_in` still typed `^[[I`, DECRQM answered
+  `Set` for 1004 and 2026, and an update begun before the reset never
+  ended, so every later `wait_stable` timed out. The half-drawn frame is
+  dropped.
+
+- A control character inside an escape sequence is carried out and the
+  sequence goes on, as the parser that feeds the grid does (#627). The
+  tracker dropped to plain text there, so `ESC CR` before line-drawing
+  text blanked the rest of the write, and the query in `ESC BEL [6n` went
+  unanswered with its bell uncounted. The same holds inside a CSI.
+
+- An emoji with a presentation selector (`⚠️`, `❤️`) drawn into the
+  bottom-right cell no longer panics the emulator when the row is redrawn
+  (#619). vt100 0.18.1 moved the wrong cell to the new bottom row and left
+  the emoji wide in the last column of the row above, where the next write
+  over it panicked on the reader thread and the screen stopped advancing.
+  termlens now moves the emoji itself, to the start of the new row, as
+  xterm does.
+
+- A resize round trip over a soft-wrapped line no longer makes the attribute
+  shadow diverge from the grid (#620). Copying the rows a wider, shorter
+  screen pushed into history widened them and cleared their wrap flags, in
+  the primary grid only unless styled history was on, so the resize back
+  pulled different rows into the two and a debug build panicked on the next
+  snapshot; with both moved, `row_wrapped` turned false and `logical_text()`
+  split the line. A history at its retention bound is still re-read whole
+  on the next output, and a row narrower than the screen loses its wrap
+  flag then.
+
+- Rows that scroll off in the same read that switches to the alternate
+  screen (`CSI ? 1049 h`, `? 47 h`, `? 1047 h`) are in `scrollback_text()`
+  while the alternate screen is up, and survive a reset before it comes
+  down (#622). They were copied only once the main screen was back, and a
+  RIS before that lost them for good.
+
+- `termlens render` and `termlens diff` accept `--` as the end of their
+  options, as `inspect` does (#650), so a file whose name begins with `-`
+  can be named: `termlens render --text -- -x.snap`. A `-` after `--` is
+  still standard input.
+
+- `termlens diff missing.snap -` reports the missing file at once (#651).
+  Both operands were read before either result was looked at, so `diff`
+  first waited for standard input to end, which at a terminal meant
+  Ctrl-D.
+
+- `termlens render` and `termlens diff` refuse an input larger than 1 GiB
+  with exit code 2 and a message saying so (#653). They read a whole file
+  or stream into memory with no bound, so `render --text /dev/zero` or
+  `yes | termlens render --text -` grew until the allocator or the OOM
+  killer stopped them. The largest screen termlens writes — 1000x1000
+  cells, each styled differently, as the pretty-printed JSON — is about
+  600 MB, so every saved screen an earlier release wrote still reads. A
+  regular file past the bound is refused before it is read.
 
 ## [0.11.7] - 2026-10-27
 

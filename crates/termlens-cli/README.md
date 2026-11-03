@@ -28,6 +28,14 @@ termlens inspect ./myapp | termlens render --svg --out shot.svg -
 termlens diff expected.snap -   < actual.snap
 ```
 
+`--` ends the options of all three commands, so a file whose name begins
+with `-` can be named (`termlens render --text -- -x.snap`); a `-` after it
+is still standard input. `diff` and `render` refuse an input larger than
+1 GiB with exit code `2`: the largest screen termlens writes, 1000x1000
+cells each styled differently, is about 600 MB as JSON, so nothing real is
+near it, and `render --text /dev/zero` stops there rather than filling
+memory.
+
 `render --out PATH` writes there instead of to stdout, and creates nothing
 when the render fails. A shell redirect cannot promise that — `> file.svg`
 truncates the file before termlens runs, so a failed render leaves an empty
