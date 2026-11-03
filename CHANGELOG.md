@@ -107,6 +107,11 @@ reads that marker.
   (#658). They sit at the foot of CHANGELOG.md, and the v0.11.0 notes
   showed `` [`Unsupported`] `` in brackets, linked to nothing, as v0.11.1's
   did `[Keep a Changelog]`.
+- A label quoted inside a code span or a fenced block no longer counts as a
+  use, so release notes no longer end with definitions nothing in them links
+  to (#674). Quoting the two above in this file was enough to append both
+  to these notes, and the v0.11.1 notes gained today's `[Unreleased]`
+  compare link. A link whose text is code, as in 0.11.0, still counts.
 
 - A kitty `a=p` placement takes its size from the newest transmission of
   its image id (#626). When that one declared no size, a PNG for instance,
