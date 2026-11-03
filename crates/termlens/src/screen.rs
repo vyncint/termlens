@@ -1975,7 +1975,9 @@ impl Screen {
     /// `reversed_empty_ranges` already refuses a written-out `3..0`; this
     /// covers the computed bounds it cannot see. Out-of-*range* bounds are
     /// different and stay clamped: asking for more screen than exists is a
-    /// reasonable thing to do.
+    /// reasonable thing to do. That includes an open end: `split..` runs to
+    /// the edge wherever it is, so once the terminal is narrowed below
+    /// `split` it reads an empty column range rather than panicking (#644).
     #[must_use]
     pub fn rect_text(&self, cols: impl RangeBounds<u16>, rows: impl RangeBounds<u16>) -> String {
         let (col_start, col_end) = clamp_range(&cols, self.cols, "column", "rect_text");
@@ -2246,7 +2248,10 @@ fn clamp_range(range: &impl RangeBounds<u16>, len: u16, axis: &str, caller: &str
     let end = match range.end_bound() {
         Bound::Included(&e) => e.saturating_add(1),
         Bound::Excluded(&e) => e,
-        Bound::Unbounded => len,
+        // An open end is "to the edge, wherever that is", so it never ends
+        // before the start: `split..` on a screen narrowed below `split`
+        // is an empty read, not a backwards range (#644).
+        Bound::Unbounded => len.max(start),
     };
     // Checked on what the caller wrote, before clamping, so the message
     // quotes their numbers. Clamping cannot create an inversion: both
@@ -2641,6 +2646,28 @@ mod tests {
         assert_eq!(s.rect_text(8..99, ..1), "89");
         assert_eq!(s.rect_text(.., 1..99), "abcdefghij\nxyz");
         assert_eq!(s.rect_text(5..5, ..), "\n\n"); // empty but not inverted
+    }
+
+    /// An open end is "to the edge", so it clamps like an explicit one past
+    /// it, rather than becoming the screen's length and then reading as
+    /// ending before the start (#644): `rect_text(split.., ..)` on a pane
+    /// narrowed below `split`.
+    #[test]
+    fn an_open_range_starting_past_the_edge_clamps() {
+        let s = screen(10, 3, &["0123456789", "abcdefghij", "xyz"]);
+        assert_eq!(s.rect_text(12..99, ..), "\n\n");
+        assert_eq!(s.rect_text(12.., ..), "\n\n");
+        assert_eq!(s.rect_text(10.., ..), "\n\n");
+        assert_eq!(s.rect_text(.., 5..), "");
+        assert_eq!(s.rect_text(.., 3..), "");
+        use std::ops::Bound;
+        assert_eq!(
+            s.rect_text((Bound::Excluded(10), Bound::Unbounded), ..1),
+            ""
+        );
+        assert!(s.mask_rect(12.., ..).diff(&s).is_empty());
+        assert!(s.mask_rect(.., 5..).diff(&s).is_empty());
+        // An explicit backwards range still panics; see the tests above.
     }
 
     #[test]

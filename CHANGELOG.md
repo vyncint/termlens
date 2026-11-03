@@ -28,6 +28,12 @@ reads that marker.
   JSON reader already read it, and the stranded character reads as that
   cell, so the JSON twin's own text also parses again. Both files, written
   by the published releases, are in the compatibility corpus.
+- `Screen::rect_text` and `mask_rect` clamp an open-ended range that starts
+  past the edge, as they clamp an explicit one (#644). `rect_text(12.., ..)`
+  on a 10-column screen panicked with "column range starts at 12 but ends
+  at 10", a range the caller never wrote, so a pane read such as
+  `rect_text(split.., ..)` panicked as soon as the terminal was narrowed
+  below `split`. A range written backwards still panics.
 
 ## [0.11.7] - 2026-10-27
 
