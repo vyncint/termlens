@@ -40,10 +40,17 @@
 # which is the failure mode this script exists to avoid. `temlens` is not in
 # the list.
 #
+# A link is every target the renderer follows, not only an inline `](…)`: a
+# reference definition (`[design]: docs/DESIGN.md`) is how a relative link
+# reaches crates.io unseen, and an HTML `src`/`href` is followed as well.
+# Reading only the inline form let both through, and a `…/tree/main/<path>`
+# URL had only its repository checked, never the path (#657).
+#
 # Usage: check-readme-links.sh [file ...]   (default: README.md)
 set -euo pipefail
 
 base="https://github.com/vyncint/termlens/blob/main/"
+tree="https://github.com/vyncint/termlens/tree/main/"
 
 # The repositories a document here has any business linking: the four projects
 # CONTRIBUTING.md names as sharing one contributor pattern, oxidelake and
@@ -64,6 +71,18 @@ files=("$@")
 if [ "${#files[@]}" -eq 0 ]; then
   files=(README.md)
 fi
+
+# `links <file>`: every link target in it, once each. Inline links lose a
+# title and angle brackets; a reference definition is one at the start of a
+# line, a footnote (`[^1]: …`) excepted; HTML attributes in either quote.
+links() {
+  {
+    grep -oE '\]\([^)]+\)' "$1" | sed -E 's/^\]\([[:space:]]*//; s/\)$//; s/^<//; s/[[:space:]].*$//; s/>$//' || true
+    grep -E '^ {0,3}\[[^]^][^]]*\]:' "$1" \
+      | sed -E 's/^ {0,3}\[[^]]+\]:[[:space:]]*//; s/^<//; s/[[:space:]].*$//; s/>$//' || true
+    grep -oE '(src|href)=("[^"]*"|\047[^\047]*\047)' "$1" | sed -E 's/^(src|href)=.//; s/.$//' || true
+  } | sort -u
+}
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 status=0
@@ -98,9 +117,11 @@ for file in "${files[@]}"; do
         ;;
       http://* | https://*)
         case "$link" in
-          "$base"*)
+          "$base"* | "$tree"*)
             path=${link#"$base"}
+            path=${path#"$tree"}
             path=${path%%#*}
+            path=${path%%\?*}
             if [ ! -e "$root/$path" ]; then
               echo "$file LINK: \"$path\" is linked but not in the repository" >&2
               status=1
@@ -146,7 +167,7 @@ for file in "${files[@]}"; do
         fi
         ;;
     esac
-  done <<<"$(grep -oE '\]\([^)]+\)' "$file" | sed -E 's/^\]\(//; s/\)$//' | sort -u || true)"
+  done <<<"$(links "$file")"
 
   total=$((total + checked))
   echo "$file: $checked distinct link target(s)"

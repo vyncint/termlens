@@ -17,6 +17,13 @@
 #   readme-missing/          the packaged README with a dead absolute target
 #   pr-template-relative/    the pull-request template with a relative target,
 #                            which GitHub resolves against the pull request
+#   readme-reference-relative/  the packaged README with a relative target in
+#                            a reference definition, which the gate did not
+#                            read (#657)
+#   contributing-reference-missing/  a reference definition to a missing file
+#   contributing-tree-missing/  a `…/tree/main/<path>` URL to a missing
+#                            directory, whose path the gate did not check
+#   contributing-html-missing/  an HTML `src` to a missing file
 #
 # The first and the last assertions are the ones that keep the gate honest: a
 # fixture that must pass, and the repository's own files, which must still
@@ -52,10 +59,14 @@ expect "CONTRIBUTING.md: a misspelled org repository fails (#351)" nonzero contr
 expect "README.md: a relative target fails (crates.io rewrites it)" nonzero readme-relative/README.md
 expect "README.md: a missing absolute target fails" nonzero readme-missing/README.md
 expect "PULL_REQUEST_TEMPLATE.md: a relative target fails (#369)" nonzero pr-template-relative/PULL_REQUEST_TEMPLATE.md
+expect "README.md: a relative reference definition fails (#657)" nonzero readme-reference-relative/README.md
+expect "CONTRIBUTING.md: a reference to a missing target fails" nonzero contributing-reference-missing/CONTRIBUTING.md
+expect "CONTRIBUTING.md: a tree/main/ URL to a missing path fails" nonzero contributing-tree-missing/CONTRIBUTING.md
+expect "CONTRIBUTING.md: an HTML src to a missing target fails" nonzero contributing-html-missing/CONTRIBUTING.md
 expect "this repository's own files pass" zero "$root/README.md" "$root/CONTRIBUTING.md" "$root/.github/PULL_REQUEST_TEMPLATE.md"
 
 rm -f out.log
 if [ "$status" -eq 0 ]; then
-  echo "link gate selftest: 8 expectation(s), the gate fails when it should"
+  echo "link gate selftest: 12 expectation(s), the gate fails when it should"
 fi
 exit "$status"

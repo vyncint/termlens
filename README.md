@@ -160,12 +160,13 @@ A clock in the title bar or a PID in the status line would break a snapshot
 on every run, and a text filter over the rendering shifts every column after
 it. Mask the **grid** instead — width, styles and cursor stay put:
 
-```rust,ignore
+```rust
 let s = t.snapshot_after(|s| s.contains("Ready"))?;
 insta::assert_snapshot!(s.mask_matching("12:34:56", '▒'));   // a literal…
 insta::assert_snapshot!(s.mask_rect(70.., ..1));              // …a rectangle…
 // …or a pattern, with the `regex` feature:
-insta::assert_snapshot!(s.mask_matches(&regex::Regex::new(r"\d\d:\d\d:\d\d")?, '▒'));
+let clock = regex::Regex::new(r"\d\d:\d\d:\d\d").expect("a valid pattern");
+insta::assert_snapshot!(s.mask_matches(&clock, '▒'));
 ```
 
 `Screen::diff(&other)` reports what changed between two screens cell by
@@ -204,7 +205,8 @@ let seen = screen.graphics();
 let image = seen.last().expect("the chart went out as an image");
 assert_eq!(image.cells(), Some((106, 7)));       // on the cells reserved
 assert_eq!(image.at(), (4, 5));                  // at the grid's origin
-assert_eq!(image.decode()?.pixel(9, 9), Some([0x39, 0xd3, 0x53, 0xff]));
+let bitmap = image.decode().expect("the payload decodes"); // DecodeError: no `?`
+assert_eq!(bitmap.pixel(9, 9), Some([0x39, 0xd3, 0x53, 0xff]));
 ```
 
 **Scrollback is retained** (1,000 rows by default; text only unless

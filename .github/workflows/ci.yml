@@ -215,6 +215,18 @@ jobs:
       # with a stub CLI: a directory `find` cannot read ended the step
       # before it wrote a line, and other repositories run this step.
       - run: tools/report-action-selftest/run.sh
+      # …and the gates-listed gate itself (#657): a gate under a `name:`,
+      # in quotes or in a folded block was invisible to it, so each is
+      # asserted to fail unlisted.
+      - run: tools/gates-listed-selftest/run.sh
+      # …and the snippet gate's extraction (#657): a ```rust,no_run block
+      # or one indented under a list item was never compiled. Extraction
+      # only, so no toolchain; the `skill` job does the compiling.
+      - run: tools/snippet-gate-selftest/run.sh
+      # …and the release-notes extraction (#658): a section copied without
+      # the foot definitions it names showed v0.11.0's `[Unsupported]` in
+      # brackets on the GitHub Release.
+      - run: tools/release-notes-selftest/run.sh
       # The emit fixture's documented steps against the ones it implements
       # (#318). It lives in this job because it needs no toolchain — it is
       # two greps and a `comm` — and the fixture is what almost every
@@ -388,6 +400,8 @@ jobs:
   # copies from, so a recipe that no longer compiles teaches the wrong API to
   # everyone who installed it. Every Rust block in it is compiled against the
   # crate in this checkout, inside a consumer that owns a `myapp` binary.
+  # README.md's blocks are compiled too, fragments inside a function, since
+  # its decode example used a `?` that cannot compile (#660).
   skill:
     name: skill
     runs-on: ubuntu-latest
