@@ -9,44 +9,77 @@
 #
 # tests:
 #   .github/scripts/extract-changelog.sh Unreleased   # prints current section
+#   tools/release-notes-selftest/run.sh               # the cases below, checked
 #
 # An empty [Unreleased] section is valid and prints nothing with exit status 0.
 # An empty numbered release section is an error, as is a missing section.
+#
+# A section is printed with the link reference definitions it uses. Keep a
+# Changelog puts them at the foot of the file, below every section, so a
+# section copied alone kept its `` [`Unsupported`] `` and lost what it
+# pointed at, and the v0.11.0 release notes showed the brackets (#658).
+# Definitions are never part of a section's body, wherever they sit: they
+# are collected from the whole file and the ones the section names are
+# appended, in file order. Naming is matched as CommonMark matches a label,
+# case-insensitively; a definition the section merely mentions in passing
+# is appended too, which renders as nothing.
+#
+# Usage: extract-changelog.sh <version|vX.Y.Z|Unreleased> [CHANGELOG.md]
 set -euo pipefail
 
-version="${1:?usage: extract-changelog.sh <version|vX.Y.Z|Unreleased>}"
+version="${1:?usage: extract-changelog.sh <version|vX.Y.Z|Unreleased> [CHANGELOG.md]}"
 version="${version#v}"
+changelog="${2:-CHANGELOG.md}"
 
 result="$(awk -v ver="$version" '
-  # Section headers look like "## [0.1.0] - 2026-01-31" or "## [Unreleased]".
-  /^## \[/ {
-    if (found) exit
-    if (index($0, "[" ver "]") > 0) { found = 1; next }
+  function label(s) {
+    s = tolower(s); gsub(/[ \t]+/, " ", s); sub(/^ /, "", s); sub(/ $/, "", s)
+    return s
   }
-  # Keep a Changelog ends with link reference definitions, which sit below
-  # the oldest version heading and therefore inside its section as far as
-  # the slice above is concerned. They belong to the file, not to any one
-  # release, so collecting stops at the first of them (#319).
-  found && /^\[[^]]+\]:[[:space:]]+http/ { exit }
-  found { lines[++n] = $0 }
+  # A line in a code fence is never a definition or a heading.
+  FNR == 1 { fenced = 0 }
+  /^ ? ? ?(```|~~~)/ { fenced = !fenced }
+  !fenced && match($0, /^ ? ? ?\[[^]]+\]:/) {
+    d = $0; sub(/^ */, "", d)
+    l = label(substr(d, 2, index(d, "]:") - 2))
+    if (FNR == NR) {
+      if (!(l in def)) { def[l] = $0; order[++ndefs] = l }
+    }
+    next
+  }
+  FNR == NR { next }
+  # Section headers look like "## [0.1.0] - 2026-01-31" or "## [Unreleased]".
+  !fenced && /^## \[/ {
+    if (found) { done = 1 }
+    else if (index($0, "[" ver "]") > 0) { found = 1; next }
+  }
+  found && !done { lines[++n] = $0 }
   END {
     start = 1; while (start <= n && lines[start] ~ /^[[:space:]]*$/) start++
     end = n;   while (end >= start && lines[end]   ~ /^[[:space:]]*$/) end--
     if (!found) { print "__EXTRACT_CHANGELOG_MISSING__"; exit }
     if (start > end) { print "__EXTRACT_CHANGELOG_EMPTY__"; exit }
     print "__EXTRACT_CHANGELOG_CONTENT__"
-    for (i = start; i <= end; i++) print lines[i]
+    body = ""
+    for (i = start; i <= end; i++) { print lines[i]; body = body " " lines[i] }
+    body = tolower(body); gsub(/[ \t]+/, " ", body)
+    sep = 0
+    for (i = 1; i <= ndefs; i++) {
+      if (index(body, "[" order[i] "]") == 0) continue
+      if (!sep) { print ""; sep = 1 }
+      print def[order[i]]
+    }
   }
-' CHANGELOG.md)"
+' "$changelog" "$changelog")"
 
 case "$result" in
 __EXTRACT_CHANGELOG_MISSING__)
-  echo "::error::No CHANGELOG.md section found for version '${version}'." >&2
+  echo "::error::No ${changelog} section found for version '${version}'." >&2
   exit 1
   ;;
 __EXTRACT_CHANGELOG_EMPTY__)
   if [ "$version" != "Unreleased" ]; then
-    echo "::error::CHANGELOG.md section for version '${version}' is empty." >&2
+    echo "::error::${changelog} section for version '${version}' is empty." >&2
     exit 1
   fi
   ;;
