@@ -19,6 +19,16 @@ reads that marker.
 
 ### Changed
 
+- A `Graphics::Kitty` terminal answers kitty's `a=q` query as kitty does
+  (#639): `ESC _Gi=<id>;OK ESC \` for a query naming an image id, and
+  nothing for one that names none (`i=` absent or 0, or `I=` alone) or asks
+  for quiet (`q=1` suppresses an `OK`, `q=2` every reply). termlens used to
+  answer all of these `OK`, with `i=0` when there was no id, which put bytes
+  into the input of an application that had asked for none. A query without
+  an id is now named in the next timeout instead; a quiet one is not, since
+  the application asked for silence. A test that read the `i=0;OK` reply
+  should send `i=` with a nonzero id, as kitty requires.
+
 - `unsupported()` is right about three more shapes (#625, #641). A window
   title with a `;` in it (`OSC 2 ; make; test`) is no longer listed: the
   title was always honoured, and `title()` reported it whole. An ANSI mode
@@ -97,6 +107,83 @@ reads that marker.
   (#658). They sit at the foot of CHANGELOG.md, and the v0.11.0 notes
   showed `` [`Unsupported`] `` in brackets, linked to nothing, as v0.11.1's
   did `[Keep a Changelog]`.
+
+- A kitty `a=p` placement takes its size from the newest transmission of
+  its image id (#626). When that one declared no size, a PNG for instance,
+  the size of an older transmission of the same id moved the cursor, though
+  kitty replaces an image on retransmission.
+
+- A kitty placement with a huge `c=`, `r=`, `s=` or `v=` no longer panics
+  the emulator in a debug build, or moves the cursor by a wrapped amount in
+  a release one (#634). The cells are computed in 64 bits and saturate.
+
+- A sixel past the capture bound keeps its declared size, and the cursor
+  still moves past it by its full height (#635). Both were read off the
+  retained data, so `capture_graphics(0)` reported `size() == None` and left
+  the cursor where the image started. They are now measured as the stream
+  arrives, at no extra memory.
+
+- A kitty placement (`a=p`), animation (`a=a`) or compose (`a=c`) that
+  arrives during a chunked upload is a payload of its own, and the upload
+  goes on to its last chunk (#636). It used to be swallowed as the upload's
+  next chunk, so the placement was lost and neither image decoded. A
+  transmission from a file or shared memory (`t=f`, `t=t`, `t=s`) arriving
+  mid-upload starts an image of its own, as kitty does.
+
+- Kitty data whose chunks each end in base64 padding decodes (#637). kitty
+  decodes every escape's payload on its own and the protocol allows a padded
+  chunk, but `decode()` read the joined body once and called it bad base64.
+
+- A sixel that paints past its declared raster size decodes to everything it
+  painted (#638), as xterm draws it: the larger of the declared and the
+  painted extent on each axis, still within the 4096-pixel cap. It was
+  cropped to the declared size.
+
+- `Screen::parse` and `termlens render` read two text snapshots earlier
+  releases wrote and 0.11.7 refused (#643): a visible cursor one past the
+  last column (`cursor: 1,6` on a 6-column screen), which releases up to
+  0.11.1 wrote after a write filled the last cell, and a wide character a
+  narrowing resize stranded in the last column with no second half, which
+  releases up to 0.11.6 wrote. The cursor reads onto the last cell, as the
+  JSON reader already read it, and the stranded character reads as that
+  cell, so the JSON twin's own text also parses again. Both files, written
+  by the published releases, are in the compatibility corpus.
+
+- `Screen::rect_text` and `mask_rect` clamp an open-ended range that starts
+  past the edge, as they clamp an explicit one (#644). `rect_text(12.., ..)`
+  on a 10-column screen panicked with "column range starts at 12 but ends
+  at 10", a range the caller never wrote, so a pane read such as
+  `rect_text(split.., ..)` panicked as soon as the terminal was narrowed
+  below `split`. A range written backwards still panics.
+
+- `Screen::to_html` dims a run's text and no longer its background (#645).
+  The run's span carried `opacity:0.6`, which faded a coloured background
+  into the page, while `to_svg` faded only the text over a full-strength
+  `<rect>`. The span now carries the foreground blended 60% over the
+  background, the colour the SVG's text composites to, so the two
+  renderings paint the same picture.
+
+- `Recording::to_asciicast` places each frame's cursor (#646). An event
+  repainted the grid and wrote nothing for the cursor, so `asciinema play`
+  and `agg` drew a visible cursor after the last row of every frame, even
+  for a program that had hidden it. Each event now ends by moving the
+  cursor to where the test saw it and showing or hiding it as it was.
+
+- `Screen::find`, `find_all` and `mask_matching` with a needle that spans
+  rows no longer slow down with the needle's height (#647). Every row was
+  rebuilt for each candidate start row it was compared from, so on a
+  1000x1000 screen a 400-row needle took 565 ms where `contains` took
+  5 ms. Each row is now built once per call and the whole rows in the
+  middle of the needle are matched in one pass; the same search takes as
+  long as `contains` whatever the needle's height.
+
+- A `ScreenDiff` between screens of different sizes prints each row clipped
+  to the overlap it compares (#649). The wider screen's rows were printed
+  whole under the note saying the rest is clipped, so the `│` separators
+  left the marker line's columns and the after side's `^` sat under the
+  wrong cells. `termlens diff --color` clips the same way and no longer
+  leaves painted blanks at the end of the after side. A wide character cut
+  by the overlap's edge prints as one blank, and its cell is still marked.
 
 - Every wait takes `Duration::MAX` as "no deadline", per call or as the
   builder's `timeout` (#629). Each one added the timeout to the current

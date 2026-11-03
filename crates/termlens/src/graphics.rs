@@ -313,6 +313,8 @@ impl GraphicsPayload {
     ///
     /// `None` when nothing declared one, which for sixel means the size is
     /// implicit in the data; `GraphicsPayload::decode` computes it there.
+    /// A sixel that paints past its declared size decodes to everything it
+    /// painted, as xterm draws it, while this stays what was declared.
     #[must_use]
     pub fn size(&self) -> Option<(u32, u32)> {
         self.size
@@ -455,7 +457,7 @@ impl GraphicsPayload {
             .checked_mul(height as usize)
             .and_then(|pixels| pixels.checked_mul(channels))
             .ok_or(DecodeError::Malformed("a declared size that overflows"))?;
-        let raw = crate::emu::decode_base64(data).ok_or(DecodeError::Malformed("bad base64"))?;
+        let raw = decode_chunked_base64(data).ok_or(DecodeError::Malformed("bad base64"))?;
         let raw = if self.compressed {
             // Nothing past the declared size is ever read, so nothing past it
             // needs inflating.
@@ -647,6 +649,32 @@ impl fmt::Display for DecodeError {
 #[cfg(feature = "decode")]
 impl std::error::Error for DecodeError {}
 
+/// Decode the base64 body of a kitty transmission, joined from its chunks.
+///
+/// kitty decodes each escape's payload on its own (`base64_decode8`, per
+/// escape, in `parse-graphics-command.h`), so every chunk may end in its own
+/// padding: `/w==` then `AAA=` is two pixels' worth, not malformed (#637).
+/// The protocol has every chunk but the last be "a size that is a multiple
+/// of 4" (its "Remote client" section), so a chunk boundary always falls on
+/// a four-byte quantum of the joined body, and a quantum that ends in `=`
+/// ends a chunk: decoding the body a padded quantum at a time decodes it as
+/// kitty does, with no record of where the chunks were — which a saved
+/// screen's JSON never carried. Padding anywhere else is still refused.
+#[cfg(feature = "decode")]
+fn decode_chunked_base64(data: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len() / 4 * 3 + 2);
+    let mut rest = data;
+    while !rest.is_empty() {
+        let end = rest
+            .chunks(4)
+            .position(|quantum| quantum.len() == 4 && quantum[3] == b'=')
+            .map_or(rest.len(), |at| (at + 1) * 4);
+        out.extend(crate::emu::decode_base64(&rest[..end])?);
+        rest = &rest[end..];
+    }
+    Some(out)
+}
+
 /// Decode a sixel data stream — everything after the `q` that closes the
 /// DCS header — into pixels.
 ///
@@ -821,8 +849,22 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
         Ok(())
     }
 
+    // xterm's size: the larger of the declared and the painted extent on
+    // each axis. xterm's `graphics_sixel.c` grows the image to the raster
+    // attributes when it reads them, and `set_sixel` grows it again to every
+    // pixel painted past them, so what a sixel paints beyond its declared
+    // size is kept (#638). It was cropped away. The painted extent is past
+    // the last pixel given a colour — a row grows only to the pixel painted
+    // in it, so not to whatever the cursor advanced over without painting —
+    // and is already within the 4096 cap, which `paint` enforces as it goes.
     let (width, height) = match declared {
-        Some((width, height)) if width > 0 && height > 0 => (width, height),
+        Some((width, height)) if width > 0 && height > 0 => {
+            let painted_width = rows.iter().map(Vec::len).max().unwrap_or(0);
+            (
+                width.max(painted_width as u32),
+                height.max(rows.len() as u32),
+            )
+        }
         _ => (width_seen as u32, rows.len() as u32),
     };
     // The declared raster attributes reach this allocation without the pixel
@@ -1125,10 +1167,27 @@ impl GraphicsBuilder {
     /// the data, so only the protocol is settled here. Nothing else is
     /// reset, so the builder must hold no kitty upload — the tracker
     /// abandons one first.
-    pub(crate) fn sixel(&mut self) {
+    ///
+    /// `meter` has measured the whole stream, every byte of it: the size and
+    /// the height the cursor moves by are facts about the image, kept
+    /// exactly whatever the capture bound keeps of its data (#635).
+    pub(crate) fn sixel(&mut self, meter: &SixelMeter) {
         self.protocol = Some(GraphicsProtocol::Sixel);
         self.action = GraphicsAction::TransmitAndPlace;
         self.format = GraphicsFormat::Sixel;
+        self.size = meter.raster();
+        // xterm's height: the larger of the raster attributes' and the
+        // painted rows'.
+        let declared = self.size.map_or(0, |(_, height)| height);
+        self.placement.height = declared.max(meter.painted_height());
+    }
+
+    /// [`sixel`](Self::sixel) and one [`chunk`](Self::chunk) of `data`,
+    /// measured whole — the shape the tracker hands a sixel over in.
+    #[cfg(test)]
+    pub(crate) fn sixel_chunk(&mut self, bytes: u64, data: &[u8], complete: bool, cap: usize) {
+        self.sixel(&SixelMeter::over(data));
+        self.chunk(bytes, data, complete, cap);
     }
 
     /// Add one escape's worth of wire cost and image data.
@@ -1142,12 +1201,6 @@ impl GraphicsBuilder {
     /// entirely rather than kept as a prefix that would decode into a
     /// plausible-looking wrong picture.
     pub(crate) fn chunk(&mut self, bytes: u64, data: &[u8], complete: bool, cap: usize) {
-        // Measured here, before a chunk past the capture bound is dropped:
-        // the cursor moves past an image whatever this test chose to keep.
-        if self.protocol == Some(GraphicsProtocol::Sixel) && self.chunks == 0 {
-            let declared = raster_size(data).map_or(0, |(_, height)| height);
-            self.placement.height = declared.max(sixel_painted_height(data));
-        }
         self.chunks += 1;
         self.bytes += bytes;
         let fits = self.data.len().saturating_add(data.len()) <= cap;
@@ -1157,6 +1210,13 @@ impl GraphicsBuilder {
             self.dropped = true;
             self.data = Vec::new();
         }
+    }
+
+    /// Whether a payload is under way: a kitty upload whose last chunk has
+    /// not arrived. A sixel is begun and finished by one terminator, so it
+    /// is never left in progress.
+    pub(crate) fn in_progress(&self) -> bool {
+        self.protocol.is_some()
     }
 
     /// [`finish_placed`](Self::finish_placed) without the placement.
@@ -1170,10 +1230,6 @@ impl GraphicsBuilder {
     pub(crate) fn finish_placed(&mut self) -> Option<(GraphicsPayload, Placement)> {
         let protocol = self.protocol.take()?;
         let placement = self.placement;
-        let mut size = self.size;
-        if protocol == GraphicsProtocol::Sixel {
-            size = raster_size(&self.data).or(size);
-        }
         let payload = GraphicsPayload {
             protocol,
             action: self.action,
@@ -1181,7 +1237,7 @@ impl GraphicsBuilder {
             compressed: self.compressed,
             transmission: self.transmission,
             id: self.id,
-            size,
+            size: self.size,
             cells: self.cells,
             chunks: self.chunks,
             bytes: self.bytes,
@@ -1205,53 +1261,119 @@ impl GraphicsBuilder {
     }
 }
 
-/// The `"Pan;Pad;Ph;Pv` raster attributes at the head of a sixel stream, if
-/// it declares any.
-fn raster_size(data: &[u8]) -> Option<(u32, u32)> {
-    let at = data.iter().position(|&b| b == b'"')?;
-    // Only a leading raster record describes the whole image; one appearing
-    // after pixels have been painted is a different statement.
-    if data[..at].iter().any(|b| (0x3f..=0x7e).contains(b)) {
-        return None;
-    }
-    let mut values = vec![0u32];
-    for &b in &data[at + 1..] {
-        match b {
-            b'0'..=b'9' => {
-                let last = values.last_mut().expect("seeded with one parameter");
-                *last = last.saturating_mul(10).saturating_add(u32::from(b - b'0'));
-            }
-            b';' => values.push(0),
-            _ => break,
-        }
-    }
-    match (values.get(2), values.get(3)) {
-        (Some(&width), Some(&height)) if width > 0 && height > 0 => Some((width, height)),
-        _ => None,
+/// What the sixel stream says about the image's extent, measured a byte at
+/// a time as the stream arrives — before, and whatever, the capture bound
+/// keeps of it (#635).
+///
+/// Two facts, both of which describe the image and neither of which may
+/// depend on how much of it a test chose to keep: the raster attributes
+/// (`"Pan;Pad;Ph;Pv`) that open the stream, which are the payload's
+/// [`size`](GraphicsPayload::size), and the height its sixels paint, which
+/// with the raster's moves the cursor past it. Both used to be read off the
+/// retained data, so a payload past the bound lost its size and stopped
+/// moving the cursor. Fixed-size, so measuring costs the same whatever the
+/// stream's length.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SixelMeter {
+    raster: Raster,
+    /// Bands ended so far (`-`).
+    band: u32,
+    /// Down to the lowest pixel set, in pixels.
+    height: u32,
+}
+
+/// How far into the leading raster record a [`SixelMeter`] is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Raster {
+    /// No raster record yet, and no sixel painted either.
+    #[default]
+    Leading,
+    /// Inside `"…`, at parameter `index`. Only the first four parameters
+    /// mean anything, so only four are kept, however many arrive.
+    Reading { index: usize, values: [u32; 4] },
+    /// The record is over, or a sixel came first and there is none: only a
+    /// leading record describes the whole image, and one appearing after
+    /// pixels have been painted is a different statement.
+    Done(Option<(u32, u32)>),
+}
+
+impl Raster {
+    fn size(values: [u32; 4]) -> Option<(u32, u32)> {
+        let [_, _, width, height] = values;
+        (width > 0 && height > 0).then_some((width, height))
     }
 }
 
-/// The height in pixels the sixels in `data` paint, as xterm's decoder
-/// measures it: down to the lowest pixel set. Bands of six rows are
-/// separated by `-`, and each sixel character's bits are its band's rows,
-/// the lowest bit the top one.
-fn sixel_painted_height(data: &[u8]) -> u32 {
-    let mut band = 0u32;
-    let mut height = 0u32;
-    for &byte in data {
+impl SixelMeter {
+    /// Measure all of `data`, a sixel stream after the `q` of its header.
+    #[cfg(test)]
+    pub(crate) fn over(data: &[u8]) -> Self {
+        let mut meter = Self::default();
+        for &byte in data {
+            meter.feed(byte);
+        }
+        meter
+    }
+
+    /// Take one byte of the stream.
+    pub(crate) fn feed(&mut self, byte: u8) {
+        let painted = (0x3f..=0x7e).contains(&byte);
+        self.raster = match self.raster {
+            Raster::Leading if byte == b'"' => Raster::Reading {
+                index: 0,
+                values: [0; 4],
+            },
+            Raster::Leading if painted => Raster::Done(None),
+            Raster::Reading { index, mut values } => match byte {
+                b'0'..=b'9' => {
+                    if let Some(value) = values.get_mut(index) {
+                        *value = value
+                            .saturating_mul(10)
+                            .saturating_add(u32::from(byte - b'0'));
+                    }
+                    Raster::Reading { index, values }
+                }
+                b';' => Raster::Reading {
+                    index: index.saturating_add(1),
+                    values,
+                },
+                _ => Raster::Done(Raster::size(values)),
+            },
+            unchanged => unchanged,
+        };
+        // As xterm's decoder measures it: bands of six rows are separated
+        // by `-`, and each sixel character's bits are its band's rows, the
+        // lowest bit the top one.
         match byte {
-            b'-' => band = band.saturating_add(1),
-            0x3f..=0x7e => {
+            b'-' => self.band = self.band.saturating_add(1),
+            _ if painted => {
                 let bits = u32::from(byte - 0x3f);
                 if bits != 0 {
-                    let lowest = band.saturating_mul(6) + (u32::BITS - bits.leading_zeros());
-                    height = height.max(lowest);
+                    let lowest = self
+                        .band
+                        .saturating_mul(6)
+                        .saturating_add(u32::BITS - bits.leading_zeros());
+                    self.height = self.height.max(lowest);
                 }
             }
             _ => {}
         }
     }
-    height
+
+    /// The size the leading raster attributes declare, if they declare one
+    /// with neither side zero.
+    pub(crate) fn raster(&self) -> Option<(u32, u32)> {
+        match self.raster {
+            Raster::Leading => None,
+            Raster::Reading { values, .. } => Raster::size(values),
+            Raster::Done(size) => size,
+        }
+    }
+
+    /// The height in pixels the sixels paint, down to the lowest pixel set.
+    pub(crate) fn painted_height(&self) -> u32 {
+        self.height
+    }
 }
 
 /// The cells a kitty placement covers, `(cols, rows)`, computed as kitty
@@ -1265,50 +1387,67 @@ pub(crate) fn kitty_cells(
     image: Option<(u32, u32)>,
     cell: Option<(u16, u16)>,
 ) -> Option<(u32, u32)> {
-    let (mut cols, mut rows) = (placement.cols, placement.rows);
+    let (cols, rows) = (placement.cols, placement.rows);
     if cols > 0 && rows > 0 {
         return Some((cols, rows));
     }
     let (cell_w, cell_h) = cell
-        .map(|(w, h)| (u32::from(w), u32::from(h)))
+        .map(|(w, h)| (u64::from(w), u64::from(h)))
         .filter(|&(w, h)| w > 0 && h > 0)?;
-    let (image_w, image_h) = image?;
-    let src_w = if placement.src_width > 0 {
-        placement.src_width
-    } else {
-        image_w
+    // Every number below is one the program under test chose, any of them
+    // up to `u32::MAX`, so the arithmetic is done in `u64` — where none of
+    // these sums and products of two `u32`s can overflow — and the result
+    // saturates on the way back (#634). In `u32` a large `r=` panicked the
+    // emulator in a debug build and moved the cursor by a wrapped amount in
+    // a release one. kitty's own `update_dest_rect` computes in `uint32_t`,
+    // but kitty refuses an image over 10000 pixels a side before it gets
+    // there; termlens sizes a placement from what the escape declared, so
+    // it cannot lean on that.
+    let (image_w, image_h) = image.map(|(w, h)| (u64::from(w), u64::from(h)))?;
+    let src_w = match u64::from(placement.src_width) {
+        0 => image_w,
+        width => width,
     };
-    let src_h = if placement.src_height > 0 {
-        placement.src_height
-    } else {
-        image_h
+    let src_h = match u64::from(placement.src_height) {
+        0 => image_h,
+        height => height,
     };
-    let src_w = src_w.min(image_w - placement.src_x.min(image_w));
-    let src_h = src_h.min(image_h - placement.src_y.min(image_h));
-    let offset_x = placement.cell_x.min(cell_w - 1);
-    let offset_y = placement.cell_y.min(cell_h - 1);
+    let src_w = src_w.min(image_w - u64::from(placement.src_x).min(image_w));
+    let src_h = src_h.min(image_h - u64::from(placement.src_y).min(image_h));
+    let offset_x = u64::from(placement.cell_x).min(cell_w - 1);
+    let offset_y = u64::from(placement.cell_y).min(cell_h - 1);
+    let (given_cols, given_rows) = (u64::from(cols), u64::from(rows));
     let (auto_cols, auto_rows) = (cols == 0, rows == 0);
+    let mut out_cols = given_cols;
+    let mut out_rows = given_rows;
+    // `f64` holds every integer below 2^53, and `cell * count + offset` stays
+    // under 2^49; the cast back from `f64` saturates.
+    #[allow(clippy::cast_precision_loss)]
+    let float = |value: u64| value as f64;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let ceil = |value: f64| value.ceil() as u64;
     if auto_cols {
-        cols = if auto_rows {
+        out_cols = if auto_rows {
             (src_w + offset_x).div_ceil(cell_w)
         } else if src_h == 0 {
             0
         } else {
-            let height = f64::from(cell_h * rows + offset_y);
-            (height * f64::from(src_w) / f64::from(src_h) / f64::from(cell_w)).ceil() as u32
+            let height = float(cell_h * given_rows + offset_y);
+            ceil(height * float(src_w) / float(src_h) / float(cell_w))
         };
     }
     if auto_rows {
-        rows = if auto_cols {
+        out_rows = if auto_cols {
             (src_h + offset_y).div_ceil(cell_h)
         } else if src_w == 0 {
             0
         } else {
-            let width = f64::from(cell_w * cols + offset_x);
-            (width * f64::from(src_h) / f64::from(src_w) / f64::from(cell_h)).ceil() as u32
+            let width = float(cell_w * given_cols + offset_x);
+            ceil(width * float(src_h) / float(src_w) / float(cell_h))
         };
     }
-    Some((cols, rows))
+    let saturate = |value: u64| u32::try_from(value).unwrap_or(u32::MAX);
+    Some((saturate(out_cols), saturate(out_rows)))
 }
 
 /// The raw value of `name` in a kitty control block (`a=T,i=3,f=32`).
@@ -1440,19 +1579,165 @@ mod tests {
         assert_eq!(kitty_cells(&given(0, 0), Some((20, 10)), None), None);
     }
 
+    /// Every key is a number the program under test chose, `u32::MAX`
+    /// included: the cells saturate rather than overflow (#634). Each of
+    /// these panicked in a debug build and wrapped in a release one.
+    #[test]
+    fn kitty_sizes_a_placement_of_any_size_without_overflowing() {
+        let cell = Some((10, 20));
+        let image = Some((1, 1));
+        let max = u32::MAX;
+        let given = |placement: Placement| kitty_cells(&placement, image, cell);
+        // `c=` alone: 10 * MAX px wide keeps a 1:1 aspect, MAX / 2 rows.
+        assert_eq!(
+            given(Placement {
+                cols: max,
+                ..Placement::default()
+            }),
+            Some((max, max / 2 + 1))
+        );
+        // `r=` alone: 20 * MAX px tall is 2 * MAX columns, saturated.
+        assert_eq!(
+            given(Placement {
+                rows: max,
+                ..Placement::default()
+            }),
+            Some((max, max))
+        );
+        // `s=` with an offset in the cell: (MAX + 5) / 10, rounded up.
+        assert_eq!(
+            kitty_cells(
+                &Placement {
+                    cell_x: 5,
+                    ..Placement::default()
+                },
+                Some((max, 1)),
+                cell
+            ),
+            Some((429_496_730, 1))
+        );
+        // `v=` likewise: (MAX + 7) / 20, rounded up.
+        assert_eq!(
+            kitty_cells(
+                &Placement {
+                    cell_y: 7,
+                    ..Placement::default()
+                },
+                Some((1, max)),
+                cell
+            ),
+            Some((1, 214_748_366))
+        );
+    }
+
+    /// Only a raster record that opens the stream is the image's size, as
+    /// the retained-data reading had it: one after a painted sixel says
+    /// something else, one cut off by the end of the stream still counts,
+    /// and a zero side declares nothing.
+    #[test]
+    fn a_sixel_meter_reads_only_the_leading_raster_record() {
+        assert_eq!(SixelMeter::over(b"\"1;1;18;12#0~").raster(), Some((18, 12)));
+        assert_eq!(
+            SixelMeter::over(b"#0;2;0;0;0\"1;1;4;6~").raster(),
+            Some((4, 6))
+        );
+        assert_eq!(SixelMeter::over(b"~\"1;1;4;6~").raster(), None);
+        assert_eq!(SixelMeter::over(b"\"1;1;4;6").raster(), Some((4, 6)));
+        assert_eq!(SixelMeter::over(b"\"1;1;0;6~").raster(), None);
+        assert_eq!(SixelMeter::over(b"\"1;1;4").raster(), None);
+        assert_eq!(SixelMeter::over(b"#0~~").raster(), None);
+        // Extra parameters are ignored, and kept no more of than four.
+        assert_eq!(
+            SixelMeter::over(b"\"1;1;4;6;9;9;9;9;9;9~").raster(),
+            Some((4, 6))
+        );
+        // Huge numbers saturate rather than overflow.
+        assert_eq!(
+            SixelMeter::over(b"\"1;1;99999999999;6").raster(),
+            Some((u32::MAX, 6))
+        );
+    }
+
+    /// Padding ends a chunk, so it may close any four-byte quantum of the
+    /// joined body (#637) — and nowhere else.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn chunked_base64_takes_padding_at_a_quantum_boundary_only() {
+        assert_eq!(decode_chunked_base64(b"/w==AAA="), Some(vec![0xff, 0, 0]));
+        assert_eq!(decode_chunked_base64(b"/w==AA=="), Some(vec![0xff, 0]));
+        assert_eq!(
+            decode_chunked_base64(b"AAAA/w=="),
+            Some(vec![0, 0, 0, 0xff])
+        );
+        assert_eq!(decode_chunked_base64(b""), Some(vec![]));
+        // An unpadded short tail, as before.
+        assert_eq!(decode_chunked_base64(b"AAAA/w"), Some(vec![0, 0, 0, 0xff]));
+        for bad in [&b"/w=A"[..], b"A===", b"/w==A", b"/w=", b"AA=AAAAA"] {
+            assert_eq!(
+                decode_chunked_base64(bad),
+                None,
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+    }
+
+    /// xterm keeps what a sixel paints past its declared size: its decoder
+    /// takes the larger of the declared and the painted extent on each axis
+    /// (`graphics_sixel.c`, the raster branch and `set_sixel`) (#638). It
+    /// was cropped to the declared 2x6.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn a_sixel_painting_past_its_declared_size_keeps_what_it_painted() {
+        let mut builder = GraphicsBuilder::default();
+        builder.sixel_chunk(
+            40,
+            b"\"1;1;2;6#0;2;100;0;0~~~~~~~~-~~~~~~~~",
+            true,
+            usize::MAX,
+        );
+        let payload = builder.finish().expect("a payload");
+        assert_eq!(payload.size(), Some((2, 6)), "still the declared size");
+        let bitmap = payload.decode().expect("decodes");
+        assert_eq!((bitmap.width(), bitmap.height()), (8, 12));
+        assert_eq!(bitmap.pixel(5, 0), Some([255, 0, 0, 255]));
+        assert_eq!(bitmap.pixel(0, 8), Some([255, 0, 0, 255]));
+        // A declared size larger than the painting is kept, as before, the
+        // unpainted rest transparent; and painting that only advances the
+        // cursor (`?` sets no pixel) grows nothing.
+        let mut builder = GraphicsBuilder::default();
+        builder.sixel_chunk(30, b"\"1;1;4;12#0;2;100;0;0~~????", true, usize::MAX);
+        let bitmap = builder
+            .finish()
+            .expect("a payload")
+            .decode()
+            .expect("decodes");
+        assert_eq!((bitmap.width(), bitmap.height()), (4, 12));
+        assert_eq!(bitmap.pixel(3, 11), Some([0, 0, 0, 0]));
+        // Still under the cap: a painting past 4096 is refused as before.
+        let mut builder = GraphicsBuilder::default();
+        builder.sixel_chunk(30, b"\"1;1;2;6#0;2;100;0;0!4097~", true, usize::MAX);
+        assert!(matches!(
+            builder.finish().expect("a payload").decode(),
+            Err(DecodeError::TooLarge(_))
+        ));
+    }
+
     /// xterm measures a sixel down to its lowest painted pixel; each sixel
     /// character's bits are its band's six rows, the low bit the top one.
     #[test]
     fn a_sixel_is_as_tall_as_the_lowest_pixel_it_paints() {
-        assert_eq!(sixel_painted_height(b"#0~~~~"), 6);
-        assert_eq!(sixel_painted_height(b"#0~-~-@"), 13);
+        assert_eq!(SixelMeter::over(b"#0~~~~").painted_height(), 6);
+        assert_eq!(SixelMeter::over(b"#0~-~-@").painted_height(), 13);
         // `?` paints nothing; colour and raster parameters are not sixels.
-        assert_eq!(sixel_painted_height(b"\"1;1;4;45#0;2;100;0;0??"), 0);
+        assert_eq!(
+            SixelMeter::over(b"\"1;1;4;45#0;2;100;0;0??").painted_height(),
+            0
+        );
         // The builder takes the larger of the raster's and the painted one,
         // from the data as it arrives — kept past the capture bound too.
         let mut builder = GraphicsBuilder::default();
-        builder.sixel();
-        builder.chunk(8, b"\"1;1;4;45#0~-~", true, 0);
+        builder.sixel_chunk(8, b"\"1;1;4;45#0~-~", true, 0);
         let (payload, placement) = builder.finish_placed().expect("a payload");
         assert_eq!(payload.data(), None, "dropped by the bound");
         assert_eq!(placement.height, 45);
@@ -1497,8 +1782,7 @@ mod tests {
     #[test]
     fn a_sixel_reads_its_size_off_its_raster_attributes() {
         let mut builder = GraphicsBuilder::default();
-        builder.sixel();
-        builder.chunk(30, b"\"1;1;18;12#0;2;100;100;100~", true, usize::MAX);
+        builder.sixel_chunk(30, b"\"1;1;18;12#0;2;100;100;100~", true, usize::MAX);
         let payload = builder.finish().expect("a payload");
         assert_eq!(payload.protocol(), GraphicsProtocol::Sixel);
         assert_eq!(payload.size(), Some((18, 12)));
@@ -1508,8 +1792,7 @@ mod tests {
     #[test]
     fn a_sixel_that_declares_no_size_says_so_rather_than_guessing() {
         let mut builder = GraphicsBuilder::default();
-        builder.sixel();
-        builder.chunk(10, b"#0;2;100;100;100~~~", true, usize::MAX);
+        builder.sixel_chunk(10, b"#0;2;100;100;100~~~", true, usize::MAX);
         assert_eq!(builder.finish().expect("a payload").size(), None);
     }
 
@@ -1539,8 +1822,7 @@ mod tests {
     #[cfg(feature = "decode")]
     fn sixel_payload(data: &[u8]) -> GraphicsPayload {
         let mut builder = GraphicsBuilder::default();
-        builder.sixel();
-        builder.chunk(data.len() as u64, data, true, usize::MAX);
+        builder.sixel_chunk(data.len() as u64, data, true, usize::MAX);
         builder.finish().expect("a payload")
     }
 
@@ -1712,8 +1994,7 @@ mod tests {
         // A 4x6 image: register 0 is white, and `~` sets all six rows of the
         // band, so a run of four fills the whole thing.
         let mut builder = GraphicsBuilder::default();
-        builder.sixel();
-        builder.chunk(40, b"\"1;1;4;6#0;2;100;100;100!4~-", true, usize::MAX);
+        builder.sixel_chunk(40, b"\"1;1;4;6#0;2;100;100;100!4~-", true, usize::MAX);
         let bitmap = builder
             .finish()
             .expect("a payload")
@@ -1733,8 +2014,7 @@ mod tests {
         // `@` sets only the top row of the band; the five below it were
         // never written, and sixel has no alpha to say so with.
         let mut builder = GraphicsBuilder::default();
-        builder.sixel();
-        builder.chunk(30, b"\"1;1;1;6#0;2;0;100;0@-", true, usize::MAX);
+        builder.sixel_chunk(30, b"\"1;1;1;6#0;2;0;100;0@-", true, usize::MAX);
         let bitmap = builder
             .finish()
             .expect("a payload")
@@ -1750,8 +2030,7 @@ mod tests {
         // Two bands, and a `$` that goes back to paint the second colour
         // over the first band's second column.
         let mut builder = GraphicsBuilder::default();
-        builder.sixel();
-        builder.chunk(
+        builder.sixel_chunk(
             60,
             b"\"1;1;2;12#0;2;100;0;0~~$#1;2;0;0;100?~-#0??-",
             true,
@@ -1772,8 +2051,7 @@ mod tests {
     #[test]
     fn a_sixel_without_raster_attributes_takes_its_size_from_its_data() {
         let mut builder = GraphicsBuilder::default();
-        builder.sixel();
-        builder.chunk(20, b"#0;2;100;100;100!3~-", true, usize::MAX);
+        builder.sixel_chunk(20, b"#0;2;100;100;100!3~-", true, usize::MAX);
         let bitmap = builder
             .finish()
             .expect("a payload")
@@ -1859,8 +2137,7 @@ mod tests {
     #[test]
     fn hls_colours_are_refused_rather_than_converted() {
         let mut builder = GraphicsBuilder::default();
-        builder.sixel();
-        builder.chunk(30, b"\"1;1;1;6#0;1;120;50;100~-", true, usize::MAX);
+        builder.sixel_chunk(30, b"\"1;1;1;6#0;1;120;50;100~-", true, usize::MAX);
         assert!(matches!(
             builder.finish().expect("a payload").decode(),
             Err(DecodeError::Unsupported(_))

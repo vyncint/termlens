@@ -1,0 +1,6 @@
+size: 6x2  cursor: 1,6
+
+abcdef
+
+styles:
+(none)

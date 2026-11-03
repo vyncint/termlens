@@ -567,34 +567,58 @@ fn colored(before: &Screen, after: &Screen, diff: &ScreenDiff) -> String {
     // Collected once: asking the diff about every painted cell made a
     // full-screen change quadratic (#595).
     let changed: HashSet<(u16, u16)> = diff.cells().map(|(row, col, _, _)| (row, col)).collect();
+    // The overlap's columns, as the plain rendering clips its rows to them
+    // (#649): painting each screen across its own width printed the wider
+    // side whole, past the note saying the rest is clipped.
+    let cols = before.cols().min(after.cols());
     for row in changed_rows {
-        let paint = |screen: &Screen, sgr: &str| -> String {
-            let mut cells: Vec<String> = Vec::new();
-            for col in 0..screen.cols() {
+        // The row's cells in the overlap, each as `(text, changed)`. A wide
+        // character whose second column falls past the overlap does not fit
+        // in it and is one blank, as in the plain rendering.
+        let cells = |screen: &Screen| -> Vec<(String, bool)> {
+            let mut cells = Vec::new();
+            for col in 0..cols {
                 let Some(cell) = screen.cell(row, col) else {
                     continue;
                 };
                 if cell.is_wide_continuation() {
                     continue;
                 }
-                let text = if cell.contents().is_empty() {
+                let text = if cell.contents().is_empty() || (cell.is_wide() && col + 1 >= cols) {
                     " "
                 } else {
                     cell.contents()
                 };
-                cells.push(if changed.contains(&(row, col)) {
-                    format!("\x1b[{sgr}m{text}\x1b[0m")
-                } else {
-                    text.to_owned()
-                });
+                cells.push((text.to_owned(), changed.contains(&(row, col))));
             }
-            cells.concat()
+            cells
         };
-        // The before side keeps its full width so the separator stays in one
-        // column down the listing; the after side is trimmed like a row.
-        let after_row = paint(after, "32");
-        let after_row = after_row.trim_end();
-        out.push_str(&format!("\n{row:>3} │{}│{after_row}", paint(before, "31")));
+        let paint = |cells: &[(String, bool)], sgr: &str| -> String {
+            cells
+                .iter()
+                .map(|(text, changed)| {
+                    if *changed {
+                        format!("\x1b[{sgr}m{text}\x1b[0m")
+                    } else {
+                        text.clone()
+                    }
+                })
+                .collect()
+        };
+        // The before side keeps the overlap's full width so the separator
+        // stays in one column down the listing. The after side is trimmed
+        // like a row, by cell: a trailing blank is trimmed painted or not,
+        // since a coloured blank shows nothing, and trimming the painted
+        // string instead left its `\x1b[32m \x1b[0m` runs behind.
+        let mut after_cells = cells(after);
+        while after_cells.last().is_some_and(|(text, _)| text == " ") {
+            after_cells.pop();
+        }
+        out.push_str(&format!(
+            "\n{row:>3} │{}│{}",
+            paint(&cells(before), "31"),
+            paint(&after_cells, "32")
+        ));
     }
     // The trailer: the unchanged-row count and the style runs, as printed.
     for line in lines.filter(|l| l.starts_with('…') || l.starts_with("styles:")) {

@@ -26,7 +26,9 @@ pub struct ScreenDiff {
     /// The `styles:` runs of each changed row, before and after, where
     /// they differ.
     style_changes: Vec<(u16, String, String)>,
-    /// The rows of the taller screen whose text is in the diff.
+    /// The changed rows, `(row, before, after, changed columns)`, each
+    /// side's text clipped to the overlap's columns as [`overlap_text`]
+    /// clips it, so the two sides line up under one marker line (#649).
     rows: Vec<(u16, String, String, Vec<u16>)>,
 }
 
@@ -58,7 +60,7 @@ impl Screen {
     /// written.
     ///
     /// Sizes that differ diff what overlaps, and the rendering says what was
-    /// clipped. The rendering is plain text — no colour, so CI logs stay
+    /// clipped and prints each row clipped to the overlap's columns. The rendering is plain text — no colour, so CI logs stay
     /// readable — and shows only the rows that changed, with a marker line
     /// under the changed columns and the style runs before and after.
     #[must_use]
@@ -86,8 +88,8 @@ impl Screen {
             }
             rows_out.push((
                 row,
-                self.row_text(row).trim_end().to_owned(),
-                other.row_text(row).trim_end().to_owned(),
+                overlap_text(self, row, cols),
+                overlap_text(other, row, cols),
                 changed_cols,
             ));
             let before = row_styles(self, row);
@@ -107,6 +109,34 @@ impl Screen {
             rows: rows_out,
         }
     }
+}
+
+/// Row `row` of `screen` as the diff prints it: the first `cols` columns —
+/// the overlap of the two screens — trailing blanks trimmed. The rest is
+/// clipped, as the header says, so each side is at most `cols` grid columns
+/// and the `│` after it and the `^` under it stay in their columns (#649).
+///
+/// A wide character whose second column falls past `cols` — cut by the
+/// overlap, or stranded at a screen's own edge by a narrowing resize — is
+/// printed as one blank: it does not fit, and printing it whole would push
+/// the frame a column right. Its cell is still compared, and still marked.
+fn overlap_text(screen: &Screen, row: u16, cols: u16) -> String {
+    let mut out = String::new();
+    for col in 0..cols {
+        let Some(cell) = screen.cell(row, col) else {
+            break;
+        };
+        if cell.is_wide_continuation() {
+            continue;
+        }
+        if cell.contents().is_empty() || (cell.is_wide() && col + 1 >= cols) {
+            out.push(' ');
+        } else {
+            out.push_str(cell.contents());
+        }
+    }
+    out.truncate(out.trim_end().len());
+    out
 }
 
 /// Whether two cells draw the same thing: equal, or both blank in the same
@@ -387,6 +417,56 @@ mod tests {
                 "the frame lines disagree in display width:\n{rendered}"
             );
         }
+    }
+
+    /// Screens of different sizes are compared over their overlap, and the
+    /// header says the rest is clipped — so the rows are printed clipped
+    /// too (#649). Printed whole, the wider side pushed its `│` out of line
+    /// with the marker line's, and the after side's carets sat under the
+    /// wrong cells.
+    #[test]
+    fn a_diff_across_sizes_prints_both_sides_clipped_to_the_overlap() {
+        let wide = Screen::parse("size: 12x2  cursor: 0,0\nhello world!\nsame").unwrap();
+        let narrow = Screen::parse("size: 6x2  cursor: 0,0\nhellO\nsame").unwrap();
+        for (before, after, row) in [
+            (&wide, &narrow, "  0 │hello │hellO"),
+            (&narrow, &wide, "  0 │hellO │hello"),
+        ] {
+            let rendered = before.diff(after).to_string();
+            let mut lines = rendered.lines().skip(2);
+            let text = lines.next().expect("a row line");
+            let marks = lines.next().expect("its marker line");
+            assert_eq!(text, row, "{rendered}");
+            assert_eq!(marks, "    │    ^ │    ^", "{rendered}");
+            assert_eq!(
+                separator_columns(text),
+                separator_columns(marks),
+                "{rendered}"
+            );
+        }
+
+        // A wide character cut by the overlap's edge does not fit in it: one
+        // blank, so the frame stays put, and its cell is still marked.
+        let cut = Screen::parse("size: 8x1  cursor: 0,0\nabcde東").unwrap();
+        let short = Screen::parse("size: 6x1  cursor: 0,0\nabcdeX").unwrap();
+        let rendered = cut.diff(&short).to_string();
+        let mut lines = rendered.lines().skip(2);
+        let (text, marks) = (lines.next().unwrap(), lines.next().unwrap());
+        assert_eq!(text, "  0 │abcde │abcdeX", "{rendered}");
+        assert_eq!(marks, "    │     ^│     ^", "{rendered}");
+        assert_eq!(separator_columns(text), separator_columns(marks));
+
+        // The same for a character stranded at a screen's own last column,
+        // the shape a narrowing resize leaves (#643), at equal sizes.
+        let stranded = Screen::parse("size: 6x1  cursor: 0,0\nabcde東").unwrap();
+        let rendered = stranded.diff(&short).to_string();
+        let mut lines = rendered.lines().skip(1);
+        let (text, marks) = (lines.next().unwrap(), lines.next().unwrap());
+        assert_eq!(
+            separator_columns(text),
+            separator_columns(marks),
+            "{rendered}"
+        );
     }
 
     /// One unchanged row is "1 row", not "1 rows" (#652).
