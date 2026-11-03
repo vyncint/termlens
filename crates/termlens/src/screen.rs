@@ -1586,7 +1586,13 @@ impl Screen {
     ///   own end, as `str::matches` does.
     /// - **Multi-row needles are supported**, with exactly the semantics of
     ///   `find`: a needle containing `\n` matches across consecutive rows,
-    ///   and the scan resumes below the rows a match consumed.
+    ///   and those matches do not overlap either. The scan resumes on the
+    ///   row a match ended on, where the next match may start only in a
+    ///   column after the last cell the previous one used there — grid
+    ///   columns, so a wide character is used in both of its. On four rows
+    ///   reading `a`, `find_all("a\na")` is `(0, 0)` and `(2, 0)`; on rows
+    ///   reading `xxxa`, `axxxa` and `axxx` it is `(0, 3)` and `(1, 4)`,
+    ///   which share row 1 but no cell.
     ///
     /// A `Vec` rather than an iterator: a screen holds at most a few
     /// thousand cells, so allocation is not the concern, and a `Vec` is what
@@ -1685,6 +1691,13 @@ impl Screen {
     /// have: the first segment ends a row (after the trailing-whitespace
     /// trim), the middle segments are whole rows, the last starts one.
     ///
+    /// Non-overlapping in cells. After a match the scan resumes on the row
+    /// it ended on, not below it — that row's last-segment cells are spent
+    /// and the rest of it is not — and a match starting there is taken only
+    /// when its first segment begins in a column after the last cell the
+    /// previous match used (#670). On `xxxa`, `axxxa`, `axxx`, `"a\na"` is
+    /// found at rows 0 and 1, sharing row 1 and no cell.
+    ///
     /// One engine, two callers — [`find_all`](Self::find_all) and
     /// [`mask_matching`](Self::mask_matching) — so they cannot disagree
     /// about what matched, which is exactly how a mask came to leave a
@@ -1718,21 +1731,42 @@ impl Screen {
         let lines: Vec<&str> = rows.iter().map(|(text, _)| text.trim_end()).collect();
         let (first, last) = (segments[0], segments[usize::from(extra)]);
         let middle = whole_rows_at(&lines, &segments[1..usize::from(extra)]);
+        // The row the previous match ended on, and the column of the last
+        // cell its last segment used there. Columns come from the row's own
+        // map (`searchable_row`), where every byte of a cell — a wide
+        // character's, a mark's — maps to the cell's column, so "the same
+        // cell" is a comparison of two columns and never of bytes or chars.
+        let mut spent: Option<(u16, u16)> = None;
         let mut row = 0;
         while row < last_start {
             let at = usize::from(row);
             let matched = lines[at].ends_with(first) // first segment: suffix
                 && middle[at + 1] // middle segments: whole rows
                 && lines[at + usize::from(extra)].starts_with(last); // last: prefix
-            if !matched {
+
+            // On the previous match's last row, a match may start only to
+            // the right of the last cell that match used: its first segment
+            // ends the row and the previous last segment starts it, so they
+            // share a cell exactly when the first begins at or before that
+            // column (#670). An empty segment uses no cell on the row, and
+            // shares none.
+            let shares_a_cell = matched
+                && !first.is_empty()
+                && spent.is_some_and(|(spent_row, spent_col)| {
+                    spent_row == row && rows[at].1[lines[at].len() - first.len()] <= spent_col
+                });
+            if !matched || shares_a_cell {
                 row += 1;
                 continue;
             }
             if !visit(row) {
                 return;
             }
-            // Non-overlapping: the rows this match spanned are spent.
+            // Non-overlapping: the rows above this match's last row are
+            // spent. The scan resumes on that row, whose cells to the right
+            // of the last segment are still free for the next match's first.
             row += extra;
+            spent = (!last.is_empty()).then(|| (row, rows[usize::from(row)].1[last.len() - 1]));
         }
     }
 

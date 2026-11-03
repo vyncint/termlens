@@ -93,6 +93,18 @@ reads that marker.
   file saved from 0.11.7 or earlier should drop that file's final empty
   line and, where the count is one, the `s` of `rows`.
 
+- A multi-row needle no longer matches in cells a previous match used, in
+  `Screen::find_all` and `mask_matching` (#670). The scan resumed on the
+  row a match ended on and took any match starting there, so on four rows
+  reading `a`, `find_all("a\na")` was three matches, each sharing a cell
+  with the next, and the mask covered all of them, where the rustdoc said
+  matches do not overlap. A match may still start on that row to the right
+  of the last cell the previous one used, counted in grid columns, so on
+  `xxxa`, `axxxa`, `axxx` the needle is still found twice. A test that
+  asserts `find_all(…).len()` for such a needle expects the
+  non-overlapping count, `[(0, 0), (2, 0)]` above rather than three, and a
+  snapshot of such a mask shows the rows no match now covers unmasked.
+
 ### Fixed
 
 - The report action writes each screen into the step summary verbatim
@@ -124,6 +136,11 @@ reads that marker.
   (#658). They sit at the foot of CHANGELOG.md, and the v0.11.0 notes
   showed `` [`Unsupported`] `` in brackets, linked to nothing, as v0.11.1's
   did `[Keep a Changelog]`.
+- A label quoted inside a code span or a fenced block no longer counts as a
+  use, so release notes no longer end with definitions nothing in them links
+  to (#674). Quoting the two above in this file was enough to append both
+  to these notes, and the v0.11.1 notes gained today's `[Unreleased]`
+  compare link. A link whose text is code, as in 0.11.0, still counts.
 
 - A kitty `a=p` placement takes its size from the newest transmission of
   its image id (#626). When that one declared no size, a PNG for instance,
