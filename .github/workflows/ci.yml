@@ -108,10 +108,14 @@ jobs:
       - run: .github/scripts/check-readme-links.sh README.md CONTRIBUTING.md .github/PULL_REQUEST_TEMPLATE.md docs/*.md skills/termlens/SKILL.md
       # The screens of whatever failed, in the step summary (#251). The
       # suite dogfoods the action with the CLI from this tree.
+      # The same inputs the READMEs tell a consumer to pass (#654): the
+      # test step's env does not reach this step, and a matrix needs one
+      # artifact name per leg.
       - uses: ./.github/actions/report
         if: failure()
         with:
           cli: workspace
+          artifact-dir: ${{ runner.temp }}/termlens
           name: termlens-report-${{ matrix.os }}
 
   # Every feature configuration a consumer can ask for. The default set is

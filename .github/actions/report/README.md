@@ -13,6 +13,9 @@ as SVG/HTML in an uploaded artifact.
     INSTA_UPDATE: new
 - uses: vyncint/termlens/.github/actions/report@v0.11.7
   if: failure()
+  with:
+    artifact-dir: ${{ runner.temp }}/termlens   # a step's env: reaches that step only
+    name: termlens-report-${{ matrix.os }}      # one artifact per matrix leg
 ```
 
 `INSTA_UPDATE: new` is what makes insta write a `.snap.new` on CI. Its
@@ -24,7 +27,16 @@ records for `cargo insta review` rather than a screen, and the action does
 not collect them.
 
 Nothing to install: the action `cargo install`s `termlens-cli` on the
-runner. Inputs: `artifact-dir` (defaults to `TERMLENS_ARTIFACT_DIR`, else
-`$RUNNER_TEMP/termlens`), `cli-version` (a `termlens-cli` version; empty
-means latest), `name` (the artifact's, default `termlens-report`), and
-`cli: workspace` for the termlens repository itself.
+runner. Inputs:
+
+- `artifact-dir`: where the tests wrote their screens. It defaults to
+  `TERMLENS_ARTIFACT_DIR` when that is set for the job or the workflow,
+  else `$RUNNER_TEMP/termlens`. A variable in the test step's own `env:`
+  reaches that step only, so the action never sees it: pass the same value
+  here, as above. Without it the action finds nothing, unless the value
+  happens to be `$RUNNER_TEMP/termlens`.
+- `name`: the artifact's, default `termlens-report`. Give each matrix leg
+  its own, as above. upload-artifact refuses a second artifact of one name
+  in a run, so with the default only one failing leg's screens are kept.
+- `cli-version`: a `termlens-cli` version; empty means the latest.
+- `cli: workspace`, for the termlens repository itself.

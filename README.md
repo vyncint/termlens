@@ -238,7 +238,17 @@ snapshots are not rendered):
     INSTA_UPDATE: new
 - uses: vyncint/termlens/.github/actions/report@v0.11.7
   if: failure()
+  with:
+    artifact-dir: ${{ runner.temp }}/termlens   # a step's env: reaches that step only
+    name: termlens-report-${{ matrix.os }}      # one artifact per matrix leg
 ```
+
+The report step cannot see the test step's `env:`, so it is told the
+directory with `artifact-dir:`; leave that out only when
+`TERMLENS_ARTIFACT_DIR` is set for the whole job. Each matrix leg needs an
+artifact `name:` of its own: upload-artifact refuses a second artifact of
+the same name in one run, so with one name only one failing leg's screens
+are kept.
 
 ## Comparison
 

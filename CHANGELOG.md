@@ -17,6 +17,34 @@ reads that marker.
 
 ## [Unreleased]
 
+### Fixed
+
+- The report action writes each screen into the step summary verbatim
+  (#648). A screen with a row of three backticks closed the action's code
+  block early, the rows after it rendered as Markdown, and every later
+  entry came out inside out; the fence is now longer than any run of
+  backticks in the text. File names are HTML-escaped in the summary, and a
+  name holding a newline is one entry rather than two that name no file.
+  Characters upload-artifact refuses in a path are replaced in the
+  artifact's file names, so one odd name no longer fails the upload.
+- The CI snippet in the README, the action's README and the skill works in
+  a matrix and with any directory (#654). It passes the artifact `name:`
+  per matrix leg, since upload-artifact refuses a second artifact of one
+  name in a run and only one failing leg's screens were kept, and passes
+  `artifact-dir:`, since the test step's `env:` never reaches the action:
+  the default worked only while the directory was `$RUNNER_TEMP/termlens`.
+- The skill says `record().stop()` refuses an application without DEC 2026
+  synchronized updates; it said `Terminal::record()`, which cannot fail,
+  and a `?` on it does not compile (#659).
+- The README's decode and masking examples compile (#660): `decode()` and
+  `Regex::new` fail with errors of their own that `?` cannot turn into a
+  `termlens::Error`. README's Rust blocks are now compiled in CI as the
+  skill's are.
+- A GitHub Release's notes carry the link definitions their section uses
+  (#658). They sit at the foot of CHANGELOG.md, and the v0.11.0 notes
+  showed `` [`Unsupported`] `` in brackets, linked to nothing, as v0.11.1's
+  did `[Keep a Changelog]`.
+
 ## [0.11.7] - 2026-10-27
 
 ### Changed
