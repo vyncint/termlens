@@ -68,6 +68,52 @@ reads that marker.
 
 ### Fixed
 
+- `Screen::parse` and `termlens render` read two text snapshots earlier
+  releases wrote and 0.11.7 refused (#643): a visible cursor one past the
+  last column (`cursor: 1,6` on a 6-column screen), which releases up to
+  0.11.1 wrote after a write filled the last cell, and a wide character a
+  narrowing resize stranded in the last column with no second half, which
+  releases up to 0.11.6 wrote. The cursor reads onto the last cell, as the
+  JSON reader already read it, and the stranded character reads as that
+  cell, so the JSON twin's own text also parses again. Both files, written
+  by the published releases, are in the compatibility corpus.
+
+- `Screen::rect_text` and `mask_rect` clamp an open-ended range that starts
+  past the edge, as they clamp an explicit one (#644). `rect_text(12.., ..)`
+  on a 10-column screen panicked with "column range starts at 12 but ends
+  at 10", a range the caller never wrote, so a pane read such as
+  `rect_text(split.., ..)` panicked as soon as the terminal was narrowed
+  below `split`. A range written backwards still panics.
+
+- `Screen::to_html` dims a run's text and no longer its background (#645).
+  The run's span carried `opacity:0.6`, which faded a coloured background
+  into the page, while `to_svg` faded only the text over a full-strength
+  `<rect>`. The span now carries the foreground blended 60% over the
+  background, the colour the SVG's text composites to, so the two
+  renderings paint the same picture.
+
+- `Recording::to_asciicast` places each frame's cursor (#646). An event
+  repainted the grid and wrote nothing for the cursor, so `asciinema play`
+  and `agg` drew a visible cursor after the last row of every frame, even
+  for a program that had hidden it. Each event now ends by moving the
+  cursor to where the test saw it and showing or hiding it as it was.
+
+- `Screen::find`, `find_all` and `mask_matching` with a needle that spans
+  rows no longer slow down with the needle's height (#647). Every row was
+  rebuilt for each candidate start row it was compared from, so on a
+  1000x1000 screen a 400-row needle took 565 ms where `contains` took
+  5 ms. Each row is now built once per call and the whole rows in the
+  middle of the needle are matched in one pass; the same search takes as
+  long as `contains` whatever the needle's height.
+
+- A `ScreenDiff` between screens of different sizes prints each row clipped
+  to the overlap it compares (#649). The wider screen's rows were printed
+  whole under the note saying the rest is clipped, so the `│` separators
+  left the marker line's columns and the after side's `^` sat under the
+  wrong cells. `termlens diff --color` clips the same way and no longer
+  leaves painted blanks at the end of the after side. A wide character cut
+  by the overlap's edge prints as one blank, and its cell is still marked.
+
 - Every wait takes `Duration::MAX` as "no deadline", per call or as the
   builder's `timeout` (#629). Each one added the timeout to the current
   instant and panicked with "overflow when adding duration to instant"; the

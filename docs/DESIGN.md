@@ -839,7 +839,10 @@ counters and the history, comes back default; and a hidden cursor's position
 is not recorded, so `cursor: hidden` parses back to a hidden cursor at
 `0,0`. `diff` reports none of those as a difference, which is the same claim
 from the other side: the text format is the *picture*, and two screens that
-render alike are the same picture.
+render alike are the same picture. One header releases before 0.11.2 wrote
+does not render back as written: a visible cursor at `col == cols`, the
+pending-wrap column (#401), reads onto the last cell, as the JSON reader
+reads it, so the header comes back one column left (#643).
 
 The header's row count is what decides where the grid ends — not a search
 for the `styles:` marker — so a grid may hold the words `styles:` or
@@ -947,7 +950,7 @@ Refused, naming the cell, in the grid and in the retained history alike:
 - a `wide_continuation` cell that holds text, or that does not follow a
   `wide` one.
 
-Two kinds of cell `Screen::parse` would never build are read as written,
+Two kinds of cell a fresh capture would not make are read as written,
 because a termlens did write them. Whether a non-ASCII character is a
 mark, one column or two is an entry in `unicode-width`'s tables, and the
 tables move between releases — 0.2.1 to 0.2.2, both of which vt100 0.16
@@ -957,7 +960,9 @@ printable ASCII are the only widths no release reads from a table. And a
 `wide` cell need not be followed by its continuation: vt100 0.16, behind
 every release up to 0.11.6, narrowed a row by truncating it, so a resize
 that cut a wide character left it in the last column, and widening again
-left it before a blank.
+left it before a blank. The text reader reads the same row the same way: a
+wide character whose second column would fall one past the edge is that
+stranded cell, not an over-long row (#643).
 
 The compatibility corpus under `crates/termlens/tests/compat/` holds both
 formats as written by each release since 0.10.1, and `tests/compat.rs`

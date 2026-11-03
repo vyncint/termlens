@@ -1,0 +1,7 @@
+size: 5x3  cursor: 1,4
+abcd東
+ABC東
+
+
+styles:
+(none)
