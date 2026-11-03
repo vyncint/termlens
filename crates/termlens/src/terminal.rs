@@ -263,18 +263,48 @@ const DROP_REAP_GRACE: Duration = Duration::from_secs(2);
 #[cfg(unix)]
 static PTY_LIFECYCLE: Mutex<()> = Mutex::new(());
 
-/// The lifecycle lock, held — or `None` on a platform with nothing to
-/// serialize. Callers hold and drop it the same way either way.
-pub(crate) type LifecycleGuard = Option<std::sync::MutexGuard<'static, ()>>;
+/// The lifecycle lock, held, or nothing: on a platform with nothing to
+/// serialize, and on a thread that already holds it. Callers hold and drop
+/// it the same way either way.
+pub(crate) struct LifecycleGuard(Option<std::sync::MutexGuard<'static, ()>>);
 
 #[cfg(unix)]
+thread_local! {
+    /// Whether this thread holds [`PTY_LIFECYCLE`].
+    static HOLDS_LIFECYCLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Take the lifecycle lock, unless this thread holds it already.
+///
+/// Re-entrant because a spawn that fails while it holds the lock drops what
+/// it opened right there, and a [`MasterDup`] dropped there, or a responder
+/// thread's closure when the thread cannot be started, takes the lock to
+/// close: with a plain mutex, a spawn that failed at those steps deadlocked
+/// on itself instead of reporting why (#633).
+#[cfg(unix)]
 pub(crate) fn pty_lifecycle_guard() -> LifecycleGuard {
-    Some(PTY_LIFECYCLE.lock().unwrap_or_else(PoisonError::into_inner))
+    if HOLDS_LIFECYCLE.get() {
+        return LifecycleGuard(None);
+    }
+    let guard = PTY_LIFECYCLE.lock().unwrap_or_else(PoisonError::into_inner);
+    HOLDS_LIFECYCLE.set(true);
+    LifecycleGuard(Some(guard))
 }
 
 #[cfg(not(unix))]
 pub(crate) fn pty_lifecycle_guard() -> LifecycleGuard {
-    None
+    LifecycleGuard(None)
+}
+
+impl Drop for LifecycleGuard {
+    fn drop(&mut self) {
+        // Only the guard that took the lock clears the mark; one handed out
+        // re-entrantly leaves it to the outer guard. Never set off Unix.
+        if self.0.is_some() {
+            #[cfg(unix)]
+            HOLDS_LIFECYCLE.set(false);
+        }
+    }
 }
 
 /// A duplicate of the PTY master owned by a responder thread, closed under
@@ -317,6 +347,54 @@ impl<T: Write> Write for MasterDup<T> {
             Some(inner) => inner.flush(),
             None => Ok(()),
         }
+    }
+}
+
+/// A PTY a spawn is setting up, with the lifecycle lock held: whichever way
+/// the spawn ends, every handle on it closes before the lock is released.
+///
+/// A failed spawn used to drop its bindings in reverse order, the lock first,
+/// so the master and slave closed outside it, and the PTY layer's writer,
+/// shared with the reader thread, closed on that thread whenever it ended
+/// (#633). On macOS such a close can revoke a recycled device another thread
+/// has just opened, which is what the lock exists to prevent (#589).
+struct Opening {
+    pair: Option<PtyPair>,
+    /// The terminal's writer, once there is one: the PTY layer's writer is
+    /// taken out of it on failure, since the reader thread keeps the cell.
+    writer: Option<SharedWriter>,
+    lifecycle: Option<LifecycleGuard>,
+}
+
+impl Opening {
+    fn pair(&self) -> &PtyPair {
+        self.pair
+            .as_ref()
+            .expect("the pair is taken only by `spawned`, which consumes the opening")
+    }
+
+    /// The child is running: close the parent's slave handle, so the master
+    /// sees EOF once the child and its descendants release the terminal,
+    /// release the lock, and hand the master on.
+    fn spawned(mut self) -> Box<dyn portable_pty::MasterPty + Send> {
+        // The writer now belongs to the terminal.
+        self.writer = None;
+        let pair = self.pair.take().expect("the pair is taken only here, once");
+        drop(pair.slave);
+        pair.master
+    }
+}
+
+impl Drop for Opening {
+    /// In this order: the writer and the pair close, then the lock goes. The
+    /// fields would drop in declaration order without this body, which is the
+    /// right order too, but the order is the point and is not left to it.
+    fn drop(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            drop(writer.lock().unwrap_or_else(PoisonError::into_inner).take());
+        }
+        drop(self.pair.take());
+        drop(self.lifecycle.take());
     }
 }
 
@@ -1942,7 +2020,8 @@ impl TerminalBuilder {
 
         // The lifecycle lock is held across openpty → spawn → slave close, so
         // no concurrent Terminal teardown can revoke our fresh PTY device.
-        // `open_pty` takes it, retries under it, and hands it back still held.
+        // `open_pty` takes it, retries under it, and hands it back still held,
+        // and `Opening` closes what this opened under it however this ends.
         let (pair, lifecycle) = open_pty(PtySize {
             rows: self.rows,
             cols: self.cols,
@@ -1952,6 +2031,11 @@ impl TerminalBuilder {
             pixel_width: pixel_span(self.cols, self.cell_size.map(|(w, _)| w)),
             pixel_height: pixel_span(self.rows, self.cell_size.map(|(_, h)| h)),
         })?;
+        let mut opening = Opening {
+            pair: Some(pair),
+            writer: None,
+            lifecycle: Some(lifecycle),
+        };
 
         let mut cmd = CommandBuilder::new(program);
         cmd.args(&self.args);
@@ -2005,11 +2089,15 @@ impl TerminalBuilder {
         // buffered at teardown — see docs/DESIGN.md §2 — so the window
         // between child start and first read must be as close to zero as
         // userspace can make it.)
-        let reader: Box<dyn Read + Send> =
-            Box::new(MasterDup(Some(pair.master.try_clone_reader().map_err(
-                |e| Error::Pty(format!("cloning PTY reader failed: {e}")),
-            )?)));
-        let writer = pair
+        let reader: Box<dyn Read + Send> = Box::new(MasterDup(Some(
+            opening
+                .pair()
+                .master
+                .try_clone_reader()
+                .map_err(|e| Error::Pty(format!("cloning PTY reader failed: {e}")))?,
+        )));
+        let writer = opening
+            .pair()
             .master
             .take_writer()
             .map_err(|e| Error::Pty(format!("taking PTY writer failed: {e}")))?;
@@ -2041,6 +2129,7 @@ impl TerminalBuilder {
             Arc::clone(&replies_pending),
         )));
         let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
+        opening.writer = Some(Arc::clone(&writer));
 
         // Everything written *to* the child goes through a thread of its
         // own: query replies from the drain, and typed input from the
@@ -2049,7 +2138,7 @@ impl TerminalBuilder {
         // would deadlock the harness (the child then blocks writing into
         // a full output buffer), and the test thread would hang with no
         // deadline and no diagnosis.
-        let write_tx = match dup_writer(pair.master.as_ref()) {
+        let write_tx = match dup_writer(opening.pair().master.as_ref()) {
             Some(pty_writer) => {
                 let mut pty_writer = MasterDup(Some(pty_writer));
                 let (tx, rx) = mpsc::channel::<WriteRequest>();
@@ -2128,19 +2217,16 @@ impl TerminalBuilder {
             })
             .map_err(Error::Io)?;
 
-        let child =
-            spawn_child(&pair, cmd, self.env_clear, &env).map_err(|reason| Error::Spawn {
+        let child = spawn_child(opening.pair(), cmd, self.env_clear, &env).map_err(|reason| {
+            Error::Spawn {
                 command: command_desc.clone(),
                 reason,
-            })?;
-        // Close the parent's slave handle so the master sees EOF once the
-        // child (and its descendants) release the terminal.
-        drop(pair.slave);
-        drop(lifecycle);
+            }
+        })?;
 
         Ok(Terminal {
             child,
-            master: Some(pair.master),
+            master: Some(opening.spawned()),
             writer,
             write_tx,
             shared,
@@ -4399,6 +4485,69 @@ fn send_signal(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
     }
 }
 
+/// Make every write and read on the master give up rather than wait, and
+/// empty the input queue nothing will read: for teardown, once the child has
+/// been stopped.
+///
+/// portable-pty's writer writes an EOT as it is dropped, a plain blocking
+/// `write(2)`. When the application left more input unread than its queue
+/// holds, which raw mode allows and which a send that gave up (#590) is the
+/// ordinary report of, that queue never drains, and on Linux the write then
+/// blocks with the child dead and reaped. Teardown drops the writer under the
+/// lifecycle lock, so it hung there, and so did every spawn in the binary
+/// after it (#628).
+///
+/// `O_NONBLOCK` belongs to the open file description, which every duplicate
+/// of the master shares, so the EOT and the reader's last read fail with
+/// `EAGAIN` instead of waiting. That alone does not reach a `write(2)` that
+/// is already asleep, the writer thread's, which then held its duplicate,
+/// and with it the PTY, for the life of the process. So the slave is opened
+/// and its input queue flushed: the flush makes room and the close wakes
+/// the sleeping write (on Linux the close alone does, measured), which sees
+/// the flag and returns, and the thread ends and closes its duplicate.
+/// Whoever could have read that input is gone or about to be hung up, and
+/// the EOT now finds room.
+///
+/// Neither step is a lifecycle edge: the master stays open throughout, and
+/// the slave opened here is closed as a child's own descriptors are. A step
+/// that fails leaves things as they were, which is no worse.
+#[cfg(unix)]
+fn unblock_teardown(master: &dyn portable_pty::MasterPty) {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if let Some(fd) = master.as_raw_fd() {
+        // SAFETY: `fd` is the live master descriptor, owned by `master` for
+        // the whole call; F_GETFL and F_SETFL only read and set its status
+        // flags.
+        #[allow(unsafe_code)]
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags != -1 {
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+    }
+    // O_NOCTTY, so the device cannot become this process's controlling
+    // terminal; O_NONBLOCK, so the open cannot wait either.
+    let slave = master.tty_name().and_then(|name| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+            .open(name)
+            .ok()
+    });
+    if let Some(slave) = slave {
+        // SAFETY: `slave` is an open descriptor for the whole call, and
+        // tcflush touches no memory.
+        #[allow(unsafe_code)]
+        unsafe {
+            libc::tcflush(slave.as_raw_fd(), libc::TCIFLUSH);
+        }
+    }
+}
+
 impl Drop for Terminal {
     /// Kill and reap the child. No zombies, even when a test panics before
     /// `wait_exit`. The reader thread ends on its own at EOF and is never
@@ -4413,6 +4562,10 @@ impl Drop for Terminal {
     /// anyone, and every spawn in the binary used to wait out the child's
     /// shutdown (#589).
     ///
+    /// Nothing after the stop may block either: an application that left
+    /// its input queue full would otherwise hold the lock forever (#628,
+    /// `unblock_teardown`).
+    ///
     /// The reap is bounded (`DROP_REAP_GRACE`). A child that cannot be
     /// reaped is a bad outcome; a test binary that never exits — which an
     /// unbounded `wait` here produced whenever the child was wedged — is a
@@ -4420,6 +4573,10 @@ impl Drop for Terminal {
     fn drop(&mut self) {
         if self.exit_status.is_none() && !matches!(self.child.try_wait(), Ok(Some(_))) {
             stop_child(&mut self.child, Instant::now() + DROP_REAP_GRACE);
+        }
+        #[cfg(unix)]
+        if let Some(master) = &self.master {
+            unblock_teardown(master.as_ref());
         }
         let _lifecycle = pty_lifecycle_guard();
         // Close the PTY fds while holding the lock. Taking the writer
@@ -4769,6 +4926,133 @@ mod tests {
                 !path.contains(&(0, 0)),
                 "the press already reported the origin"
             );
+        }
+    }
+
+    /// Every handle a spawn opened closes under the lifecycle lock (#633),
+    /// told by probes that note, as each is dropped, whether this thread
+    /// held the lock.
+    #[cfg(unix)]
+    mod opening {
+        use std::io;
+        use std::sync::mpsc;
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+        use std::time::Duration;
+
+        use portable_pty::{CommandBuilder, MasterPty, PtyPair, PtySize, SlavePty};
+
+        use super::super::{pty_lifecycle_guard, MasterDup, Opening, HOLDS_LIFECYCLE};
+
+        type Log = Arc<Mutex<Vec<(&'static str, bool)>>>;
+
+        struct Probe(&'static str, Log);
+
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.1.lock().unwrap().push((self.0, HOLDS_LIFECYCLE.get()));
+            }
+        }
+
+        impl io::Write for Probe {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl SlavePty for Probe {
+            fn spawn_command(
+                &self,
+                _: CommandBuilder,
+            ) -> anyhow::Result<Box<dyn portable_pty::Child + Send + Sync>> {
+                anyhow::bail!("a probe spawns nothing")
+            }
+        }
+
+        impl MasterPty for Probe {
+            fn resize(&self, _: PtySize) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn get_size(&self) -> anyhow::Result<PtySize> {
+                Ok(PtySize::default())
+            }
+            fn try_clone_reader(&self) -> anyhow::Result<Box<dyn io::Read + Send>> {
+                anyhow::bail!("a probe has no reader")
+            }
+            fn take_writer(&self) -> anyhow::Result<Box<dyn io::Write + Send>> {
+                anyhow::bail!("a probe has no writer")
+            }
+            fn process_group_leader(&self) -> Option<libc::pid_t> {
+                None
+            }
+            fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+                None
+            }
+            fn tty_name(&self) -> Option<std::path::PathBuf> {
+                None
+            }
+        }
+
+        /// An opening, its writer shared with a reader thread that outlives
+        /// it, as a spawn's is.
+        fn opening(log: &Log) -> (Opening, super::super::SharedWriter) {
+            let writer: super::super::SharedWriter =
+                Arc::new(Mutex::new(Some(Box::new(Probe("writer", Arc::clone(log))))));
+            let opening = Opening {
+                pair: Some(PtyPair {
+                    slave: Box::new(Probe("slave", Arc::clone(log))),
+                    master: Box::new(Probe("master", Arc::clone(log))),
+                }),
+                writer: Some(Arc::clone(&writer)),
+                lifecycle: Some(pty_lifecycle_guard()),
+            };
+            (opening, writer)
+        }
+
+        #[test]
+        fn a_failed_spawn_closes_everything_before_it_releases_the_lock() {
+            let log = Log::default();
+            let (opening, _reader_s_copy) = opening(&log);
+            drop(opening);
+            assert_eq!(
+                *log.lock().unwrap(),
+                [("writer", true), ("slave", true), ("master", true)]
+            );
+            assert!(!HOLDS_LIFECYCLE.get(), "the lock outlived the opening");
+        }
+
+        #[test]
+        fn a_spawn_closes_the_slave_under_the_lock_and_keeps_the_master() {
+            let log = Log::default();
+            let (opening, _terminal_s_copy) = opening(&log);
+            let master = opening.spawned();
+            assert_eq!(*log.lock().unwrap(), [("slave", true)]);
+            assert!(!HOLDS_LIFECYCLE.get(), "the lock outlived the opening");
+            drop(master);
+            assert_eq!(*log.lock().unwrap(), [("slave", true), ("master", false)]);
+        }
+
+        /// A master duplicate dropped by a thread that holds the lock, as a
+        /// failing spawn drops its reader or a responder closure, closes
+        /// under that lock instead of waiting on it forever.
+        #[test]
+        fn a_master_duplicate_dropped_under_the_lock_does_not_wait_for_it() {
+            let log = Log::default();
+            let (done, finished) = mpsc::channel();
+            let held = Arc::clone(&log);
+            thread::spawn(move || {
+                let lifecycle = pty_lifecycle_guard();
+                drop(MasterDup(Some(Probe("duplicate", held))));
+                drop(lifecycle);
+                let _ = done.send(());
+            });
+            finished
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the drop deadlocked on the lock its own thread held");
+            assert_eq!(*log.lock().unwrap(), [("duplicate", true)]);
         }
     }
 }

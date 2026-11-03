@@ -17,6 +17,23 @@ reads that marker.
 
 ## [Unreleased]
 
+### Fixed
+
+- Dropping a terminal returns when the application left more input unread
+  than its terminal holds, which a raw-mode application that stops reading
+  allows (#628). The PTY layer writes an end-of-file as its writer is
+  dropped, and that write waited forever on the full queue, with the child
+  already gone, while holding the lock every spawn in the test binary takes:
+  the binary never exited. Teardown now makes the terminal's writes give up
+  rather than wait and empties the queue nothing will read, so the writer
+  thread stuck behind it ends too, instead of keeping the PTY open.
+- A spawn that fails closes the terminal it opened before it releases the
+  PTY lifecycle lock (#633). It released the lock first, so on macOS the
+  close could revoke a device another thread had just opened, the failure
+  the lock exists to prevent; and a spawn that failed after opening the
+  terminal but before starting the child could deadlock on the lock it
+  held, instead of reporting why.
+
 ## [0.11.7] - 2026-10-27
 
 ### Changed
