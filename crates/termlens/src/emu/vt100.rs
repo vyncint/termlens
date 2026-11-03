@@ -55,6 +55,11 @@ pub(crate) struct Vt100Emulator {
     /// Inline graphics payloads, oldest first, behind an `Arc` so a
     /// snapshot costs one refcount rather than a copy of every image.
     graphics: Arc<Vec<GraphicsPayload>>,
+    /// For each payload in `graphics`, the image ids a kitty delete freed
+    /// ([`Placement::forgets`]), so a later `a=p` of one is not sized from
+    /// an image kitty has forgotten (#672). Kept in lockstep with
+    /// `graphics`, one entry each, and so bounded by the same two bounds.
+    graphics_forgets: VecDeque<Option<(u32, u32)>>,
     /// Payload bytes currently retained, so eviction is a subtraction
     /// rather than a walk.
     graphics_bytes: usize,
@@ -124,6 +129,7 @@ impl Vt100Emulator {
             captured: 0,
             history_reset: false,
             graphics: Arc::new(Vec::new()),
+            graphics_forgets: VecDeque::new(),
             graphics_bytes: 0,
             capture,
             image_support: Graphics::None,
@@ -163,17 +169,28 @@ impl Vt100Emulator {
                     // replaces an image on retransmission (`handle_add_command`
                     // frees the existing image's resources), so the size of
                     // one sent before it describes nothing on screen (#626).
+                    //
+                    // Unless a delete that frees the image came after it.
+                    // kitty has then forgotten the image, and refuses the
+                    // placement ("Put command refers to non-existent image",
+                    // `handle_put_command`): nothing is placed, so nothing
+                    // moves — even with `c=` and `r=` given (#672). It was
+                    // sized from the image kitty no longer has.
                     GraphicsAction::Place => {
                         let id = payload.id()?;
-                        self.graphics
-                            .iter()
-                            .rev()
-                            .find(|earlier| {
-                                earlier.protocol() == GraphicsProtocol::Kitty
-                                    && earlier.action().carries_image()
-                                    && earlier.id() == Some(id)
-                            })
-                            .and_then(GraphicsPayload::size)
+                        let newest = self.graphics.iter().zip(&self.graphics_forgets).rev().find(
+                            |(earlier, forgets)| {
+                                forgets.is_some_and(|(first, last)| (first..=last).contains(&id))
+                                    || (earlier.protocol() == GraphicsProtocol::Kitty
+                                        && earlier.action().carries_image()
+                                        && earlier.id() == Some(id))
+                            },
+                        );
+                        match newest {
+                            Some((_, Some(_))) => return None,
+                            Some((earlier, None)) => earlier.size(),
+                            None => None,
+                        }
                     }
                     _ => return None,
                 };
@@ -299,17 +316,32 @@ impl Vt100Emulator {
     /// labels.
     ///
     /// [`move_past_image`]: Self::move_past_image
-    fn record_graphics(&mut self, mut payload: GraphicsPayload) {
+    fn record_graphics(&mut self, mut payload: GraphicsPayload, forgets: Option<(u32, u32)>) {
         payload.place(self.cursor_position());
         let kept = payload.data().map_or(0, <[u8]>::len);
         let log = Arc::make_mut(&mut self.graphics);
         log.push(payload);
+        self.graphics_forgets.push_back(forgets);
         self.graphics_bytes += kept;
         // Evict oldest-first, on both bounds. A snapshot already taken keeps
         // its own view: it holds an `Arc` to the vector as it stood.
         while log.len() > HISTORY || (self.graphics_bytes > self.capture && log.len() > 1) {
             let dropped = log.remove(0);
+            self.graphics_forgets.pop_front();
             self.graphics_bytes -= dropped.data().map_or(0, <[u8]>::len);
+        }
+    }
+
+    /// Carry out a completed payload: stamp it, file it, and move the cursor
+    /// past it as the declared terminal does.
+    fn place_graphics(&mut self, payload: GraphicsPayload, placement: &Placement) {
+        // Sized before the payload joins the log, so a placement finds the
+        // earlier transmission and not itself; moved after it is stamped, so
+        // `at` is the top-left corner.
+        let step = self.image_step(&payload, placement);
+        self.record_graphics(payload, placement.forgets);
+        if let Some(step) = step {
+            self.move_past_image(step);
         }
     }
 
@@ -777,15 +809,16 @@ impl Emulator for Vt100Emulator {
                 SeqEvent::Graphics(payload, placement) => {
                     self.feed_staged(&bytes[fed..=i]);
                     fed = i + 1;
-                    // Sized before the payload joins the log, so a placement
-                    // finds the earlier transmission and not itself; moved
-                    // after it is stamped, so `at` is the top-left corner.
-                    let step = self.image_step(&payload, &placement);
-                    self.record_graphics(*payload);
-                    if let Some(step) = step {
-                        self.move_past_image(step);
-                    }
+                    self.place_graphics(*payload, &placement);
                     None
+                }
+                // The upload a query completed is placed before the query
+                // is answered, as kitty places it before it replies (#672).
+                SeqEvent::GraphicsQuery(payload, placement, query) => {
+                    self.feed_staged(&bytes[fed..=i]);
+                    fed = i + 1;
+                    self.place_graphics(*payload, &placement);
+                    Some(Stop::Query(query))
                 }
                 SeqEvent::SoftReset => {
                     // The tracker has reset what it holds; the grid's
@@ -2359,6 +2392,97 @@ mod tests {
               \x1b_Ga=p,i=1\x1b\\X",
         );
         assert_eq!(x_at(&emu), Some((1, 2)));
+    }
+
+    /// A delete that frees an image makes kitty forget it, and a later
+    /// `a=p` of it is refused ("Put command refers to non-existent image",
+    /// `handle_put_command` in kitty's `graphics.c`): nothing is placed, so
+    /// nothing moves, `c=` and `r=` or not (#672). It was sized from the
+    /// image in the payload log. `d=I` frees the image with that id and
+    /// `d=R` every id from `x=` to `y=`; the lower-case forms remove only
+    /// placements and keep the image ("The uppercase variants will delete
+    /// the image data as well", the protocol's "Deleting images").
+    #[test]
+    fn a_kitty_placement_of_an_image_a_delete_freed_does_not_move() {
+        let sent = b"\x1b_Ga=t,f=24,s=20,v=40,i=7;AAAA\x1b\\";
+        for (delete, at) in [
+            (&b"\x1b_Ga=d,d=I,i=7\x1b\\"[..], (0, 0)),
+            (b"\x1b_Ga=d,d=R,x=5,y=9\x1b\\", (0, 0)),
+            (b"\x1b_Ga=d,d=i,i=7\x1b\\", (1, 2)),
+            (b"\x1b_Ga=d,d=r,x=5,y=9\x1b\\", (1, 2)),
+            (b"\x1b_Ga=d,d=I,i=8\x1b\\", (1, 2)),
+            (b"\x1b_Ga=d,d=R,x=8,y=9\x1b\\", (1, 2)),
+            (b"\x1b_Ga=d\x1b\\", (1, 2)),
+        ] {
+            let wire = [&sent[..], delete, b"\x1b_Ga=p,i=7\x1b\\X"].concat();
+            let emu = graphics_emu(Graphics::Kitty, 6, 10, &wire);
+            assert_eq!(x_at(&emu), Some(at), "{}", String::from_utf8_lossy(delete));
+        }
+        // Refused, the placement has no size to give: `c=` and `r=` do not
+        // place what kitty has not got.
+        let wire = [
+            &sent[..],
+            b"\x1b_Ga=d,d=I,i=7\x1b\\\x1b_Ga=p,i=7,c=3,r=2\x1b\\X",
+        ]
+        .concat();
+        assert_eq!(
+            x_at(&graphics_emu(Graphics::Kitty, 6, 10, &wire)),
+            Some((0, 0))
+        );
+        // Sent again after the delete, it is an image kitty has: 2x2.
+        let wire = [
+            &sent[..],
+            b"\x1b_Ga=d,d=I,i=7\x1b\\",
+            sent,
+            b"\x1b_Ga=p,i=7\x1b\\X",
+        ]
+        .concat();
+        assert_eq!(
+            x_at(&graphics_emu(Graphics::Kitty, 6, 10, &wire)),
+            Some((1, 2))
+        );
+    }
+
+    /// The delete facts are kept one for one with the payload log, through
+    /// its eviction: a log that has evicted its oldest entries still pairs
+    /// each delete with itself, so the newest transmission is not taken for
+    /// a deleted one (#672).
+    #[test]
+    fn delete_facts_stay_paired_with_the_payloads_through_eviction() {
+        let mut wire = Vec::new();
+        for _ in 0..HISTORY + 10 {
+            wire.extend_from_slice(b"\x1b_Ga=d,d=I,i=7\x1b\\");
+        }
+        wire.extend_from_slice(b"\x1b_Ga=t,f=24,s=20,v=40,i=8;AAAA\x1b\\\x1b_Ga=p,i=8\x1b\\X");
+        let emu = graphics_emu(Graphics::Kitty, 6, 10, &wire);
+        assert_eq!(x_at(&emu), Some((1, 2)));
+        assert_eq!(emu.graphics.len(), emu.graphics_forgets.len());
+    }
+
+    /// A query that kitty took as an upload's last chunk completes the
+    /// upload, and an `a=T` upload is then placed — `handle_put_command`
+    /// runs for it in kitty's `grman_handle_command` — before the query is
+    /// answered (#672).
+    #[test]
+    fn a_query_that_completes_an_upload_places_its_image_first() {
+        let mut emu = Vt100Emulator::new(6, 10, 100, crate::graphics::DEFAULT_CAPTURE, false);
+        emu.declare_graphics(Graphics::Kitty, Some((10, 20)));
+        let wire = b"\x1b_Ga=T,f=24,s=1,v=1,c=3,r=2,i=5,m=1;AA\x1b\\\x1b_Ga=q,i=31;AA\x1b\\X";
+        let processed = emu.process(wire);
+        assert!(
+            matches!(processed.stop, Some(Stop::Query(_))),
+            "stops for the query: {:?}",
+            processed.stop
+        );
+        feed_all(&mut emu, &wire[processed.consumed..]);
+        assert_eq!(x_at(&emu), Some((1, 3)));
+        let screen = emu.snapshot();
+        let seen = screen.graphics();
+        let image = seen.last().expect("the upload's image");
+        assert_eq!(
+            (image.id(), image.chunks(), image.at()),
+            (Some(5), 2, (0, 0))
+        );
     }
 
     #[test]

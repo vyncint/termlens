@@ -29,6 +29,23 @@ reads that marker.
   the application asked for silence. A test that read the `i=0;OK` reply
   should send `i=` with a nonzero id, as kitty requires.
 
+- A kitty `a=q` query naming both an image id and an image number is
+  refused as kitty refuses it (#672): the reply echoes its `i=` and `I=`
+  (and `p=`, if it names one) with
+  `EINVAL:Must not specify both image id and image number`, and only `q=2`
+  silences it. It was answered `OK`. A test that read `OK` there should
+  drop one of the two keys.
+
+- A kitty query with its data in the escape is part of the upload in
+  progress, as in kitty (#672): its data is the upload's next chunk.
+  Without `m=1` it is the last one, and the upload's image is counted and
+  placed before the query is answered `OK`. With `m=1` kitty removes the
+  image being loaded: no image comes of the upload, the query gets no
+  reply (and is named in the next timeout), and the next chunk is refused —
+  a query sent then is answered `EILSEQ`. termlens used to leave the upload
+  alone and answer the query `OK` on its own. A test should finish an
+  upload before it probes, as the protocol requires of the client.
+
 - `unsupported()` is right about three more shapes (#625, #641). A window
   title with a `;` in it (`OSC 2 ; make; test`) is no longer listed: the
   title was always honoured, and `title()` reported it whole. An ANSI mode
@@ -155,6 +172,13 @@ reads that marker.
   painted (#638), as xterm draws it: the larger of the declared and the
   painted extent on each axis, still within the 4096-pixel cap. It was
   cropped to the declared size.
+
+- A kitty `a=p` of an image a delete freed no longer moves the cursor
+  (#672). After `d=I` of its id, or `d=R` over a range that holds it, kitty
+  has forgotten the image and refuses the placement; termlens sized it from
+  the deleted image, `c=` and `r=` or not. A lower-case delete keeps the
+  image, as in kitty. The deletes termlens cannot attribute are listed in
+  `docs/LIMITATIONS.md`.
 
 - `Screen::parse` and `termlens render` read two text snapshots earlier
   releases wrote and 0.11.7 refused (#643): a visible cursor one past the

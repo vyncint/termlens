@@ -420,6 +420,10 @@ pub(crate) enum SeqEvent {
     /// stood — is a fact about the grid, which only the emulator holds; so
     /// is moving the cursor past the image, which the [`Placement`] sizes.
     Graphics(Box<GraphicsPayload>, Placement),
+    /// Both at once: a kitty query that kitty took as the last chunk of the
+    /// upload in progress, which completes the upload's image and is then
+    /// answered (#672).
+    GraphicsQuery(Box<GraphicsPayload>, Placement, Query),
     /// A tab-stop operation completed, and needs the cursor column to
     /// finish — carried out for the same reason a graphics placement is.
     Tabs(TabOp),
@@ -466,9 +470,16 @@ pub(crate) enum Query {
     KittyGraphics {
         /// The `i=` value, if the probe gave one.
         id: Option<u32>,
+        /// The `I=` value, if it gave one: kitty refuses a command naming
+        /// both an image id and an image number (#672).
+        number: Option<u32>,
+        /// The `p=` value, if it gave one, which that refusal echoes.
+        placement: Option<u32>,
         /// The `q=` value, 0 when absent: 1 suppresses an `OK`, 2 every
         /// reply (#639).
         quiet: u32,
+        /// What kitty's loader made of the probe's data (#672).
+        load: KittyLoad,
         /// Printable rendering, for the timeout note when unanswered.
         shape: String,
     },
@@ -496,6 +507,27 @@ fn kitty_key(control: &[u8], key: &[u8]) -> Option<u32> {
         .find_map(|pair| pair.strip_prefix(key))
         .and_then(|digits| std::str::from_utf8(digits).ok())
         .and_then(|digits| digits.parse().ok())
+}
+
+/// What kitty's loader made of a query's data, which decides whether kitty
+/// answers it, and with what (#672).
+///
+/// A query with an id and data in the escape goes to the loader like any
+/// transmission (`grman_handle_command` hands `a=q` to `handle_add_command`
+/// in kitty's `graphics.c`), so in the middle of an upload it is that
+/// upload's next chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KittyLoad {
+    /// Loaded — tested on its own, or as the last chunk of the upload it
+    /// joined. Taken to succeed, as a placement is: whether kitty could
+    /// decode the data is not knowable here. kitty answers `OK`.
+    Loaded,
+    /// Joined a load that waits for more chunks (`m=1`). kitty has nothing
+    /// to say: no data loaded yet, and no error.
+    Pending,
+    /// Sent to a load whose image kitty had already removed: kitty answers
+    /// `EILSEQ` ("More payload loading refers to non-existent image").
+    Gone,
 }
 
 /// What a kitty escape arriving in the middle of a chunked upload does to
@@ -689,6 +721,15 @@ pub(crate) struct SeqTracker {
     counts: GraphicsCounts,
     /// The payload being assembled, if a kitty transmission is mid-chunk.
     building: GraphicsBuilder,
+    /// kitty's loader still names an image kitty has removed, so the next
+    /// chunk it is handed is refused rather than starting anything (#672).
+    ///
+    /// A query with `m=1` leaves it so: kitty loads the query's data, then
+    /// trims every image whose data is not loaded yet — `remove_images(self,
+    /// add_trim_predicate, 0)` after every `a=q` in `grman_handle_command` —
+    /// which removes the very image being loaded, while the loader still
+    /// points at it. Never set while `building` is in progress.
+    orphaned_load: bool,
     /// How many payload bytes may be kept for inspection. Counting is
     /// unaffected by it; only the data is dropped.
     capture: usize,
@@ -822,6 +863,7 @@ impl SeqTracker {
             bells: 0,
             counts: GraphicsCounts::default(),
             building: GraphicsBuilder::default(),
+            orphaned_load: false,
             capture,
             frame_printable: 0,
             focus_events: false,
@@ -976,8 +1018,13 @@ impl SeqTracker {
     /// sixel was built on top of it and came out carrying the kitty `s=`,
     /// `c=` and `i=`, the delete was swallowed as its last chunk, and after
     /// `RIS` the next transmission completed it.
+    ///
+    /// Whatever kitty's loader was left naming goes with it: a delete frees
+    /// the load (`handle_delete_command` calls `free_load_data`), and
+    /// termlens takes a sixel and a reset to start the loader over.
     fn abandon_upload(&mut self) {
         self.counts.bytes += self.building.abandon();
+        self.orphaned_load = false;
     }
 
     /// True while the application has focus reporting (mode 1004) enabled.
@@ -1572,6 +1619,27 @@ impl SeqTracker {
             let is_query = keys.split(|&b| b == b',').any(|pair| pair == b"a=q");
             if !is_query {
                 let at = self.dcs_payload_start();
+                if self.orphaned_load {
+                    match MidUpload::of(keys) {
+                        // kitty's `handle_add_command` takes it as the next
+                        // chunk of the load, finds the image that load was
+                        // for gone, and refuses it (`EILSEQ`), clearing the
+                        // load: the escape is spent, and no image comes of
+                        // it (#672). Its bytes crossed the wire all the same.
+                        MidUpload::Continues if !key_is(keys, b"a", b"f") => {
+                            self.orphaned_load = false;
+                            self.counts.bytes += self.dcs_data_len;
+                            return SeqEvent::None;
+                        }
+                        // A delete frees the load, and a transmission from
+                        // outside the stream starts an image of its own.
+                        MidUpload::Aborts => self.orphaned_load = false,
+                        // A placement, an animation, a compose — and a
+                        // frame, which kitty's frame loader refuses without
+                        // clearing the load — leave it as it is.
+                        _ => {}
+                    }
+                }
                 if self.building.in_progress() {
                     match MidUpload::of(keys) {
                         MidUpload::Continues => {}
@@ -1624,18 +1692,7 @@ impl SeqTracker {
                     None => SeqEvent::None,
                 };
             }
-            // Only an explicit `a=q` is a question. A transmission is an
-            // instruction, and classifying one as a query would put "the
-            // application queried the terminal" into the next timeout of
-            // every application that draws — a false diagnosis, and a loud
-            // one.
-            let id = kitty_key(keys, b"i=");
-            let quiet = kitty_key(keys, b"q=").unwrap_or(0);
-            return SeqEvent::Query(Query::KittyGraphics {
-                id,
-                quiet,
-                shape: self.seq_printable(),
-            });
+            return self.kitty_query(keys);
         }
         // Sixel: `DCS <params> q <data> ST`, with no intermediate byte. The
         // intermediate is the whole distinction from the two DCS questions
@@ -1682,6 +1739,92 @@ impl SeqTracker {
             return SeqEvent::Query(Query::Unanswerable(self.seq_printable()));
         }
         SeqEvent::None
+    }
+
+    /// A kitty query (`a=q`), taken through kitty's loader in the order
+    /// kitty's `grman_handle_command` (`graphics.c`) takes it (#672).
+    ///
+    /// Only an explicit `a=q` is a question. A transmission is an
+    /// instruction, and classifying one as a query would put "the
+    /// application queried the terminal" into the next timeout of every
+    /// application that draws — a false diagnosis, and a loud one.
+    ///
+    /// A command naming both an image id and an image number is refused
+    /// before anything else is looked at, and a query without an id right
+    /// after; neither reaches the loader. Nor does a feature query (`e=`):
+    /// kitty 0.49 rejects the key outright, and the development branch that
+    /// adds it says "A feature query transmits no image data, so it must not
+    /// interfere with any chunked load that is in progress". Every other
+    /// query hands its
+    /// data to `handle_add_command` as a transmission would, so:
+    ///
+    /// - from a file or shared memory (`t=` other than `d`), it starts a
+    ///   load of its own, and the upload in progress is dropped;
+    /// - with the data in the escape and an upload in progress, it *is* the
+    ///   upload's next chunk: its data is appended, and without `m=1` it is
+    ///   the last one, so the upload's image is complete — and placed, for
+    ///   `a=T` — before the query is answered;
+    /// - with `m=1`, the load then waits for more, and the trim that follows
+    ///   every query (`remove_images(self, add_trim_predicate, 0)`) removes
+    ///   the image whose data is not loaded yet: the upload's, or the
+    ///   query's own. Nothing is answered, and the loader is left naming an
+    ///   image that is gone, so the next chunk is refused;
+    /// - handed to a loader in that state, it is refused (`EILSEQ`).
+    fn kitty_query(&mut self, keys: &[u8]) -> SeqEvent {
+        let id = kitty_key(keys, b"i=");
+        let number = kitty_key(keys, b"I=");
+        let nonzero = |value: Option<u32>| value.is_some_and(|value| value != 0);
+        let feature_query = keys
+            .split(|&b| b == b',')
+            .any(|pair| pair.starts_with(b"e="));
+        let mut load = KittyLoad::Loaded;
+        let mut completed = None;
+        if nonzero(id) && !nonzero(number) && !feature_query {
+            let direct = keys
+                .split(|&b| b == b',')
+                .find_map(|pair| pair.strip_prefix(b"t="))
+                .is_none_or(|medium| medium == b"d");
+            let more = key_is(keys, b"m", b"1");
+            if !direct {
+                self.abandon_upload();
+            } else if self.orphaned_load {
+                self.orphaned_load = false;
+                load = KittyLoad::Gone;
+            } else {
+                if self.building.in_progress() {
+                    let at = self.dcs_payload_start();
+                    self.building.chunk(
+                        self.dcs_data_len,
+                        &self.dcs_body[at..],
+                        self.dcs_body_full,
+                        self.capture,
+                    );
+                    if !more {
+                        completed = self.building.finish_placed();
+                    }
+                }
+                if more {
+                    self.abandon_upload();
+                    self.orphaned_load = true;
+                    load = KittyLoad::Pending;
+                }
+            }
+        }
+        let query = Query::KittyGraphics {
+            id,
+            number,
+            placement: kitty_key(keys, b"p="),
+            quiet: kitty_key(keys, b"q=").unwrap_or(0),
+            load,
+            shape: self.seq_printable(),
+        };
+        match completed {
+            Some((payload, placement)) => {
+                self.counts.record(&payload);
+                SeqEvent::GraphicsQuery(Box::new(payload), placement, query)
+            }
+            None => SeqEvent::Query(query),
+        }
     }
 
     /// The image data inside the captured body: for kitty everything after
@@ -2190,11 +2333,43 @@ mod tests {
         let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
         let mut out = Vec::new();
         for &byte in bytes {
-            if let SeqEvent::Graphics(payload, _) = tracker.step(byte) {
+            if let SeqEvent::Graphics(payload, _) | SeqEvent::GraphicsQuery(payload, _, _) =
+                tracker.step(byte)
+            {
                 out.push(*payload);
             }
         }
         out
+    }
+
+    /// Every payload and every query a feed produced, in order, and the
+    /// tracker it left.
+    fn kitty_events(bytes: &[u8]) -> (Vec<GraphicsPayload>, Vec<Query>, SeqTracker) {
+        let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let (mut seen, mut queries) = (Vec::new(), Vec::new());
+        for &byte in bytes {
+            match tracker.step(byte) {
+                SeqEvent::Graphics(payload, _) => seen.push(*payload),
+                SeqEvent::GraphicsQuery(payload, _, query) => {
+                    seen.push(*payload);
+                    queries.push(query);
+                }
+                SeqEvent::Query(query) => queries.push(query),
+                _ => {}
+            }
+        }
+        (seen, queries, tracker)
+    }
+
+    /// The `(i=, load)` of each kitty query.
+    fn loads(queries: &[Query]) -> Vec<(Option<u32>, KittyLoad)> {
+        queries
+            .iter()
+            .map(|query| match query {
+                Query::KittyGraphics { id, load, .. } => (*id, *load),
+                other => panic!("not a kitty query: {other:?}"),
+            })
+            .collect()
     }
 
     /// Kitty and sixel payloads, and the two DCS *questions* that share
@@ -2432,6 +2607,152 @@ mod tests {
         assert_eq!(seen[0].id(), Some(8), "its own image: {seen:?}");
         assert_eq!(seen[0].chunks(), 1);
         assert_eq!(fed(&[UPLOAD_OF_5, file].concat()).graphics().kitty, 1);
+    }
+
+    /// A query with an id and its data in the escape is, mid-upload, that
+    /// upload's next chunk: kitty's `grman_handle_command` hands `a=q` to
+    /// `handle_add_command`, which continues the load in progress for any
+    /// direct transmission (`init_img = false`). Without `m=1` it is the
+    /// last one, so the upload's image is complete and the query is
+    /// answered — kitty's 0.49 `graphics.c` (#672). termlens left the upload
+    /// alone and answered the query on its own.
+    #[test]
+    fn a_kitty_query_mid_upload_is_the_uploads_last_chunk() {
+        let query: &[u8] = b"\x1b_Ga=q,i=31;BBBB\x1b\\";
+        let (seen, queries, tracker) = kitty_events(&[UPLOAD_OF_5, query].concat());
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].id(), Some(5), "the upload's image: {seen:?}");
+        assert_eq!(seen[0].action(), GraphicsAction::TransmitAndPlace);
+        assert_eq!(seen[0].chunks(), 2);
+        assert_eq!(seen[0].data(), Some(&b"AAAABBBB"[..]));
+        assert_eq!(loads(&queries), [(Some(31), KittyLoad::Loaded)]);
+        assert_eq!(tracker.graphics().kitty, 1);
+        assert_eq!(tracker.graphics().bytes, wire_cost(&[UPLOAD_OF_5, query]));
+    }
+
+    /// The queries that never reach kitty's loader leave an upload alone:
+    /// one naming both an image id and an image number (refused before
+    /// anything else, "Must not specify both image id and image number"),
+    /// one without an id ("Query graphics command without image id"), and a
+    /// feature query (`e=`), which kitty 0.49 rejects as a key it does not
+    /// know and later kitty keeps clear of any load in progress.
+    #[test]
+    fn a_kitty_query_that_never_reaches_the_loader_leaves_an_upload_alone() {
+        for query in [
+            &b"\x1b_Ga=q,i=31,I=7;BBBB\x1b\\"[..],
+            b"\x1b_Ga=q;BBBB\x1b\\",
+            b"\x1b_Ga=q,i=0;BBBB\x1b\\",
+            b"\x1b_Ga=q,i=31,e=T;BBBB\x1b\\",
+        ] {
+            let wire = [UPLOAD_OF_5, query, b"\x1b_Gm=0;CCCC\x1b\\"].concat();
+            let (seen, queries, _) = kitty_events(&wire);
+            let shown = String::from_utf8_lossy(query);
+            assert_eq!(seen.len(), 1, "{shown}: {seen:?}");
+            assert_eq!(seen[0].data(), Some(&b"AAAACCCC"[..]), "{shown}");
+            assert_eq!(loads(&queries)[0].1, KittyLoad::Loaded, "{shown}");
+        }
+    }
+
+    /// With `m=1`, kitty loads the query's data and then, as after every
+    /// query, trims each image whose data is not loaded yet
+    /// (`remove_images(self, add_trim_predicate, 0)`) — the very image being
+    /// loaded. Its loader still names that image, so the chunk after is
+    /// refused (`EILSEQ`, "More payload loading refers to non-existent
+    /// image") and clears it (#672). No image comes of any of it, and
+    /// nothing answers the query.
+    #[test]
+    fn a_kitty_query_with_m_1_leaves_kittys_loader_on_a_removed_image() {
+        let query: &[u8] = b"\x1b_Ga=q,i=31,m=1;BBBB\x1b\\";
+        let last: &[u8] = b"\x1b_Gm=0;CCCC\x1b\\";
+        let (seen, queries, tracker) = kitty_events(&[UPLOAD_OF_5, query, last].concat());
+        assert!(seen.is_empty(), "{seen:?}");
+        assert_eq!(loads(&queries), [(Some(31), KittyLoad::Pending)]);
+        assert_eq!(tracker.graphics().kitty, 0);
+        assert_eq!(
+            tracker.graphics().bytes,
+            wire_cost(&[UPLOAD_OF_5, query, last])
+        );
+        // A query split into chunks by itself goes the same way: its own
+        // test image is the one removed.
+        let (seen, queries, _) = kitty_events(&[query, last].concat());
+        assert!(seen.is_empty(), "{seen:?}");
+        assert_eq!(loads(&queries), [(Some(31), KittyLoad::Pending)]);
+        // Once refused, the loader is clear: the next transmission is an
+        // image like any other.
+        let fresh: &[u8] = b"\x1b_Ga=T,f=24,s=1,v=1,i=9;QUJD\x1b\\";
+        let seen = payloads(&[UPLOAD_OF_5, query, last, fresh].concat());
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].id(), Some(9));
+    }
+
+    /// Whatever kitty would take as the load's next chunk is refused while
+    /// the loader names a removed image — a fresh transmission with the
+    /// data in the escape too (`init_img` is false whenever a load is under
+    /// way), and a query, which gets `EILSEQ`. A delete frees the load
+    /// first (`free_load_data`), and so does a transmission from a file;
+    /// a placement leaves it as it is (#672).
+    #[test]
+    fn kittys_loader_on_a_removed_image_refuses_the_next_chunk_whatever_it_is() {
+        let orphan: &[u8] = b"\x1b_Ga=q,i=31,m=1;AAAA\x1b\\";
+        let fresh: &[u8] = b"\x1b_Ga=T,f=24,s=1,v=1,i=9;QUJD\x1b\\";
+        let (seen, _, tracker) = kitty_events(&[orphan, fresh].concat());
+        assert!(seen.is_empty(), "refused: {seen:?}");
+        assert_eq!(
+            tracker.graphics().bytes,
+            wire_cost(&[fresh]),
+            "but it crossed the wire"
+        );
+
+        let (_, queries, _) = kitty_events(
+            &[
+                orphan,
+                b"\x1b_Ga=q,i=32;BBBB\x1b\\",
+                b"\x1b_Ga=q,i=33;CCCC\x1b\\",
+            ]
+            .concat(),
+        );
+        assert_eq!(
+            loads(&queries),
+            [
+                (Some(31), KittyLoad::Pending),
+                (Some(32), KittyLoad::Gone),
+                (Some(33), KittyLoad::Loaded),
+            ]
+        );
+
+        // Whether the fresh transmission is an image after each of these.
+        for (between, cleared) in [
+            (&b"\x1b_Ga=d,d=I,i=4\x1b\\"[..], true),
+            (b"\x1b_Ga=t,t=f,i=8;L3RtcC94\x1b\\", true),
+            (b"\x1b_Ga=p,i=4\x1b\\", false),
+        ] {
+            let seen = payloads(&[orphan, between, fresh].concat());
+            assert_eq!(
+                seen.iter().any(|payload| payload.id() == Some(9)),
+                cleared,
+                "{}: {seen:?}",
+                String::from_utf8_lossy(between)
+            );
+        }
+    }
+
+    /// A query from a file or shared memory starts a test load of its own,
+    /// which drops the upload in progress (`handle_add_command` resets the
+    /// loader when `init_img` is true) (#672).
+    #[test]
+    fn a_kitty_query_from_a_file_mid_upload_drops_the_upload() {
+        let wire = [
+            UPLOAD_OF_5,
+            b"\x1b_Ga=q,i=31,t=f;L3RtcC94\x1b\\",
+            b"\x1b_Gm=0;CCCC\x1b\\",
+        ]
+        .concat();
+        let (seen, queries, _) = kitty_events(&wire);
+        assert!(
+            seen.iter().all(|payload| payload.id() != Some(5)),
+            "{seen:?}"
+        );
+        assert_eq!(loads(&queries), [(Some(31), KittyLoad::Loaded)]);
     }
 
     /// Chunks each padded on their own, as the protocol allows: kitty
@@ -3549,7 +3870,7 @@ mod tests {
         bytes
             .iter()
             .filter_map(|&b| match t.step(b) {
-                SeqEvent::Query(q) => Some(q),
+                SeqEvent::Query(q) | SeqEvent::GraphicsQuery(_, _, q) => Some(q),
                 _ => None,
             })
             .collect()
@@ -3624,7 +3945,10 @@ mod tests {
             queries_of(b"\x1b_Ga=q;\x1b\\"),
             vec![Query::KittyGraphics {
                 id: None,
+                number: None,
+                placement: None,
                 quiet: 0,
+                load: KittyLoad::Loaded,
                 shape: "^[_Ga=q;^[\\".into()
             }]
         );

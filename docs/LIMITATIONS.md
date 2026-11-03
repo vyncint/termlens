@@ -123,6 +123,28 @@ CHANGELOG entry.
   and its sixel-scrolls-right mode (`CSI ? 8452 h`) are not modelled. A
   `Graphics::None` terminal, the default, moves nothing: it ignores both
   escapes.
+- **The kitty capture follows kitty's `graphics.c` (0.49) only as far as the
+  escapes decide it.** A delete frees an image here only by id — `d=I`, or
+  `d=R` over a range of ids, without `p=` — so an `a=p` after one is not
+  moved. A delete that frees an image because its last placement went
+  (`p=`, or a delete by position, z-index, number or frame), a screen clear
+  or hard reset (kitty then frees every image left without a placement),
+  the alternate screen's separate image store and kitty's storage quota are
+  not modelled, since termlens does not track placements: an `a=p` after
+  one is still sized from the payload log. A query is answered `OK` without
+  kitty's test load, so one whose data kitty could not load gets an error
+  from kitty and `OK` here. kitty answers a transmission or a placement
+  that names `i=` (`i=…;OK`, unless `q=` silences it); termlens answers only
+  queries. A command naming both `i=` and `I=` is refused by kitty whatever
+  its action; termlens answers a query so, but still captures, counts and
+  places a transmission or placement that does. termlens starts kitty's
+  loader over on a sixel and on a hard reset: kitty ignores the sixel and
+  goes on with the upload, and after a reset its loader still names the
+  image the reset removed, so it refuses the next transmission that carries
+  its data. And chunks that break the protocol's rule that every chunk but
+  the last is a multiple of four base64 characters are decoded joined, not
+  one escape at a time as kitty decodes them (#637); a stream that keeps
+  the rule decodes exactly as kitty decodes it.
 - **Hyperlinks are captured, not attributed to cells.** `links()` reports
   every `OSC 8` span with its target, its `id`, and the text it wrapped, so
   "did it link the right place?" is assertable — but a `Cell` does not carry
