@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 
-use crate::emu::{Emulator, InputModes, MouseEncoding, Query, Stop, Vt100Emulator};
+use crate::emu::{Emulator, InputModes, KittyLoad, MouseEncoding, Query, Stop, Vt100Emulator};
 use crate::error::{Error, Result};
 use crate::keys::Input;
 use crate::keys::{mouse_legacy, mouse_sgr, mouse_urxvt, mouse_utf8};
@@ -514,9 +514,10 @@ pub enum Graphics {
     None,
     /// Sixel: DA1 gains `4`, so a probing application sees the capability.
     Sixel,
-    /// Kitty graphics: the `a=q` capability probe is answered `OK`, as
-    /// kitty answers it — echoing its `i=`, and not at all when it names no
-    /// image id or asks for quiet with `q=`.
+    /// Kitty graphics: the `a=q` capability probe is answered as kitty
+    /// answers it — `OK` echoing its `i=`, kitty's error where kitty refuses
+    /// it, and not at all when it names no image id, asks for quiet with
+    /// `q=`, or joins an upload still waiting for chunks.
     Kitty,
 }
 
@@ -1426,23 +1427,76 @@ impl EmuState {
             // responses from the terminal"). termlens used to answer all
             // four `OK`, putting bytes into an input stream the application
             // had asked to keep clean.
-            Query::KittyGraphics { id, quiet, shape } => {
+            //
+            // And what kitty's loader made of the query's data decides the
+            // rest (#672), as the tracker worked it out: see `KittyLoad`.
+            Query::KittyGraphics {
+                id,
+                number,
+                placement,
+                quiet,
+                load,
+                shape,
+            } => {
                 if self.graphics != Graphics::Kitty {
                     self.note_unanswered(shape.clone());
                     return None;
                 }
-                match (id.filter(|&id| id != 0), quiet) {
-                    (Some(id), 0) => format!("\x1b_Gi={id};OK\x1b\\").into_bytes(),
-                    // Asked for silence, and given it: naming the query in
-                    // a timeout would blame it for a reply the application
-                    // said it did not want.
-                    (Some(_), _) | (None, 2..) => return None,
+                let nonzero = |value: &Option<u32>| value.filter(|&value| value != 0);
+                // Before anything else, for every action: "Must not specify
+                // both image id and image number", and the reply echoes the
+                // keys of the command it refuses (#672). It was `OK`.
+                if let (Some(id), Some(number)) = (nonzero(id), nonzero(number)) {
+                    if *quiet >= 2 {
+                        return None;
+                    }
+                    let placement = nonzero(placement).map_or(String::new(), |p| format!(",p={p}"));
+                    return Some(
+                        format!(
+                            "\x1b_Gi={id},I={number}{placement};\
+                             EINVAL:Must not specify both image id and image number\x1b\\"
+                        )
+                        .into_bytes(),
+                    );
+                }
+                match (nonzero(id), load) {
                     // kitty refuses it ("Query graphics command without
                     // image id") and its error reply needs an id to go to,
                     // so nothing comes back. Named, since an application
-                    // that waits for an answer will wait for ever.
+                    // that waits for an answer will wait for ever — unless
+                    // it asked for silence (`q=2`), and was given it:
+                    // naming the query in a timeout would blame it for a
+                    // reply the application said it did not want.
                     (None, _) => {
-                        self.note_unanswered(shape.clone());
+                        if *quiet < 2 {
+                            self.note_unanswered(shape.clone());
+                        }
+                        return None;
+                    }
+                    (Some(id), KittyLoad::Loaded) => {
+                        if *quiet >= 1 {
+                            return None;
+                        }
+                        format!("\x1b_Gi={id};OK\x1b\\").into_bytes()
+                    }
+                    // An error, which only `q=2` silences.
+                    (Some(id), KittyLoad::Gone) => {
+                        if *quiet >= 2 {
+                            return None;
+                        }
+                        format!(
+                            "\x1b_Gi={id};EILSEQ:More payload loading refers to non-existent image\x1b\\"
+                        )
+                        .into_bytes()
+                    }
+                    // No data loaded yet and no error: kitty says nothing
+                    // (`finish_command_response` returns no reply), and a
+                    // load the query joined never answers it later. Named
+                    // unless `q=` asked for silence.
+                    (Some(_), KittyLoad::Pending) => {
+                        if *quiet == 0 {
+                            self.note_unanswered(shape.clone());
+                        }
                         return None;
                     }
                 }
@@ -4813,7 +4867,7 @@ mod tests {
         cells_between, check_mouse_in_grid, check_size, history_note, panic_detail, reader_loop,
         EmuState, Graphics, Monitor, Responder, Scroll, ScrollChord,
     };
-    use crate::emu::{Emulator, InputModes, ModeState, MouseEncoding, Processed, Query};
+    use crate::emu::{Emulator, InputModes, KittyLoad, ModeState, MouseEncoding, Processed, Query};
     use crate::screen::{Cell, Style, TermState};
     use crate::{Error, Screen};
 
@@ -4965,10 +5019,25 @@ mod tests {
     }
 
     fn kitty_query(id: Option<u32>, quiet: u32) -> crate::emu::Query {
+        kitty_query_of(id, None, None, quiet, KittyLoad::Loaded)
+    }
+
+    /// A kitty query with `i=`, `I=`, `p=` and `q=` as given, whose data
+    /// kitty's loader made `load` of.
+    fn kitty_query_of(
+        id: Option<u32>,
+        number: Option<u32>,
+        placement: Option<u32>,
+        quiet: u32,
+        load: KittyLoad,
+    ) -> crate::emu::Query {
         crate::emu::Query::KittyGraphics {
             id,
+            number,
+            placement,
             quiet,
-            shape: format!("^[_Ga=q,i={id:?},q={quiet}^[\\"),
+            load,
+            shape: format!("^[_Ga=q,i={id:?},I={number:?},q={quiet}^[\\"),
         }
     }
 
@@ -5011,6 +5080,69 @@ mod tests {
             let mut state = kitty_responder();
             assert_eq!(state.answer(&kitty_query(id, 2)), None, "{id:?}");
             assert!(state.unanswered.is_empty(), "{:?}", state.unanswered);
+        }
+    }
+
+    /// A command naming both an image id and an image number is refused
+    /// before kitty looks at anything else, and the refusal echoes the
+    /// command's keys: `grman_handle_command` opens with "Must not specify
+    /// both image id and image number" and `finish_command_response(g,
+    /// false)` (kitty 0.49 `graphics.c`) (#672). termlens answered `OK`. An
+    /// error, so `q=1` does not silence it and `q=2` does.
+    #[test]
+    fn a_kitty_query_naming_both_ids_is_refused_with_einval() {
+        let refusal = |keys: &str| {
+            format!("\x1b_G{keys};EINVAL:Must not specify both image id and image number\x1b\\")
+                .into_bytes()
+        };
+        let answer = |number, placement, quiet| {
+            let mut state = kitty_responder();
+            let reply = state.answer(&kitty_query_of(
+                Some(31),
+                number,
+                placement,
+                quiet,
+                KittyLoad::Loaded,
+            ));
+            assert!(state.unanswered.is_empty(), "{:?}", state.unanswered);
+            reply
+        };
+        assert_eq!(answer(Some(7), None, 0), Some(refusal("i=31,I=7")));
+        assert_eq!(answer(Some(7), None, 1), Some(refusal("i=31,I=7")));
+        assert_eq!(answer(Some(7), None, 2), None);
+        // A placement id is echoed too, and an `I=0` is no image number.
+        assert_eq!(answer(Some(7), Some(3), 0), Some(refusal("i=31,I=7,p=3")));
+        assert_eq!(
+            answer(Some(0), None, 0),
+            Some(b"\x1b_Gi=31;OK\x1b\\".to_vec())
+        );
+    }
+
+    /// Sent to a load whose image kitty had already removed, a query is
+    /// refused: `handle_add_command` aborts with `EILSEQ` and the error goes
+    /// to the query's id (#672). Only `q=2` silences an error.
+    #[test]
+    fn a_kitty_query_sent_to_a_removed_image_gets_eilseq() {
+        let refusal =
+            &b"\x1b_Gi=31;EILSEQ:More payload loading refers to non-existent image\x1b\\"[..];
+        for (quiet, reply) in [(0, Some(refusal)), (1, Some(refusal)), (2, None)] {
+            let mut state = kitty_responder();
+            let query = kitty_query_of(Some(31), None, None, quiet, KittyLoad::Gone);
+            assert_eq!(state.answer(&query).as_deref(), reply, "q={quiet}");
+        }
+    }
+
+    /// A query whose data joined a load still waiting for chunks has no
+    /// data loaded and no error, and kitty's `finish_command_response`
+    /// sends nothing for that (#672). Named, as an unanswered question is,
+    /// unless `q=` asked for silence.
+    #[test]
+    fn a_kitty_query_whose_load_waits_for_more_gets_no_reply() {
+        for (quiet, named) in [(0, 1), (1, 0), (2, 0)] {
+            let mut state = kitty_responder();
+            let query = kitty_query_of(Some(31), None, None, quiet, KittyLoad::Pending);
+            assert_eq!(state.answer(&query), None, "q={quiet}");
+            assert_eq!(state.unanswered.len(), named, "q={quiet}");
         }
     }
 
