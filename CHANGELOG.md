@@ -29,6 +29,7 @@ reads that marker.
   program blocked on one. A test that pins `unsupported()` exactly drops
   any `^[]0;…`, `^[]2;…` or `^[[?…S` entry from its expected list and adds
   a mode list such as `^[[4;20h` where its application sends one.
+
 - The urxvt mouse encoding (mode 1015) is honoured (#640). An application
   that enables it gets xterm's `CSI 32;5;3M` form, decimal and with no 222
   limit, where it got the legacy bytes; DECRQM answers for 1015; and the
@@ -38,11 +39,21 @@ reads that marker.
   encoding; it names the extended ones that would reach that far. A test
   that read legacy reports from an application enabling 1015 reads the
   urxvt form instead.
+
 - X10 mouse tracking (`CSI ? 9 h`) reports what xterm reports (#642).
   `click_with` sends the button alone, without the modifier bits, and
   `scroll` and `scroll_with` return `Error::Input`, since the mode reports
   no wheel. A test that scrolled under X10 expects that error, or has its
   application enable `?1000` instead.
+
+- The plain output of `termlens diff` ends with one newline, not a blank
+  line, and an unchanged-row count of one reads `… 1 row unchanged`
+  (#652). `ScreenDiff`'s `Display` already ended its last line, and the CLI
+  printed a second newline after it; "no difference" and the coloured
+  output were not affected. The library's `Display` says "1 row" too. A
+  script that compares `diff --color never` output byte for byte against a
+  file saved from 0.11.7 or earlier should drop that file's final empty
+  line and, where the count is one, the `s` of `rows`.
 
 ### Fixed
 
@@ -53,20 +64,42 @@ reads that marker.
   replies left in bursts several seconds apart; a reader with an
   inter-byte timeout, like termlens-demo's, saw them stop. The same 2000
   now take about 20 ms, and the reply is the one the snapshot gave.
+
 - `CSI ? 3 J` and `CSI 3:1 J` keep the history termlens had retained, as
   `CSI 3 J` does (#621). vt100 erases its saved lines for both, and the
   tracker missed them, so the emptied history read as rows pulled back
   onto the screen and the kept copy was popped.
+
 - RIS turns focus reporting off and ends an open synchronized update
   (#623). After `ESC c`, `focus_in` still typed `^[[I`, DECRQM answered
   `Set` for 1004 and 2026, and an update begun before the reset never
   ended, so every later `wait_stable` timed out. The half-drawn frame is
   dropped.
+
 - A control character inside an escape sequence is carried out and the
   sequence goes on, as the parser that feeds the grid does (#627). The
   tracker dropped to plain text there, so `ESC CR` before line-drawing
   text blanked the rest of the write, and the query in `ESC BEL [6n` went
   unanswered with its bell uncounted. The same holds inside a CSI.
+
+- `termlens render` and `termlens diff` accept `--` as the end of their
+  options, as `inspect` does (#650), so a file whose name begins with `-`
+  can be named: `termlens render --text -- -x.snap`. A `-` after `--` is
+  still standard input.
+
+- `termlens diff missing.snap -` reports the missing file at once (#651).
+  Both operands were read before either result was looked at, so `diff`
+  first waited for standard input to end, which at a terminal meant
+  Ctrl-D.
+
+- `termlens render` and `termlens diff` refuse an input larger than 1 GiB
+  with exit code 2 and a message saying so (#653). They read a whole file
+  or stream into memory with no bound, so `render --text /dev/zero` or
+  `yes | termlens render --text -` grew until the allocator or the OOM
+  killer stopped them. The largest screen termlens writes — 1000x1000
+  cells, each styled differently, as the pretty-printed JSON — is about
+  600 MB, so every saved screen an earlier release wrote still reads. A
+  regular file past the bound is refused before it is read.
 
 ## [0.11.7] - 2026-10-27
 
