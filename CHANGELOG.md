@@ -17,6 +17,36 @@ reads that marker.
 
 ## [Unreleased]
 
+### Changed
+
+- The plain output of `termlens diff` ends with one newline, not a blank
+  line, and an unchanged-row count of one reads `… 1 row unchanged`
+  (#652). `ScreenDiff`'s `Display` already ended its last line, and the CLI
+  printed a second newline after it; "no difference" and the coloured
+  output were not affected. The library's `Display` says "1 row" too. A
+  script that compares `diff --color never` output byte for byte against a
+  file saved from 0.11.7 or earlier should drop that file's final empty
+  line and, where the count is one, the `s` of `rows`.
+
+### Fixed
+
+- `termlens render` and `termlens diff` accept `--` as the end of their
+  options, as `inspect` does (#650), so a file whose name begins with `-`
+  can be named: `termlens render --text -- -x.snap`. A `-` after `--` is
+  still standard input.
+- `termlens diff missing.snap -` reports the missing file at once (#651).
+  Both operands were read before either result was looked at, so `diff`
+  first waited for standard input to end, which at a terminal meant
+  Ctrl-D.
+- `termlens render` and `termlens diff` refuse an input larger than 1 GiB
+  with exit code 2 and a message saying so (#653). They read a whole file
+  or stream into memory with no bound, so `render --text /dev/zero` or
+  `yes | termlens render --text -` grew until the allocator or the OOM
+  killer stopped them. The largest screen termlens writes — 1000x1000
+  cells, each styled differently, as the pretty-printed JSON — is about
+  600 MB, so every saved screen an earlier release wrote still reads. A
+  regular file past the bound is refused before it is read.
+
 ## [0.11.7] - 2026-10-27
 
 ### Changed
