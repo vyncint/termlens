@@ -17,12 +17,24 @@ reads that marker.
 
 ## [Unreleased]
 
+### Changed
+
+- The plain output of `termlens diff` ends with one newline, not a blank
+  line, and an unchanged-row count of one reads `… 1 row unchanged`
+  (#652). `ScreenDiff`'s `Display` already ended its last line, and the CLI
+  printed a second newline after it; "no difference" and the coloured
+  output were not affected. The library's `Display` says "1 row" too. A
+  script that compares `diff --color never` output byte for byte against a
+  file saved from 0.11.7 or earlier should drop that file's final empty
+  line and, where the count is one, the `s` of `rows`.
+
 ### Fixed
 
 - Every wait takes `Duration::MAX` as "no deadline", per call or as the
   builder's `timeout` (#629). Each one added the timeout to the current
   instant and panicked with "overflow when adding duration to instant"; the
   deadline is now the furthest instant the clock can represent.
+
 - A send under a builder `timeout` of zero, or of a few microseconds, no
   longer fails while its bytes are delivered (#632). It waited for the
   writer thread's acknowledgement for exactly the deadline, which expired
@@ -31,6 +43,7 @@ reads that marker.
   a second, and the error claims a full buffer only when a write into it is
   seen blocked; it reads "a write into it was still blocked after …" where
   it read "no progress in …".
+
 - `spawn("sub/prog")` of a file in the working directory that cannot be
   executed, or is not there, fails with the reason the OS gave for that
   file, "cannot execute …/sub/prog: Permission denied (os error 13)" or
@@ -39,6 +52,7 @@ reads that marker.
   never meant to be; the usual case is a `target/debug/app` downloaded as
   an artifact without its executable bit. A program a PATH entry provides
   under the same name is still found.
+
 - In a test process that ignores SIGCHLD, a terminal drops at once instead
   of taking two seconds, and nothing is signalled after the child has gone
   (#630). The kernel reaps every child itself there, and teardown read the
@@ -48,6 +62,7 @@ reads that marker.
   kernel reaped it, because SIGCHLD is ignored…") where it gave a bare "No
   child processes", and `signal` refuses with `Error::Input`, as it does for
   a child already waited for.
+
 - Dropping a terminal returns when the application left more input unread
   than its terminal holds, which a raw-mode application that stops reading
   allows (#628). The PTY layer writes an end-of-file as its writer is
@@ -56,12 +71,32 @@ reads that marker.
   the binary never exited. Teardown now makes the terminal's writes give up
   rather than wait and empties the queue nothing will read, so the writer
   thread stuck behind it ends too, instead of keeping the PTY open.
+
 - A spawn that fails closes the terminal it opened before it releases the
   PTY lifecycle lock (#633). It released the lock first, so on macOS the
   close could revoke a device another thread had just opened, the failure
   the lock exists to prevent; and a spawn that failed after opening the
   terminal but before starting the child could deadlock on the lock it
   held, instead of reporting why.
+
+- `termlens render` and `termlens diff` accept `--` as the end of their
+  options, as `inspect` does (#650), so a file whose name begins with `-`
+  can be named: `termlens render --text -- -x.snap`. A `-` after `--` is
+  still standard input.
+
+- `termlens diff missing.snap -` reports the missing file at once (#651).
+  Both operands were read before either result was looked at, so `diff`
+  first waited for standard input to end, which at a terminal meant
+  Ctrl-D.
+
+- `termlens render` and `termlens diff` refuse an input larger than 1 GiB
+  with exit code 2 and a message saying so (#653). They read a whole file
+  or stream into memory with no bound, so `render --text /dev/zero` or
+  `yes | termlens render --text -` grew until the allocator or the OOM
+  killer stopped them. The largest screen termlens writes — 1000x1000
+  cells, each styled differently, as the pretty-printed JSON — is about
+  600 MB, so every saved screen an earlier release wrote still reads. A
+  regular file past the bound is refused before it is read.
 
 ## [0.11.7] - 2026-10-27
 
