@@ -30,7 +30,7 @@ use crate::keys::{mouse_legacy, mouse_sgr, mouse_utf8};
 use crate::screen::{MouseMode, Screen};
 use crate::spawn::{spawn_child, PtyChild};
 use crate::utf8::Utf8Sanitizer;
-use crate::wait::{next_backoff, Expired, Monitor, INITIAL_BACKOFF, POLL_CAP};
+use crate::wait::{deadline_after, next_backoff, Expired, Monitor, INITIAL_BACKOFF, POLL_CAP};
 
 /// How long `wait_exit` keeps draining PTY output after the child has been
 /// reaped, so the final screen is complete. Best effort: a grandchild
@@ -3505,7 +3505,7 @@ impl Terminal {
         timeout: Duration,
     ) -> Result<()> {
         const WHAT: &str = "the screen predicate to hold";
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline_after(timeout);
         let mut seen_generation = None;
         let outcome = self.shared.wait_until(deadline, |state| {
             // Ahead of the generation check: a child that exited changes
@@ -3685,7 +3685,7 @@ impl Terminal {
         timeout: Duration,
     ) -> Result<Screen> {
         const WHAT: &str = "a complete frame matching the predicate";
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline_after(timeout);
         let cursor = self.frame_cursor;
         let mut seen_frame = None;
         let outcome = self.shared.wait_until(deadline, |state| {
@@ -3843,7 +3843,7 @@ impl Terminal {
     }
 
     fn wait_idle_deadline(&mut self, quiet: Duration, timeout: Duration) -> Result<()> {
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline_after(timeout);
         let mut guard = self.shared.lock();
         loop {
             self.exit_watch
@@ -4027,7 +4027,7 @@ impl Terminal {
     }
 
     fn wait_stable_deadline(&mut self, quiet: Duration, timeout: Duration) -> Result<Screen> {
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline_after(timeout);
         let mut guard = self.shared.lock();
         // The picture as last observed, and since when it has looked so.
         // Bytes are the only thing that can change the grid, so the last
@@ -4184,7 +4184,7 @@ impl Terminal {
         if let Some(status) = self.exit_status.clone() {
             return Ok(status);
         }
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline_after(timeout);
         let mut backoff = INITIAL_BACKOFF;
         loop {
             if let Some(status) = self.child.try_wait().map_err(Error::Io)? {

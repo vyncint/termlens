@@ -19,6 +19,10 @@ reads that marker.
 
 ### Fixed
 
+- Every wait takes `Duration::MAX` as "no deadline", per call or as the
+  builder's `timeout` (#629). Each one added the timeout to the current
+  instant and panicked with "overflow when adding duration to instant"; the
+  deadline is now the furthest instant the clock can represent.
 - Dropping a terminal returns when the application left more input unread
   than its terminal holds, which a raw-mode application that stops reading
   allows (#628). The PTY layer writes an end-of-file as its writer is
