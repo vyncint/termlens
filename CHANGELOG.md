@@ -23,6 +23,14 @@ reads that marker.
   builder's `timeout` (#629). Each one added the timeout to the current
   instant and panicked with "overflow when adding duration to instant"; the
   deadline is now the furthest instant the clock can represent.
+- A send under a builder `timeout` of zero, or of a few microseconds, no
+  longer fails while its bytes are delivered (#632). It waited for the
+  writer thread's acknowledgement for exactly the deadline, which expired
+  before that thread had run, and the error then said the application was
+  not reading and the buffer was full. A send now waits at least a tenth of
+  a second, and the error claims a full buffer only when a write into it is
+  seen blocked; it reads "a write into it was still blocked after …" where
+  it read "no progress in …".
 - Dropping a terminal returns when the application left more input unread
   than its terminal holds, which a raw-mode application that stops reading
   allows (#628). The PTY layer writes an end-of-file as its writer is

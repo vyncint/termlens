@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -233,6 +233,18 @@ struct WriteRequest {
     /// typed input, which reports through `ack` instead.
     replies: usize,
 }
+
+/// The least time a send waits for the writer to acknowledge its bytes,
+/// whatever the terminal's deadline.
+///
+/// A write to an application that is reading returns in microseconds, but
+/// it returns on another thread, and a zero deadline expired before that
+/// thread had run: with `timeout(Duration::ZERO)` every send failed, telling
+/// of a full buffer, while every byte was delivered (#632). Only a write
+/// still unacknowledged past this is reported. A tenth of a second is far
+/// past any write the application is reading, and still prompt for one that
+/// is truly stuck.
+const ACK_FLOOR: Duration = Duration::from_millis(100);
 
 /// How long `Drop` will wait for a killed child to be reaped before
 /// giving up. Teardown must terminate: a stuck child is a bad outcome, a
@@ -1648,6 +1660,11 @@ impl TerminalBuilder {
     }
 
     /// Default deadline applied to **every** `wait_*` call. Defaults to 5s.
+    ///
+    /// It is also how long a send waits for its bytes to be written before
+    /// it reports the application as not reading, though never less than a
+    /// tenth of a second: the write happens on another thread, and a
+    /// shorter wait reported writes that were merely not yet done (#632).
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -2103,6 +2120,9 @@ impl TerminalBuilder {
             .map_err(|e| Error::Pty(format!("taking PTY writer failed: {e}")))?;
 
         let replies_pending = Arc::new(AtomicUsize::new(0));
+        // Whether the writer thread is inside `write(2)` right now, so a send
+        // that gives up can tell a blocked write from one not yet begun.
+        let writer_busy = Arc::new(AtomicBool::new(false));
         // Reply bytes waiting for the writer, so the drain can refuse on a
         // memory bound instead of on a queue-slot count.
         let queued_bytes = Arc::new(AtomicUsize::new(0));
@@ -2144,6 +2164,7 @@ impl TerminalBuilder {
                 let (tx, rx) = mpsc::channel::<WriteRequest>();
                 let written = Arc::clone(&replies_pending);
                 let drained = Arc::clone(&queued_bytes);
+                let busy = Arc::clone(&writer_busy);
                 thread::Builder::new()
                     .name("termlens-pty-writer".into())
                     .spawn(move || {
@@ -2162,9 +2183,11 @@ impl TerminalBuilder {
                                 replies += next.replies;
                             }
                             let queued = bytes.len();
+                            busy.store(true, Ordering::Relaxed);
                             let result = pty_writer
                                 .write_all(&bytes)
                                 .and_then(|()| pty_writer.flush());
+                            busy.store(false, Ordering::Relaxed);
                             // Only after the bytes are actually out: while
                             // this write is blocked, those replies are
                             // undelivered, and that is precisely what the
@@ -2229,6 +2252,7 @@ impl TerminalBuilder {
             master: Some(opening.spawned()),
             writer,
             write_tx,
+            writer_busy,
             shared,
             default_timeout: self.timeout,
             exit_status: None,
@@ -2742,6 +2766,8 @@ pub struct Terminal {
     /// Queue to the writer thread. `None` only when no descriptor could
     /// be duplicated, in which case writes go through `writer` directly.
     write_tx: Option<mpsc::Sender<WriteRequest>>,
+    /// Set by the writer thread while it is inside `write(2)`.
+    writer_busy: Arc<AtomicBool>,
     shared: Arc<Monitor<EmuState>>,
     default_timeout: Duration,
     exit_status: Option<ExitStatus>,
@@ -3404,17 +3430,6 @@ impl Terminal {
             };
         };
 
-        // The write is not withdrawn: it is mid-`write(2)` on the writer
-        // thread, which no portable call can interrupt, and the rest of it
-        // follows once the application reads again (#590).
-        let not_reading = || {
-            format!(
-                "the application is not reading its input, and the PTY buffer is \
-                 full — no progress in {:?}; what was not written stays queued and \
-                 reaches the application if it reads again",
-                self.default_timeout
-            )
-        };
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
         let request = WriteRequest {
             bytes: bytes.to_vec(),
@@ -3429,10 +3444,33 @@ impl Terminal {
         if tx.send(request).is_err() {
             return Err("the terminal is closed".to_owned());
         }
-        match ack_rx.recv_timeout(self.default_timeout) {
+        let mut waited = self.default_timeout.max(ACK_FLOOR);
+        let busy = || self.writer_busy.load(Ordering::Relaxed);
+        let mut outcome = ack_rx.recv_timeout(waited);
+        // No write blocked means nothing stands between these bytes and the
+        // application but the writer thread getting to run, so it is given
+        // the floor once more before anything is reported.
+        if matches!(outcome, Err(mpsc::RecvTimeoutError::Timeout)) && !busy() {
+            outcome = ack_rx.recv_timeout(ACK_FLOOR);
+            waited += ACK_FLOOR;
+        }
+        match outcome {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(e.to_string()),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(not_reading()),
+            // The write is not withdrawn: it is mid-`write(2)` on the writer
+            // thread, which no portable call can interrupt, and the rest of
+            // it follows once the application reads again (#590). A full
+            // buffer is claimed only while a write is seen blocked, this one
+            // or one ahead of it (#632).
+            Err(mpsc::RecvTimeoutError::Timeout) if busy() => Err(format!(
+                "the application is not reading its input, and the PTY buffer is \
+                 full — a write into it was still blocked after {waited:?}; what was not \
+                 written stays queued and reaches the application if it reads again"
+            )),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+                "the bytes were not acknowledged within {waited:?}, and no write into \
+                 the PTY was blocked; they stay queued and reach the application in order"
+            )),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err("the terminal is closed".to_owned()),
         }
     }
