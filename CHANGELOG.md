@@ -76,6 +76,18 @@ reads that marker.
   file saved from 0.11.7 or earlier should drop that file's final empty
   line and, where the count is one, the `s` of `rows`.
 
+- A multi-row needle no longer matches in cells a previous match used, in
+  `Screen::find_all` and `mask_matching` (#670). The scan resumed on the
+  row a match ended on and took any match starting there, so on four rows
+  reading `a`, `find_all("a\na")` was three matches, each sharing a cell
+  with the next, and the mask covered all of them, where the rustdoc said
+  matches do not overlap. A match may still start on that row to the right
+  of the last cell the previous one used, counted in grid columns, so on
+  `xxxa`, `axxxa`, `axxx` the needle is still found twice. A test that
+  asserts `find_all(…).len()` for such a needle expects the
+  non-overlapping count, `[(0, 0), (2, 0)]` above rather than three, and a
+  snapshot of such a mask shows the rows no match now covers unmasked.
+
 ### Fixed
 
 - The report action writes each screen into the step summary verbatim
