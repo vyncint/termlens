@@ -29,9 +29,10 @@ What the project does continuously, enforced by required CI on every change:
   The workspace sets `unsafe_code = "warn"` and CI runs clippy with
   `-D warnings`, so a new block fails unless it carries that `#[allow]` as
   well: the attribute is what review has to see, not a count the lint
-  keeps. None touches memory the child can influence. Everything on the
-  parsing path is pure Rust: escape sequences from the child are parsed,
-  never executed or evaluated.
+  keeps. The count above is held to the code by
+  `.github/scripts/check-unsafe-blocks.sh`. None touches memory the child
+  can influence. Everything on the parsing path is pure Rust: escape
+  sequences from the child are parsed, never executed or evaluated.
 - **Dependency policy** (`cargo-deny` job): RUSTSEC advisories, yanked
   crates, license allowlist, and crates.io-only sources — on every PR, with
   weekly grouped Dependabot updates and Dependabot alerts enabled.

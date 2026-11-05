@@ -17,6 +17,13 @@ reads that marker.
 
 ## [Unreleased]
 
+### Fixed
+
+- `SECURITY.md` counts the eight `unsafe` blocks there are: 0.11.8 added
+  `waitid(2)` (#630), and `fcntl(2)` and `tcflush(2)` in teardown (#628).
+  A new gate, `.github/scripts/check-unsafe-blocks.sh`, fails CI when the
+  count there and the blocks in `crates/*/src` disagree (#706).
+
 ## [0.11.8] - 2026-11-03
 
 ### Changed
