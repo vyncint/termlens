@@ -10,18 +10,22 @@ issues in escape-sequence handling) are treated as security issues.
 
 What the project does continuously, enforced by required CI on every change:
 
-- **`unsafe` is confined to five audited blocks, all Unix-only.** Three
+- **`unsafe` is confined to eight audited blocks, all Unix-only.** Three
   are single lines. `BorrowedFd::borrow_raw` borrows the PTY master's
   descriptor, which std then duplicates, close-on-exec, into the responder
   thread's second writer. `access(2)` resolves the program the way the PTY
   layer does. `kill(2)` sits behind `Terminal::signal`. The fourth asks
   `sigaction(2)` whether the kernel reaps this process's children. The
-  fifth is the `pre_exec` hook in `src/spawn.rs`, which runs in the forked
-  child before exec. It repeats portable-pty's own hook step by step, with
-  two changes: inherited descriptors are marked close-on-exec rather than
-  closed, so that a failed exec can be reported (#563), and the umask step
-  is left out because termlens never sets a umask. Each block sits under
-  its own `SAFETY` comment and carries its own `#[allow(unsafe_code)]`.
+  fifth asks `waitid(2)` with `WNOWAIT` whether a child has already been
+  reaped (#630). The sixth and seventh unblock teardown (#628): `fcntl(2)`
+  sets the master descriptor non-blocking, and `tcflush(2)` flushes unread
+  slave input. The eighth is the `pre_exec` hook in `src/spawn.rs`, which
+  runs in the forked child before exec. It repeats portable-pty's own hook
+  step by step, with two changes: inherited descriptors are marked
+  close-on-exec rather than closed, so that a failed exec can be reported
+  (#563), and the umask step is left out because termlens never sets a
+  umask. Each block sits under its own `SAFETY` comment and carries its own
+  `#[allow(unsafe_code)]`.
   The workspace sets `unsafe_code = "warn"` and CI runs clippy with
   `-D warnings`, so a new block fails unless it carries that `#[allow]` as
   well: the attribute is what review has to see, not a count the lint
