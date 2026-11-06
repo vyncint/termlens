@@ -109,8 +109,10 @@ cargo check --workspace                       # refreshes Cargo.lock
 $EDITOR CHANGELOG.md                          # [Unreleased] -> [X.Y.Z] - YYYY-MM-DD
                                               # add a fresh empty [Unreleased] above
                                               # and two lines at the foot
-# Release notes stop above the link definitions, so they are unchanged by
-# this; `extract-changelog.sh X.Y.Z` prints exactly the section.
+# Release notes are the section plus the definitions it links (#658), so
+# they are unchanged by adding the compare links at the foot (neither is
+# named in the section's body); `extract-changelog.sh X.Y.Z` prints the
+# section with the definitions it links.
 .github/scripts/extract-changelog.sh X.Y.Z    # what the GitHub Release will say
 
 # 2b. Freeze this release's saved-screen shapes into the compatibility
