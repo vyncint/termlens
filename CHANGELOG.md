@@ -23,6 +23,9 @@ reads that marker.
   `waitid(2)` (#630), and `fcntl(2)` and `tcflush(2)` in teardown (#628).
   A new gate, `.github/scripts/check-unsafe-blocks.sh`, fails CI when the
   count there and the blocks in `crates/*/src` disagree (#706).
+- `docs/RELEASING.md` step 2 notes that release notes consist of the
+  section plus the definitions it links (#658), and are unaffected by the
+  compare definitions added at the foot (#722).
 
 ## [0.11.8] - 2026-11-03
 
