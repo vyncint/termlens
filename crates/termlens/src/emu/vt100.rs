@@ -844,13 +844,23 @@ impl Emulator for Vt100Emulator {
                     fed = i + 1;
                     None
                 }
-                SeqEvent::AlternateScreen => {
-                    // Everything before the final byte goes first, so the
-                    // capture that feed runs reads the main screen's history
-                    // while it is still the one on display (#622). The final
-                    // byte goes with the rest of the read.
-                    self.feed_staged(&bytes[fed..i]);
-                    fed = i;
+                SeqEvent::AlternateScreen { leaving } => {
+                    // On the way in, everything before the final byte goes
+                    // first, so the capture that feed runs reads the main
+                    // screen's history while it is still the one on display
+                    // (#622); the final byte goes with the rest of the read.
+                    //
+                    // On the way out the final byte goes too, so that
+                    // capture reads the main screen back before the rest of
+                    // the read scrolls it. A taller resize while it was
+                    // hidden pulled rows back out of its history; settled in
+                    // one feed with new rows scrolling off, the rows pulled
+                    // back and the rows pushed cancelled in the length, and
+                    // the copy kept a row the grid had taken back and lost
+                    // the row that scrolled, by where the read split (#682).
+                    let end = if leaving { i + 1 } else { i };
+                    self.feed_staged(&bytes[fed..end]);
+                    fed = end;
                     None
                 }
                 SeqEvent::Tabs(op) => {
@@ -2065,6 +2075,38 @@ mod tests {
         let s = emu.snapshot();
         assert_eq!(s.scrollback_text(), "");
         assert_eq!(s.full_text(), "1\n2\n3\n4\nend");
+    }
+
+    #[test]
+    fn leaving_the_alternate_screen_settles_a_taller_resize_before_new_rows() {
+        // A taller resize while the alternate screen is up pulls `L1` back
+        // out of the main screen's history. Leaving it and scrolling `NEW1`
+        // off in one feed left the history its old length: the pop and the
+        // push cancelled, so the copy kept `L1`, a row now on the grid and
+        // then erased, and never took `NEW1` — unless the read happened to
+        // split right after the exit (#682). Every split, every spelling.
+        for (enter, exit) in [
+            ("\x1b[?1049h", "\x1b[?1049l"),
+            ("\x1b[?1047h", "\x1b[?1047l"),
+            ("\x1b[?47h", "\x1b[?47l"),
+            ("\x1b[?1049h", "\x1b[?25;1049l"),
+        ] {
+            let tail = format!("{exit}\x1b[2J\x1b[HNEW1\r\nNEW2\r\nNEW3\r\nNEW4\r\nNEW5");
+            for styled in [false, true] {
+                for split in 0..=tail.len() {
+                    let mut emu =
+                        Vt100Emulator::new(3, 10, 100, crate::graphics::DEFAULT_CAPTURE, styled);
+                    feed_all(&mut emu, format!("L1\r\nL2\r\nL3\r\nL4{enter}").as_bytes());
+                    emu.set_size(4, 10);
+                    feed_all(&mut emu, &tail.as_bytes()[..split]);
+                    feed_all(&mut emu, &tail.as_bytes()[split..]);
+                    let s = emu.snapshot();
+                    let at = format!("{exit:?}, styled {styled}, split at {split}");
+                    assert_eq!(s.scrollback_text(), "NEW1", "{at}");
+                    assert_eq!(s.text(), "NEW2\nNEW3\nNEW4\nNEW5", "{at}");
+                }
+            }
+        }
     }
 
     #[test]

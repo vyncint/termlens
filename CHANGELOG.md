@@ -27,6 +27,14 @@ reads that marker.
   section plus the definitions it links (#658), and are unaffected by the
   compare definitions added at the foot (#722).
 
+- Leaving the alternate screen keeps the history right after a taller
+  resize (#682), a regression in 0.11.8. When the terminal grew while the
+  alternate screen was up, and the application left it (`?1049l`, `?47l`
+  or `?1047l`) in the same read as output that scrolled, `scrollback_text()`
+  kept a row the resize had pulled back onto the grid and lost the row that
+  scrolled off, by where the PTY split the read. The exit is now settled
+  before the rest of the read, as the entry is since #622.
+
 ## [0.11.8] - 2026-11-03
 
 ### Changed
