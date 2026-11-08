@@ -20,7 +20,9 @@
 //! a message naming it rather than read as far as the fields happen to
 //! line up.
 
-use serde::de::Error as _;
+use std::fmt;
+
+use serde::de::{DeserializeSeed, Error as _, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{parse, Cell, MouseModes, Screen, TermState};
@@ -51,20 +53,251 @@ struct Wire<'a> {
     state: &'a TermState,
 }
 
-/// 0.10 wrote no `format` field; its shape is format 1.
-fn format_when_absent() -> u32 {
-    JSON_FORMAT
-}
-
-#[derive(Deserialize)]
+/// What is read back: the [`Wire`] fields, owned, less `format`, which
+/// [`WireVisitor`] checks as it reads it.
 struct OwnedWire {
-    #[serde(default = "format_when_absent")]
-    format: u32,
     cols: u16,
     rows: u16,
     cursor: Cursor,
     cells: Vec<Vec<Cell>>,
     state: TermState,
+}
+
+/// The fields, in the order [`Wire`] writes them, which is the order a
+/// format without field names reads them in.
+const FIELDS: &[&str] = &["format", "cols", "rows", "cursor", "cells", "state"];
+
+/// A field name; one this build does not know is skipped, as the derive
+/// that read [`OwnedWire`] until #713 skipped it.
+#[derive(Deserialize)]
+#[serde(field_identifier, rename_all = "snake_case")]
+enum Field {
+    Format,
+    Cols,
+    Rows,
+    Cursor,
+    Cells,
+    State,
+    #[serde(other)]
+    Other,
+}
+
+/// The refusal of a format this build does not read.
+fn unknown_format<E: serde::de::Error>(format: u32) -> E {
+    E::custom(format!(
+        "saved-screen JSON format {format} is not one this termlens reads (it reads format {JSON_FORMAT}); \
+         a newer termlens wrote this file"
+    ))
+}
+
+/// [`OwnedWire`] by hand, so the grid is read against the header (#713).
+///
+/// A derive read `cells` into vectors before anything looked at their
+/// count, so the file's size bounded the memory and not the screen's: a
+/// 1x1 header over 67 million empty rows, 201 MB on disk, took 1.77 GB to
+/// read before it was refused. The grid is read through [`Grid`] instead,
+/// which stops at the first row or cell past what `rows` and `cols`
+/// declare. Otherwise this is the derive's document: the same fields,
+/// `format` defaulting to 1 (0.10 wrote none, and its shape is format 1),
+/// an unknown field skipped, a missing or repeated one an error.
+struct WireVisitor;
+
+impl<'de> Visitor<'de> for WireVisitor {
+    type Value = OwnedWire;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("struct OwnedWire")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<OwnedWire, A::Error> {
+        let mut format: Option<u32> = None;
+        let mut cols: Option<u16> = None;
+        let mut rows: Option<u16> = None;
+        let mut cursor: Option<Cursor> = None;
+        let mut cells: Option<Vec<Vec<Cell>>> = None;
+        let mut state: Option<TermState> = None;
+        fn once<T, E: serde::de::Error>(slot: &Option<T>, name: &'static str) -> Result<(), E> {
+            match slot {
+                Some(_) => Err(E::duplicate_field(name)),
+                None => Ok(()),
+            }
+        }
+        while let Some(key) = map.next_key::<Field>()? {
+            match key {
+                Field::Format => {
+                    once(&format, "format")?;
+                    let read: u32 = map.next_value()?;
+                    // Refused at once: a newer format's grid is not this
+                    // one's, and its shape is not worth reading to say so.
+                    if read != JSON_FORMAT {
+                        return Err(unknown_format(read));
+                    }
+                    format = Some(read);
+                }
+                Field::Cols => {
+                    once(&cols, "cols")?;
+                    cols = Some(map.next_value()?);
+                }
+                Field::Rows => {
+                    once(&rows, "rows")?;
+                    rows = Some(map.next_value()?);
+                }
+                Field::Cursor => {
+                    once(&cursor, "cursor")?;
+                    cursor = Some(map.next_value()?);
+                }
+                Field::Cells => {
+                    once(&cells, "cells")?;
+                    cells = Some(map.next_value_seed(Grid { cols, rows })?);
+                }
+                Field::State => {
+                    once(&state, "state")?;
+                    state = Some(map.next_value()?);
+                }
+                Field::Other => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(OwnedWire {
+            cols: cols.ok_or_else(|| A::Error::missing_field("cols"))?,
+            rows: rows.ok_or_else(|| A::Error::missing_field("rows"))?,
+            cursor: cursor.ok_or_else(|| A::Error::missing_field("cursor"))?,
+            cells: cells.ok_or_else(|| A::Error::missing_field("cells"))?,
+            state: state.ok_or_else(|| A::Error::missing_field("state"))?,
+        })
+    }
+
+    /// A format without field names writes the fields in order, so the
+    /// header is read before the grid.
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<OwnedWire, A::Error> {
+        let format = seq.next_element()?.unwrap_or(JSON_FORMAT);
+        if format != JSON_FORMAT {
+            return Err(unknown_format(format));
+        }
+        let missing =
+            |index: usize| A::Error::invalid_length(index, &"struct OwnedWire with 6 elements");
+        let cols: u16 = seq.next_element()?.ok_or_else(|| missing(1))?;
+        let rows: u16 = seq.next_element()?.ok_or_else(|| missing(2))?;
+        let cursor = seq.next_element()?.ok_or_else(|| missing(3))?;
+        let cells = seq
+            .next_element_seed(Grid {
+                cols: Some(cols),
+                rows: Some(rows),
+            })?
+            .ok_or_else(|| missing(4))?;
+        let state = seq.next_element()?.ok_or_else(|| missing(5))?;
+        Ok(OwnedWire {
+            cols,
+            rows,
+            cursor,
+            cells,
+            state,
+        })
+    }
+}
+
+/// How many rows or cells to read for a declared count: the count, or the
+/// per-axis limit when there is none yet (the grid came before the header)
+/// or it is one no screen has, which the checks after the read refuse.
+fn bound(declared: Option<u16>) -> usize {
+    match declared {
+        Some(n) if (1..=MAX_DIMENSION).contains(&n) => usize::from(n),
+        _ => usize::from(MAX_DIMENSION),
+    }
+}
+
+/// `cells`, read against the declared size (#713). Each row is read
+/// through [`Row`], and the first one past the count is refused, so the
+/// grid never holds more than `rows` rows of at most `cols` cells.
+struct Grid {
+    cols: Option<u16>,
+    rows: Option<u16>,
+}
+
+impl<'de> DeserializeSeed<'de> for Grid {
+    type Value = Vec<Vec<Cell>>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_seq(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Grid {
+    type Value = Vec<Vec<Cell>>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a sequence")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let most = bound(self.rows);
+        let mut grid = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(most));
+        while let Some(row) = seq.next_element_seed(Row {
+            index: grid.len(),
+            cols: self.cols,
+        })? {
+            if grid.len() == most {
+                return Err(A::Error::custom(match (self.cols, self.rows) {
+                    (Some(cols), Some(rows)) if usize::from(rows) == most => {
+                        format!("a {cols}x{rows} screen needs {rows} rows of cells, not more")
+                    }
+                    _ => format!(
+                        "more than {MAX_DIMENSION} rows of cells, past the \
+                         {MAX_DIMENSION}-per-axis limit of a terminal"
+                    ),
+                }));
+            }
+            grid.push(row);
+        }
+        Ok(grid)
+    }
+}
+
+/// One row of `cells`, held to the declared width as [`Grid`] holds the
+/// rows to the declared count.
+struct Row {
+    index: usize,
+    cols: Option<u16>,
+}
+
+impl<'de> DeserializeSeed<'de> for Row {
+    type Value = Vec<Cell>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_seq(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Row {
+    type Value = Vec<Cell>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a sequence")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let most = bound(self.cols);
+        let mut row = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(most));
+        while let Some(cell) = seq.next_element::<Cell>()? {
+            if row.len() == most {
+                let index = self.index;
+                return Err(A::Error::custom(match self.cols {
+                    Some(cols) if usize::from(cols) == most => {
+                        format!(
+                            "row {index} of a {cols}-column screen holds more than {cols} cells"
+                        )
+                    }
+                    _ => format!(
+                        "row {index} holds more than {MAX_DIMENSION} cells, past the \
+                         {MAX_DIMENSION}-per-axis limit of a terminal"
+                    ),
+                }));
+            }
+            row.push(cell);
+        }
+        Ok(row)
+    }
 }
 
 impl Serialize for Screen {
@@ -88,14 +321,7 @@ impl Serialize for Screen {
 
 impl<'de> Deserialize<'de> for Screen {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let wire = OwnedWire::deserialize(deserializer)?;
-        if wire.format != JSON_FORMAT {
-            return Err(D::Error::custom(format!(
-                "saved-screen JSON format {} is not one this termlens reads (it reads format {JSON_FORMAT}); \
-                 a newer termlens wrote this file",
-                wire.format
-            )));
-        }
+        let wire = deserializer.deserialize_struct("OwnedWire", FIELDS, WireVisitor)?;
         if wire.cols > MAX_DIMENSION || wire.rows > MAX_DIMENSION {
             return Err(D::Error::custom(format!(
                 "{}x{} is past the {MAX_DIMENSION}-per-axis limit of a terminal, \
@@ -277,4 +503,143 @@ fn check_cell(cell: &Cell) -> Result<(), String> {
 /// column wide in code, ahead of its tables.
 fn one_column(ch: char) -> bool {
     matches!(ch, ' '..='~')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::screen::Style;
+
+    fn cell() -> String {
+        serde_json::to_string(&Cell::new("x".into(), Style::default(), false, false)).unwrap()
+    }
+
+    const CURSOR: &str = r#""cursor":{"row":0,"col":0,"visible":true}"#;
+
+    /// The grid is checked against the header while it is read (#713): the
+    /// row past the declared count is refused before anything after it is
+    /// read, so the text after it here — not JSON at all — is never seen.
+    /// A file of empty rows used to cost a vector per row first.
+    #[test]
+    fn a_row_past_the_declared_count_is_refused_before_the_rest_is_read() {
+        let cell = cell();
+        let json =
+            format!(r#"{{"format":1,"cols":1,"rows":1,{CURSOR},"cells":[[{cell}],[], not json"#);
+        let err = serde_json::from_str::<Screen>(&json)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("a 1x1 screen needs 1 rows of cells, not more"),
+            "{err}"
+        );
+    }
+
+    /// A row is held to the declared width the same way (#713).
+    #[test]
+    fn a_cell_past_the_declared_width_is_refused_before_the_rest_is_read() {
+        let cell = cell();
+        let json = format!(
+            r#"{{"format":1,"cols":1,"rows":2,{CURSOR},"cells":[[{cell}],[{cell},{cell}, not json"#
+        );
+        let err = serde_json::from_str::<Screen>(&json)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("row 1 of a 1-column screen holds more than 1 cells"),
+            "{err}"
+        );
+    }
+
+    /// The header need not come first — `jq -S` sorts `cells` ahead of
+    /// `cols` — so a grid read before it is held to the largest a terminal
+    /// has (#713), and a document in any key order still reads.
+    #[test]
+    fn a_grid_read_before_the_header_is_held_to_the_terminal_limit() {
+        let rows = "[],".repeat(1000);
+        let json = format!(r#"{{"cells":[{rows}[], not json"#);
+        let err = serde_json::from_str::<Screen>(&json)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("more than 1000 rows of cells, past the 1000-per-axis limit"),
+            "{err}"
+        );
+        let cell = cell();
+        let wide = format!(
+            r#"{{"cells":[[{}{cell}, not json"#,
+            format!("{cell},").repeat(1000)
+        );
+        let err = serde_json::from_str::<Screen>(&wide)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("row 0 holds more than 1000 cells, past the 1000-per-axis limit"),
+            "{err}"
+        );
+
+        let screen = Screen::parse("size: 3x2  cursor: 1,2\nab\ncd").unwrap();
+        let value = serde_json::to_value(&screen).unwrap();
+        let reversed = ["state", "cells", "cursor", "rows", "cols", "format"]
+            .iter()
+            .map(|key| format!("{key:?}:{}", value[key]))
+            .collect::<Vec<_>>()
+            .join(",");
+        let read: Screen = serde_json::from_str(&format!("{{{reversed}}}")).unwrap();
+        assert_eq!(read, screen);
+    }
+
+    /// What the derive refused and allowed, the hand-written reader does
+    /// too: a missing or repeated field is an error, an unknown one is
+    /// skipped, and a 0.10 file without `format` reads as format 1.
+    #[test]
+    fn the_reader_keeps_the_derived_field_rules() {
+        let screen = Screen::parse("size: 2x1  cursor: 0,1\nab").unwrap();
+        let mut value = serde_json::to_value(&screen).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.insert("added_by_a_later_release".into(), serde_json::json!([1, 2]));
+        object.remove("format");
+        let read: Screen = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(read, screen);
+
+        value.as_object_mut().unwrap().remove("cells");
+        let err = serde_json::from_value::<Screen>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing field `cells`"), "{err}");
+
+        let json = serde_json::to_string(&screen).unwrap();
+        let twice = json.replacen(r#""cols":2,"#, r#""cols":2,"cols":2,"#, 1);
+        let err = serde_json::from_str::<Screen>(&twice)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("duplicate field `cols`"), "{err}");
+
+        // A format without field names: the fields in order, which
+        // serde_json reads from an array; the grid is still bounded.
+        let value = serde_json::to_value(&screen).unwrap();
+        let array: Vec<_> = FIELDS.iter().map(|key| value[key].clone()).collect();
+        let read: Screen = serde_json::from_value(serde_json::json!(array)).unwrap();
+        assert_eq!(read, screen);
+        let mut longer = array.clone();
+        longer[4]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!([]));
+        let err = serde_json::from_value::<Screen>(serde_json::json!(longer))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("a 2x1 screen needs 1 rows of cells, not more"),
+            "{err}"
+        );
+
+        let newer = json.replacen(r#""format":1"#, r#""format":2"#, 1);
+        let err = serde_json::from_str::<Screen>(&newer)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("format 2 is not one this termlens reads"),
+            "{err}"
+        );
+    }
 }

@@ -2454,3 +2454,53 @@ fn render_and_diff_refuse_a_stream_past_the_size_bound() {
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
     }
 }
+
+/// The 1 GiB input bound bounds the bytes, and the JSON reader has to
+/// bound what it builds from them (#713): a 1x1 screen whose `cells` holds
+/// millions of empty rows took a vector per row before the shape was
+/// checked, about eight bytes of memory per byte of file, and aborted
+/// under a cap. 30 MB of `[]` cost some 240 MB that way; under a 160 MiB
+/// address-space cap the reader now refuses the second row, with exit 2
+/// and the reason, in memory the declared 1x1 sets.
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "`ulimit -v` caps the child's address space only on Linux"
+)]
+fn render_refuses_json_rows_past_the_header_without_building_them() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(r#"ulimit -v 163840 && exec "$0" "$@""#)
+        .arg(env!("CARGO_BIN_EXE_termlens"))
+        .args(["render", "--text", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("sh runs");
+    let mut stdin = child.stdin.take().expect("a stdin pipe");
+    let writer = std::thread::spawn(move || {
+        let head =
+            r#"{"format":1,"cols":1,"rows":1,"cursor":{"row":0,"col":0,"visible":true},"cells":["#;
+        let chunk = "[],".repeat(1_000_000);
+        // A refusal before the end of the input closes the pipe; that is a
+        // result, not a failure of the writer.
+        let _ = stdin.write_all(head.as_bytes());
+        for _ in 0..10 {
+            let _ = stdin.write_all(chunk.as_bytes());
+        }
+        let _ = stdin.write_all(br#"[]],"state":{}}"#);
+    });
+    let out = child.wait_with_output().expect("termlens runs");
+    writer.join().expect("the writer thread");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with(
+            "termlens: <stdin>: not a termlens Screen: a 1x1 screen needs 1 rows of cells, not more"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+}

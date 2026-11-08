@@ -936,7 +936,12 @@ Nothing is omitted that a `Screen` holds, which is why reading the JSON
 back gives a `Screen` that is `==` to the original where the text format
 gives one that only `diff`s empty. Every row must hold `cols` cells and
 there must be `rows` of them; a file that does not hold together is an
-error, never a screen that panics on its first `cell()`.
+error, never a screen that panics on its first `cell()`. Both counts are
+checked while the grid is read, so the first row or cell past the header's
+size is refused before anything after it is read, and a file costs memory
+in proportion to the screen it declares, not to its length (#713). A grid
+that comes before the header (`jq -S` sorts `cells` ahead of `cols`) is
+held to the 1000-per-axis limit until the header is known.
 
 A cell must also be one a termlens could have written, because the CLI
 prints what it reads: a cell carrying an escape sequence drove the
