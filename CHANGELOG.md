@@ -26,6 +26,12 @@ reads that marker.
 - `docs/RELEASING.md` step 2 notes that release notes consist of the
   section plus the definitions it links (#658), and are unaffected by the
   compare definitions added at the foot (#722).
+- A sixel that paints with a colour register it never defined decodes in
+  the VT340's colours, as the VT340 draws it (#699). Registers 0 to 15
+  start with its colour map and the rest black, and drawing starts in
+  register 15, its 80 % grey. Those pixels were transparent, so `~~`
+  decoded to a 2x0 image while the cursor moved past six rows of it. A
+  pixel no sixel touched is still transparent.
 
 ## [0.11.8] - 2026-11-03
 
