@@ -40,8 +40,12 @@ CHANGELOG entry.
   are modelled; the DEC Special Graphics set (`0`) and the UK set (`A`,
   `£` at `#`) are translated, and every other designation — the alternate
   ROMs, the other national sets — is acknowledged and reads as ASCII.
-  `DECSC`/`DECRC` save and restore this state with the cursor. Locking
-  shifts remain G0/G1 only (`LS2`/`LS3` are not modelled).
+  `DECSC`/`DECRC` save and restore this state with the cursor, in one
+  slot per screen as xterm keeps it, and `?1049h`/`l` save and restore it
+  around the alternate screen. xterm's other cursor saves, `CSI s`/`CSI u`
+  without parameters and `?1048h`/`l`, save and restore the sets too, but
+  the backend moves no cursor for them, and `unsupported()` names them.
+  Locking shifts remain G0/G1 only (`LS2`/`LS3` are not modelled).
 - **Insert mode (`IRM`, `CSI 4 h`) pushes the rest of the row right**, as
   ncurses's `insch` expects on a terminal advertising `smir`; `RIS` and
   `DECSTR` clear it, and `Screen::insert_mode()` reports an application

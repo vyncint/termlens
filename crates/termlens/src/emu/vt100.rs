@@ -115,7 +115,7 @@ impl Vt100Emulator {
                 scrollback_len,
                 Unhandled::default(),
             ),
-            tracker: SeqTracker::new(capture, cols),
+            tracker: SeqTracker::new(capture, rows, cols),
             // The shadow keeps the same history as the primary, styled or
             // not: a resize that makes the screen taller pulls rows back out
             // of history onto the grid, and the shadow's grid has to get the
@@ -959,10 +959,14 @@ impl Emulator for Vt100Emulator {
         )
     }
 
-    fn cursor_position(&self) -> (u16, u16) {
+    fn reported_position(&self) -> (u16, u16) {
         // The inherent method, which `snapshot` uses too, so a reply and a
-        // snapshot cannot disagree — #401's clamp included.
-        Vt100Emulator::cursor_position(self)
+        // snapshot cannot disagree — #401's clamp included. A cursor above
+        // the margin under origin mode — a `DECRC` can put it there — has
+        // no row to count; xterm would report zero or less, and the
+        // margin's own row is the nearest a `CUP` can reach.
+        let (row, col) = Vt100Emulator::cursor_position(self);
+        (row.saturating_sub(self.tracker.report_origin_row()), col)
     }
 
     fn size(&self) -> (u16, u16) {
@@ -1045,7 +1049,7 @@ impl Emulator for Vt100Emulator {
         // counts on (#671). The shadow keeps no count and needs none.
         self.parser.set_size(nz(rows), nz(cols));
         self.shadow.set_size(rows, cols);
-        self.tracker.set_cols(cols);
+        self.tracker.set_size(rows, cols);
         // A resize can push rows into history on its own, drop rows from
         // its front, or pull rows back out of it.
         self.capture_scrolled_rows();
@@ -3017,6 +3021,127 @@ mod tests {
                 observed(&whole),
                 observed(&bytewise),
                 "case {case}: {stream:?}"
+            );
+        }
+    }
+
+    /// The character sets `DECSC` saves are kept per screen, as xterm keeps
+    /// them (`screen->sc[screen->whichBuf]`), and `1049` saves and restores
+    /// them around the alternate screen. A line-drawing set designated by a
+    /// full-screen application used to leak out of it onto the main screen,
+    /// so `quit` printed after it drew `─┤␋├` (#685).
+    #[test]
+    fn the_alternate_screens_character_sets_do_not_outlive_1049() {
+        let s = emu_with(b"\x1b[?1049h\x1b(0lqk\x1b[?1049l\x1b[Hquit").snapshot();
+        assert_eq!(s.row_text(0).trim_end(), "quit", "{s}");
+    }
+
+    /// `DECRC` on the main screen restores what `DECSC` saved there, not
+    /// what the alternate screen saved last (#685).
+    #[test]
+    fn a_restore_on_the_main_screen_reads_the_main_screens_slot() {
+        // 1049: its own save is the main slot, the alternate screen's
+        // `ESC 7` goes to the other one, and the main screen's `ESC 8` reads
+        // its own after a designation made since.
+        let s = emu_with(b"\x1b[?1049h\x1b(0\x1b7\x1b(B\x1b[?1049l\x1b(0\x1b8q").snapshot();
+        assert_eq!(s.row_text(0).trim_end(), "q", "after 1049: {s}");
+        // 47 saves nothing itself: the main screen's slot is the `ESC 7`
+        // made there before the switch.
+        let s = emu_with(b"\x1b7\x1b[?47h\x1b(0\x1b7\x1b[?47l\x1b8q").snapshot();
+        assert_eq!(s.row_text(0).trim_end(), "q", "after 47: {s}");
+        // And the alternate screen's slot is still its own when it is back.
+        let s = emu_with(b"\x1b[?47h\x1b(0\x1b7\x1b(B\x1b[?47l\x1b7\x1b[?47h\x1b8q").snapshot();
+        assert_eq!(s.row_text(0).trim_end(), "\u{2500}", "back on 47: {s}");
+    }
+
+    /// `CSI s` / `CSI u` without parameters and `?1048h` / `?1048l` are
+    /// xterm's other cursor saves, and save the character sets as `DECSC`
+    /// does (#685). vt100 moves no cursor for any of them, which
+    /// `unsupported()` goes on naming; the sets are termlens's own.
+    #[test]
+    fn scosc_and_1048_save_and_restore_the_character_sets() {
+        for (save, restore) in [("\x1b[s", "\x1b[u"), ("\x1b[?1048h", "\x1b[?1048l")] {
+            let stream = format!("\x1b(0{save}\x1b(B{restore}qqq");
+            let s = emu_with(stream.as_bytes()).snapshot();
+            assert_eq!(
+                s.row_text(0).trim_end(),
+                "\u{2500}".repeat(3),
+                "{save:?}: {s}"
+            );
+        }
+        // With a parameter `CSI u` is not a restore (kitty's keyboard
+        // protocol owns the shapes around it), and neither is `CSI s`.
+        let s = emu_with(b"\x1b(0\x1b[1s\x1b(B\x1b[1uq").snapshot();
+        assert_eq!(s.row_text(0).trim_end(), "q", "{s}");
+    }
+
+    /// The tracker follows vt100's margins and origin mode, which vt100
+    /// keeps per grid and does not expose, so a report is checked here
+    /// against what vt100 does with the `CUP` an application sends back:
+    /// under origin mode `CSI H` lands on the top margin, and outside it on
+    /// row 0, and the report must count from exactly that row (#689). The
+    /// streams mix every sequence that moves either — regions valid and
+    /// not, both screen switches, the saves, both resets — with resizes.
+    #[test]
+    fn the_report_origin_follows_vt100s_margins_and_origin_mode() {
+        const PIECES: &[&str] = &[
+            "\x1b[2;4r",
+            "\x1b[3r",
+            "\x1b[r",
+            "\x1b[;3r",
+            "\x1b[4;2r",
+            "\x1b[2:1;5r",
+            "\x1b[9;99r",
+            "\x1b[?6h",
+            "\x1b[?6l",
+            "\x1b[?6;1049h",
+            "\x1b[?1049;6h",
+            "\x1b7",
+            "\x1b8",
+            "\x1b[s",
+            "\x1b[u",
+            "\x1b[?1048h",
+            "\x1b[?1048l",
+            "\x1b[?1049h",
+            "\x1b[?1049l",
+            "\x1b[?47h",
+            "\x1b[?47l",
+            "\x1b[?1047h",
+            "\x1b[!p",
+            "\x1bc",
+            "ab\r\n",
+            "\x1b[3;2H",
+            "RESIZE",
+        ];
+        let mut seed: u64 = 0x0689_0687_0685;
+        let mut next = move |n: usize| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(seed >> 33).unwrap() % n
+        };
+        for case in 0..3000 {
+            let ops: Vec<&str> = (0..16).map(|_| PIECES[next(PIECES.len())]).collect();
+            let sizes = [(5, 8), (6, 8), (6, 9)];
+            let run = |extra: &[u8]| {
+                let mut emu = Vt100Emulator::new(5, 8, 0, crate::graphics::DEFAULT_CAPTURE, false);
+                for (i, op) in ops.iter().enumerate() {
+                    if *op == "RESIZE" {
+                        let (rows, cols) = sizes[i % sizes.len()];
+                        emu.set_size(rows, cols);
+                    } else {
+                        feed_all(&mut emu, op.as_bytes());
+                    }
+                }
+                feed_all(&mut emu, extra);
+                emu
+            };
+            let emu = run(b"");
+            let homed = run(b"\x1b[H");
+            assert_eq!(
+                emu.tracker.report_origin_row(),
+                homed.cursor_position().0,
+                "case {case}: {ops:?}"
             );
         }
     }

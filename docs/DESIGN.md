@@ -115,8 +115,13 @@ like the rest.
 Precision: the emulator stops consuming at each query byte (the same
 mechanism as frame boundaries), so a cursor-position report reflects the
 cursor *at the query*, not after later output in the same chunk moved
-it. Replies are built under the state lock but written after it is
-released — the state lock and the writer lock are never held together.
+it. Under origin mode (`DECOM`) the report counts rows from the top
+margin, as xterm's does, so an application that restores the position
+with `CUP` lands where it was; the backend keeps neither the margins nor
+the mode where termlens can read them, so the sequence tracker follows
+both, by the backend's rules (#689). Replies are built under the state
+lock but written after it is released — the state lock and the writer
+lock are never held together.
 
 **Nothing writes to the child on a thread that cannot afford to wait.**
 Every write — query replies and typed input alike — is handed to a
@@ -1020,8 +1025,9 @@ But it is an implementation detail:
   narrow and listed in `docs/LIMITATIONS.md`: G0–G3 designation, locking
   shifts on G0/G1, SS2/SS3 for one character, two sets translated — DEC
   Special Graphics and the UK set — and everything else read as ASCII.
-  `DECSC`/`DECRC` save and restore the charset state with the cursor;
-  `LS2`/`LS3` are not modelled.
+  `DECSC`/`DECRC` save and restore the charset state with the cursor, in
+  one slot per screen as xterm keeps it (#685); `LS2`/`LS3` are not
+  modelled.
 - vt100's tab stops are a hardcoded eight with no way to be told otherwise,
   so **the stop set is termlens's too**, and for the same reason: `HTS`,
   `TBC`, `CHT` and `CBT` reached `unhandled_escape`/`unhandled_csi` and were

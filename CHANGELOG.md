@@ -19,6 +19,19 @@ reads that marker.
 
 ### Fixed
 
+- The character sets a cursor save keeps are kept per screen, as in xterm,
+  and `?1049h` and `?1049l` save and restore them around the alternate
+  screen. A line-drawing set designated by a full-screen application
+  leaked onto the main screen after it left, so `quit` printed there drew
+  `─┤␋├`, and a `DECRC` on the main screen restored the sets the alternate
+  screen had saved. `CSI s` and `CSI u` without parameters and `?1048h`
+  and `?1048l` save and restore the sets too; the backend still moves no
+  cursor for them, and `unsupported()` still names them. (#685)
+- A cursor position report (`CSI 6 n`, `CSI ? 6 n`) under origin mode
+  (`DECOM`) counts rows from the top margin, as xterm's does. It gave the
+  absolute row, so an application that restored the position with `CUP`,
+  which counts from the margin there, put the cursor as many rows too low
+  as the margin was deep. (#689)
 - `SECURITY.md` counts the eight `unsafe` blocks there are: 0.11.8 added
   `waitid(2)` (#630), and `fcntl(2)` and `tcflush(2)` in teardown (#628).
   A new gate, `.github/scripts/check-unsafe-blocks.sh`, fails CI when the
