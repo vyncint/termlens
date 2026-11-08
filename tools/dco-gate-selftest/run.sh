@@ -9,7 +9,12 @@
 #   - a sign-off whose email is not the author's fails
 #   - a merge commit is exempt, and the commits it merged are still read
 #   - a web-flow commit (committer noreply@github.com) with a sign-off passes
-#     without the email match: GitHub rewrites its author
+#     without the email match on the push run, which names the commit GitHub
+#     composed: GitHub rewrites its author there
+#   - on a pull request the committer proves nothing, since anyone can set
+#     it: a forged web-flow committer with someone else's sign-off fails
+#     (#718), and only Dependabot's own commit, its author and its sign-off
+#     both Dependabot's, is let through without the match
 #   - the squash GitHub composed without trailers fails unless it is named,
 #     and passes when it is
 #   - the exemption is one commit wide: naming the tip exempts no other
@@ -87,6 +92,13 @@ web_flow -m "feat: squashed (#1)" \
 git -C "$scratch" checkout -q -b case-composed main
 web_flow -m "feat: composed (#2)"
 
+# 7b. A squash that kept its sign-off, then the composed squash at the tip:
+#     the history a first push to main walks
+git -C "$scratch" checkout -q -b case-composed-over-web-flow main
+web_flow -m "feat: squashed (#7)" \
+  -m "Signed-off-by: Author <author@example.com>"
+web_flow -m "feat: composed (#8)"
+
 # 8. An unsigned commit, then the composed squash at the tip
 git -C "$scratch" checkout -q -b case-composed-over-unsigned main
 git -C "$scratch" commit -q --allow-empty -m "feat: unsigned"
@@ -104,6 +116,33 @@ web_flow -m "feat: composed without a pull request number"
 # 11. An unsigned commit that looks composed but was committed by a person
 git -C "$scratch" checkout -q -b case-not-web-flow main
 git -C "$scratch" commit -q --allow-empty -m "feat: looks composed (#6)"
+
+# 12. A pull request commit whose committer was forged as GitHub's, signed
+#     off by someone other than its author (#718)
+git -C "$scratch" checkout -q -b case-forged-committer main
+GIT_COMMITTER_EMAIL="noreply@github.com" git -C "$scratch" commit -q --allow-empty \
+  -m "feat: forged committer" \
+  -m "Signed-off-by: Someone Else <someone@else.example>"
+
+# What Dependabot pushes to its pull request branch: GitHub commits it, and
+# its sign-off is support@github.com, never its author address.
+dependabot() {
+  GIT_AUTHOR_NAME="dependabot[bot]" \
+  GIT_AUTHOR_EMAIL="49699333+dependabot[bot]@users.noreply.github.com" \
+  GIT_COMMITTER_NAME="GitHub" \
+  GIT_COMMITTER_EMAIL="noreply@github.com" \
+    git -C "$scratch" commit -q --allow-empty "$@"
+}
+
+# 13. Dependabot's own commit
+git -C "$scratch" checkout -q -b case-dependabot main
+dependabot -m "chore(deps): bump a crate" \
+  -m "Signed-off-by: dependabot[bot] <support@github.com>"
+
+# 14. Dependabot as the author, a person's sign-off
+git -C "$scratch" checkout -q -b case-dependabot-signed-by-someone main
+dependabot -m "chore(deps): bump a crate" \
+  -m "Signed-off-by: Someone Else <someone@else.example>"
 
 tip() { git -C "$scratch" rev-parse "$1"; }
 
@@ -146,10 +185,23 @@ expect "a sign-off with another email than the author's fails" nonzero \
 expect "an unsigned merge commit is exempt" zero "$ok" main..case-merge
 expect "an unsigned commit behind a merge still fails" nonzero \
   "$(unsigned case-merge-unsigned-side)" main..case-merge-unsigned
-expect "a web-flow commit with a sign-off passes" zero "$ok" \
-  main..case-web-flow-signed
+expect "a web-flow commit with a sign-off passes on the push run" zero "$ok" \
+  main..case-web-flow-signed "$(tip case-web-flow-signed)"
+expect "...and under the named tip, as a first push walks all of main" zero \
+  "$ok" main..case-composed-over-web-flow "$(tip case-composed-over-web-flow)"
+expect "on a pull request, a web-flow commit's sign-off must match" \
+  nonzero "$(unsigned case-web-flow-signed)" main..case-web-flow-signed
+expect "a forged web-flow committer, another's sign-off: fails (#718)" \
+  nonzero "$(unsigned case-forged-committer)" main..case-forged-committer
+expect "...but passes on the push run, reached only through a PR" zero \
+  "$ok" main..case-forged-committer "$(tip case-forged-committer)"
+expect "Dependabot's own commit passes on a pull request" zero "$ok" \
+  main..case-dependabot
+expect "Dependabot as author, a person's sign-off: fails on a PR" \
+  nonzero "$(unsigned case-dependabot-signed-by-someone)" \
+  main..case-dependabot-signed-by-someone
 expect "the composed squash fails when it is not named" nonzero \
-  "$(unexempt case-composed)" main..case-composed
+  "$(unsigned case-composed)" main..case-composed
 expect "the composed squash passes when it is named" zero "$ok" \
   main..case-composed "$(tip case-composed)"
 expect "naming the tip does not exempt an unsigned commit under it" nonzero \
@@ -176,6 +228,6 @@ expect "an unresolvable range fails (#214)" nonzero \
 expect "an empty range fails (#214)" nonzero "resolved to no commits" main..main
 
 if [ "$status" -eq 0 ]; then
-  echo "dco gate selftest: 16 expectation(s), the gate fails when it should"
+  echo "dco gate selftest: 22 expectation(s), the gate fails when it should"
 fi
 exit "$status"

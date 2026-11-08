@@ -39,6 +39,12 @@ reads that marker.
   old one, and a resize back was then skipped as a no-op. Typed input and
   mouse reports are encoded with the modes the emulator last reported
   before it panicked, rather than read from it.
+- The DCO gate spares a commit whose committer is `noreply@github.com` the
+  sign-off-equals-author match only on the push run to main, which names
+  the squash GitHub composed (#718). On a pull request it accepted anyone's
+  sign-off on such a commit, and the committer is set locally. The one
+  pull-request exemption left is Dependabot's own commit, its author and
+  its sign-off (`dependabot[bot] <support@github.com>`) both Dependabot's.
 
 ## [0.11.8] - 2026-11-03
 

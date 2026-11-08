@@ -13,6 +13,9 @@
 # composed itself by squash-merging a pull request — the tip of a push to
 # main. See the web-flow block below for why that commit is treated
 # differently, and why naming it explicitly is what keeps the check honest.
+# Giving it also marks the run as the push run, the only one on which a
+# web-flow commit is spared the email match (#718); without it, as on a pull
+# request, the committer proves nothing and every commit is held to it.
 #
 # Self-test: tools/dco-gate-selftest/run.sh builds a scratch history and
 # holds every rule here to failing when it should (#471) — above all the
@@ -21,6 +24,13 @@ set -euo pipefail
 
 range="${1:?usage: check-dco.sh <range> [composed-sha]}"
 composed="${2:-}"
+# Taken before the name is resolved: a push run whose tip will not resolve
+# is still a push run, and the strict match would red the squashes of all
+# of main's history on a first push. The name itself still exempts nothing.
+push_run=""
+if [ -n "$composed" ]; then
+  push_run=1
+fi
 # Resolve it once, so the comparison below is sha-to-sha rather than
 # text-to-text. Empty (pull_request runs) or unresolvable leaves it empty,
 # which exempts nothing.
@@ -57,7 +67,13 @@ while IFS= read -r sha; do
   # DCO-checked by this workflow's required pull_request run; for the
   # resulting merge commit we require a sign-off to be present but skip
   # the email match.
-  if [ "$committer_email" = "noreply@github.com" ]; then
+  #
+  # Only on the push run. The committer is whatever the commit says, and
+  # `GIT_COMMITTER_EMAIL=noreply@github.com` sets it locally, so on a pull
+  # request this rule let any sign-off through on a commit claiming to be
+  # GitHub's (#718). What reaches main has been through a pull request run
+  # first, and that run is strict.
+  if [ -n "$push_run" ] && [ "$committer_email" = "noreply@github.com" ]; then
     if git log -1 --format='%B' "$sha" | grep -qi '^signed-off-by:'; then
       continue
     fi
@@ -90,6 +106,20 @@ while IFS= read -r sha; do
     echo "::error::Merge/squash commit ${sha} carries no Signed-off-by at all."
     echo "  subject: $(git log -1 --format='%s' "$sha")"
     fail=1
+    continue
+  fi
+
+  # Dependabot's own commits, on its pull request branches: GitHub commits
+  # them, and Dependabot signs off as support@github.com, which is never its
+  # author address, so the match below could not pass. Exempt exactly that
+  # pair, author and sign-off both Dependabot's, as check-no-ai-attribution.sh
+  # names it. A forged commit passes here only by claiming to be
+  # Dependabot's on both lines, which signs no person's name to anything.
+  if [ "$committer_email" = "noreply@github.com" ] \
+     && printf '%s\n' "$author_email" | tr '[:upper:]' '[:lower:]' \
+        | grep -Eq '^([0-9]+\+)?dependabot\[bot\]@users\.noreply\.github\.com$' \
+     && git log -1 --format='%B' "$sha" \
+        | grep -Eiq '^signed-off-by:[[:space:]]*dependabot\[bot\][[:space:]]*<support@github\.com>[[:space:]]*$'; then
     continue
   fi
 
