@@ -5072,9 +5072,9 @@ mod tests {
             self.called();
             self.inner.snapshot()
         }
-        fn cursor_position(&self) -> (u16, u16) {
+        fn reported_position(&self) -> (u16, u16) {
             self.called();
-            self.inner.cursor_position()
+            self.inner.reported_position()
         }
         fn size(&self) -> (u16, u16) {
             self.called();
