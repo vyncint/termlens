@@ -17,8 +17,36 @@ reads that marker.
 
 ## [Unreleased]
 
+### Changed
+
+- `DECSTR` (soft reset, `CSI ! p`) resets what xterm's soft reset resets
+  and keeps what it keeps. It turned off mouse tracking and its encoding,
+  focus reporting and bracketed paste and restored the default tab stops,
+  all of which xterm resets only on `RIS`; and it left the attributes, the
+  scroll margins, origin mode and the saved cursor alone, which xterm
+  resets. Now those five stay as the application set them, text after the
+  reset is plain, the margins and origin mode are cleared with the cursor
+  left where it was, and a `DECRC` after the reset returns to the top-left
+  corner. A test that expected `DECSTR` to end mouse, focus or
+  bracketed-paste reporting or to restore the tab stops should expect them
+  kept, as a real xterm keeps them, and have the application reset each
+  mode itself or send `RIS`. (#687)
+
 ### Fixed
 
+- The character sets a cursor save keeps are kept per screen, as in xterm,
+  and `?1049h` and `?1049l` save and restore them around the alternate
+  screen. A line-drawing set designated by a full-screen application
+  leaked onto the main screen after it left, so `quit` printed there drew
+  `─┤␋├`, and a `DECRC` on the main screen restored the sets the alternate
+  screen had saved. `CSI s` and `CSI u` without parameters and `?1048h`
+  and `?1048l` save and restore the sets too; the backend still moves no
+  cursor for them, and `unsupported()` still names them. (#685)
+- A cursor position report (`CSI 6 n`, `CSI ? 6 n`) under origin mode
+  (`DECOM`) counts rows from the top margin, as xterm's does. It gave the
+  absolute row, so an application that restored the position with `CUP`,
+  which counts from the margin there, put the cursor as many rows too low
+  as the margin was deep. (#689)
 - `SECURITY.md` counts the eight `unsafe` blocks there are: 0.11.8 added
   `waitid(2)` (#630), and `fcntl(2)` and `tcflush(2)` in teardown (#628).
   A new gate, `.github/scripts/check-unsafe-blocks.sh`, fails CI when the
@@ -26,6 +54,22 @@ reads that marker.
 - `docs/RELEASING.md` step 2 notes that release notes consist of the
   section plus the definitions it links (#658), and are unaffected by the
   compare definitions added at the foot (#722).
+- `Screen::parse` and `termlens render` read a text snapshot 0.11.6 wrote
+  and every later release refused (#683): a wide character a narrowing
+  resize stranded without its second half, left before other text when the
+  screen widened again and the program redrew after it. The row was read
+  two columns per wide character and refused as wider than the header
+  declares. A row that only fits with some wide characters at one column
+  now reads with as many of them as it needs stranded, the leftmost first,
+  as its JSON twin holds them. The file, written by the published 0.11.6,
+  is in the compatibility corpus.
+- The JSON reader checks a screen's rows and cells against its header
+  while it reads them (#713). It read every row first, so the 1 GiB input
+  bound did not bound memory: a 1x1 screen whose `cells` held 67 million
+  empty rows, 201 MB on disk, took 1.77 GB, and `termlens render` aborted
+  with exit 134 under a memory cap. The first row or cell past the declared
+  size is now refused at once, and `render` and `diff` exit 2 naming it.
+  The JSON format does not change.
 
 - Leaving the alternate screen keeps the history right after a taller
   resize (#682), a regression in 0.11.8. When the terminal grew while the

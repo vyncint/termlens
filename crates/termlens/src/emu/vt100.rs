@@ -115,7 +115,7 @@ impl Vt100Emulator {
                 scrollback_len,
                 Unhandled::default(),
             ),
-            tracker: SeqTracker::new(capture, cols),
+            tracker: SeqTracker::new(capture, rows, cols),
             // The shadow keeps the same history as the primary, styled or
             // not: a resize that makes the screen taller pulls rows back out
             // of history onto the grid, and the shadow's grid has to get the
@@ -503,6 +503,19 @@ impl Vt100Emulator {
         }
     }
 
+    /// Carry out the grid's half of `DECSTR`: [`SOFT_RESET_REPLAY`], then
+    /// the cursor back where the reset found it. xterm's soft reset moves
+    /// no cursor, but vt100 homes it on each margin and origin reset the
+    /// replay makes, and the replay homes it once more to save it there.
+    /// The move back is absolute, since origin mode is off by then. A
+    /// cursor pending wrap comes back onto the last column, not past it:
+    /// `CUP` cannot address the column past the margin.
+    fn soft_reset(&mut self) {
+        let (row, col) = self.cursor_position();
+        self.feed(SOFT_RESET_REPLAY);
+        self.feed(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
+    }
+
     /// The cursor as a snapshot should report it: a column pending wrap
     /// sits one past the last cell inside the backend, and no terminal
     /// reports a column its own width does not have (#401). Clamping here
@@ -836,7 +849,7 @@ impl Emulator for Vt100Emulator {
                     // stream order, then the replay.
                     self.feed_staged(&bytes[fed..=i]);
                     fed = i + 1;
-                    self.feed(SOFT_RESET_REPLAY);
+                    self.soft_reset();
                     None
                 }
                 SeqEvent::HardReset => {
@@ -977,10 +990,14 @@ impl Emulator for Vt100Emulator {
         )
     }
 
-    fn cursor_position(&self) -> (u16, u16) {
+    fn reported_position(&self) -> (u16, u16) {
         // The inherent method, which `snapshot` uses too, so a reply and a
-        // snapshot cannot disagree — #401's clamp included.
-        Vt100Emulator::cursor_position(self)
+        // snapshot cannot disagree — #401's clamp included. A cursor above
+        // the margin under origin mode — a `DECRC` can put it there — has
+        // no row to count; xterm would report zero or less, and the
+        // margin's own row is the nearest a `CUP` can reach.
+        let (row, col) = Vt100Emulator::cursor_position(self);
+        (row.saturating_sub(self.tracker.report_origin_row()), col)
     }
 
     fn size(&self) -> (u16, u16) {
@@ -1063,7 +1080,7 @@ impl Emulator for Vt100Emulator {
         // counts on (#671). The shadow keeps no count and needs none.
         self.parser.set_size(nz(rows), nz(cols));
         self.shadow.set_size(rows, cols);
-        self.tracker.set_cols(cols);
+        self.tracker.set_size(rows, cols);
         // A resize can push rows into history on its own, drop rows from
         // its front, or pull rows back out of it.
         self.capture_scrolled_rows();
@@ -1071,15 +1088,19 @@ impl Emulator for Vt100Emulator {
 }
 
 /// What `DECSTR` resets of the state vt100 holds, as the sequences vt100
-/// understands: cursor keys back to normal (`DECCKM`), bracketed paste off,
-/// every mouse tracking mode and encoding off, and the cursor visible
-/// (`DECTCEM`). The rest of the specified list — attributes, margins,
-/// origin and insert modes, the keypad — is deliberately not replayed:
-/// none of it is observable through `Screen` today, and a replay nothing
-/// can check is a claim nothing can catch. The alternate screen is left
-/// alone, as the spec says.
-const SOFT_RESET_REPLAY: &[u8] =
-    b"\x1b[?1l\x1b[?2004l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?25h";
+/// understands, following xterm's soft reset: cursor keys back to normal
+/// (`DECCKM`), the cursor visible (`DECTCEM`), the rendition cleared
+/// (`SGR 0`), the margins and origin mode cleared (`DECSTBM`, `DECOM`), and
+/// the cursor saved at home with all of that (`DECSC`), which is where
+/// xterm leaves its saved cursor. [`Vt100Emulator::soft_reset`] then puts
+/// the cursor back.
+///
+/// Mouse tracking and its encoding, bracketed paste and the alternate
+/// screen are left alone, as xterm leaves them: it resets the mouse modes
+/// and bracketed paste only on `RIS` (#687). The keypad mode is not replayed, since nothing on
+/// `Screen` reads it and a replay nothing can check is a claim nothing can
+/// catch.
+const SOFT_RESET_REPLAY: &[u8] = b"\x1b[?1l\x1b[?25h\x1b[0m\x1b[r\x1b[?6l\x1b7";
 
 fn convert_mouse(mode: ::vt100::MouseProtocolMode) -> MouseMode {
     match mode {
@@ -2906,17 +2927,15 @@ mod tests {
         assert_eq!(cursor_col(b"\x1b[9Z"), 0);
     }
 
+    /// Through the grid: `RIS` restores the default stops, and `DECSTR`
+    /// keeps the custom one, as xterm's soft reset does (#687).
     #[test]
-    fn ris_and_decstr_restore_the_default_stops() {
-        for reset in [&b"\x1bc"[..], b"\x1b[!p"] {
+    fn ris_restores_the_default_stops_and_decstr_keeps_them() {
+        for (reset, col) in [(&b"\x1bc"[..], 8), (b"\x1b[!p", 3)] {
             let mut stream = b"\x1b[3g\x1b[4G\x1bH".to_vec();
             stream.extend_from_slice(reset);
             stream.extend_from_slice(b"\x1b[1G\t");
-            assert_eq!(
-                cursor_col(&stream),
-                8,
-                "the custom stop must not survive {reset:?}"
-            );
+            assert_eq!(cursor_col(&stream), col, "after {reset:?}");
         }
     }
 
@@ -3182,6 +3201,10 @@ mod tests {
             "\x1b[?47h",
             "\x1b[?47l",
             "\x1bc",
+            // DECSTR's replay reads the cursor to put it back (#687).
+            "\x1b[!p",
+            "\x1b7",
+            "\x1b8",
         ];
         let mut seed: u64 = 0x5eed_0619_0624;
         let mut next = move |n: usize| {
@@ -3198,6 +3221,179 @@ mod tests {
                 observed(&whole),
                 observed(&bytewise),
                 "case {case}: {stream:?}"
+            );
+        }
+    }
+
+    /// The character sets `DECSC` saves are kept per screen, as xterm keeps
+    /// them (`screen->sc[screen->whichBuf]`), and `1049` saves and restores
+    /// them around the alternate screen. A line-drawing set designated by a
+    /// full-screen application used to leak out of it onto the main screen,
+    /// so `quit` printed after it drew `─┤␋├` (#685).
+    #[test]
+    fn the_alternate_screens_character_sets_do_not_outlive_1049() {
+        let s = emu_with(b"\x1b[?1049h\x1b(0lqk\x1b[?1049l\x1b[Hquit").snapshot();
+        assert_eq!(s.row_text(0).trim_end(), "quit", "{s}");
+    }
+
+    /// `DECRC` on the main screen restores what `DECSC` saved there, not
+    /// what the alternate screen saved last (#685).
+    #[test]
+    fn a_restore_on_the_main_screen_reads_the_main_screens_slot() {
+        // 1049: its own save is the main slot, the alternate screen's
+        // `ESC 7` goes to the other one, and the main screen's `ESC 8` reads
+        // its own after a designation made since.
+        let s = emu_with(b"\x1b[?1049h\x1b(0\x1b7\x1b(B\x1b[?1049l\x1b(0\x1b8q").snapshot();
+        assert_eq!(s.row_text(0).trim_end(), "q", "after 1049: {s}");
+        // 47 saves nothing itself: the main screen's slot is the `ESC 7`
+        // made there before the switch.
+        let s = emu_with(b"\x1b7\x1b[?47h\x1b(0\x1b7\x1b[?47l\x1b8q").snapshot();
+        assert_eq!(s.row_text(0).trim_end(), "q", "after 47: {s}");
+        // And the alternate screen's slot is still its own when it is back.
+        let s = emu_with(b"\x1b[?47h\x1b(0\x1b7\x1b(B\x1b[?47l\x1b7\x1b[?47h\x1b8q").snapshot();
+        assert_eq!(s.row_text(0).trim_end(), "\u{2500}", "back on 47: {s}");
+    }
+
+    /// `CSI s` / `CSI u` without parameters and `?1048h` / `?1048l` are
+    /// xterm's other cursor saves, and save the character sets as `DECSC`
+    /// does (#685). vt100 moves no cursor for any of them, which
+    /// `unsupported()` goes on naming; the sets are termlens's own.
+    #[test]
+    fn scosc_and_1048_save_and_restore_the_character_sets() {
+        for (save, restore) in [("\x1b[s", "\x1b[u"), ("\x1b[?1048h", "\x1b[?1048l")] {
+            let stream = format!("\x1b(0{save}\x1b(B{restore}qqq");
+            let s = emu_with(stream.as_bytes()).snapshot();
+            assert_eq!(
+                s.row_text(0).trim_end(),
+                "\u{2500}".repeat(3),
+                "{save:?}: {s}"
+            );
+        }
+        // With a parameter `CSI u` is not a restore (kitty's keyboard
+        // protocol owns the shapes around it), and neither is `CSI s`.
+        let s = emu_with(b"\x1b(0\x1b[1s\x1b(B\x1b[1uq").snapshot();
+        assert_eq!(s.row_text(0).trim_end(), "q", "{s}");
+    }
+
+    /// `DECSTR` keeps what xterm's soft reset keeps: mouse tracking, the
+    /// mouse encoding, focus reporting, bracketed paste and the tab stops
+    /// all survive it, since xterm resets them only on `RIS` (#687).
+    #[test]
+    fn a_soft_reset_keeps_the_modes_xterm_keeps() {
+        let emu = emu_with(b"\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?2004h\x1b[!p");
+        let modes = emu.input_modes();
+        assert_eq!(modes.mouse, MouseMode::PressRelease);
+        assert_eq!(modes.mouse_encoding, MouseEncoding::Sgr);
+        assert!(modes.focus_events);
+        assert!(modes.bracketed_paste);
+        for mode in [1000, 1006, 1004, 2004] {
+            assert_eq!(emu.mode_state(mode), ModeState::Set, "?{mode}");
+        }
+        assert_eq!(emu.snapshot().mouse_mode(), MouseMode::PressRelease);
+        // A custom tab stop survives too.
+        assert_eq!(cursor_col(b"\x1b[3g\x1b[4G\x1bH\x1b[!p\x1b[1G\t"), 3);
+    }
+
+    /// `DECSTR` clears the rendition, as xterm's soft reset does: a
+    /// character written after it is plain (#687).
+    #[test]
+    fn a_soft_reset_clears_the_rendition() {
+        let s = emu_with(b"\x1b[31;1;5;8;9m\x1b[!pX").snapshot();
+        assert_eq!(s.find("X"), Some((0, 0)), "{s}");
+        assert_eq!(*s.cell(0, 0).unwrap().style(), Style::default(), "{s}");
+    }
+
+    /// `DECSTR` clears the scroll margins and origin mode, and leaves the
+    /// cursor where it was: vt100 homes it on both resets, so the replay
+    /// moves it back (#687).
+    #[test]
+    fn a_soft_reset_clears_the_margins_and_origin_mode() {
+        let s = emu_with(b"top\x1b[2;3r\x1b[?6h\x1b[!p\x1b[1;1HX").snapshot();
+        assert_eq!(s.find("X"), Some((0, 0)), "{s}");
+        // The margins are gone: a line feed on row 3 scrolls the whole
+        // screen, not a region that ends there.
+        let s = emu_with(b"top\x1b[2;3r\x1b[!p\x1b[3;1Hmid\x1b[4;1Hbot\r\nX").snapshot();
+        assert_eq!(s.text(), "\nmid\nbot\nX", "{s}");
+        // The cursor stays where the reset found it.
+        let emu = emu_with(b"\x1b[2;4r\x1b[?6h\x1b[2;5H\x1b[!p");
+        assert_eq!(emu.snapshot().cursor(), (2, 4, true));
+    }
+
+    /// `DECSTR` homes the saved cursor, and a restore after it finds the
+    /// sets it reset (#687).
+    #[test]
+    fn a_soft_reset_homes_the_saved_cursor() {
+        let s = emu_with(b"\x1b(0\x1b[3;5H\x1b7\x1b[!p\x1b[2;2H\x1b8q").snapshot();
+        assert_eq!(s.find("q"), Some((0, 0)), "{s}");
+    }
+
+    /// The tracker follows vt100's margins and origin mode, which vt100
+    /// keeps per grid and does not expose, so a report is checked here
+    /// against what vt100 does with the `CUP` an application sends back:
+    /// under origin mode `CSI H` lands on the top margin, and outside it on
+    /// row 0, and the report must count from exactly that row (#689). The
+    /// streams mix every sequence that moves either — regions valid and
+    /// not, both screen switches, the saves, both resets — with resizes.
+    #[test]
+    fn the_report_origin_follows_vt100s_margins_and_origin_mode() {
+        const PIECES: &[&str] = &[
+            "\x1b[2;4r",
+            "\x1b[3r",
+            "\x1b[r",
+            "\x1b[;3r",
+            "\x1b[4;2r",
+            "\x1b[2:1;5r",
+            "\x1b[9;99r",
+            "\x1b[?6h",
+            "\x1b[?6l",
+            "\x1b[?6;1049h",
+            "\x1b[?1049;6h",
+            "\x1b7",
+            "\x1b8",
+            "\x1b[s",
+            "\x1b[u",
+            "\x1b[?1048h",
+            "\x1b[?1048l",
+            "\x1b[?1049h",
+            "\x1b[?1049l",
+            "\x1b[?47h",
+            "\x1b[?47l",
+            "\x1b[?1047h",
+            "\x1b[!p",
+            "\x1bc",
+            "ab\r\n",
+            "\x1b[3;2H",
+            "RESIZE",
+        ];
+        let mut seed: u64 = 0x0689_0687_0685;
+        let mut next = move |n: usize| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(seed >> 33).unwrap() % n
+        };
+        for case in 0..3000 {
+            let ops: Vec<&str> = (0..16).map(|_| PIECES[next(PIECES.len())]).collect();
+            let sizes = [(5, 8), (6, 8), (6, 9)];
+            let run = |extra: &[u8]| {
+                let mut emu = Vt100Emulator::new(5, 8, 0, crate::graphics::DEFAULT_CAPTURE, false);
+                for (i, op) in ops.iter().enumerate() {
+                    if *op == "RESIZE" {
+                        let (rows, cols) = sizes[i % sizes.len()];
+                        emu.set_size(rows, cols);
+                    } else {
+                        feed_all(&mut emu, op.as_bytes());
+                    }
+                }
+                feed_all(&mut emu, extra);
+                emu
+            };
+            let emu = run(b"");
+            let homed = run(b"\x1b[H");
+            assert_eq!(
+                emu.tracker.report_origin_row(),
+                homed.cursor_position().0,
+                "case {case}: {ops:?}"
             );
         }
     }

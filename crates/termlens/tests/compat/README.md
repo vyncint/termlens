@@ -46,8 +46,8 @@ holds it to that; the six shapes cannot, because the writer no longer
 produces the column. It is JSON only: the text format drops a hidden
 cursor's position, so only the JSON ever carried the column.
 
-Two more files sit outside the six shapes, each with its JSON twin, for
-shapes the text reader refused until #643. Both were written by the
+Three more files sit outside the six shapes, each with its JSON twin, for
+shapes the text reader refused until #643 or #683. Both were written by the
 **published** release (a scratch crate on `termlens = "=<version>"` from
 crates.io, its lockfile resolving vt100 0.16), and `tests/compat.rs` names
 them in `EXTRA_SHAPES`:
@@ -56,3 +56,4 @@ them in `EXTRA_SHAPES`:
 | --- | --- |
 | `0.11.1/pending-wrap-visible` | `printf '\r\nabcdef'` on 6x2: the visible cursor at `1,6`, one past the last column, in the text header. It reads clamped onto `1,5`, as the JSON reader clamps it |
 | `0.11.6/stranded-wide` | `printf 'abcd東xy\r\nABC東'` on 8x3, then `resize(5, 3)`: `東` left wide in the last column with no continuation cell (DESIGN §3's truncation case). It reads as that cell and renders back byte for byte |
+| `0.11.6/stranded-wide-redrawn` | `printf 'abcd東xyz'` on 8x2, `resize(5, 2)`, `resize(8, 2)`, then `printf '\033[1;6HZyw'`: the stranded `東` left before `Zyw`, which fills the row to the edge (#683). It reads with `東` as the one-column cell its JSON twin has, and renders back byte for byte |
