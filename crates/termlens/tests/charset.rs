@@ -123,19 +123,22 @@ fn a_hard_reset_returns_to_ascii() -> termlens::Result<()> {
 fn a_soft_reset_returns_to_ascii_without_clearing_the_screen() -> termlens::Result<()> {
     let mut t = emit(&[
         "--raw",
-        r"\e(0q\e[!pq\n",
+        r"\e[2;1H\e(0q\e[!pq",
         "--raw",
-        r"\e(0\e7\e[!p\e8lqk\n",
-        "DONE",
+        r"\e[3;1H\e(0\e7\e[!p\e8lqk",
+        "--raw",
+        r"\e[4;1HDONE",
         "--wait",
     ])?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
-    assert_eq!(s.row_text(0).trim_end(), "─q", "{s}");
-    // Row 1 draws after a DECRC: the soft reset emptied the saved slot, so
-    // the restore returns to ASCII rather than to the graphics set saved
-    // before it. (The cursor it restores is the row's start, where it was.)
-    assert_eq!(s.row_text(1).trim_end(), "lqk", "{s}");
+    assert_eq!(s.row_text(1).trim_end(), "─q", "{s}");
+    // `lqk` draws after a DECRC. The soft reset saved the reset state at
+    // home, as xterm's does (#687), so the restore returns to ASCII rather
+    // than to the graphics set saved before it, and to row 0 rather than to
+    // row 2, where the `DECSC` was.
+    assert_eq!(s.row_text(0).trim_end(), "lqk", "{s}");
+    assert_eq!(s.row_text(2).trim_end(), "", "{s}");
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())

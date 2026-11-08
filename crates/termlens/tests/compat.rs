@@ -142,7 +142,7 @@ fn a_declared_size_past_the_terminal_limit_is_refused_before_allocating() {
 /// them: each file was written by the published release its directory
 /// names (a registry dependency on `termlens = "=<version>"`, resolving
 /// vt100 0.16), and is frozen here for the reader that refused it (#643).
-const EXTRA_SHAPES: [(&str, &str); 2] = [
+const EXTRA_SHAPES: [(&str, &str); 3] = [
     // `printf '\r\nabcdef'` on 6x2: the write fills the last column and
     // 0.11.1 parked the visible cursor one past it, at `1,6`.
     ("0.11.1", "pending-wrap-visible"),
@@ -150,6 +150,10 @@ const EXTRA_SHAPES: [(&str, &str); 2] = [
     // 0.16 left the first row's `東` wide in the last column with no
     // continuation cell — the truncation case DESIGN §3 describes.
     ("0.11.6", "stranded-wide"),
+    // `printf 'abcd東xyz'` on 8x2, `resize(5, 2)`, `resize(8, 2)`, then
+    // `printf '\033[1;6HZyw'`: the stranded `東` is no longer in the last
+    // column, and the redraw after it filled the row to the edge (#683).
+    ("0.11.6", "stranded-wide-redrawn"),
 ];
 
 fn extra(version: &str, shape: &str, ext: &str) -> PathBuf {
@@ -221,6 +225,43 @@ fn a_wide_character_stranded_by_a_resize_in_0_11_6_round_trips() {
     // Only the last column strands: anything after the stranded half is
     // past the edge and still refused.
     let longer = text.replacen("abcd東", "abcd東x", 1);
+    assert!(
+        Screen::parse(&longer).is_err(),
+        "a cell past the edge is refused"
+    );
+}
+
+/// 0.11.6 wrote a stranded wide character that a later write left
+/// *before* other text: the screen widened again and the program redrew
+/// from the column after it, the partial redraw a `SIGWINCH` handler does.
+/// Laid out two columns wide the row is one column too long, so it reads
+/// with `東` as the one-column cell the JSON twin has (#683), and renders
+/// back byte for byte.
+#[test]
+fn a_stranded_wide_character_redrawn_after_in_0_11_6_round_trips() {
+    let path = extra("0.11.6", "stranded-wide-redrawn", "txt");
+    let text = read(&path);
+    assert!(
+        text.starts_with("size: 8x2  cursor: 0,7\nabcd東Zyw\n"),
+        "the frozen file really carries the row: {text}"
+    );
+    let (screen, rendered) = round_trip(&text);
+    assert_eq!(
+        rendered,
+        text,
+        "{} does not survive parse -> render",
+        path.display()
+    );
+    let stranded = screen.cell(0, 4).expect("column 4");
+    assert_eq!(stranded.contents(), "東");
+    assert!(stranded.is_wide(), "kept wide, as the JSON reader keeps it");
+    let after = screen.cell(0, 5).expect("column 5");
+    assert!(!after.is_wide_continuation(), "no second half");
+    assert_eq!(after.contents(), "Z");
+    assert_eq!(screen.row_text(0), "abcd東Zyw");
+    // Stranding is a reading for a row that does not fit, not a licence
+    // for any length: one cell more is past the edge either way.
+    let longer = text.replacen("abcd東Zyw", "abcd東Zywx", 1);
     assert!(
         Screen::parse(&longer).is_err(),
         "a cell past the edge is refused"

@@ -164,18 +164,23 @@ fn a_hard_reset_restores_the_default_stops() -> termlens::Result<()> {
     Ok(())
 }
 
-/// `DECSTR` restores them too — the soft reset a well-behaved TUI sends on
-/// startup and teardown, which leaves the screen alone.
+/// `DECSTR` does not: the soft reset a well-behaved TUI sends on startup
+/// and teardown keeps the stops the application set, as xterm's does — it
+/// resets them only on `RIS` (#687).
 #[test]
 #[cfg_attr(windows, ignore = "ConPTY does not forward DECSTR (#149)")]
-fn a_soft_reset_restores_the_default_stops() -> termlens::Result<()> {
+fn a_soft_reset_keeps_the_stops_the_application_set() -> termlens::Result<()> {
     let mut t = emit(&[
         "--csi", "3g", "--csi", "4G", "--esc", "H", "--csi", "!p", "--csi", "1G", "\tx", " DONE",
         "--wait",
     ])?;
     t.wait_until(|s| s.contains("DONE"))?;
     let s = t.screen();
-    assert_eq!(col_of(&s, "x"), Some(8), "every eighth column again:\n{s}");
+    assert_eq!(
+        col_of(&s, "x"),
+        Some(3),
+        "the stop set before the reset:\n{s}"
+    );
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
     Ok(())

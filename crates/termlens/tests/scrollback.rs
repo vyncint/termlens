@@ -326,6 +326,46 @@ fn rows_that_scroll_in_the_write_that_enters_the_alternate_screen_stay_in_histor
     Ok(())
 }
 
+/// A taller resize while the alternate screen is up pulls a row back out of
+/// the main screen's history; the program then leaves the alternate screen,
+/// clears, and scrolls one row off, all in one write. The pull and the
+/// scroll cancelled in the history's length, so the copy kept `L1` — on the
+/// grid again, and then erased — and lost `NEW1`, unless the PTY happened
+/// to split the read right after the exit (#682).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY carries out the alternate-screen switch and re-renders the screen itself, so the bytes termlens reads are not the ones the child wrote (#149)"
+)]
+fn leaving_the_alternate_screen_after_a_taller_resize_keeps_the_row_that_scrolled(
+) -> termlens::Result<()> {
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .size(10, 3)
+            .scrollback(100)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            "L1\nL2\nL3\nL4\\e[?1049h",
+            "--wait",
+            "--raw",
+            "\\e[?1049l\\e[2J\\e[HNEW1\\r\\nNEW2\\r\\nNEW3\\r\\nNEW4\\r\\nNEW5",
+            "--wait",
+        ],
+    )?;
+    t.wait_until(|s| s.alternate_screen())?;
+    t.resize(10, 4)?;
+    t.send(Key::Enter)?;
+    t.wait_until(|s| s.contains("NEW5"))?;
+    let s = t.screen();
+    assert_eq!(s.scrollback_text(), "NEW1", "{s}");
+    assert_eq!(s.text(), "NEW2\nNEW3\nNEW4\nNEW5", "{s}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// Wider and shorter, then back, over a soft-wrapped line: the rows the
 /// first resize pushed into history were widened when they were copied,
 /// which cleared the wrap — in the primary grid only, so the second resize

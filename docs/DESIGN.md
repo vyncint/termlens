@@ -115,8 +115,13 @@ like the rest.
 Precision: the emulator stops consuming at each query byte (the same
 mechanism as frame boundaries), so a cursor-position report reflects the
 cursor *at the query*, not after later output in the same chunk moved
-it. Replies are built under the state lock but written after it is
-released — the state lock and the writer lock are never held together.
+it. Under origin mode (`DECOM`) the report counts rows from the top
+margin, as xterm's does, so an application that restores the position
+with `CUP` lands where it was; the backend keeps neither the margins nor
+the mode where termlens can read them, so the sequence tracker follows
+both, by the backend's rules (#689). Replies are built under the state
+lock but written after it is released — the state lock and the writer
+lock are never held together.
 
 **Nothing writes to the child on a thread that cannot afford to wait.**
 Every write — query replies and typed input alike — is handed to a
@@ -573,7 +578,11 @@ while vt100 still holds them, and the capture after it sees an empty
 history, which is what re-syncs the mark (#391). An entry to the
 alternate screen splits the feed the same way, since from that byte every
 accessor reads the alternate grid and the main screen's newest rows are out
-of reach until it is back (#622). At the length, vt100
+of reach until it is back (#622). The exit splits it just after its final
+byte, so the main screen is read back before anything scrolls it: a taller
+resize while it was hidden pulled rows back out of its history, and new
+rows scrolling off in the same feed would cancel that in the length (#682).
+At the length, vt100
 evicts from the front and its length stops changing, so growth is no
 longer visible there — and the rows cannot say it either, since
 consecutive identical rows are ordinary output. vt100 reports each row it
@@ -715,11 +724,16 @@ Rules:
    title, the clipboard, the bell count or the link log: the first is a
    window property `RIS` does not restore in xterm, and the rest are records
    of what the application emitted rather than state the terminal still
-   holds. `DECSTR` (soft reset) resets what a `Screen` can observe — cursor
-   keys, bracketed paste, mouse tracking, focus reporting, the cursor's
-   visibility and shape, the character sets — and leaves the alternate
-   screen alone; the rest of the specified list is not replayed, because
-   none of it is observable. `docs/LIMITATIONS.md` keeps the exact list.
+   holds. `DECSTR` (soft reset) follows xterm's, which resets less than
+   `RIS` in both directions: it resets cursor keys, the cursor's
+   visibility and shape, the attributes, the character sets, insert mode,
+   the margins and origin mode, and homes the saved cursor, and it keeps
+   bracketed paste, the mouse modes, focus reporting, the tab stops and the
+   alternate screen (#687). vt100 implements none of it, so the emulator
+   replays the resets as sequences vt100 does implement, then moves the
+   cursor back where the reset found it, since vt100 homes it on a margin
+   or origin reset and xterm's soft reset moves no cursor.
+   `docs/LIMITATIONS.md` keeps the exact list.
 
    `OSC 8` hyperlinks are **captured**, on the same grounds as `OSC 52`
    below: a link changes no cell, its label renders as ordinary text, and
@@ -936,7 +950,12 @@ Nothing is omitted that a `Screen` holds, which is why reading the JSON
 back gives a `Screen` that is `==` to the original where the text format
 gives one that only `diff`s empty. Every row must hold `cols` cells and
 there must be `rows` of them; a file that does not hold together is an
-error, never a screen that panics on its first `cell()`.
+error, never a screen that panics on its first `cell()`. Both counts are
+checked while the grid is read, so the first row or cell past the header's
+size is refused before anything after it is read, and a file costs memory
+in proportion to the screen it declares, not to its length (#713). A grid
+that comes before the header (`jq -S` sorts `cells` ahead of `cols`) is
+held to the 1000-per-axis limit until the header is known.
 
 A cell must also be one a termlens could have written, because the CLI
 prints what it reads: a cell carrying an escape sequence drove the
@@ -968,7 +987,14 @@ every release up to 0.11.6, narrowed a row by truncating it, so a resize
 that cut a wide character left it in the last column, and widening again
 left it before a blank. The text reader reads the same row the same way: a
 wide character whose second column would fall one past the edge is that
-stranded cell, not an over-long row (#643).
+stranded cell, not an over-long row (#643). So is one that a redraw after
+widening left before other text: a row too long at two columns per wide
+character, but not at one for some of them, reads with as many as it needs
+stranded, the leftmost first (#683). A row that fits reads with every wide
+character whole, since the text does not say one lost its second half; the
+JSON twin of such a row, which carries the flags, can then hold the text
+after a stranded character one column further left than the text reads it.
+Both render back to the same text.
 
 The compatibility corpus under `crates/termlens/tests/compat/` holds both
 formats as written by each release since 0.10.1, and `tests/compat.rs`
@@ -1020,8 +1046,9 @@ But it is an implementation detail:
   narrow and listed in `docs/LIMITATIONS.md`: G0–G3 designation, locking
   shifts on G0/G1, SS2/SS3 for one character, two sets translated — DEC
   Special Graphics and the UK set — and everything else read as ASCII.
-  `DECSC`/`DECRC` save and restore the charset state with the cursor;
-  `LS2`/`LS3` are not modelled.
+  `DECSC`/`DECRC` save and restore the charset state with the cursor, in
+  one slot per screen as xterm keeps it (#685); `LS2`/`LS3` are not
+  modelled.
 - vt100's tab stops are a hardcoded eight with no way to be told otherwise,
   so **the stop set is termlens's too**, and for the same reason: `HTS`,
   `TBC`, `CHT` and `CBT` reached `unhandled_escape`/`unhandled_csi` and were
