@@ -685,19 +685,52 @@ fn decode_chunked_base64(data: &[u8]) -> Option<Vec<u8>> {
 /// byte; `$` returns to the left margin within the band; `-` ends the band.
 #[cfg(feature = "decode")]
 fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
-    /// A colour register, or `None` where the application never defined one.
-    type Registers = Vec<Option<[u8; 4]>>;
+    /// The VT340's colour map in percent, registers 0 to 15, as vt340test
+    /// measured it on the hardware (`colormap/colormap.md`) and xterm seeds
+    /// it (`graphics.c`, `case 340`). A sixel that never defines a register
+    /// draws in these, so an image that defines none is not 0 pixels tall
+    /// (#699).
+    const VT340_COLOUR_MAP: [[u32; 3]; 16] = [
+        [0, 0, 0],
+        [20, 20, 80],
+        [80, 13, 13],
+        [20, 80, 20],
+        [80, 20, 80],
+        [20, 80, 80],
+        [80, 80, 20],
+        [53, 53, 53],
+        [26, 26, 26],
+        [33, 33, 60],
+        [60, 26, 26],
+        [33, 60, 33],
+        [60, 33, 60],
+        [33, 60, 60],
+        [60, 60, 33],
+        [80, 80, 80],
+    ];
+    /// What every register past the map holds: xterm zeroes the whole
+    /// table before seeding it, which is opaque black, not "no colour".
+    const BLACK: [u8; 4] = [0, 0, 0, 0xff];
 
     fn percent(value: u32) -> u8 {
         // Sixel colour components are percentages, and the rounding has to
         // match what a terminal does or every assertion lands one off.
         ((value.min(100) * 255 + 50) / 100) as u8
     }
+    fn rgb([r, g, b]: [u32; 3]) -> [u8; 4] {
+        [percent(r), percent(g), percent(b), 0xff]
+    }
 
     let mut at = 0usize;
     let mut declared: Option<(u32, u32)> = None;
-    let mut registers: Registers = vec![None; 256];
-    let mut current = 0usize;
+    let mut registers: Vec<[u8; 4]> = (0..256)
+        .map(|index| VT340_COLOUR_MAP.get(index).copied().map_or(BLACK, rgb))
+        .collect();
+    // The VT340 draws in the last entry of its map until the image selects
+    // a register: 15, the grey of its bold foreground. xterm starts on 3,
+    // under a `FIXME` that calls it a guess (`graphics_sixel.c`); Windows
+    // Terminal's sixel parser starts on 15 as well.
+    let mut current = 15usize;
     // Rows of runs, grown as the data addresses them: a sixel need not
     // declare its size, and one that does can still overrun it.
     let mut rows: Vec<Vec<Option<[u8; 4]>>> = Vec::new();
@@ -743,7 +776,7 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
                     ));
                 }
                 if index >= registers.len() {
-                    registers.resize(index + 1, None);
+                    registers.resize(index + 1, BLACK);
                 }
                 if values.len() >= 5 {
                     // `#n;1;…` is HLS; only RGB (`2`) is defined here, and a
@@ -752,12 +785,7 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
                     if values[1] != 2 {
                         return Err(DecodeError::Unsupported("sixel HLS colours"));
                     }
-                    registers[index] = Some([
-                        percent(values[2]),
-                        percent(values[3]),
-                        percent(values[4]),
-                        0xff,
-                    ]);
+                    registers[index] = rgb([values[2], values[3], values[4]]);
                 }
                 current = index;
             }
@@ -775,7 +803,7 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
                         &mut x,
                         bits,
                         count,
-                        registers.get(current).copied().flatten(),
+                        registers[current],
                     )?;
                 }
             }
@@ -789,7 +817,7 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
                     &mut x,
                     bits,
                     1,
-                    registers.get(current).copied().flatten(),
+                    registers[current],
                 )?;
             }
             b'$' => {
@@ -814,33 +842,31 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
         x: &mut usize,
         bits: u8,
         count: usize,
-        colour: Option<[u8; 4]>,
+        colour: [u8; 4],
     ) -> Result<(), DecodeError> {
         for _ in 0..count {
             // Checked every step rather than once against `count`: `!n` gives
             // a `u32`, and the cursor also carries over from earlier runs in
-            // the same band. Outside the colour branch because an undefined
-            // register still advances the cursor, so a huge repeat would
+            // the same band. Outside the bit loop because `?` sets no bit and
+            // still advances the cursor, so a huge repeat of it would
             // otherwise spin four billion times painting nothing.
             if *x >= MAX_DECODED_WIDTH {
                 return Err(DecodeError::TooLarge("a sixel wider than 4096 pixels"));
             }
-            if let Some(colour) = colour {
-                for bit in 0..6 {
-                    if bits & (1 << bit) != 0 {
-                        let y = band_top + bit;
-                        if y >= MAX_DECODED_HEIGHT {
-                            return Err(DecodeError::TooLarge("a sixel taller than 4096 pixels"));
-                        }
-                        if rows.len() <= y {
-                            rows.resize(y + 1, Vec::new());
-                        }
-                        let row = &mut rows[y];
-                        if row.len() <= *x {
-                            row.resize(*x + 1, None);
-                        }
-                        row[*x] = Some(colour);
+            for bit in 0..6 {
+                if bits & (1 << bit) != 0 {
+                    let y = band_top + bit;
+                    if y >= MAX_DECODED_HEIGHT {
+                        return Err(DecodeError::TooLarge("a sixel taller than 4096 pixels"));
                     }
+                    if rows.len() <= y {
+                        rows.resize(y + 1, Vec::new());
+                    }
+                    let row = &mut rows[y];
+                    if row.len() <= *x {
+                        row.resize(*x + 1, None);
+                    }
+                    row[*x] = Some(colour);
                 }
             }
             *x += 1;
@@ -2102,6 +2128,45 @@ mod tests {
             .expect("decodes");
         assert_eq!(bitmap.pixel(0, 0), Some([0, 255, 0, 255]));
         assert_eq!(bitmap.pixel(0, 1), Some([0, 0, 0, 0]));
+    }
+
+    /// A VT340 starts with its colour map in registers 0 to 15 and draws in
+    /// register 15 until the image selects another (vt340test's
+    /// `colormap/colormap.md`; xterm's `graphics.c`, `case 340`). Both
+    /// decoded to a 2x0 image, while the sixel meter moved the cursor past
+    /// six rows of it (#699).
+    #[cfg(feature = "decode")]
+    #[test]
+    fn a_sixel_that_defines_no_colours_paints_in_the_vt340_colour_map() {
+        // Register 15, 80,80,80 %: nothing selected.
+        let bitmap = sixel_payload(b"~~").decode().expect("decodes");
+        assert_eq!((bitmap.width(), bitmap.height()), (2, 6));
+        assert_eq!(bitmap.colours(), vec![([204, 204, 204, 255], 12)]);
+        // Register 2, 80,13,13 %: selected, never defined.
+        let bitmap = sixel_payload(b"#2~~").decode().expect("decodes");
+        assert_eq!((bitmap.width(), bitmap.height()), (2, 6));
+        assert_eq!(bitmap.colours(), vec![([204, 33, 33, 255], 12)]);
+        // The table converts as a defined register does, so a test may
+        // spell a default out and get the same pixel.
+        for (register, rgb) in [(1, "20;20;80"), (7, "53;53;53"), (9, "33;33;60")] {
+            let defined = format!("#{register};2;{rgb}~");
+            assert_eq!(
+                sixel_payload(defined.as_bytes()).decode().expect("decodes"),
+                sixel_payload(format!("#{register}~").as_bytes())
+                    .decode()
+                    .expect("decodes"),
+                "register {register}"
+            );
+        }
+        // Past the table a register is black rather than nothing, also one
+        // past the 256 seeded up front; and a register the sixel defines is
+        // still its own.
+        let bitmap = sixel_payload(b"#16~#300~#15;2;0;100;0~")
+            .decode()
+            .expect("decodes");
+        assert_eq!(bitmap.pixel(0, 0), Some([0, 0, 0, 255]));
+        assert_eq!(bitmap.pixel(1, 0), Some([0, 0, 0, 255]));
+        assert_eq!(bitmap.pixel(2, 0), Some([0, 255, 0, 255]));
     }
 
     #[cfg(feature = "decode")]

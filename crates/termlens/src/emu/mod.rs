@@ -134,7 +134,7 @@ pub(crate) trait Emulator: Send {
     fn reported_position(&self) -> (u16, u16);
 
     /// The grid as `(rows, cols)`, for the same reason as
-    /// [`cursor_position`](Self::cursor_position).
+    /// [`reported_position`](Self::reported_position).
     fn size(&self) -> (u16, u16);
 
     /// True while the byte stream ends inside an unfinished escape sequence

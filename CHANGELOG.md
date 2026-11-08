@@ -87,6 +87,29 @@ reads that marker.
   before, capped at 64 KiB; an unsupported OSC past the cap is reported
   with its first 64 KiB rather than whole, and one under it is unchanged.
 
+- A sixel that paints with a colour register it never defined decodes in
+  the VT340's colours, as the VT340 draws it (#699). Registers 0 to 15
+  start with its colour map and the rest black, and drawing starts in
+  register 15, its 80 % grey. Those pixels were transparent, so `~~`
+  decoded to a 2x0 image while the cursor moved past six rows of it. A
+  pixel no sixel touched is still transparent.
+- After the emulator panics, `resize` returns the stored
+  `Error::Emulator`, as every wait does, and touches neither the PTY nor
+  the grid (#702). It called `set_size` on the panicked emulator and
+  returned `Ok`: the child was told the new size while `screen()` kept the
+  old one, and a resize back was then skipped as a no-op. Typed input and
+  mouse reports are encoded with the modes the emulator last reported
+  before it panicked, rather than read from it.
+- The DCO gate spares a commit whose committer is `noreply@github.com` the
+  sign-off-equals-author match only on the push run to main, which names
+  the squash GitHub composed (#718). On a pull request it accepted anyone's
+  sign-off on such a commit, and the committer is set locally. The rule
+  holds for every commit in that push, not only its tip, since one push can
+  carry several squashes. The one pull-request exemption left is
+  Dependabot's own commit: Dependabot signs off as
+  `dependabot[bot] <support@github.com>`, never as its author address, so it
+  is let through when its author and its sign-off are both Dependabot's.
+
 ## [0.11.8] - 2026-11-03
 
 ### Changed
