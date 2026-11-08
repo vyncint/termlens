@@ -946,7 +946,12 @@ Nothing is omitted that a `Screen` holds, which is why reading the JSON
 back gives a `Screen` that is `==` to the original where the text format
 gives one that only `diff`s empty. Every row must hold `cols` cells and
 there must be `rows` of them; a file that does not hold together is an
-error, never a screen that panics on its first `cell()`.
+error, never a screen that panics on its first `cell()`. Both counts are
+checked while the grid is read, so the first row or cell past the header's
+size is refused before anything after it is read, and a file costs memory
+in proportion to the screen it declares, not to its length (#713). A grid
+that comes before the header (`jq -S` sorts `cells` ahead of `cols`) is
+held to the 1000-per-axis limit until the header is known.
 
 A cell must also be one a termlens could have written, because the CLI
 prints what it reads: a cell carrying an escape sequence drove the
@@ -978,7 +983,14 @@ every release up to 0.11.6, narrowed a row by truncating it, so a resize
 that cut a wide character left it in the last column, and widening again
 left it before a blank. The text reader reads the same row the same way: a
 wide character whose second column would fall one past the edge is that
-stranded cell, not an over-long row (#643).
+stranded cell, not an over-long row (#643). So is one that a redraw after
+widening left before other text: a row too long at two columns per wide
+character, but not at one for some of them, reads with as many as it needs
+stranded, the leftmost first (#683). A row that fits reads with every wide
+character whole, since the text does not say one lost its second half; the
+JSON twin of such a row, which carries the flags, can then hold the text
+after a stranded character one column further left than the text reads it.
+Both render back to the same text.
 
 The compatibility corpus under `crates/termlens/tests/compat/` holds both
 formats as written by each release since 0.10.1, and `tests/compat.rs`
