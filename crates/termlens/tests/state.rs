@@ -207,18 +207,17 @@ fn a_snapshot_keeps_its_own_view_of_the_links() -> termlens::Result<()> {
 
 /// `DECSTR` (`CSI ! p`) is the polite reset — no screen clear — that a
 /// well-behaved TUI sends on teardown, and it used to have no effect at
-/// all (#233). What it resets here is the list a test can check on a
-/// `Screen`: cursor keys, bracketed paste, mouse tracking, focus reporting,
-/// the cursor's visibility and shape, and the character sets (covered in
-/// `charset.rs`). Attributes, margins, origin and insert modes and the
-/// keypad are not replayed — nothing observes them, so nothing could catch
-/// a wrong replay — and the alternate screen is left alone, as specified.
+/// all (#233). It is xterm's soft reset (#687). Of what a `Screen` shows,
+/// it resets cursor keys, the cursor's visibility and shape, the rendition
+/// and the character sets (covered in `charset.rs`), and keeps what xterm
+/// keeps: bracketed paste, mouse tracking and focus reporting, which xterm
+/// resets only on `RIS`, and the alternate screen.
 #[test]
 #[cfg_attr(windows, ignore = "ConPTY does not forward DECSTR (#149)")]
-fn a_soft_reset_returns_the_modes_a_screen_can_observe() -> termlens::Result<()> {
+fn a_soft_reset_returns_the_modes_xterm_resets() -> termlens::Result<()> {
     let mut t = emit(&[
         "--raw",
-        r"\e[?1049h\e[?1h\e[?2004h\e[?1000h\e[?1006h\e[?1004h\e[?25l\e[5 q",
+        r"\e[?1049h\e[?1h\e[?2004h\e[?1000h\e[?1006h\e[?1004h\e[?25l\e[5 q\e[31;1m",
         "set",
         "--wait",
         "--csi",
@@ -246,9 +245,15 @@ fn a_soft_reset_returns_the_modes_a_screen_can_observe() -> termlens::Result<()>
         "the alternate screen is left alone: {s}"
     );
     assert!(!s.application_cursor(), "{s}");
-    assert!(!s.bracketed_paste(), "{s}");
-    assert_eq!(s.mouse_mode(), MouseMode::None, "{s}");
-    assert!(!s.focus_events(), "{s}");
+    assert!(s.bracketed_paste(), "{s}");
+    assert_eq!(s.mouse_mode(), MouseMode::PressRelease, "{s}");
+    assert!(s.focus_events(), "{s}");
+    let (row, col) = s.find("reset").expect("drawn");
+    assert_eq!(
+        *s.cell(row, col).unwrap().style(),
+        termlens::Style::default(),
+        "SGR 0: the text after the reset is plain: {s}"
+    );
     assert!(
         s.cursor_visible(),
         "DECTCEM: the cursor is visible again: {s}"

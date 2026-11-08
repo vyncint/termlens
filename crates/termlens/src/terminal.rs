@@ -1369,8 +1369,9 @@ impl EmuState {
             Query::CursorPosition { private } => {
                 // Report exactly the cursor as of the query byte: the
                 // emulator stopped there, so this cannot include later
-                // output. 1-based on the wire.
-                let (row, col) = self.emu.cursor_position();
+                // output. 1-based on the wire, and relative to the top
+                // margin under origin mode.
+                let (row, col) = self.emu.reported_position();
                 let prefix = if *private { "?" } else { "" };
                 format!("\x1b[{prefix}{};{}R", row + 1, col + 1).into_bytes()
             }
@@ -4949,7 +4950,7 @@ mod tests {
             );
             Self::screen()
         }
-        fn cursor_position(&self) -> (u16, u16) {
+        fn reported_position(&self) -> (u16, u16) {
             let (row, col, _) = Self::screen().cursor();
             (row, col)
         }
@@ -5266,6 +5267,43 @@ mod tests {
                 took.as_secs_f64() / reference.as_secs_f64()
             );
         }
+    }
+
+    /// Under origin mode (`DECOM`) a cursor position report counts rows from
+    /// the top margin, as xterm's does: an application that reads the
+    /// position back and restores it with `CUP`, which is relative to the
+    /// margin there, must land where it was. Both forms reported the
+    /// absolute row, three rows too low here (#689).
+    #[test]
+    fn a_position_report_under_origin_mode_counts_from_the_top_margin() {
+        let state = |stream: &[u8]| {
+            let mut emu =
+                super::Vt100Emulator::new(24, 80, 0, crate::graphics::DEFAULT_CAPTURE, false);
+            emu.process(stream);
+            EmuState::new(
+                Box::new(emu),
+                Responder {
+                    respond: true,
+                    background: (0, 0, 0),
+                    foreground: (255, 255, 255),
+                    cell_size: None,
+                    graphics: Graphics::default(),
+                    term_name: "xterm-256color".into(),
+                },
+                Arc::new(AtomicUsize::new(0)),
+            )
+        };
+        let report = |state: &mut EmuState, private| {
+            state
+                .answer(&Query::CursorPosition { private })
+                .expect("a cursor position query is answered")
+        };
+        let mut origin = state(b"\x1b[4;8r\x1b[?6h\x1b[2;3H");
+        assert_eq!(report(&mut origin, false), b"\x1b[2;3R");
+        assert_eq!(report(&mut origin, true), b"\x1b[?2;3R");
+        // Without origin mode the same region reports the absolute row.
+        let mut absolute = state(b"\x1b[4;8r\x1b[?6h\x1b[?6l\x1b[5;3H");
+        assert_eq!(report(&mut absolute, false), b"\x1b[5;3R");
     }
 
     /// The reader turns an emulator panic into state every wait can report,

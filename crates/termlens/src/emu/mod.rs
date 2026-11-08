@@ -120,8 +120,10 @@ pub(crate) trait Emulator: Send {
     /// Snapshot the current screen as an owned value.
     fn snapshot(&self) -> Screen;
 
-    /// The cursor as `(row, col)`, 0-based, exactly as [`snapshot`]
-    /// reports it.
+    /// The cursor as a position report (`CSI 6 n`, `CSI ? 6 n`) gives it,
+    /// as `(row, col)`, 0-based: where [`snapshot`] puts it, with the row
+    /// counted from the top margin under origin mode, where a `CUP` counts
+    /// from it too (#689).
     ///
     /// The query responder reads this rather than a snapshot: a snapshot
     /// copies every cell, the history and the graphics log to answer with
@@ -129,7 +131,7 @@ pub(crate) trait Emulator: Send {
     /// batch waited seconds for the replies on a large grid (#618).
     ///
     /// [`snapshot`]: Self::snapshot
-    fn cursor_position(&self) -> (u16, u16);
+    fn reported_position(&self) -> (u16, u16);
 
     /// The grid as `(rows, cols)`, for the same reason as
     /// [`cursor_position`](Self::cursor_position).

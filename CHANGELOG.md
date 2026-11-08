@@ -17,8 +17,36 @@ reads that marker.
 
 ## [Unreleased]
 
+### Changed
+
+- `DECSTR` (soft reset, `CSI ! p`) resets what xterm's soft reset resets
+  and keeps what it keeps. It turned off mouse tracking and its encoding,
+  focus reporting and bracketed paste and restored the default tab stops,
+  all of which xterm resets only on `RIS`; and it left the attributes, the
+  scroll margins, origin mode and the saved cursor alone, which xterm
+  resets. Now those five stay as the application set them, text after the
+  reset is plain, the margins and origin mode are cleared with the cursor
+  left where it was, and a `DECRC` after the reset returns to the top-left
+  corner. A test that expected `DECSTR` to end mouse, focus or
+  bracketed-paste reporting or to restore the tab stops should expect them
+  kept, as a real xterm keeps them, and have the application reset each
+  mode itself or send `RIS`. (#687)
+
 ### Fixed
 
+- The character sets a cursor save keeps are kept per screen, as in xterm,
+  and `?1049h` and `?1049l` save and restore them around the alternate
+  screen. A line-drawing set designated by a full-screen application
+  leaked onto the main screen after it left, so `quit` printed there drew
+  `─┤␋├`, and a `DECRC` on the main screen restored the sets the alternate
+  screen had saved. `CSI s` and `CSI u` without parameters and `?1048h`
+  and `?1048l` save and restore the sets too; the backend still moves no
+  cursor for them, and `unsupported()` still names them. (#685)
+- A cursor position report (`CSI 6 n`, `CSI ? 6 n`) under origin mode
+  (`DECOM`) counts rows from the top margin, as xterm's does. It gave the
+  absolute row, so an application that restored the position with `CUP`,
+  which counts from the margin there, put the cursor as many rows too low
+  as the margin was deep. (#689)
 - `SECURITY.md` counts the eight `unsafe` blocks there are: 0.11.8 added
   `waitid(2)` (#630), and `fcntl(2)` and `tcflush(2)` in teardown (#628).
   A new gate, `.github/scripts/check-unsafe-blocks.sh`, fails CI when the

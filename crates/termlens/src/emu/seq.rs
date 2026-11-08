@@ -303,7 +303,7 @@ enum Charset {
 }
 
 /// What `DECSC` saves of the character-set state — see
-/// [`SeqTracker::saved_charsets`].
+/// [`ScreenFrame::saved_charsets`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SavedCharsets {
     g0: Charset,
@@ -311,6 +311,35 @@ struct SavedCharsets {
     g2: Charset,
     g3: Charset,
     shifted_out: bool,
+}
+
+/// What the tracker follows of one screen — the main one or the alternate —
+/// beside vt100, which keeps the same state per grid and exposes none of it.
+///
+/// The margin and origin mode are kept for the cursor position report,
+/// which counts rows from the top margin under origin mode (#689). They
+/// follow vt100's rules rather than xterm's wherever the two differ, since
+/// a report is read back as a `CUP` that vt100 carries out: a region per
+/// grid, `1049` clearing the alternate grid's, a resize clearing both.
+/// The charset slot is xterm's `screen->sc[screen->whichBuf]`, one per
+/// screen, so a restore on the main screen never reads what the alternate
+/// screen saved (#685).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ScreenFrame {
+    /// The top margin `DECSTBM` set, 0-based; 0 with no region set.
+    top: u16,
+    /// Origin mode (`DECOM`, `CSI ? 6 h`).
+    origin: bool,
+    /// The origin mode `DECSC` saved and `DECRC` restores. vt100 saves it
+    /// with the cursor; the other saves, which vt100 does not implement,
+    /// leave it alone.
+    saved_origin: bool,
+    /// The charset half of the state a cursor save keeps: G0–G3 and which
+    /// of G0/G1 is locked in. A restore with nothing saved returns to the
+    /// power-on defaults, as xterm does. `None` after RIS and `DECSTR`, or
+    /// a restore after a reset would resurrect a designation from before
+    /// it.
+    saved_charsets: Option<SavedCharsets>,
 }
 
 /// The glyph a byte draws in DEC Special Graphics, where it differs from
@@ -658,7 +687,18 @@ pub(crate) struct SeqTracker {
     csi_param: u32,
     csi_has_digits: bool,
     csi_first_param: u32,
+    /// The second parameter, for `DECSTBM`'s bottom margin.
+    csi_second_param: u32,
     csi_param_count: u8,
+    /// The modes of the current CSI that move a [`ScreenFrame`] — `6`,
+    /// `47`, `1048` and `1049` — in the order named. Unlike the flags
+    /// above, order matters here: `CSI ? 6 ; 1049 h` sets origin mode on
+    /// the main screen and saves it there, `CSI ? 1049 ; 6 h` sets it on
+    /// the alternate screen, and vt100 applies a list in order. Four is
+    /// more than any application names in one sequence; a fifth is
+    /// dropped.
+    csi_frame_modes: [u16; 4],
+    csi_frame_mode_count: u8,
     csi_saw_2026: bool,
     /// Set when the current CSI's parameter list contains 1004 (focus
     /// reporting), the same trick `csi_saw_2026` uses — a mode can arrive
@@ -780,13 +820,21 @@ pub(crate) struct SeqTracker {
     /// an intervening control or designation must not consume it, or a
     /// mixed line that shifts then redraws would lose the graphic.
     single_shift: Option<SingleShift>,
-    /// The charset half of the state `DECSC` (`ESC 7`) saves: G0–G3 and
-    /// which of G0/G1 is locked in. `DECRC` (`ESC 8`) restores it; with
-    /// nothing saved it restores the power-on defaults, as xterm does. vt100
-    /// saves and restores the cursor and attributes itself, so only the
-    /// half it does not know about lives here. `None` after RIS, or a
-    /// restore after a reset would resurrect a designation from before it.
-    saved_charsets: Option<SavedCharsets>,
+    /// The main screen's frame and the alternate screen's, in that order.
+    /// vt100 saves and restores the cursor and attributes itself; what it
+    /// does not know about, or does not expose, lives here.
+    screens: [ScreenFrame; 2],
+    /// Whether the alternate screen is up, by vt100's rule: `47` and
+    /// `1049` switch, and `1047`, which vt100 does not implement, does not.
+    /// Following xterm there would put the charset slot on one screen and
+    /// the cursor vt100 saves on the other.
+    alternate: bool,
+    /// The grid's height, which decides whether a `DECSTBM` is a region or
+    /// a reset, as it does in vt100.
+    rows: u16,
+    /// The grid's width, kept so a resize to the same size is told apart:
+    /// vt100 clears the margins only when the size changes.
+    cols: u16,
     /// Which introducer opened the current DCS-class string: `P` (DCS),
     /// `X` (SOS), `^` (PM) or `_` (APC). Sixel and kitty graphics differ
     /// only by this, so consuming all four alike — which is all the tracker
@@ -819,7 +867,7 @@ pub(crate) struct SeqTracker {
     /// byte of its stream rather than over the bounded `dcs_body`: they
     /// describe the image, and stay exact past the capture bound (#635).
     sixel_meter: SixelMeter,
-    /// Where the tab stops are. Sized to the grid, so `set_cols` follows
+    /// Where the tab stops are. Sized to the grid, so `set_size` follows
     /// every resize.
     tabs: TabStops,
     /// `IRM` (`CSI 4 h`) is set — see [`insert_mode`](Self::insert_mode).
@@ -827,8 +875,9 @@ pub(crate) struct SeqTracker {
 }
 
 impl SeqTracker {
-    /// `cols` sizes the tab-stop set; everything else here is width-agnostic.
-    pub(crate) fn new(capture: usize, cols: u16) -> Self {
+    /// `cols` sizes the tab-stop set, and `rows` decides which margins are
+    /// a region.
+    pub(crate) fn new(capture: usize, rows: u16, cols: u16) -> Self {
         Self {
             state: State::Ground,
             utf8_remaining: 0,
@@ -842,7 +891,10 @@ impl SeqTracker {
             csi_param: 0,
             csi_has_digits: false,
             csi_first_param: 0,
+            csi_second_param: 0,
             csi_param_count: 0,
+            csi_frame_modes: [0; 4],
+            csi_frame_mode_count: 0,
             csi_saw_2026: false,
             csi_saw_1004: false,
             csi_saw_irm: false,
@@ -877,7 +929,10 @@ impl SeqTracker {
             g3: Charset::Ascii,
             shifted_out: false,
             single_shift: None,
-            saved_charsets: None,
+            screens: [ScreenFrame::default(); 2],
+            alternate: false,
+            rows: rows.max(1),
+            cols: cols.max(1),
             dcs_introducer: 0,
             dcs_final: 0,
             dcs_intermediate: 0,
@@ -892,10 +947,138 @@ impl SeqTracker {
         }
     }
 
-    /// Resize the tab-stop set with the grid. See [`TabStops::set_cols`] for
-    /// what happens to the columns on either side of the change.
-    pub(crate) fn set_cols(&mut self, cols: u16) {
+    /// Follow a resize of the grid. The tab-stop set grows or shrinks with
+    /// it — see [`TabStops::set_cols`] for what happens to the columns on
+    /// either side of the change — and a change of size clears both
+    /// screens' margins, as vt100's does (xterm's too). Origin mode stays.
+    pub(crate) fn set_size(&mut self, rows: u16, cols: u16) {
+        // vt100 makes a zero dimension one, so both are compared that way.
+        let size = (rows.max(1), cols.max(1));
+        if size != (self.rows, self.cols) {
+            for screen in &mut self.screens {
+                screen.top = 0;
+            }
+        }
+        (self.rows, self.cols) = size;
         self.tabs.set_cols(cols);
+    }
+
+    /// The frame of the screen on display.
+    fn frame(&self) -> &ScreenFrame {
+        &self.screens[usize::from(self.alternate)]
+    }
+
+    fn frame_mut(&mut self) -> &mut ScreenFrame {
+        &mut self.screens[usize::from(self.alternate)]
+    }
+
+    /// The row a cursor position report counts from: the top margin under
+    /// origin mode, where `CUP` counts from it too, and row 0 otherwise.
+    /// xterm subtracts `top_marg` when `ORIGIN` is set (#689).
+    pub(crate) fn report_origin_row(&self) -> u16 {
+        let frame = self.frame();
+        if frame.origin {
+            frame.top
+        } else {
+            0
+        }
+    }
+
+    /// Save the character sets into the slot of the screen on display.
+    fn save_charsets(&mut self) {
+        let saved = SavedCharsets {
+            g0: self.g0,
+            g1: self.g1,
+            g2: self.g2,
+            g3: self.g3,
+            shifted_out: self.shifted_out,
+        };
+        self.frame_mut().saved_charsets = Some(saved);
+    }
+
+    /// Restore the character sets from the slot of the screen on display;
+    /// with nothing saved there, xterm restores the defaults rather than
+    /// leaving the current designation, and so do we.
+    fn restore_charsets(&mut self) {
+        match self.frame().saved_charsets {
+            Some(saved) => {
+                self.g0 = saved.g0;
+                self.g1 = saved.g1;
+                self.g2 = saved.g2;
+                self.g3 = saved.g3;
+                self.shifted_out = saved.shifted_out;
+            }
+            None => self.reset_charsets(),
+        }
+    }
+
+    /// `DECSC`: the charsets, and the origin mode vt100 saves with the
+    /// cursor.
+    fn save_cursor(&mut self) {
+        self.save_charsets();
+        let frame = self.frame_mut();
+        frame.saved_origin = frame.origin;
+    }
+
+    /// `DECRC`, the other half of [`save_cursor`](Self::save_cursor).
+    fn restore_cursor(&mut self) {
+        self.restore_charsets();
+        let frame = self.frame_mut();
+        frame.origin = frame.saved_origin;
+    }
+
+    /// `DECSTBM` (`CSI Pt ; Pb r`), read as vt100 reads it: an omitted or
+    /// zero margin is the screen's edge, a bottom past the screen is its
+    /// last row, and a region that does not have its top above its bottom
+    /// is no region at all.
+    fn set_margins(&mut self) {
+        let given = |param: u32, default: u16| match u16::try_from(param).unwrap_or(u16::MAX) {
+            0 => default,
+            value => value,
+        };
+        let top = if self.csi_param_count == 0 {
+            1
+        } else {
+            given(self.csi_first_param, 1)
+        };
+        let bottom = if self.csi_param_count < 2 {
+            self.rows
+        } else {
+            given(self.csi_second_param, self.rows)
+        };
+        let (top, bottom) = (top - 1, (bottom - 1).min(self.rows - 1));
+        self.frame_mut().top = if top < bottom { top } else { 0 };
+    }
+
+    /// Set or reset one of the modes that move a [`ScreenFrame`], in vt100's
+    /// way.
+    fn set_frame_mode(&mut self, mode: u16, set: bool) {
+        match (mode, set) {
+            (6, _) => self.frame_mut().origin = set,
+            (47, _) => self.alternate = set,
+            // xterm's other cursor save. vt100 does not implement it, so
+            // only the charset half is honoured.
+            (1048, true) => self.save_charsets(),
+            (1048, false) => self.restore_charsets(),
+            // vt100 saves the cursor, clears the alternate grid — margins,
+            // origin mode and saved cursor with it — and switches; and on
+            // the way back switches, then restores. The alternate screen's
+            // charset slot is xterm's and survives, as it does there.
+            (1049, true) => {
+                self.save_cursor();
+                let alternate = &mut self.screens[1];
+                *alternate = ScreenFrame {
+                    saved_charsets: alternate.saved_charsets,
+                    ..ScreenFrame::default()
+                };
+                self.alternate = true;
+            }
+            (1049, false) => {
+                self.alternate = false;
+                self.restore_cursor();
+            }
+            _ => {}
+        }
     }
 
     /// Carry out a [`TabOp`] at cursor column `col`, returning the column the
@@ -1102,25 +1285,29 @@ impl SeqTracker {
         self.single_shift = None;
     }
 
-    /// The tracker's half of `DECSTR`: the character sets and the `DECSC`
-    /// slot back to power-on, the cursor shape back to the terminal's
-    /// default, focus reporting off. The window title, the clipboard, the
-    /// bell count and the link log stay, for the same reason they survive
-    /// `RIS`: they are records of what the application emitted, not modes
-    /// the terminal holds. An open link span stays open too — a soft reset
-    /// clears no screen, so the text after it is still the span's text. A
-    /// kitty upload still in progress survives as well, though `RIS`
-    /// abandons one: kitty's soft reset leaves its images alone, and the
-    /// next chunk there still completes the upload.
+    /// The tracker's half of `DECSTR`, which is xterm's soft reset
+    /// (`ReallyReset` with `full` false): the character sets back to
+    /// power-on, the cursor shape back to the terminal's default, insert
+    /// mode off, and on the screen on display the margins and origin mode
+    /// cleared and the cursor save emptied — xterm saves the reset state
+    /// there and homes it, which a restore cannot tell from an empty slot.
+    ///
+    /// Kept, as xterm keeps them (it resets each only when `full`, for
+    /// `RIS`): mouse tracking and its encoding, focus reporting and the tab
+    /// stops (#687). The window title, the clipboard, the bell count and the
+    /// link log stay too, for the same reason they survive `RIS`: they are
+    /// records of what the application emitted, not modes the terminal
+    /// holds. An open link span stays open — a soft reset clears no screen,
+    /// so the text after it is still the span's text. A kitty upload still
+    /// in progress survives as well, though `RIS` abandons one: kitty's soft
+    /// reset leaves its images alone, and the next chunk there still
+    /// completes the upload.
     fn soft_reset(&mut self) {
         self.reset_charsets();
-        self.saved_charsets = None;
         self.cursor_style = None;
-        self.focus_events = false;
-        self.mouse_tracking = 0;
-        self.mouse_encoding = MouseEncoding::Legacy;
         self.insert_mode = false;
-        self.tabs.reset();
+        let frame = self.frame_mut();
+        *frame = ScreenFrame::default();
     }
 
     /// Whether `IRM` (`CSI 4 h`) is set: a printable byte pushes the rest
@@ -1175,7 +1362,9 @@ impl SeqTracker {
         self.csi_param = 0;
         self.csi_has_digits = false;
         self.csi_first_param = 0;
+        self.csi_second_param = 0;
         self.csi_param_count = 0;
+        self.csi_frame_mode_count = 0;
         self.csi_saw_2026 = false;
         self.csi_saw_1004 = false;
         self.csi_saw_irm = false;
@@ -1223,8 +1412,17 @@ impl SeqTracker {
             self.csi_saw_encodings |= encoding_bit(encoding);
             self.csi_last_encoding = Some(encoding);
         }
-        if self.csi_param_count == 0 {
-            self.csi_first_param = self.csi_param;
+        if let Ok(mode @ (6 | 47 | 1048 | 1049)) = u16::try_from(self.csi_param) {
+            let at = usize::from(self.csi_frame_mode_count);
+            if at < self.csi_frame_modes.len() {
+                self.csi_frame_modes[at] = mode;
+                self.csi_frame_mode_count += 1;
+            }
+        }
+        match self.csi_param_count {
+            0 => self.csi_first_param = self.csi_param,
+            1 => self.csi_second_param = self.csi_param,
+            _ => {}
         }
         self.csi_param_count = self.csi_param_count.saturating_add(1);
         self.csi_param = 0;
@@ -1270,14 +1468,17 @@ impl SeqTracker {
 
     /// The event (if any) implied by a CSI final byte.
     fn csi_final(&mut self, b: u8) -> SeqEvent {
-        if self.csi_invalid || (self.csi_colon && b != b'J') {
+        // ED and DECSTBM read the first value of a parameter with
+        // sub-parameters in vt100, so they act on one; nothing else does.
+        if self.csi_invalid || (self.csi_colon && !matches!(b, b'J' | b'r')) {
             return SeqEvent::None;
         }
         if self.csi_has_digits {
             self.end_csi_param();
         }
         let params_empty = self.csi_param_count == 0;
-        let single = |v: u32| self.csi_param_count == 1 && self.csi_first_param == v;
+        let (count, first) = (self.csi_param_count, self.csi_first_param);
+        let single = move |v: u32| count == 1 && first == v;
 
         // DECRQM (`CSI ? n $ p`) and DECRQSS-adjacent `$`-intermediate
         // requests. Handled before the plain-CSI table below, which
@@ -1295,9 +1496,9 @@ impl SeqTracker {
 
         // DECSTR (`CSI ! p`), the soft reset: what a well-behaved TUI sends
         // on startup and teardown for a known-good terminal without the
-        // screen clear RIS brings. The spec's list is long; the modes this
-        // crate holds are returned to their defaults here, and the emulator
-        // is told to do the same for the ones it holds (#233).
+        // screen clear RIS brings. xterm's is the reference (#687): what it
+        // resets of the state this crate holds is reset here, and the
+        // emulator is told to do the same for the state it holds (#233).
         if self.csi_intermediate == b'!' {
             if b == b'p' && self.csi_prefix == 0 && params_empty {
                 self.soft_reset();
@@ -1332,6 +1533,24 @@ impl SeqTracker {
                 }
             }
             return SeqEvent::None;
+        }
+
+        // The screen frames — see `ScreenFrame`: the margins, origin mode,
+        // the screen switches vt100 carries out and the cursor saves. Ahead
+        // of 2026, whose Begin returns from a list that names one of these
+        // too.
+        match (self.csi_prefix, b) {
+            (0, b'r') => self.set_margins(),
+            // SCOSC / SCORC. With a parameter `CSI s` is DECSLRM in xterm
+            // and `CSI u` belongs to kitty's keyboard protocol.
+            (0, b's') if params_empty => self.save_charsets(),
+            (0, b'u') if params_empty => self.restore_charsets(),
+            (b'?', b'h' | b'l') => {
+                for i in 0..usize::from(self.csi_frame_mode_count) {
+                    self.set_frame_mode(self.csi_frame_modes[i], b == b'h');
+                }
+            }
+            _ => {}
         }
 
         // DEC private mode 1004 (focus reporting). vt100 does not model it,
@@ -2059,7 +2278,10 @@ impl SeqTracker {
                 b'c' => {
                     self.cursor_style = None;
                     self.reset_charsets();
-                    self.saved_charsets = None;
+                    // vt100 builds a new screen: the main one, with no
+                    // margins, no origin mode and nothing saved.
+                    self.screens = [ScreenFrame::default(); 2];
+                    self.alternate = false;
                     // Focus reporting and an open synchronized update are
                     // modes the terminal holds, so a reset ends both. Left
                     // set, `focus_in` typed `^[[I` at a program that never
@@ -2086,31 +2308,14 @@ impl SeqTracker {
                 // restore-cursor. The idiom is save, jump, draw a border,
                 // restore — and a restore that forgot the designation
                 // rendered the border after it as `lqk`. vt100 does the
-                // cursor and attributes; the sets are ours (#232).
+                // cursor and attributes; the sets are ours (#232), kept per
+                // screen (#685), and so is the origin mode vt100 saves.
                 b'7' => {
-                    self.saved_charsets = Some(SavedCharsets {
-                        g0: self.g0,
-                        g1: self.g1,
-                        g2: self.g2,
-                        g3: self.g3,
-                        shifted_out: self.shifted_out,
-                    });
+                    self.save_cursor();
                     State::Ground
                 }
                 b'8' => {
-                    match self.saved_charsets {
-                        Some(saved) => {
-                            self.g0 = saved.g0;
-                            self.g1 = saved.g1;
-                            self.g2 = saved.g2;
-                            self.g3 = saved.g3;
-                            self.shifted_out = saved.shifted_out;
-                        }
-                        // Nothing saved: xterm restores the defaults rather
-                        // than leaving the current designation, and so do
-                        // we — the least surprising answer, and no new state.
-                        None => self.reset_charsets(),
-                    }
+                    self.restore_cursor();
                     State::Ground
                 }
                 // HTS (`ESC H`): a tab stop at the cursor column, which the
@@ -2265,13 +2470,14 @@ mod tests {
     use super::*;
     use crate::graphics::{GraphicsAction, GraphicsFormat, GraphicsProtocol};
 
-    /// The width these tests construct a tracker at. Only the tab-stop set
-    /// is sized, and only the tab tests care what the size is; the rest is
-    /// width-agnostic and takes the default terminal's 80.
+    /// The size these tests construct a tracker at: the default terminal's.
+    /// Only the tab-stop set and the margins are sized, and only the tests
+    /// of those care what the size is.
+    const TEST_ROWS: u16 = 24;
     const TEST_COLS: u16 = 80;
 
     fn fed(bytes: &[u8]) -> SeqTracker {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         t.feed(bytes);
         t
     }
@@ -2303,7 +2509,7 @@ mod tests {
     /// which is the whole of what the knob is for.
     #[test]
     fn the_capture_bound_holds_across_a_chunked_transmission() {
-        let mut tracker = SeqTracker::new(40, TEST_COLS);
+        let mut tracker = SeqTracker::new(40, TEST_ROWS, TEST_COLS);
         // Ten chunks of eight data bytes: every escape fits the bound
         // comfortably, and the ten together do not.
         let mut wire: Vec<u8> = b"\x1b_Ga=T,f=32,s=4,v=4,m=1;AAAAAAAA\x1b\\".to_vec();
@@ -2330,7 +2536,7 @@ mod tests {
 
     /// Every payload a feed produced, in order.
     fn payloads(bytes: &[u8]) -> Vec<GraphicsPayload> {
-        let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let mut out = Vec::new();
         for &byte in bytes {
             if let SeqEvent::Graphics(payload, _) | SeqEvent::GraphicsQuery(payload, _, _) =
@@ -2345,7 +2551,7 @@ mod tests {
     /// Every payload and every query a feed produced, in order, and the
     /// tracker it left.
     fn kitty_events(bytes: &[u8]) -> (Vec<GraphicsPayload>, Vec<Query>, SeqTracker) {
-        let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let (mut seen, mut queries) = (Vec::new(), Vec::new());
         for &byte in bytes {
             match tracker.step(byte) {
@@ -2776,7 +2982,7 @@ mod tests {
     fn a_sixel_keeps_its_declared_size_at_every_capture_bound() {
         let wire: &[u8] = b"\x1bPq\"1;1;8;45#0;2;100;0;0~~~~~~~~-~~~~~~~~\x1b\\";
         for capture in [crate::graphics::DEFAULT_CAPTURE, 20, 6, 0] {
-            let mut tracker = SeqTracker::new(capture, TEST_COLS);
+            let mut tracker = SeqTracker::new(capture, TEST_ROWS, TEST_COLS);
             let mut seen = None;
             for &byte in wire {
                 if let SeqEvent::Graphics(payload, placement) = tracker.step(byte) {
@@ -2799,7 +3005,7 @@ mod tests {
     /// plausible-looking wrong picture.
     #[test]
     fn a_payload_past_the_capture_bound_is_counted_and_not_kept() {
-        let mut tracker = SeqTracker::new(8, TEST_COLS);
+        let mut tracker = SeqTracker::new(8, TEST_ROWS, TEST_COLS);
         let mut seen = None;
         for &byte in b"\x1b_Ga=T,f=32,s=4,v=4;AAAABBBBCCCCDDDD\x1b\\" {
             if let SeqEvent::Graphics(payload, _) = tracker.step(byte) {
@@ -2831,7 +3037,7 @@ mod tests {
     /// it and the timeout said nothing.
     #[test]
     fn the_kitty_graphics_query_is_classified() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let mut events = Vec::new();
         for &b in b"\x1b_Gi=1,a=q;\x1b\\" {
             events.push(t.step(b));
@@ -2854,7 +3060,7 @@ mod tests {
     /// next timeout of every application that draws.
     #[test]
     fn a_kitty_transmission_is_not_treated_as_a_query() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let mut events = Vec::new();
         for &b in b"\x1b_Gf=24,a=T;QUJD\x1b\\" {
             events.push(t.step(b));
@@ -3173,7 +3379,7 @@ mod tests {
     #[test]
     fn hostile_input_cannot_panic_or_grow_a_buffer_past_its_bound() {
         let capture = crate::graphics::DEFAULT_CAPTURE;
-        let mut tracker = SeqTracker::new(capture, TEST_COLS);
+        let mut tracker = SeqTracker::new(capture, TEST_ROWS, TEST_COLS);
         // (links, label, osc, dcs_body) high-water marks.
         let mut peak = (0usize, 0usize, 0usize, 0usize);
 
@@ -3251,7 +3457,7 @@ mod tests {
     /// with them, driven long enough to exercise eviction many times over.
     #[test]
     fn a_long_well_formed_stream_stays_bounded_and_consistent() {
-        let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut tracker = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         for n in 0..5_000u32 {
             let chunk = format!(
                 "\x1b]8;id={n};http://example.invalid/{n}\x1b\\label{n}\x1b]8;;\x1b\\\
@@ -3272,7 +3478,7 @@ mod tests {
     /// The glyphs a fed tracker would hand the grid for `text`, byte by
     /// byte: the translation where one applies, the byte itself otherwise.
     fn drawn(bytes: &[u8]) -> String {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let mut out = String::new();
         for &b in bytes {
             match t.charset_glyph(b) {
@@ -3372,7 +3578,7 @@ mod tests {
     #[test]
     fn a_multibyte_character_consumes_a_single_shift() {
         for ch in ["汉", "🦀", "é"] {
-            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
             t.feed(b"\x1b*0\x1bN");
             assert_eq!(
                 t.charset_glyph(b'l'),
@@ -3405,7 +3611,7 @@ mod tests {
     /// OSC title, a CSI parameter or a DCS payload must pass untouched.
     #[test]
     fn bytes_inside_sequences_are_never_translated() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         for &b in b"\x1b(0" {
             t.step(b);
         }
@@ -3451,13 +3657,13 @@ mod tests {
 
     #[test]
     fn a_designation_split_across_feeds_still_applies() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         t.feed(b"\x1b(");
         assert!(t.mid_sequence());
         t.feed(b"0");
         assert_eq!(t.charset_glyph(b'l'), Some("\u{250c}"));
 
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         t.feed(b"\x1b*");
         assert!(t.mid_sequence());
         t.feed(b"0\x1bN");
@@ -3472,7 +3678,7 @@ mod tests {
 
     #[test]
     fn split_csi_is_mid_sequence_until_final_byte() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         t.feed(b"\x1b[3");
         assert!(t.mid_sequence());
         t.feed(b"1");
@@ -3528,7 +3734,7 @@ mod tests {
 
     #[test]
     fn sync_update_events_fire_on_2026_set_and_reset() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let events: Vec<SeqEvent> = b"\x1b[?2026h".iter().map(|&b| t.step(b)).collect();
         assert_eq!(*events.last().unwrap(), SeqEvent::SyncBegin);
         assert!(t.in_sync_update());
@@ -3543,11 +3749,11 @@ mod tests {
     /// reset, and the same final byte must not fire the event.
     #[test]
     fn hard_reset_fires_an_event_and_csi_c_does_not() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let events: Vec<SeqEvent> = b"\x1bc".iter().map(|&b| t.step(b)).collect();
         assert_eq!(*events.last().unwrap(), SeqEvent::HardReset);
 
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let events: Vec<SeqEvent> = b"\x1b[c".iter().map(|&b| t.step(b)).collect();
         assert!(!events.contains(&SeqEvent::HardReset));
     }
@@ -3581,17 +3787,17 @@ mod tests {
             encoding(b"\x1b[?1015h\x1b[?1006;1015l"),
             MouseEncoding::Legacy
         );
-        // Both resets return it to power-on.
-        assert_eq!(encoding(b"\x1b[?1015h\x1b[!p"), MouseEncoding::Legacy);
+        // RIS returns it to power-on; DECSTR keeps it, as xterm does (#687).
         assert_eq!(encoding(b"\x1b[?1015h\x1bc"), MouseEncoding::Legacy);
+        assert_eq!(encoding(b"\x1b[?1015h\x1b[!p"), MouseEncoding::Urxvt);
         // An ANSI mode of the same number is not a mouse encoding.
         assert_eq!(encoding(b"\x1b[1015h"), MouseEncoding::Legacy);
     }
 
-    /// RIS returns focus reporting and synchronized output to power-on, as
-    /// `DECSTR` already did for focus: left on, `focus_in` typed at a
-    /// program that had reset, and an update begun before the reset stayed
-    /// open for good (#623).
+    /// RIS returns focus reporting and synchronized output to power-on: left
+    /// on, `focus_in` typed at a program that had reset, and an update begun
+    /// before the reset stayed open for good (#623). `DECSTR` keeps focus
+    /// reporting, as xterm's soft reset does (#687).
     #[test]
     fn a_hard_reset_ends_focus_reporting_and_an_open_synchronized_update() {
         let mut t = fed(b"\x1b[?1004h\x1b[?2026hhalf");
@@ -3618,7 +3824,7 @@ mod tests {
     #[test]
     fn every_spelling_of_erase_saved_lines_is_seen() {
         let erased = |bytes: &[u8]| {
-            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
             bytes
                 .iter()
                 .filter(|&&b| t.step(b) == SeqEvent::ScrollbackErased)
@@ -3674,7 +3880,7 @@ mod tests {
         assert_eq!(fed(b"\x1b(\x07").bells(), 1);
         // The control is not part of the sequence: an unanswered query is
         // named as the application would recognise it.
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let named: Vec<SeqEvent> = b"\x1b[\r?u".iter().map(|&b| t.step(b)).collect();
         assert_eq!(
             named.last(),
@@ -3699,7 +3905,7 @@ mod tests {
     #[test]
     fn entering_the_alternate_screen_fires_an_event() {
         let last = |bytes: &[u8]| {
-            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
             bytes.iter().map(|&b| t.step(b)).last().unwrap()
         };
         for entry in [
@@ -3722,17 +3928,17 @@ mod tests {
 
     #[test]
     fn sync_2026_is_recognized_anywhere_in_a_multi_mode_list() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         t.feed(b"\x1b[?2026;25h");
         assert!(t.in_sync_update());
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         t.feed(b"\x1b[?25;2026h");
         assert!(t.in_sync_update());
     }
 
     #[test]
     fn lookalike_sequences_do_not_toggle_sync() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         t.feed(b"\x1b[2026h"); // not private (no '?')
         assert!(!t.in_sync_update());
         t.feed(b"\x1b[?2026m"); // wrong final byte
@@ -3819,7 +4025,7 @@ mod tests {
 
     #[test]
     fn a_clipboard_read_is_a_query_not_a_write() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let events: Vec<SeqEvent> = b"\x1b]52;c;?\x07".iter().map(|&b| t.step(b)).collect();
         assert!(matches!(
             events.last(),
@@ -3833,19 +4039,19 @@ mod tests {
         // Applications reset terminal modes defensively at startup and on
         // crash, and such a reset string contains `?2026l`. It must not end
         // a frame that never began.
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let events: Vec<SeqEvent> = b"\x1b[?2026l".iter().map(|&b| t.step(b)).collect();
         assert!(!events.contains(&SeqEvent::SyncEnd));
         assert!(!t.in_sync_update());
 
         // Taken verbatim from a real crash handler.
         let reset = b"\x1b[?2026l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?2004l\x1b[?1049l";
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let events: Vec<SeqEvent> = reset.iter().map(|&b| t.step(b)).collect();
         assert!(!events.contains(&SeqEvent::SyncEnd));
 
         // And the End of a real frame still ends it, once only.
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let events: Vec<SeqEvent> = b"\x1b[?2026h\x1b[?2026l\x1b[?2026l"
             .iter()
             .map(|&b| t.step(b))
@@ -3858,7 +4064,7 @@ mod tests {
 
     #[test]
     fn sync_survives_an_aborted_csi_inside_the_update() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         t.feed(b"\x1b[?2026h\x1b[31\x18"); // CAN aborts the SGR, not the frame
         assert!(t.in_sync_update());
         t.feed(b"\x1b[?2026l");
@@ -3866,7 +4072,7 @@ mod tests {
     }
 
     fn queries_of(bytes: &[u8]) -> Vec<Query> {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         bytes
             .iter()
             .filter_map(|&b| match t.step(b) {
@@ -4063,7 +4269,7 @@ mod tests {
 
     #[test]
     fn osc_0_and_2_set_the_title_via_bel_or_st() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         assert_eq!(&*t.title(), "");
         t.feed(b"\x1b]2;hello world\x07");
         assert_eq!(&*t.title(), "hello world");
@@ -4073,7 +4279,7 @@ mod tests {
 
     #[test]
     fn titles_longer_than_the_diagnostic_capture_are_kept_whole() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let title = "t".repeat(80); // seq_buf truncates at 24; titles must not
         t.feed(format!("\x1b]2;{title}\x07").as_bytes());
         assert_eq!(&*t.title(), title.as_str());
@@ -4081,7 +4287,7 @@ mod tests {
 
     #[test]
     fn title_survives_chunked_delivery() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         t.feed(b"\x1b]2;split");
         t.feed(b" title\x07");
         assert_eq!(&*t.title(), "split title");
@@ -4089,14 +4295,14 @@ mod tests {
 
     #[test]
     fn title_keeps_embedded_semicolons() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         t.feed(b"\x1b]0;a;b;c\x07");
         assert_eq!(&*t.title(), "a;b;c");
     }
 
     #[test]
     fn icon_only_and_aborted_titles_do_not_change_the_title() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         t.feed(b"\x1b]2;kept\x07");
         t.feed(b"\x1b]1;icon only\x07"); // OSC 1: icon name, not the title
         assert_eq!(&*t.title(), "kept");
@@ -4111,7 +4317,7 @@ mod tests {
     #[test]
     fn split_utf8_is_mid_sequence() {
         let bytes = "汉".as_bytes(); // 3 bytes
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         t.feed(&bytes[..1]);
         assert!(t.mid_sequence());
         t.feed(&bytes[1..2]);
@@ -4123,7 +4329,7 @@ mod tests {
     /// Every [`TabOp`] a stream can produce, so the recognition is pinned
     /// apart from the rewrite that acts on it.
     fn tab_ops(bytes: &[u8]) -> Vec<TabOp> {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_COLS);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
         let mut out = Vec::new();
         for &byte in bytes {
             if let SeqEvent::Tabs(op) = t.step(byte) {
@@ -4169,7 +4375,7 @@ mod tests {
 
     #[test]
     fn a_stop_set_at_the_cursor_is_where_the_next_tab_lands() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, 24);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, 24);
         // The default eight, until the application says otherwise.
         assert_eq!(t.tab_op(TabOp::Forward(1), 1), Some(8));
         assert_eq!(t.tab_op(TabOp::Set, 3), None);
@@ -4183,7 +4389,7 @@ mod tests {
 
     #[test]
     fn motions_move_by_whole_stops_and_saturate_at_the_edges() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, 24);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, 24);
         assert_eq!(t.tab_op(TabOp::Forward(2), 0), Some(16));
         // Past the last stop there is nowhere left to go but the last
         // column, and asking for more stops than exist does not overshoot.
@@ -4199,7 +4405,7 @@ mod tests {
 
     #[test]
     fn clearing_every_stop_leaves_the_two_edges() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, 24);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, 24);
         assert_eq!(t.tab_op(TabOp::ClearAll, 0), None);
         assert_eq!(t.tab_op(TabOp::Forward(1), 0), Some(23));
         assert_eq!(t.tab_op(TabOp::Back(1), 20), Some(0));
@@ -4208,30 +4414,31 @@ mod tests {
         assert_eq!(t.tab_op(TabOp::Forward(1), 0), Some(5));
     }
 
+    /// `RIS` restores the every-eighth set; `DECSTR` keeps the stops the
+    /// application set, as xterm's soft reset does (#687).
     #[test]
-    fn a_reset_restores_the_default_every_eighth_set() {
-        for reset in [&b"\x1bc"[..], b"\x1b[!p"] {
-            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, 24);
+    fn a_hard_reset_restores_the_default_every_eighth_set_and_a_soft_one_does_not() {
+        for (reset, after) in [(&b"\x1bc"[..], 8), (b"\x1b[!p", 3)] {
+            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, 24);
             assert_eq!(t.tab_op(TabOp::ClearAll, 0), None);
             assert_eq!(t.tab_op(TabOp::Set, 3), None);
             assert_eq!(t.tab_op(TabOp::Forward(1), 0), Some(3));
             t.feed(reset);
             assert_eq!(
                 t.tab_op(TabOp::Forward(1), 0),
-                Some(8),
-                "the custom stop must not survive {}",
+                Some(after),
+                "after {}",
                 printable(reset)
             );
-            assert_eq!(t.tab_op(TabOp::Forward(1), 8), Some(16));
         }
     }
 
     #[test]
     fn a_resize_extends_the_set_without_disturbing_the_stops_it_had() {
-        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, 24);
+        let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, 24);
         assert_eq!(t.tab_op(TabOp::Set, 3), None);
         assert_eq!(t.tab_op(TabOp::ClearAtCursor, 16), None);
-        t.set_cols(40);
+        t.set_size(TEST_ROWS, 40);
         // The documented rule: new columns get the every-eighth pattern,
         // and both edits inside the old width survive.
         assert_eq!(t.tab_op(TabOp::Forward(1), 0), Some(3));
@@ -4239,7 +4446,7 @@ mod tests {
         assert_eq!(t.tab_op(TabOp::Forward(1), 24), Some(32), "new territory");
         // Narrowing drops the columns that no longer exist, and motion
         // clamps to the width that does.
-        t.set_cols(10);
+        t.set_size(TEST_ROWS, 10);
         assert_eq!(t.tab_op(TabOp::Forward(1), 8), Some(9));
     }
 }

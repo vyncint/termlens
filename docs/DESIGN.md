@@ -115,8 +115,13 @@ like the rest.
 Precision: the emulator stops consuming at each query byte (the same
 mechanism as frame boundaries), so a cursor-position report reflects the
 cursor *at the query*, not after later output in the same chunk moved
-it. Replies are built under the state lock but written after it is
-released — the state lock and the writer lock are never held together.
+it. Under origin mode (`DECOM`) the report counts rows from the top
+margin, as xterm's does, so an application that restores the position
+with `CUP` lands where it was; the backend keeps neither the margins nor
+the mode where termlens can read them, so the sequence tracker follows
+both, by the backend's rules (#689). Replies are built under the state
+lock but written after it is released — the state lock and the writer
+lock are never held together.
 
 **Nothing writes to the child on a thread that cannot afford to wait.**
 Every write — query replies and typed input alike — is handed to a
@@ -715,11 +720,16 @@ Rules:
    title, the clipboard, the bell count or the link log: the first is a
    window property `RIS` does not restore in xterm, and the rest are records
    of what the application emitted rather than state the terminal still
-   holds. `DECSTR` (soft reset) resets what a `Screen` can observe — cursor
-   keys, bracketed paste, mouse tracking, focus reporting, the cursor's
-   visibility and shape, the character sets — and leaves the alternate
-   screen alone; the rest of the specified list is not replayed, because
-   none of it is observable. `docs/LIMITATIONS.md` keeps the exact list.
+   holds. `DECSTR` (soft reset) follows xterm's, which resets less than
+   `RIS` in both directions: it resets cursor keys, the cursor's
+   visibility and shape, the attributes, the character sets, insert mode,
+   the margins and origin mode, and homes the saved cursor, and it keeps
+   bracketed paste, the mouse modes, focus reporting, the tab stops and the
+   alternate screen (#687). vt100 implements none of it, so the emulator
+   replays the resets as sequences vt100 does implement, then moves the
+   cursor back where the reset found it, since vt100 homes it on a margin
+   or origin reset and xterm's soft reset moves no cursor.
+   `docs/LIMITATIONS.md` keeps the exact list.
 
    `OSC 8` hyperlinks are **captured**, on the same grounds as `OSC 52`
    below: a link changes no cell, its label renders as ordinary text, and
@@ -1032,8 +1042,9 @@ But it is an implementation detail:
   narrow and listed in `docs/LIMITATIONS.md`: G0–G3 designation, locking
   shifts on G0/G1, SS2/SS3 for one character, two sets translated — DEC
   Special Graphics and the UK set — and everything else read as ASCII.
-  `DECSC`/`DECRC` save and restore the charset state with the cursor;
-  `LS2`/`LS3` are not modelled.
+  `DECSC`/`DECRC` save and restore the charset state with the cursor, in
+  one slot per screen as xterm keeps it (#685); `LS2`/`LS3` are not
+  modelled.
 - vt100's tab stops are a hardcoded eight with no way to be told otherwise,
   so **the stop set is termlens's too**, and for the same reason: `HTS`,
   `TBC`, `CHT` and `CBT` reached `unhandled_escape`/`unhandled_csi` and were
