@@ -2498,7 +2498,7 @@ fn render_refuses_json_rows_past_the_header_without_building_them() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.starts_with(
-            "termlens: <stdin>: not a termlens Screen: a 1x1 screen needs 1 rows of cells, not more"
+            "termlens: <stdin>: not a termlens Screen: a 1x1 screen has 1 row of cells, and this one has more"
         ),
         "{stderr}"
     );

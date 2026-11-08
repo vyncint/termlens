@@ -240,7 +240,10 @@ impl<'de> Visitor<'de> for Grid {
             if grid.len() == most {
                 return Err(A::Error::custom(match (self.cols, self.rows) {
                     (Some(cols), Some(rows)) if usize::from(rows) == most => {
-                        format!("a {cols}x{rows} screen needs {rows} rows of cells, not more")
+                        format!(
+                            "a {cols}x{rows} screen has {rows} {} of cells, and this one has more",
+                            if rows == 1 { "row" } else { "rows" }
+                        )
                     }
                     _ => format!(
                         "more than {MAX_DIMENSION} rows of cells, past the \
@@ -529,7 +532,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("a 1x1 screen needs 1 rows of cells, not more"),
+            err.contains("a 1x1 screen has 1 row of cells, and this one has more"),
             "{err}"
         );
     }
@@ -629,7 +632,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("a 2x1 screen needs 1 rows of cells, not more"),
+            err.contains("a 2x1 screen has 1 row of cells, and this one has more"),
             "{err}"
         );
 
