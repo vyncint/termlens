@@ -1199,6 +1199,21 @@ struct Responder {
     term_name: String,
 }
 
+/// A wrapper for the emulator the next spawn on this thread builds.
+#[cfg(test)]
+type WrapEmulator = Box<dyn FnOnce(Box<dyn Emulator>) -> Box<dyn Emulator>>;
+
+#[cfg(test)]
+thread_local! {
+    /// Fault injection for a whole `Terminal`: the next spawn on this thread
+    /// hands its emulator to the wrapper set here, so a test can make it
+    /// panic on the reader thread and watch every call that reaches it
+    /// afterwards. No real input is known to panic vt100 (#619), so this is
+    /// the only way to drive the public API down that path (#702).
+    static WRAP_EMULATOR: std::cell::RefCell<Option<WrapEmulator>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Shared between the test thread and the PTY reader thread.
 struct EmuState {
     emu: Box<dyn Emulator>,
@@ -1214,6 +1229,11 @@ struct EmuState {
     /// again — after a panic its state means nothing — so the snapshot
     /// frozen in `snapshot_cache` is what every later observation returns.
     emu_panic: Option<String>,
+    /// The input modes as of the last `process` call that returned, which
+    /// is what typed input is encoded with once the emulator has panicked
+    /// and may no longer be asked (#702). The application set them before
+    /// the panic, and nothing after it could have been seen to change them.
+    last_input_modes: InputModes,
     /// The reader is holding the incomplete tail of a multi-byte character
     /// for the next read. The emulator never sees a partial character now
     /// that decoding happens before it (#217), so this is what keeps
@@ -1298,8 +1318,10 @@ impl EmuState {
             term_name,
         } = responder;
         let emu_snapshot = emu.snapshot();
+        let last_input_modes = emu.input_modes();
         Self {
             emu,
+            last_input_modes,
             last_activity: Instant::now(),
             eof: false,
             utf8_pending: false,
@@ -1569,6 +1591,15 @@ impl EmuState {
             }
         }
         self.emu.snapshot().with_repaints(self.frames_seen)
+    }
+
+    /// The modes typed input is encoded with: the emulator's own while it
+    /// is healthy, and the last ones it reported once it has panicked.
+    fn input_modes(&self) -> InputModes {
+        if self.emu_panic.is_some() {
+            return self.last_input_modes;
+        }
+        self.emu.input_modes()
     }
 
     /// The error every screen-based wait returns once the emulator has
@@ -2216,18 +2247,24 @@ impl TerminalBuilder {
         // Reply bytes waiting for the writer, so the drain can refuse on a
         // memory bound instead of on a queue-slot count.
         let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let emu: Box<dyn Emulator> = Box::new({
+            let mut emu = Vt100Emulator::new(
+                self.rows,
+                self.cols,
+                self.scrollback,
+                self.capture_graphics,
+                self.scrollback_styles,
+            );
+            emu.declare_graphics(self.graphics, self.cell_size);
+            emu
+        });
+        #[cfg(test)]
+        let emu = match WRAP_EMULATOR.with(|wrap| wrap.borrow_mut().take()) {
+            Some(wrap) => wrap(emu),
+            None => emu,
+        };
         let shared = Arc::new(Monitor::new(EmuState::new(
-            Box::new({
-                let mut emu = Vt100Emulator::new(
-                    self.rows,
-                    self.cols,
-                    self.scrollback,
-                    self.capture_graphics,
-                    self.scrollback_styles,
-                );
-                emu.declare_graphics(self.graphics, self.cell_size);
-                emu
-            }),
+            emu,
             Responder {
                 respond: self.answer_queries,
                 background: self.background,
@@ -2696,6 +2733,10 @@ fn reader_loop(
                 let processing = panic::catch_unwind(AssertUnwindSafe(|| {
                     while offset < chunk.len() {
                         let processed = state.emu.process(&chunk[offset..]);
+                        // Kept per call rather than per read, so a panic
+                        // later in this chunk keeps the modes up to the
+                        // last call that returned.
+                        state.last_input_modes = state.emu.input_modes();
                         offset += processed.consumed;
                         match processed.stop {
                             Some(Stop::FrameComplete(span)) => {
@@ -3434,7 +3475,7 @@ impl Terminal {
     }
 
     fn input_modes(&self) -> InputModes {
-        self.shared.lock().emu.input_modes()
+        self.shared.lock().input_modes()
     }
 
     fn mouse_report(
@@ -4499,11 +4540,18 @@ impl Terminal {
     ///
     /// [`Error::Size`] if either dimension is below 2 or past the
     /// 1000-per-axis limit, before the PTY or the grid is touched;
+    /// [`Error::Emulator`] once the emulator has failed, as every wait
+    /// returns it, with neither the PTY nor the grid touched;
     /// [`Error::Write`] when the child has
     /// released the terminal, carrying the final screen; [`Error::Pty`] if
     /// the ioctl fails.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         check_size(cols, rows)?;
+        // Ahead of the refusal after an exit, as in the waits: a reader that
+        // drained to EOF behind a panicked emulator is not why this failed.
+        if let Some(failure) = self.shared.lock().emulator_failure() {
+            return Err(failure);
+        }
         self.ensure_deliverable("a resize")?;
         let size = PtySize {
             rows,
@@ -4530,6 +4578,15 @@ impl Terminal {
         // hold for `wait_frame`: a frame drawn at the old size cannot be the
         // repaint that answers this resize, so it stops being offered.
         let cursor = self.shared.mutate(|state| {
+            // Again under the lock that resizes, since the reader may have
+            // panicked since the check above. A panicked emulator is never
+            // called again (#211), and resizing the PTY alone is no better:
+            // the child would draw at a size the frozen screen never takes,
+            // and a resize back would then be skipped below as a no-op,
+            // stranding it there (#702).
+            if let Some(failure) = state.emulator_failure() {
+                return Err(failure);
+            }
             let (old_cols, old_rows) = state.peek_snapshot().size();
             // A resize to the size the grid already has is a true no-op, and
             // it has to be one: TIOCSWINSZ raises SIGWINCH only when a
@@ -4858,6 +4915,8 @@ impl Drop for Terminal {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicUsize;
+    #[cfg(unix)]
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     use super::{
@@ -4976,6 +5035,140 @@ mod tests {
             ModeState::NotRecognized
         }
         fn set_size(&mut self, _rows: u16, _cols: u16) {}
+    }
+
+    /// vt100 until the test arms it, then a panic on its next read, as a
+    /// whole `Terminal` would meet one; every call that reaches it after
+    /// that is counted (#702). Unix only, with the test that spawns `sh`.
+    #[cfg(unix)]
+    struct FaultyEmulator {
+        inner: Box<dyn Emulator>,
+        armed: Arc<std::sync::atomic::AtomicBool>,
+        panicked: bool,
+        late_calls: Arc<AtomicUsize>,
+    }
+
+    #[cfg(unix)]
+    impl FaultyEmulator {
+        fn called(&self) {
+            if self.panicked {
+                self.late_calls.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Emulator for FaultyEmulator {
+        fn process(&mut self, bytes: &[u8]) -> Processed {
+            self.called();
+            if self.armed.load(Ordering::SeqCst) {
+                self.panicked = true;
+                panic!("an injected emulator fault");
+            }
+            self.inner.process(bytes)
+        }
+        fn snapshot(&self) -> Screen {
+            self.called();
+            self.inner.snapshot()
+        }
+        fn cursor_position(&self) -> (u16, u16) {
+            self.called();
+            self.inner.cursor_position()
+        }
+        fn size(&self) -> (u16, u16) {
+            self.called();
+            self.inner.size()
+        }
+        fn mid_sequence(&self) -> bool {
+            self.called();
+            self.inner.mid_sequence()
+        }
+        fn in_sync_update(&self) -> bool {
+            self.called();
+            self.inner.in_sync_update()
+        }
+        fn input_modes(&self) -> InputModes {
+            self.called();
+            self.inner.input_modes()
+        }
+        fn mode_state(&self, mode: u32) -> ModeState {
+            self.called();
+            self.inner.mode_state(mode)
+        }
+        fn set_size(&mut self, rows: u16, cols: u16) {
+            self.called();
+            self.inner.set_size(rows, cols);
+        }
+    }
+
+    /// Once the emulator has panicked it is never called again (#211), and
+    /// that holds for `resize` and for the modes input is encoded with, not
+    /// only for the waits. `resize` called `set_size` on it and returned
+    /// `Ok`: the child was told 40x10 while `screen()` stayed 80x24, and a
+    /// resize back to 80x24 was then skipped as a no-op (#702).
+    #[cfg(unix)]
+    #[test]
+    fn after_an_emulator_panic_no_resize_or_input_reaches_it() {
+        use std::time::Duration;
+
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let late_calls = Arc::new(AtomicUsize::new(0));
+        let (arm, count) = (Arc::clone(&armed), Arc::clone(&late_calls));
+        super::WRAP_EMULATOR.with(|wrap| {
+            *wrap.borrow_mut() = Some(Box::new(move |inner| {
+                Box::new(FaultyEmulator {
+                    inner,
+                    armed: arm,
+                    panicked: false,
+                    late_calls: count,
+                })
+            }));
+        });
+        let mut terminal = crate::Terminal::builder()
+            .size(80, 24)
+            .args(["-c", "printf '\\033[?2004hready'; read line; read line"])
+            .spawn("sh")
+            .expect("spawns");
+        terminal
+            .wait_until_for(|s| s.contains("ready"), Duration::from_secs(10))
+            .expect("the child enabled bracketed paste and said so");
+        // The child is blocked in `read` and prints nothing more, so the
+        // echo of this line is the emulator's next read, and it panics.
+        armed.store(true, Ordering::SeqCst);
+        terminal.send_str("go\r").expect("the child is reading");
+        match terminal.wait_until_for(|s| s.contains("never"), Duration::from_secs(10)) {
+            Err(Error::Emulator { detail, .. }) => {
+                assert_eq!(detail, "an injected emulator fault");
+            }
+            other => panic!("expected Error::Emulator, got {other:?}"),
+        }
+
+        // Input is encoded with the modes the emulator last reported.
+        assert!(terminal.input_modes().bracketed_paste);
+        match terminal.resize(40, 10) {
+            Err(Error::Emulator { detail, screen }) => {
+                assert_eq!(detail, "an injected emulator fault");
+                assert_eq!(screen.size(), (80, 24));
+            }
+            other => panic!("expected Error::Emulator, got {other:?}"),
+        }
+        assert_eq!(terminal.screen().size(), (80, 24));
+        let pty = terminal
+            .master
+            .as_ref()
+            .expect("master lives until drop")
+            .get_size()
+            .expect("the PTY's size");
+        assert_eq!(
+            (pty.cols, pty.rows),
+            (80, 24),
+            "the child was told a size the screen never took"
+        );
+        assert_eq!(
+            late_calls.load(Ordering::SeqCst),
+            0,
+            "a call reached the emulator after it panicked"
+        );
     }
 
     fn panicking_state() -> Monitor<EmuState> {

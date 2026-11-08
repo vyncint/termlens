@@ -32,6 +32,13 @@ reads that marker.
   register 15, its 80 % grey. Those pixels were transparent, so `~~`
   decoded to a 2x0 image while the cursor moved past six rows of it. A
   pixel no sixel touched is still transparent.
+- After the emulator panics, `resize` returns the stored
+  `Error::Emulator`, as every wait does, and touches neither the PTY nor
+  the grid (#702). It called `set_size` on the panicked emulator and
+  returned `Ok`: the child was told the new size while `screen()` kept the
+  old one, and a resize back was then skipped as a no-op. Typed input and
+  mouse reports are encoded with the modes the emulator last reported
+  before it panicked, rather than read from it.
 
 ## [0.11.8] - 2026-11-03
 
