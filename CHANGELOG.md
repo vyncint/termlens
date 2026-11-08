@@ -26,6 +26,15 @@ reads that marker.
 - `docs/RELEASING.md` step 2 notes that release notes consist of the
   section plus the definitions it links (#658), and are unaffected by the
   compare definitions added at the foot (#722).
+- `Screen::parse` and `termlens render` read a text snapshot 0.11.6 wrote
+  and every later release refused (#683): a wide character a narrowing
+  resize stranded without its second half, left before other text when the
+  screen widened again and the program redrew after it. The row was read
+  two columns per wide character and refused as wider than the header
+  declares. A row that only fits with some wide characters at one column
+  now reads with as many of them as it needs stranded, the leftmost first,
+  as its JSON twin holds them. The file, written by the published 0.11.6,
+  is in the compatibility corpus.
 
 ## [0.11.8] - 2026-11-03
 

@@ -968,7 +968,14 @@ every release up to 0.11.6, narrowed a row by truncating it, so a resize
 that cut a wide character left it in the last column, and widening again
 left it before a blank. The text reader reads the same row the same way: a
 wide character whose second column would fall one past the edge is that
-stranded cell, not an over-long row (#643).
+stranded cell, not an over-long row (#643). So is one that a redraw after
+widening left before other text: a row too long at two columns per wide
+character, but not at one for some of them, reads with as many as it needs
+stranded, the leftmost first (#683). A row that fits reads with every wide
+character whole, since the text does not say one lost its second half; the
+JSON twin of such a row, which carries the flags, can then hold the text
+after a stranded character one column further left than the text reads it.
+Both render back to the same text.
 
 The compatibility corpus under `crates/termlens/tests/compat/` holds both
 formats as written by each release since 0.10.1, and `tests/compat.rs`
