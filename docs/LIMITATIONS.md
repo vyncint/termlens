@@ -71,7 +71,8 @@ CHANGELOG entry.
 - **Tab stops are the application's to set.** `HTS` (`ESC H`), `TBC`
   (`CSI g`, `CSI 3 g`), `CHT` (`CSI I`) and `CBT` (`CSI Z`) all work, and a
   plain `\t` honours whatever stops are set rather than a fixed eight.
-  `RIS` and `DECSTR` restore the every-eighth default, and a resize extends
+  `RIS` restores the every-eighth default (`DECSTR` keeps the stops, as
+  xterm's soft reset does), and a resize extends
   the set into its new columns with that pattern while leaving existing
   stops alone. Back-tab moves to the nearest stop *strictly* left of the
   cursor, as xterm does. Only `TBC 0` and `TBC 3` are modelled; the rest of
@@ -164,11 +165,13 @@ CHANGELOG entry.
   terminal would infer.** The cursor shape follows `DECSCUSR` and is cleared
   by a hard reset (`RIS`); the window title is not, because in xterm the
   title is a window property that `RIS` does not restore, and guessing either
-  way would be the same error. `DECSTR` (soft reset) resets what a `Screen`
-  can observe — cursor keys, bracketed paste, mouse tracking, focus
-  reporting, the cursor's visibility and shape, the character sets — and
-  leaves the alternate screen alone; attributes, margins, origin and insert
-  modes and the keypad are not modelled.
+  way would be the same error. `DECSTR` (soft reset) is xterm's: it resets
+  cursor keys, the cursor's visibility and shape, the attributes, the
+  character sets, insert mode, the scroll margins and origin mode (leaving
+  the cursor where it was), and homes the saved cursor; it keeps bracketed
+  paste, mouse tracking and its encoding, focus reporting, the tab stops
+  and the alternate screen, which xterm resets only on `RIS`. The keypad
+  mode is not modelled.
 - **Two SGR style attributes are not modelled.** Overline (`SGR 53`) and
   double underline (`SGR 21`) do not reach [`Style`](https://docs.rs/termlens/latest/termlens/struct.Style.html),
   so `with_styles()` cannot distinguish those attributes from a plain cell.

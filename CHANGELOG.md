@@ -17,6 +17,21 @@ reads that marker.
 
 ## [Unreleased]
 
+### Changed
+
+- `DECSTR` (soft reset, `CSI ! p`) resets what xterm's soft reset resets
+  and keeps what it keeps. It turned off mouse tracking and its encoding,
+  focus reporting and bracketed paste and restored the default tab stops,
+  all of which xterm resets only on `RIS`; and it left the attributes, the
+  scroll margins, origin mode and the saved cursor alone, which xterm
+  resets. Now those five stay as the application set them, text after the
+  reset is plain, the margins and origin mode are cleared with the cursor
+  left where it was, and a `DECRC` after the reset returns to the top-left
+  corner. A test that expected `DECSTR` to end mouse, focus or
+  bracketed-paste reporting or to restore the tab stops should expect them
+  kept, as a real xterm keeps them, and have the application reset each
+  mode itself or send `RIS`. (#687)
+
 ### Fixed
 
 - The character sets a cursor save keeps are kept per screen, as in xterm,

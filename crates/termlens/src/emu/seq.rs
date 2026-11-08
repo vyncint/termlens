@@ -1285,25 +1285,29 @@ impl SeqTracker {
         self.single_shift = None;
     }
 
-    /// The tracker's half of `DECSTR`: the character sets and the `DECSC`
-    /// slot of the screen on display back to power-on, the cursor shape
-    /// back to the terminal's default, focus reporting off. The window
-    /// title, the clipboard, the bell count and the link log stay, for the
-    /// same reason they survive `RIS`: they are records of what the
-    /// application emitted, not modes the terminal holds. An open link span
-    /// stays open too — a soft reset clears no screen, so the text after it
-    /// is still the span's text. A kitty upload still in progress survives
-    /// as well, though `RIS` abandons one: kitty's soft reset leaves its
-    /// images alone, and the next chunk there still completes the upload.
+    /// The tracker's half of `DECSTR`, which is xterm's soft reset
+    /// (`ReallyReset` with `full` false): the character sets back to
+    /// power-on, the cursor shape back to the terminal's default, insert
+    /// mode off, and on the screen on display the margins and origin mode
+    /// cleared and the cursor save emptied — xterm saves the reset state
+    /// there and homes it, which a restore cannot tell from an empty slot.
+    ///
+    /// Kept, as xterm keeps them (it resets each only when `full`, for
+    /// `RIS`): mouse tracking and its encoding, focus reporting and the tab
+    /// stops (#687). The window title, the clipboard, the bell count and the
+    /// link log stay too, for the same reason they survive `RIS`: they are
+    /// records of what the application emitted, not modes the terminal
+    /// holds. An open link span stays open — a soft reset clears no screen,
+    /// so the text after it is still the span's text. A kitty upload still
+    /// in progress survives as well, though `RIS` abandons one: kitty's soft
+    /// reset leaves its images alone, and the next chunk there still
+    /// completes the upload.
     fn soft_reset(&mut self) {
         self.reset_charsets();
-        self.frame_mut().saved_charsets = None;
         self.cursor_style = None;
-        self.focus_events = false;
-        self.mouse_tracking = 0;
-        self.mouse_encoding = MouseEncoding::Legacy;
         self.insert_mode = false;
-        self.tabs.reset();
+        let frame = self.frame_mut();
+        *frame = ScreenFrame::default();
     }
 
     /// Whether `IRM` (`CSI 4 h`) is set: a printable byte pushes the rest
@@ -1492,9 +1496,9 @@ impl SeqTracker {
 
         // DECSTR (`CSI ! p`), the soft reset: what a well-behaved TUI sends
         // on startup and teardown for a known-good terminal without the
-        // screen clear RIS brings. The spec's list is long; the modes this
-        // crate holds are returned to their defaults here, and the emulator
-        // is told to do the same for the ones it holds (#233).
+        // screen clear RIS brings. xterm's is the reference (#687): what it
+        // resets of the state this crate holds is reset here, and the
+        // emulator is told to do the same for the state it holds (#233).
         if self.csi_intermediate == b'!' {
             if b == b'p' && self.csi_prefix == 0 && params_empty {
                 self.soft_reset();
@@ -3783,17 +3787,17 @@ mod tests {
             encoding(b"\x1b[?1015h\x1b[?1006;1015l"),
             MouseEncoding::Legacy
         );
-        // Both resets return it to power-on.
-        assert_eq!(encoding(b"\x1b[?1015h\x1b[!p"), MouseEncoding::Legacy);
+        // RIS returns it to power-on; DECSTR keeps it, as xterm does (#687).
         assert_eq!(encoding(b"\x1b[?1015h\x1bc"), MouseEncoding::Legacy);
+        assert_eq!(encoding(b"\x1b[?1015h\x1b[!p"), MouseEncoding::Urxvt);
         // An ANSI mode of the same number is not a mouse encoding.
         assert_eq!(encoding(b"\x1b[1015h"), MouseEncoding::Legacy);
     }
 
-    /// RIS returns focus reporting and synchronized output to power-on, as
-    /// `DECSTR` already did for focus: left on, `focus_in` typed at a
-    /// program that had reset, and an update begun before the reset stayed
-    /// open for good (#623).
+    /// RIS returns focus reporting and synchronized output to power-on: left
+    /// on, `focus_in` typed at a program that had reset, and an update begun
+    /// before the reset stayed open for good (#623). `DECSTR` keeps focus
+    /// reporting, as xterm's soft reset does (#687).
     #[test]
     fn a_hard_reset_ends_focus_reporting_and_an_open_synchronized_update() {
         let mut t = fed(b"\x1b[?1004h\x1b[?2026hhalf");
@@ -4410,9 +4414,11 @@ mod tests {
         assert_eq!(t.tab_op(TabOp::Forward(1), 0), Some(5));
     }
 
+    /// `RIS` restores the every-eighth set; `DECSTR` keeps the stops the
+    /// application set, as xterm's soft reset does (#687).
     #[test]
-    fn a_reset_restores_the_default_every_eighth_set() {
-        for reset in [&b"\x1bc"[..], b"\x1b[!p"] {
+    fn a_hard_reset_restores_the_default_every_eighth_set_and_a_soft_one_does_not() {
+        for (reset, after) in [(&b"\x1bc"[..], 8), (b"\x1b[!p", 3)] {
             let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, 24);
             assert_eq!(t.tab_op(TabOp::ClearAll, 0), None);
             assert_eq!(t.tab_op(TabOp::Set, 3), None);
@@ -4420,11 +4426,10 @@ mod tests {
             t.feed(reset);
             assert_eq!(
                 t.tab_op(TabOp::Forward(1), 0),
-                Some(8),
-                "the custom stop must not survive {}",
+                Some(after),
+                "after {}",
                 printable(reset)
             );
-            assert_eq!(t.tab_op(TabOp::Forward(1), 8), Some(16));
         }
     }
 

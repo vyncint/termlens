@@ -720,11 +720,16 @@ Rules:
    title, the clipboard, the bell count or the link log: the first is a
    window property `RIS` does not restore in xterm, and the rest are records
    of what the application emitted rather than state the terminal still
-   holds. `DECSTR` (soft reset) resets what a `Screen` can observe — cursor
-   keys, bracketed paste, mouse tracking, focus reporting, the cursor's
-   visibility and shape, the character sets — and leaves the alternate
-   screen alone; the rest of the specified list is not replayed, because
-   none of it is observable. `docs/LIMITATIONS.md` keeps the exact list.
+   holds. `DECSTR` (soft reset) follows xterm's, which resets less than
+   `RIS` in both directions: it resets cursor keys, the cursor's
+   visibility and shape, the attributes, the character sets, insert mode,
+   the margins and origin mode, and homes the saved cursor, and it keeps
+   bracketed paste, the mouse modes, focus reporting, the tab stops and the
+   alternate screen (#687). vt100 implements none of it, so the emulator
+   replays the resets as sequences vt100 does implement, then moves the
+   cursor back where the reset found it, since vt100 homes it on a margin
+   or origin reset and xterm's soft reset moves no cursor.
+   `docs/LIMITATIONS.md` keeps the exact list.
 
    `OSC 8` hyperlinks are **captured**, on the same grounds as `OSC 52`
    below: a link changes no cell, its label renders as ordinary text, and
