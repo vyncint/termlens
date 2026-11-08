@@ -55,7 +55,9 @@ time budget. The reader uses a fixed 8 KiB buffer; every wait is
 deadline-bounded; retained scrollback is capped at the configured length
 (1000 rows by default, `scrollback(0)` to disable) and held as text rather
 than cells; at most 8 completed frames and 512 frame timings are retained; a
-captured `OSC 52` payload is dropped past 64 KiB; **undelivered query replies
+captured `OSC 52` payload is dropped past 64 KiB; an OSC string is kept to
+its first 64 KiB, and the rest of its body never reaches the emulator, which
+otherwise holds an unterminated one whole; **undelivered query replies
 are capped at 1 MiB** and discarded past it, counted and named in the next
 wait's error; the capture of a DCS-class header is fixed at 128 bytes; `OSC 8`
 hyperlinks are held to the most recent 64 spans with a 4 KiB label each; and

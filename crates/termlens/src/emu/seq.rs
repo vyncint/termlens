@@ -61,7 +61,7 @@ use crate::screen::{Clipboard, Link, MouseModes};
 /// OSC strings are captured whole (titles must not truncate), but bounded:
 /// a buggy or hostile stream must not grow memory without limit. No real
 /// title comes anywhere near this.
-const OSC_CAPTURE_MAX: usize = 64 * 1024;
+pub(super) const OSC_CAPTURE_MAX: usize = 64 * 1024;
 
 /// How many `OSC 8` spans to keep, oldest evicted.
 ///
@@ -1055,6 +1055,27 @@ impl SeqTracker {
     /// for the next one.
     pub(crate) fn take_frame_printable(&mut self) -> u32 {
         std::mem::replace(&mut self.frame_printable, 0)
+    }
+
+    /// Whether `b` is the body of an OSC string past [`OSC_CAPTURE_MAX`],
+    /// which this tracker drops and the parsers must not be given either.
+    ///
+    /// vte keeps an OSC string whole until its terminator, in each of the
+    /// emulator's two parsers, so a child that never terminated one grew
+    /// the test process by twice the body (#694). Withholding the bytes this
+    /// tracker drops leaves the parsers the same capped string the title is
+    /// read from, while the terminators — BEL, the ESC of an ST, CAN and
+    /// SUB — still reach them, so the string ends in all three at the same
+    /// byte. A C0 control in the body is withheld too, which changes nothing:
+    /// vte ignores it there.
+    ///
+    /// Consulted **before** the byte is stepped, as
+    /// [`charset_glyph`](Self::charset_glyph) is: the answer depends on the
+    /// state the byte arrives in.
+    pub(crate) fn withholds(&self, b: u8) -> bool {
+        self.state == State::Osc
+            && self.osc_buf.len() >= OSC_CAPTURE_MAX
+            && !matches!(b, 0x07 | 0x18 | 0x1a | 0x1b)
     }
 
     /// The glyph `b` draws in the invoked character set, when that set
