@@ -808,6 +808,14 @@ impl Emulator for Vt100Emulator {
                     run_until = i + self.reserve_insert(&bytes[i..]);
                 }
             }
+            // The body of an OSC string past the tracker's bound is cut out
+            // of what both parsers are fed, so neither holds more of it than
+            // the tracker does (#694). Only the first byte of a run feeds
+            // anything; the rest find nothing owed.
+            if self.tracker.withholds(byte) {
+                self.feed_staged(&bytes[fed..i]);
+                fed = i + 1;
+            }
             // Asked before the step, because whether this byte is a character
             // at all depends on the state the tracker is in before it — and
             // a designation's own final byte must not be drawn.
@@ -857,13 +865,23 @@ impl Emulator for Vt100Emulator {
                     fed = i + 1;
                     None
                 }
-                SeqEvent::AlternateScreen => {
-                    // Everything before the final byte goes first, so the
-                    // capture that feed runs reads the main screen's history
-                    // while it is still the one on display (#622). The final
-                    // byte goes with the rest of the read.
-                    self.feed_staged(&bytes[fed..i]);
-                    fed = i;
+                SeqEvent::AlternateScreen { leaving } => {
+                    // On the way in, everything before the final byte goes
+                    // first, so the capture that feed runs reads the main
+                    // screen's history while it is still the one on display
+                    // (#622); the final byte goes with the rest of the read.
+                    //
+                    // On the way out the final byte goes too, so that
+                    // capture reads the main screen back before the rest of
+                    // the read scrolls it. A taller resize while it was
+                    // hidden pulled rows back out of its history; settled in
+                    // one feed with new rows scrolling off, the rows pulled
+                    // back and the rows pushed cancelled in the length, and
+                    // the copy kept a row the grid had taken back and lost
+                    // the row that scrolled, by where the read split (#682).
+                    let end = if leaving { i + 1 } else { i };
+                    self.feed_staged(&bytes[fed..end]);
+                    fed = end;
                     None
                 }
                 SeqEvent::Tabs(op) => {
@@ -1608,6 +1626,137 @@ mod tests {
         assert_eq!(s.mouse_mode(), MouseMode::None);
     }
 
+    /// That the one unsupported shape is `expected`, without printing 64 KiB
+    /// of it when it is not.
+    fn assert_one_shape(s: &Screen, expected: &str, at: &str) {
+        let shapes: Vec<&str> = s.unsupported().iter().collect();
+        let lengths: Vec<usize> = shapes.iter().map(|shape| shape.len()).collect();
+        assert_eq!(lengths, [expected.len()], "{at}: shape lengths");
+        assert!(shapes[0] == expected, "{at}: the shape differs");
+    }
+
+    /// `stream` fed in pieces cut at each of `cuts`, as reads would split it.
+    fn emu_fed_in_pieces(stream: &[u8], cuts: &[usize]) -> Vt100Emulator {
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+        let mut from = 0;
+        for &cut in cuts.iter().chain([&stream.len()]) {
+            feed_all(&mut emu, &stream[from..cut]);
+            from = cut;
+        }
+        emu
+    }
+
+    #[test]
+    fn an_osc_body_past_the_capture_bound_never_reaches_the_parsers() {
+        // vte keeps an OSC string whole until its terminator, in each of
+        // the two parsers, so an unterminated one grew the process without
+        // bound (#694). The tracker keeps 64 KiB of it; the parsers now get
+        // exactly that much, which vt100 shows in the shape it reports.
+        let cap = super::super::seq::OSC_CAPTURE_MAX;
+        let kept = "a".repeat(cap - "777;".len());
+        for terminator in [&b"\x07"[..], b"\x1b\\"] {
+            let mut stream = b"\x1b]777;".to_vec();
+            stream.resize(stream.len() + cap + 3 * 4096, b'a');
+            let st = stream.len();
+            stream.extend_from_slice(terminator);
+            stream.extend_from_slice(b"DONE");
+            // Whole; in reads of 8 KiB, as the reader takes them; at the
+            // bound itself, on either side; and between the ESC and the
+            // backslash of an ST.
+            let at_bound = "\x1b]".len() + cap;
+            for cuts in [
+                vec![],
+                (1..stream.len() / 8192).map(|n| n * 8192).collect(),
+                vec![at_bound - 1, at_bound, at_bound + 1],
+                vec![st + 1],
+            ] {
+                let s = emu_fed_in_pieces(&stream, &cuts).snapshot();
+                let at = format!("{terminator:?}, cut at {cuts:?}");
+                assert_one_shape(&s, &format!("^[]777;{kept}"), &at);
+                assert_eq!(s.text(), "DONE\n\n\n", "{at}");
+            }
+        }
+    }
+
+    /// A 64 MiB OSC body, fed as the reader feeds it, in a child of this
+    /// test binary whose data segment is capped at 48 MiB: each parser held
+    /// the whole body before #694, about 128 MiB together, which the cap
+    /// turns into a failed allocation rather than a machine out of memory.
+    /// The child does the feeding only when it can see the cap in place.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_unterminated_osc_body_leaves_memory_bounded() {
+        const CHILD: &str = "TERMLENS_TEST_OSC_UNDER_CAP";
+        const CAP_KIB: u32 = 48 * 1024;
+        const NAME: &str = "emu::vt100::tests::an_unterminated_osc_body_leaves_memory_bounded";
+        if std::env::var_os(CHILD).is_some() {
+            let limits = std::fs::read_to_string("/proc/self/limits").unwrap();
+            let data = limits
+                .lines()
+                .find(|line| line.starts_with("Max data size"))
+                .unwrap();
+            let soft = data.split_whitespace().nth(3).unwrap();
+            assert_eq!(soft, (u64::from(CAP_KIB) * 1024).to_string(), "{data}");
+            let mut emu = Vt100Emulator::new(24, 80, 1000, crate::graphics::DEFAULT_CAPTURE, false);
+            feed_all(&mut emu, b"\x1b]0;");
+            let chunk = [b'a'; 8192];
+            for _ in 0..(64 << 20) / chunk.len() {
+                feed_all(&mut emu, &chunk);
+            }
+            feed_all(&mut emu, b"\x07DONE");
+            let s = emu.snapshot();
+            assert_eq!(s.title().len(), super::super::seq::OSC_CAPTURE_MAX - 2);
+            assert_eq!(s.row_text(0).trim_end(), "DONE");
+            return;
+        }
+        let out = std::process::Command::new("sh")
+            .args([
+                "-c",
+                r#"ulimit -c 0 && ulimit -d "$1" && shift && exec "$@""#,
+                "sh",
+            ])
+            .arg(CAP_KIB.to_string())
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "{}\n{stdout}\n{stderr}",
+            out.status
+        );
+    }
+
+    #[test]
+    fn a_title_past_the_capture_bound_reads_back_capped_and_the_text_after_it_draws() {
+        let cap = super::super::seq::OSC_CAPTURE_MAX;
+        for terminator in [&b"\x07"[..], b"\x1b\\"] {
+            let mut stream = b"\x1b]2;".to_vec();
+            stream.resize(stream.len() + 2 * cap, b'T');
+            stream.extend_from_slice(terminator);
+            stream.extend_from_slice(b"DONE");
+            let s = emu_fed_in_pieces(&stream, &[cap, cap + 4]).snapshot();
+            assert_eq!(s.title(), "T".repeat(cap - "2;".len()), "{terminator:?}");
+            assert_eq!(s.text(), "DONE\n\n\n", "{terminator:?}");
+            assert_eq!(s.unsupported(), [] as [&str; 0], "{terminator:?}");
+        }
+    }
+
+    #[test]
+    fn an_osc_at_the_capture_bound_reaches_the_parsers_whole() {
+        // Exactly the bound: nothing is withheld, and the shape is the
+        // whole string, as it was before #694.
+        let cap = super::super::seq::OSC_CAPTURE_MAX;
+        let body = "b".repeat(cap - "777;".len());
+        let stream = format!("\x1b]777;{body}\x07DONE");
+        let s = emu_fed_in_pieces(stream.as_bytes(), &[]).snapshot();
+        assert_one_shape(&s, &format!("^[]777;{body}"), "at the bound");
+        assert_eq!(s.text(), "DONE\n\n\n");
+    }
+
     /// Feed a stream into an emulator with `scrollback` rows of history.
     fn emu_with_history(scrollback: usize, bytes: &[u8]) -> Vt100Emulator {
         let mut emu =
@@ -2086,6 +2235,38 @@ mod tests {
         let s = emu.snapshot();
         assert_eq!(s.scrollback_text(), "");
         assert_eq!(s.full_text(), "1\n2\n3\n4\nend");
+    }
+
+    #[test]
+    fn leaving_the_alternate_screen_settles_a_taller_resize_before_new_rows() {
+        // A taller resize while the alternate screen is up pulls `L1` back
+        // out of the main screen's history. Leaving it and scrolling `NEW1`
+        // off in one feed left the history its old length: the pop and the
+        // push cancelled, so the copy kept `L1`, a row now on the grid and
+        // then erased, and never took `NEW1` — unless the read happened to
+        // split right after the exit (#682). Every split, every spelling.
+        for (enter, exit) in [
+            ("\x1b[?1049h", "\x1b[?1049l"),
+            ("\x1b[?1047h", "\x1b[?1047l"),
+            ("\x1b[?47h", "\x1b[?47l"),
+            ("\x1b[?1049h", "\x1b[?25;1049l"),
+        ] {
+            let tail = format!("{exit}\x1b[2J\x1b[HNEW1\r\nNEW2\r\nNEW3\r\nNEW4\r\nNEW5");
+            for styled in [false, true] {
+                for split in 0..=tail.len() {
+                    let mut emu =
+                        Vt100Emulator::new(3, 10, 100, crate::graphics::DEFAULT_CAPTURE, styled);
+                    feed_all(&mut emu, format!("L1\r\nL2\r\nL3\r\nL4{enter}").as_bytes());
+                    emu.set_size(4, 10);
+                    feed_all(&mut emu, &tail.as_bytes()[..split]);
+                    feed_all(&mut emu, &tail.as_bytes()[split..]);
+                    let s = emu.snapshot();
+                    let at = format!("{exit:?}, styled {styled}, split at {split}");
+                    assert_eq!(s.scrollback_text(), "NEW1", "{at}");
+                    assert_eq!(s.text(), "NEW2\nNEW3\nNEW4\nNEW5", "{at}");
+                }
+            }
+        }
     }
 
     #[test]

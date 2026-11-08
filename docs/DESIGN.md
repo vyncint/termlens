@@ -578,7 +578,11 @@ while vt100 still holds them, and the capture after it sees an empty
 history, which is what re-syncs the mark (#391). An entry to the
 alternate screen splits the feed the same way, since from that byte every
 accessor reads the alternate grid and the main screen's newest rows are out
-of reach until it is back (#622). At the length, vt100
+of reach until it is back (#622). The exit splits it just after its final
+byte, so the main screen is read back before anything scrolls it: a taller
+resize while it was hidden pulled rows back out of its history, and new
+rows scrolling off in the same feed would cancel that in the length (#682).
+At the length, vt100
 evicts from the front and its length stops changing, so growth is no
 longer visible there — and the rows cannot say it either, since
 consecutive identical rows are ordinary output. vt100 reports each row it

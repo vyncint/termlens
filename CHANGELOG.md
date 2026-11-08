@@ -71,6 +71,22 @@ reads that marker.
   size is now refused at once, and `render` and `diff` exit 2 naming it.
   The JSON format does not change.
 
+- Leaving the alternate screen keeps the history right after a taller
+  resize (#682), a regression in 0.11.8. When the terminal grew while the
+  alternate screen was up, and the application left it (`?1049l`, `?47l`
+  or `?1047l`) in the same read as output that scrolled, `scrollback_text()`
+  kept a row the resize had pulled back onto the grid and lost the row that
+  scrolled off, by where the PTY split the read. The exit is now settled
+  before the rest of the read, as the entry is since #622.
+
+- An unterminated OSC string no longer grows the test process without
+  bound (#694). termlens kept 64 KiB of it, but both of the emulator's
+  parsers kept the whole body until a terminator came: a 64 MiB body
+  raised peak memory by 129 MiB. The body past 64 KiB is now withheld from
+  them, and the same body costs about 1 MiB. The title reads back as
+  before, capped at 64 KiB; an unsupported OSC past the cap is reported
+  with its first 64 KiB rather than whole, and one under it is unchanged.
+
 ## [0.11.8] - 2026-11-03
 
 ### Changed
