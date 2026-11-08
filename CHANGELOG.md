@@ -42,9 +42,12 @@ reads that marker.
 - The DCO gate spares a commit whose committer is `noreply@github.com` the
   sign-off-equals-author match only on the push run to main, which names
   the squash GitHub composed (#718). On a pull request it accepted anyone's
-  sign-off on such a commit, and the committer is set locally. The one
-  pull-request exemption left is Dependabot's own commit, its author and
-  its sign-off (`dependabot[bot] <support@github.com>`) both Dependabot's.
+  sign-off on such a commit, and the committer is set locally. The rule
+  holds for every commit in that push, not only its tip, since one push can
+  carry several squashes. The one pull-request exemption left is
+  Dependabot's own commit: Dependabot signs off as
+  `dependabot[bot] <support@github.com>`, never as its author address, so it
+  is let through when its author and its sign-off are both Dependabot's.
 
 ## [0.11.8] - 2026-11-03
 

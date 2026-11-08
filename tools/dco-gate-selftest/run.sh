@@ -99,6 +99,16 @@ web_flow -m "feat: squashed (#7)" \
   -m "Signed-off-by: Author <author@example.com>"
 web_flow -m "feat: composed (#8)"
 
+# 7c. Two squashes in one push, each signed off by its contributor and
+#     neither by the address GitHub wrote as its author: a push to main
+#     carries several when queued runs were dropped (#656), and only the
+#     tip can be named
+git -C "$scratch" checkout -q -b case-two-signed-squashes main
+web_flow -m "feat: one contributor's change (#9)" \
+  -m "Signed-off-by: Author <author@example.com>"
+web_flow -m "fix: another contributor's change (#10)" \
+  -m "Signed-off-by: Other Person <other@example.org>"
+
 # 8. An unsigned commit, then the composed squash at the tip
 git -C "$scratch" checkout -q -b case-composed-over-unsigned main
 git -C "$scratch" commit -q --allow-empty -m "feat: unsigned"
@@ -189,6 +199,8 @@ expect "a web-flow commit with a sign-off passes on the push run" zero "$ok" \
   main..case-web-flow-signed "$(tip case-web-flow-signed)"
 expect "...and under the named tip, as a first push walks all of main" zero \
   "$ok" main..case-composed-over-web-flow "$(tip case-composed-over-web-flow)"
+expect "two signed squashes in one push both pass (#656)" zero "$ok" \
+  main..case-two-signed-squashes "$(tip case-two-signed-squashes)"
 expect "on a pull request, a web-flow commit's sign-off must match" \
   nonzero "$(unsigned case-web-flow-signed)" main..case-web-flow-signed
 expect "a forged web-flow committer, another's sign-off: fails (#718)" \
@@ -228,6 +240,6 @@ expect "an unresolvable range fails (#214)" nonzero \
 expect "an empty range fails (#214)" nonzero "resolved to no commits" main..main
 
 if [ "$status" -eq 0 ]; then
-  echo "dco gate selftest: 22 expectation(s), the gate fails when it should"
+  echo "dco gate selftest: 23 expectation(s), the gate fails when it should"
 fi
 exit "$status"
