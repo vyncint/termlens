@@ -620,7 +620,10 @@ geometries, and says so where a caller meets it. A change of *height*
 moves rows the way xterm does (vt100 0.18): a shorter screen with the
 cursor on its last row pushes its top rows into history, and a taller one
 pulls the newest back onto the grid — where they leave the history, so no
-row is on record twice. RIS and ED 3 (`CSI 3 J`, which `clear` sends)
+row is on record twice. A taller screen moves down only by the rows the
+history holds, as xterm's `ScreenResize` does, and grows below for the
+rest; vt100 counts every row that ever scrolled off, and termlens resizes
+it in two steps so it adds no blank rows above the text (#684). RIS and ED 3 (`CSI 3 J`, which `clear` sends)
 empty the terminal's own history; the rows already retained survive both,
 since a record that forgets what a test may still assert on is worse than
 one a real terminal would have cleared. The alternate screen

@@ -1092,9 +1092,12 @@ impl Emulator for Vt100Emulator {
         self.copy_rows_a_resize_pushes(rows);
         // The parser's own resize, not the screen's: it reports each row it
         // drops off the front of a full history, which the capture below
-        // counts on (#671). The shadow keeps no count and needs none.
-        self.parser.set_size(nz(rows), nz(cols));
-        self.shadow.set_size(rows, cols);
+        // counts on (#671). The shadow keeps no count and needs none. Both
+        // are resized the same way, so their grids stay in step; switching
+        // grids takes bytes, which are fed only between sequences.
+        let between_sequences = !self.tracker.mid_sequence();
+        resize_as_xterm(&mut self.parser, rows, cols, between_sequences);
+        self.shadow.set_size(rows, cols, between_sequences);
         self.tracker.set_size(rows, cols);
         // A resize can push rows into history on its own, drop rows from
         // its front, or pull rows back out of it.
@@ -1218,6 +1221,52 @@ pub(super) fn nz(n: u16) -> NonZeroU16 {
 fn size(screen: &::vt100::Screen) -> (u16, u16) {
     let (rows, cols) = screen.size();
     (rows.get(), cols.get())
+}
+
+/// Resize `parser` to `rows` by `cols` as xterm's `ScreenResize`
+/// (screen.c) does: a taller main screen moves down by
+/// `Min(nrow - oldrow, savedlines)`, the rows its history holds, pulling
+/// them back, and the rest of the new rows go below (#684).
+///
+/// vt100 moves it down by `min(diff, rows that ever scrolled off)`, which
+/// counts the rows a bounded history has dropped, every row with
+/// `scrollback(0)`, and fills the top with blank rows for them; the cursor
+/// and the saved cursor move down with it. So a taller resize is made in
+/// two steps: first by the rows the history holds, which vt100 pulls back
+/// whole, leaving it empty; then, with the count of rows that scrolled off
+/// cleared — which an empty history makes the only thing `clear_scrollback`
+/// changes — by the rest, which vt100 adds below.
+///
+/// The alternate screen keeps no history and always grows below. While it
+/// is up, the main grid behind it is resized as well, so it is brought on
+/// display for the resize with `CSI ? 47 l`, which in vt100 switches grids
+/// and nothing else, and hidden again after. That takes bytes, so it is
+/// done only with the parser `between_sequences`; inside one, the main
+/// grid is resized as vt100 resizes it.
+pub(super) fn resize_as_xterm<CB: ::vt100::Callbacks>(
+    parser: &mut ::vt100::Parser<CB>,
+    rows: u16,
+    cols: u16,
+    between_sequences: bool,
+) {
+    let (old_rows, _) = size(parser.screen());
+    let switch = parser.screen().alternate_screen();
+    if rows <= old_rows || (switch && !between_sequences) {
+        parser.set_size(nz(rows), nz(cols));
+        return;
+    }
+    if switch {
+        parser.process(b"\x1b[?47l");
+    }
+    let held = u16::try_from(parser.screen().scrollback_len()).unwrap_or(u16::MAX);
+    if held < rows - old_rows {
+        parser.set_size(nz(old_rows + held), nz(cols));
+        parser.screen_mut().clear_scrollback();
+    }
+    parser.set_size(nz(rows), nz(cols));
+    if switch {
+        parser.process(b"\x1b[?47h");
+    }
 }
 
 #[cfg(test)]
@@ -2021,6 +2070,109 @@ mod tests {
     }
 
     #[test]
+    fn a_taller_screen_moves_down_only_by_the_rows_its_history_holds() {
+        // xterm's `ScreenResize` (screen.c) moves the screen down by
+        // `Min(nrow - oldrow, savedlines)`: the rows it can pull back, and
+        // the rest of the new rows go below. vt100 moved it down by every
+        // row that ever scrolled, `scrollback(0)` included, and filled the
+        // top with blank rows the history never held (#684). The cursor
+        // and the saved cursor move with the text: the save is on the `d`.
+        for (scrollback, text, history, cursor) in [
+            (0, "c\nd\ne\n\n\n", "", (2, 1)),
+            (1, "b\nc\nd\ne\n\n", "", (3, 1)),
+            (2, "a\nb\nc\nd\ne\n", "", (4, 1)),
+            (1000, "a\nb\nc\nd\ne\n", "", (4, 1)),
+        ] {
+            for styled in [false, true] {
+                let mut emu =
+                    Vt100Emulator::new(3, 10, scrollback, crate::graphics::DEFAULT_CAPTURE, styled);
+                feed_all(
+                    &mut emu,
+                    b"a\r\nb\r\nc\r\nd\r\n\x1b[5me\x1b[2H\x1b7\x1b[3;2H",
+                );
+                emu.set_size(6, 10);
+                let s = emu.snapshot();
+                let at = format!("scrollback({scrollback}), styled {styled}");
+                assert_eq!(s.text(), text, "{at}");
+                assert_eq!(s.scrollback_text(), history, "{at}");
+                assert_eq!((s.cursor().0, s.cursor().1), cursor, "{at}");
+                let e = s.find("e").unwrap();
+                assert!(s.cell(e.0, e.1).unwrap().style().blink, "{at}");
+                let d = s.find("d").unwrap();
+                feed_all(&mut emu, b"\x1b8X");
+                assert_eq!(emu.snapshot().find("X"), Some(d), "{at}");
+                // History carries on from the rows still in it.
+                feed_all(&mut emu, b"\x1b[6;1H\r\nf");
+                let s = emu.snapshot();
+                assert_eq!(s.text().lines().last(), Some("f"), "{at}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_taller_screen_moves_the_main_screen_as_xterm_does_behind_the_alternate() {
+        // The alternate screen keeps no history, so it grows at the
+        // bottom; the main screen behind it moves down only by the rows
+        // its history holds, as when it is on display (#684). After the
+        // exit the cursor is back after the `e`.
+        for (scrollback, text) in [
+            (0, "c\nd\neX\n\n\n"),
+            (1, "b\nc\nd\neX\n\n"),
+            (1000, "a\nb\nc\nd\neX\n"),
+        ] {
+            for enter in ["\x1b[?1049h", "\x1b[?47h"] {
+                let mut emu =
+                    Vt100Emulator::new(3, 10, scrollback, crate::graphics::DEFAULT_CAPTURE, false);
+                feed_all(&mut emu, b"a\r\nb\r\nc\r\nd\r\ne");
+                feed_all(&mut emu, format!("{enter}\x1b[2J\x1b[HTUI").as_bytes());
+                emu.set_size(6, 10);
+                let s = emu.snapshot();
+                assert_eq!(s.text(), "TUI\n\n\n\n\n", "{enter:?}");
+                assert_eq!((s.cursor().0, s.cursor().1), (0, 3), "{enter:?}");
+                // `47` saves nothing, and the main grid's own cursor moved
+                // with its text.
+                feed_all(&mut emu, format!("{}X", enter.replace('h', "l")).as_bytes());
+                let s = emu.snapshot();
+                assert_eq!(s.text(), text, "scrollback({scrollback}), {enter:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_taller_resize_inside_a_sequence_leaves_the_sequence_whole() {
+        // Behind the alternate screen the main grid is resized through
+        // bytes, which would cut a sequence a read left open; inside one it
+        // is resized as vt100 resizes it, and the sequence completes as it
+        // was written (#684).
+        for (open, close) in [
+            ("\x1b]0;tit", "le\x07X"),
+            ("\x1b[3", "1mX"),
+            ("\x1b", "[31mX"),
+            ("\x1bP", "q#0;2;0;0;0\x1b\\X"),
+        ] {
+            let mut emu = Vt100Emulator::new(3, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+            feed_all(
+                &mut emu,
+                format!("a\r\nb\r\nc\r\nd\x1b[?1049h{open}").as_bytes(),
+            );
+            emu.set_size(6, 10);
+            feed_all(&mut emu, close.as_bytes());
+            let s = emu.snapshot();
+            assert_eq!(s.text().trim_end(), "X", "{open:?}");
+            if open.contains(']') {
+                assert_eq!(s.title(), "title");
+            }
+            if open.contains('[') || close.starts_with('[') {
+                assert_eq!(
+                    s.cell(0, 0).unwrap().style().fg,
+                    Color::Indexed(1),
+                    "{open:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn rows_back_from_history_keep_the_attributes_the_shadow_carries() {
         // Blink lives in the attribute shadow, a second parser. Its grid
         // must get the same rows back from history as the primary's, or a
@@ -2283,8 +2435,11 @@ mod tests {
                 if next(5) == 0 {
                     rows = 2 + u16::try_from(next(5)).unwrap();
                     cols = 3 + u16::try_from(next(10)).unwrap();
+                    // The reference resizes as termlens does, which is
+                    // vt100's but for where a taller screen's new rows go
+                    // (#684): the rows each history holds are the same.
                     emu.set_size(rows, cols);
-                    raw.set_size(nz(rows), nz(cols));
+                    resize_as_xterm(&mut raw, rows, cols, true);
                     if alternate {
                         exact = None;
                     }

@@ -39,6 +39,16 @@ reads that marker.
   Outside the region both are still ignored and the cursor stays. A test
   that expected the cursor's column, or text written after one of them,
   where the application left it should expect column 0, as in xterm.
+- A resize that makes the screen taller moves the text down only by the
+  rows the history holds, as xterm does, and adds the rest of the new rows
+  below it (#684). It moved the text down by every row that had ever
+  scrolled off, and filled the top with blank rows the history did not
+  have: with `scrollback(0)` a taller screen always opened blank rows
+  above the text, and the cursor and a saved cursor moved down with it.
+  The main screen behind the alternate one is resized the same way. A test
+  that expected blank rows above the text after a taller resize, or a
+  cursor row counted from them, should expect the text to stay where it
+  was, moved down only by the rows that came back out of history.
 
 ### Fixed
 

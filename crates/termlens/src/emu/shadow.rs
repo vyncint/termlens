@@ -227,10 +227,10 @@ impl AttrShadow {
         self.parser.screen_mut().set_scrollback(rows);
     }
 
-    pub(super) fn set_size(&mut self, rows: u16, cols: u16) {
-        self.parser
-            .screen_mut()
-            .set_size(super::vt100::nz(rows), super::vt100::nz(cols));
+    /// Resized as the primary is, so the grids stay in step — see
+    /// [`resize_as_xterm`](super::vt100::resize_as_xterm).
+    pub(super) fn set_size(&mut self, rows: u16, cols: u16, between_sequences: bool) {
+        super::vt100::resize_as_xterm(&mut self.parser, rows, cols, between_sequences);
     }
 
     /// The shadow cell at `(row, col)`, whose bold/italic/underline flags are
