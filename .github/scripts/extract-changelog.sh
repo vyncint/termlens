@@ -23,6 +23,21 @@
 # appended, in file order. Naming is matched as CommonMark matches a label,
 # case-insensitively and across a line break.
 #
+# A definition is a line that starts with `[label]:` where CommonMark lets
+# one start: at the top of the file, or under a blank line, a heading, a
+# closed code fence or another definition. Under a line of text it
+# continues that text, since a definition cannot interrupt a paragraph, so
+# it stays in its section and defines nothing. A list item that wrapped
+# onto `` [`Unsupported`]: a view of … `` lost that line from its notes,
+# and the line then stood in for the real definition in the notes of every
+# other section (#717). CommonMark has more lines that leave no paragraph
+# open, and they are not recognised: a thematic break, a setext underline,
+# an HTML block, an indented code block, an empty list item. A definition
+# directly under one is read as text and stays where it is, which can lose
+# a link and never a line. Not checked: what follows the colon. A paragraph
+# that opens with `[label]:` and goes on in prose is still read as a
+# definition.
+#
 # A `[label]` inside an inline code span or a fenced code block is text and
 # names nothing, so it appends nothing: the 0.11.8 notes ended with the two
 # definitions the #658 entry quotes as code, and re-extracting 0.11.1 added
@@ -100,16 +115,24 @@ result="$(awk -v ver="$version" '
   }
   FNR == 1 { fchar = "" }
   { infence = fence($0) }
-  # A line in a code fence is never a definition or a heading.
-  !infence && match($0, /^ ? ? ?\[[^]]+\]:/) {
-    d = $0; sub(/^ */, "", d)
-    l = label(substr(d, 2, index(d, "]:") - 2))
-    if (FNR == NR) {
+  # The first read finds the definitions and the second prints around them,
+  # so the two cannot disagree on which lines they are. A line in a code
+  # fence is never a definition or a heading, and a line under text is
+  # never a definition: `para` says the line above left a paragraph open,
+  # which a blank line, a fence, a heading of one to six `#` and a
+  # definition do not.
+  FNR == NR {
+    if (!infence && !para && $0 ~ /^ ? ? ?\[[^]]+\]:/) {
+      d = $0; sub(/^ */, "", d)
+      l = label(substr(d, 2, index(d, "]:") - 2))
       if (!(l in def)) { def[l] = $0; order[++ndefs] = l }
+      isdef[FNR] = 1
+    } else {
+      para = !(infence || $0 ~ /^[ \t]*$/ || $0 ~ /^ ? ? ?##?#?#?#?#?([ \t]|$)/)
     }
     next
   }
-  FNR == NR { next }
+  FNR in isdef { next }
   # Section headers look like "## [0.1.0] - 2026-01-31" or "## [Unreleased]".
   !infence && /^## \[/ {
     if (found) { done = 1 }

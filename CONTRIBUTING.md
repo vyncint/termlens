@@ -178,6 +178,12 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 scope optional (`feat(screen): …`). Subject line: imperative mood,
 ≤ 72 characters.
 
+This is a convention, and review holds it: no CI job checks the type or
+the length of a commit subject. The two commit rules CI does enforce, on
+every commit of a pull request, are the sign-off
+([§5](#5-developer-certificate-of-origin-dco)) and no AI attribution
+([§6](#6-ai-tooling-policy)).
+
 ## 5. Developer Certificate of Origin (DCO)
 
 Every commit must be signed off:
@@ -267,8 +273,10 @@ allowlist is a list on purpose, so that widening it is a visible decision.
 ## 7. PR flow
 
 - Branch from `main`; name branches `feat/…`, `fix/…`, `docs/…`, `ci/…`.
-- PRs are **squash-merged** — keep the PR title in Conventional Commit form,
-  since it becomes the commit subject on `main`. Branches are deleted on merge.
+- PRs are **squash-merged**. A pull request of one commit lands on `main`
+  under that commit's subject, and one of several under the PR title,
+  unless the maintainer sets another subject at merge — so keep both in
+  Conventional Commit form. Branches are deleted on merge.
 - Required checks: `required-green`, which needs every CI job — `fmt`,
   `clippy`, `test` (Ubuntu + macOS), `features`, `windows-check`, `windows`,
   `msrv`, `semver`, `docs`, `deny`, `zizmor`, `gates-listed` and `skill` —
