@@ -31,6 +31,16 @@ reads that marker.
   bracketed-paste reporting or to restore the tab stops should expect them
   kept, as a real xterm keeps them, and have the application reset each
   mode itself or send `RIS`. (#687)
+- A `wait_frame` timeout after a `resize` names the resize as what the
+  application has not repainted since: "…has not completed a repaint since
+  the resize to 30x6…", or "1 complete frame since the resize to 30x6, 2
+  in total" when it repainted and no frame matched. It read "since the
+  frame this terminal last returned", with advice about "this input",
+  though the resize had moved the frame cursor, no frame had been returned
+  and nothing typed. Once `wait_frame` returns a frame, the message is
+  about that frame again. A test that matched "since the frame this
+  terminal last returned" or "since the last one returned" on a timeout
+  after a resize should match "since the resize to" instead. (#705)
 
 ### Fixed
 

@@ -2388,6 +2388,7 @@ impl TerminalBuilder {
             exit_watch: ExitWatch::default(),
             command_desc,
             frame_cursor: 0,
+            frame_cursor_resize: None,
             last_frame: None,
             record_budget: self.record_budget,
             cell_size: self.cell_size,
@@ -2918,6 +2919,11 @@ pub struct Terminal {
     /// satisfy two waits. Advanced by a resize too: a frame drawn at the
     /// old size is not the repaint that answers the new one.
     frame_cursor: u64,
+    /// The size (cols, rows) of the resize that last moved `frame_cursor`,
+    /// while no frame has been returned since. A `wait_frame` timeout says
+    /// what the application has not repainted since, and that is the resize
+    /// then, not a frame this terminal returned (#705).
+    frame_cursor_resize: Option<(u16, u16)>,
     /// The frame `wait_frame` last returned, so a timeout can show what
     /// changed since rather than the live grid alone (#246).
     last_frame: Option<Screen>,
@@ -3929,6 +3935,7 @@ impl Terminal {
         match outcome {
             Ok(Ok((index, frame))) => {
                 self.frame_cursor = index;
+                self.frame_cursor_resize = None;
                 self.last_frame = Some(frame.clone());
                 Ok(frame)
             }
@@ -3948,18 +3955,32 @@ impl Terminal {
                     let note = format!("{}{}", guard.query_note(), history_note(&screen));
                     (guard.frames_seen, screen, note)
                 };
+                // What put the cursor where it is: the resize that moved it
+                // last, or else a frame an earlier wait returned. The message
+                // names that one, since the other never happened (#705).
+                let resized = self.frame_cursor_resize;
                 let waiting_for = if frames > 0 && frames == cursor {
-                    // Every frame the application drew has already been
-                    // handed to an earlier wait, so it has not repainted
-                    // since. Naming that is the difference between "your
-                    // predicate is wrong" and "the app never redrew".
-                    format!(
-                        "{WHAT} — the application has not completed a repaint since the \
-                         frame this terminal last returned ({} in total). If it does not \
-                         repaint in response to this input, assert on the screen with \
-                         wait_until instead{note}",
-                        frames_phrase(frames)
-                    )
+                    // Every frame the application drew is behind the cursor,
+                    // handed to an earlier wait or drawn before a resize, so
+                    // it has not repainted since. Naming that is the
+                    // difference between "your predicate is wrong" and "the
+                    // app never redrew".
+                    match resized {
+                        Some((cols, rows)) => format!(
+                            "{WHAT} — the application has not completed a repaint since the \
+                             resize to {cols}x{rows} ({} in total), and a frame drawn at \
+                             the old size is not offered. If it does not repaint when \
+                             resized, assert on the screen with wait_until instead{note}",
+                            frames_phrase(frames)
+                        ),
+                        None => format!(
+                            "{WHAT} — the application has not completed a repaint since the \
+                             frame this terminal last returned ({} in total). If it does not \
+                             repaint in response to this input, assert on the screen with \
+                             wait_until instead{note}",
+                            frames_phrase(frames)
+                        ),
+                    }
                 } else if frames == 0 {
                     // An application blocked on an unanswered probe never
                     // reaches its first repaint, so this is exactly where
@@ -3973,6 +3994,11 @@ impl Terminal {
                     )
                 } else if cursor == 0 {
                     format!("{WHAT} ({} observed){note}", frames_phrase(frames))
+                } else if let Some((cols, rows)) = resized {
+                    format!(
+                        "{WHAT} ({} since the resize to {cols}x{rows}, {frames} in total){note}",
+                        frames_phrase(frames - cursor)
+                    )
                 } else {
                     format!(
                         "{WHAT} ({} since the last one returned, {frames} in total){note}",
@@ -4611,6 +4637,7 @@ impl Terminal {
         })?;
         if let Some(cursor) = cursor {
             self.frame_cursor = cursor;
+            self.frame_cursor_resize = Some((cols, rows));
         }
         Ok(())
     }
