@@ -55,11 +55,11 @@ pub(crate) struct Vt100Emulator {
     /// Inline graphics payloads, oldest first, behind an `Arc` so a
     /// snapshot costs one refcount rather than a copy of every image.
     graphics: Arc<Vec<GraphicsPayload>>,
-    /// For each payload in `graphics`, the image ids a kitty delete freed
-    /// ([`Placement::forgets`]), so a later `a=p` of one is not sized from
-    /// an image kitty has forgotten (#672). Kept in lockstep with
-    /// `graphics`, one entry each, and so bounded by the same two bounds.
-    graphics_forgets: VecDeque<Option<(u32, u32)>>,
+    /// For each payload in `graphics`, what its escape said of the images
+    /// it concerns and the payload itself does not carry ([`Named`]). Kept
+    /// in lockstep with `graphics`, one entry each, and so bounded by the
+    /// same two bounds.
+    graphics_named: VecDeque<Named>,
     /// Payload bytes currently retained, so eviction is a subtraction
     /// rather than a walk.
     graphics_bytes: usize,
@@ -75,6 +75,19 @@ pub(crate) struct Vt100Emulator {
     /// the parsers see is then no longer a sub-slice of the read. Kept
     /// between calls only for its allocation.
     staged: Vec<u8>,
+}
+
+/// The images a logged kitty escape names, as its [`Placement`] carried
+/// them: what a later `a=p` needs in order to find the image it places, or
+/// to find that kitty no longer has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Named {
+    /// The image ids a delete freed ([`Placement::forgets`]), so a later
+    /// `a=p` of one is not sized from an image kitty has forgotten (#672).
+    forgets: Option<(u32, u32)>,
+    /// The image number the escape gave ([`Placement::number`]), 0 for
+    /// none, so a later `a=p,I=` finds the newest image sent with it (#696).
+    number: u32,
 }
 
 /// How far past an image the declared terminal moves the cursor.
@@ -129,7 +142,7 @@ impl Vt100Emulator {
             captured: 0,
             history_reset: false,
             graphics: Arc::new(Vec::new()),
-            graphics_forgets: VecDeque::new(),
+            graphics_named: VecDeque::new(),
             graphics_bytes: 0,
             capture,
             image_support: Graphics::None,
@@ -176,20 +189,40 @@ impl Vt100Emulator {
                     // `handle_put_command`): nothing is placed, so nothing
                     // moves — even with `c=` and `r=` given (#672). It was
                     // sized from the image kitty no longer has.
+                    //
+                    // The image is the one the id names, or, with no id, the
+                    // newest one sent with the image number (`I=`): kitty's
+                    // `handle_put_command` looks it up by `g->id` and
+                    // otherwise by `img_by_client_number`. With neither,
+                    // kitty places nothing ("Put graphics command without
+                    // image id or number"), and zero is neither. A number
+                    // was never looked up, so `a=p,I=` never moved (#696).
                     GraphicsAction::Place => {
-                        let id = payload.id()?;
-                        let newest = self.graphics.iter().zip(&self.graphics_forgets).rev().find(
-                            |(earlier, forgets)| {
-                                forgets.is_some_and(|(first, last)| (first..=last).contains(&id))
-                                    || (earlier.protocol() == GraphicsProtocol::Kitty
-                                        && earlier.action().carries_image()
-                                        && earlier.id() == Some(id))
-                            },
-                        );
-                        match newest {
-                            Some((_, Some(_))) => return None,
-                            Some((earlier, None)) => earlier.size(),
-                            None => None,
+                        let is_image = |earlier: &GraphicsPayload| {
+                            earlier.protocol() == GraphicsProtocol::Kitty
+                                && earlier.action().carries_image()
+                        };
+                        let mut log = self.graphics.iter().zip(&self.graphics_named).rev();
+                        match (payload.id().filter(|&id| id != 0), placement.number) {
+                            (Some(id), _) => {
+                                let newest = log.find(|(earlier, named)| {
+                                    named
+                                        .forgets
+                                        .is_some_and(|(first, last)| (first..=last).contains(&id))
+                                        || (is_image(earlier) && earlier.id() == Some(id))
+                                });
+                                match newest {
+                                    Some((_, named)) if named.forgets.is_some() => return None,
+                                    Some((earlier, _)) => earlier.size(),
+                                    None => None,
+                                }
+                            }
+                            (None, 0) => return None,
+                            (None, number) => log
+                                .find(|(earlier, named)| {
+                                    is_image(earlier) && named.number == number
+                                })
+                                .and_then(|(earlier, _)| earlier.size()),
                         }
                     }
                     _ => return None,
@@ -316,18 +349,18 @@ impl Vt100Emulator {
     /// labels.
     ///
     /// [`move_past_image`]: Self::move_past_image
-    fn record_graphics(&mut self, mut payload: GraphicsPayload, forgets: Option<(u32, u32)>) {
+    fn record_graphics(&mut self, mut payload: GraphicsPayload, named: Named) {
         payload.place(self.cursor_position());
         let kept = payload.data().map_or(0, <[u8]>::len);
         let log = Arc::make_mut(&mut self.graphics);
         log.push(payload);
-        self.graphics_forgets.push_back(forgets);
+        self.graphics_named.push_back(named);
         self.graphics_bytes += kept;
         // Evict oldest-first, on both bounds. A snapshot already taken keeps
         // its own view: it holds an `Arc` to the vector as it stood.
         while log.len() > HISTORY || (self.graphics_bytes > self.capture && log.len() > 1) {
             let dropped = log.remove(0);
-            self.graphics_forgets.pop_front();
+            self.graphics_named.pop_front();
             self.graphics_bytes -= dropped.data().map_or(0, <[u8]>::len);
         }
     }
@@ -339,7 +372,11 @@ impl Vt100Emulator {
         // earlier transmission and not itself; moved after it is stamped, so
         // `at` is the top-left corner.
         let step = self.image_step(&payload, placement);
-        self.record_graphics(payload, placement.forgets);
+        let named = Named {
+            forgets: placement.forgets,
+            number: placement.number,
+        };
+        self.record_graphics(payload, named);
         if let Some(step) = step {
             self.move_past_image(step);
         }
@@ -2596,6 +2633,97 @@ mod tests {
         assert_eq!(x_at(&emu), Some((1, 2)));
     }
 
+    /// Where `X` lands after `wire`, on a kitty terminal of 6 rows and 10
+    /// columns with 10x20-pixel cells.
+    fn x_after(wire: &str) -> Option<(u16, u16)> {
+        x_at(&graphics_emu(
+            Graphics::Kitty,
+            6,
+            10,
+            format!("{wire}X").as_bytes(),
+        ))
+    }
+
+    /// A placement may name its image by number (`I=`) rather than by id:
+    /// "All future commands that refer to images using the image number,
+    /// such as creating placements or deleting images, will act on only the
+    /// newest image with that number" (the protocol's "Requesting image ids
+    /// from the terminal"), which kitty's `handle_put_command` resolves
+    /// with `img_by_client_number`. termlens looked for an `i=`, found
+    /// none, and never moved the cursor, `c=` and `r=` given or not (#696).
+    #[test]
+    fn a_kitty_placement_by_image_number_moves_the_cursor() {
+        // The three rows of the issue. By id, the control: 2x3 cells.
+        assert_eq!(
+            x_after("\x1b_Ga=t,i=7,f=24,s=1,v=1;AAAA\x1b\\\x1b_Ga=p,i=7,c=2,r=3\x1b\\"),
+            Some((2, 2))
+        );
+        // The same by number.
+        assert_eq!(
+            x_after("\x1b_Ga=t,I=7,f=24,s=1,v=1;AAAA\x1b\\\x1b_Ga=p,I=7,c=2,r=3\x1b\\"),
+            Some((2, 2))
+        );
+        // And sized from the transmission: 30x50 px in 10x20 cells is 3x3.
+        assert_eq!(
+            x_after("\x1b_Ga=t,I=7,f=24,s=30,v=50;AAAA\x1b\\\x1b_Ga=p,I=7\x1b\\"),
+            Some((2, 3))
+        );
+    }
+
+    /// Which image a number names: the newest transmission that carried it
+    /// — a transmission by number always creates a new image, "even if an
+    /// existing image has the same number" — and no image sent under an id,
+    /// as an id names none sent under a number (#696).
+    #[test]
+    fn a_kitty_image_number_names_the_newest_image_sent_with_it() {
+        let big = "\x1b_Ga=t,I=7,f=24,s=30,v=50;AAAA\x1b\\";
+        let small = "\x1b_Ga=t,I=7,f=24,s=10,v=20;AAAA\x1b\\";
+        let place = "\x1b_Ga=p,I=7\x1b\\";
+        assert_eq!(x_after(&format!("{big}{small}{place}")), Some((0, 1)));
+        assert_eq!(x_after(&format!("{small}{big}{place}")), Some((2, 3)));
+        // The newest even when it declared no size, a PNG for one: there is
+        // then nothing to size the placement by, as for an id (#626).
+        let png = "\x1b_Ga=t,I=7,f=100;iVBORw0KGgo=\x1b\\";
+        assert_eq!(x_after(&format!("{big}{png}{place}")), Some((0, 0)));
+        // Another number, or an id of the same value, is another image.
+        for other in [
+            "\x1b_Ga=t,I=8,f=24,s=30,v=50;AAAA\x1b\\\x1b_Ga=p,I=7\x1b\\",
+            "\x1b_Ga=t,i=7,f=24,s=30,v=50;AAAA\x1b\\\x1b_Ga=p,I=7\x1b\\",
+            "\x1b_Ga=t,I=7,f=24,s=30,v=50;AAAA\x1b\\\x1b_Ga=p,i=7\x1b\\",
+        ] {
+            assert_eq!(x_after(other), Some((0, 0)), "{other:?}");
+        }
+        // The number is read off the first chunk of an upload, like the id.
+        assert_eq!(
+            x_after(
+                "\x1b_Ga=t,I=7,f=24,s=30,v=50,m=1;AAAA\x1b\\\x1b_Gm=0;AAAA\x1b\\\
+                 \x1b_Ga=p,I=7\x1b\\"
+            ),
+            Some((2, 3))
+        );
+        // `i=0` is no id, as in kitty (`if (g->id) … else if
+        // (g->image_number)`), so the number decides.
+        assert_eq!(
+            x_after(&format!("{big}\x1b_Ga=p,i=0,I=7\x1b\\")),
+            Some((2, 3))
+        );
+    }
+
+    /// A placement that names no image is not one: kitty reports "Put
+    /// graphics command without image id or number" and places nothing,
+    /// whatever `c=` and `r=` say. Neither is `i=0` or `I=0` a name.
+    #[test]
+    fn a_kitty_placement_that_names_no_image_does_not_move() {
+        let sent = "\x1b_Ga=t,i=7,f=24,s=30,v=50;AAAA\x1b\\";
+        for keys in ["a=p,c=2,r=3", "a=p,i=0,c=2,r=3", "a=p,I=0,c=2,r=3", "a=p"] {
+            assert_eq!(
+                x_after(&format!("{sent}\x1b_G{keys}\x1b\\")),
+                Some((0, 0)),
+                "{keys}"
+            );
+        }
+    }
+
     /// A delete that frees an image makes kitty forget it, and a later
     /// `a=p` of it is refused ("Put command refers to non-existent image",
     /// `handle_put_command` in kitty's `graphics.c`): nothing is placed, so
@@ -2658,7 +2786,7 @@ mod tests {
         wire.extend_from_slice(b"\x1b_Ga=t,f=24,s=20,v=40,i=8;AAAA\x1b\\\x1b_Ga=p,i=8\x1b\\X");
         let emu = graphics_emu(Graphics::Kitty, 6, 10, &wire);
         assert_eq!(x_at(&emu), Some((1, 2)));
-        assert_eq!(emu.graphics.len(), emu.graphics_forgets.len());
+        assert_eq!(emu.graphics.len(), emu.graphics_named.len());
     }
 
     /// A query that kitty took as an upload's last chunk completes the

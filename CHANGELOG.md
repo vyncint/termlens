@@ -129,6 +129,13 @@ reads that marker.
   transmission and its placement at long values is about 140 bytes. The
   block is now kept up to 256 KiB, the length at which kitty itself gives
   up on an escape that is still arriving. (#700)
+- A kitty placement that names its image by number (`a=p,I=7`) moves the
+  cursor under `Graphics::Kitty`, as kitty moves it: by `c=` and `r=`, or
+  sized from the newest transmission with that number. It never moved,
+  since termlens looked only for an image id. An `i=0` is no id, as in
+  kitty: with a number beside it the number decides, and without one
+  kitty places nothing, so `a=p,i=0,c=2,r=3` no longer moves the cursor
+  by its `c=` and `r=`. (#696)
 
 ## [0.11.8] - 2026-11-03
 

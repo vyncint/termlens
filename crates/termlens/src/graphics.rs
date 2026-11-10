@@ -1100,6 +1100,10 @@ pub(crate) struct Placement {
     /// has forgotten (#672). `None` for every other escape, and for a delete
     /// whose effect depends on placements termlens does not track.
     pub(crate) forgets: Option<(u32, u32)>,
+    /// kitty's `I=`: the image number the escape names, 0 when it names
+    /// none. A transmission creates a new image under it, and a placement
+    /// that gives no `i=` places the newest image sent with it (#696).
+    pub(crate) number: u32,
 }
 
 /// A payload under construction, owned by the sequence tracker: kitty splits
@@ -1197,6 +1201,7 @@ impl GraphicsBuilder {
                 moves: value(b"C") != 1 && value(b"U") != 1 && key(control, b"P").is_none(),
                 height: 0,
                 forgets: None,
+                number: value(b"I"),
             };
             if self.action == GraphicsAction::Delete {
                 self.placement.forgets = forgets(control);
@@ -1580,7 +1585,7 @@ mod tests {
     #[test]
     fn a_kitty_placement_records_its_size_source_and_whether_it_moves() {
         let mut builder = GraphicsBuilder::default();
-        builder.kitty(b"a=T,f=24,s=8,v=4,c=3,w=6,h=2,x=1,y=1,X=4,Y=5");
+        builder.kitty(b"a=T,f=24,s=8,v=4,c=3,w=6,h=2,x=1,y=1,X=4,Y=5,I=9");
         builder.chunk(4, b"AAAA", true, usize::MAX);
         let (_, placement) = builder.finish_placed().expect("a payload");
         assert_eq!(
@@ -1597,6 +1602,7 @@ mod tests {
                 moves: true,
                 height: 0,
                 forgets: None,
+                number: 9,
             }
         );
         for control in [&b"a=T,C=1"[..], b"a=T,U=1", b"a=p,i=1,P=2"] {

@@ -118,9 +118,11 @@ CHANGELOG entry.
   and only as far as the escape says. A `Graphics::Kitty` terminal moves
   it for a placement whose size in cells is known: from `c=` and `r=`, or
   from the pixel size and `cell_size()` — for `a=p`, the pixel size of the
-  newest transmission of that image id. A PNG (`f=100`) placed without
-  `c=` and `r=`, or a placement of an image whose transmission has left
-  the payload log, does not move it. Whether kitty would have loaded the
+  newest transmission of that image id, or, for one that names its image
+  by number (`I=`) alone, of the newest transmission with that number. A
+  PNG (`f=100`) placed without `c=` and `r=`, a placement of an image whose
+  transmission has left the payload log, or one that names neither an id
+  nor a number, does not move it. Whether kitty would have loaded the
   image at all is not knowable here, so a placement is taken to succeed. A
   `Graphics::Sixel` terminal with a `cell_size()` moves it to the image's
   last text row, as xterm does with sixel scrolling on. Sixel display mode
