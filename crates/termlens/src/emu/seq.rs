@@ -63,6 +63,15 @@ use crate::screen::{Clipboard, Link, MouseModes};
 /// title comes anywhere near this.
 pub(super) const OSC_CAPTURE_MAX: usize = 64 * 1024;
 
+/// How much of a kitty control block is kept: 256 KiB, the length past
+/// which kitty drops an escape that is still arriving
+/// (`MAX_ESCAPE_CODE_LENGTH` in its `vt-parser.c`, a quarter of its 1 MiB
+/// read buffer; it reads a longer one only when the whole of it is already
+/// in that buffer). A block that names every key of the protocol once,
+/// each at its longest value, is under 400 bytes: the bound is there for
+/// the stream that never ends one.
+const KITTY_CONTROL_MAX: usize = 256 * 1024;
+
 /// How many `OSC 8` spans to keep, oldest evicted.
 ///
 /// Bounded rather than unbounded because a TUI redraws: an application that
@@ -852,14 +861,25 @@ pub(crate) struct SeqTracker {
     /// Payload bytes after the header, so a payload's size is reportable
     /// without keeping the payload.
     dcs_data_len: u64,
-    /// The opening bytes of a DCS-class payload: enough for a kitty control
-    /// block (`G` plus `key=value` pairs up to the first `;`) and for an
-    /// XTGETTCAP name list, whose hex names run about six bytes each. A
-    /// longer list truncates, and the names that survive are still answered
-    /// — a partial answer beats none, and the ones we drop get no reply,
-    /// which is what an application already has to handle.
+    /// The opening bytes of a DCS-class payload: enough to tell a kitty
+    /// escape by its `G`, and for an XTGETTCAP name list, whose hex names
+    /// run about six bytes each. A longer list truncates, and the names
+    /// that survive are still answered — a partial answer beats none, and
+    /// the ones we drop get no reply, which is what an application already
+    /// has to handle.
     dcs_head: [u8; 128],
     dcs_head_len: u8,
+    /// A kitty escape's control block: the `G` and the `key=value` pairs
+    /// after it, up to the first `;`. Kept apart from the 128-byte head,
+    /// which cut a long block short: a value that straddled byte 127 was
+    /// read wrong and every key past it was lost, `m=1` among them (#700).
+    /// Bounded by [`KITTY_CONTROL_MAX`], and by nothing the capture bound
+    /// says: the keys describe the image, whatever is kept of its data.
+    kitty_control: Vec<u8>,
+    /// True while the bytes arriving belong to that control block: from the
+    /// introducer of an APC to its first `;`, or to a first byte other than
+    /// `G`, which makes it no kitty escape at all.
+    kitty_control_open: bool,
     /// Every byte of the current DCS-class string, up to the capture bound —
     /// the image data itself, which the 128-byte head deliberately is not.
     /// Kept only while the bound allows; `dcs_body_full` says whether it is
@@ -942,6 +962,8 @@ impl SeqTracker {
             dcs_data_len: 0,
             dcs_head: [0; 128],
             dcs_head_len: 0,
+            kitty_control: Vec::new(),
+            kitty_control_open: false,
             dcs_body: Vec::new(),
             dcs_body_full: true,
             sixel_meter: SixelMeter::default(),
@@ -1371,6 +1393,8 @@ impl SeqTracker {
         self.dcs_intermediate = 0;
         self.dcs_data_len = 0;
         self.dcs_head_len = 0;
+        self.kitty_control.clear();
+        self.kitty_control_open = introducer == b'_';
         self.dcs_body.clear();
         self.dcs_body_full = true;
         self.sixel_meter = SixelMeter::default();
@@ -1858,7 +1882,7 @@ impl SeqTracker {
         // Any other APC is not graphics and leaves an upload where it was,
         // as kitty does; it used to be taken as the upload's next chunk.
         if self.dcs_introducer == b'_' && self.dcs_head.first() == Some(&b'G') {
-            let control = self.dcs_control_block().to_vec();
+            let control = self.kitty_control.clone();
             // The control block is `G` followed by the comma-separated keys.
             let keys = control.strip_prefix(b"G").unwrap_or(&control);
             let is_query = keys.split(|&b| b == b',').any(|pair| pair == b"a=q");
@@ -2090,16 +2114,29 @@ impl SeqTracker {
         )
     }
 
-    /// The captured head of a DCS-class payload, cut at the first `;`.
+    /// Take one byte of an APC into the kitty control block, if it is part
+    /// of one.
     ///
     /// A kitty payload is `G <key=value>,… ; <base64>`; only the control
     /// block before the `;` is worth reading, and stopping there keeps a
     /// base64 blob from being scanned for keys it cannot contain.
-    fn dcs_control_block(&self) -> &[u8] {
-        let head = &self.dcs_head[..usize::from(self.dcs_head_len)];
-        match head.iter().position(|&b| b == b';') {
-            Some(sep) => &head[..sep],
-            None => head,
+    fn push_kitty_control(&mut self, b: u8) {
+        if !self.kitty_control_open {
+            return;
+        }
+        if b == b';' || (self.kitty_control.is_empty() && b != b'G') {
+            self.kitty_control_open = false;
+        } else if self.kitty_control.len() < KITTY_CONTROL_MAX {
+            self.kitty_control.push(b);
+        } else {
+            // The bound: nothing past it is read. A pair it cuts in two is
+            // dropped whole, so that a value is never read as its own first
+            // digits, which is what the 128-byte head did to one.
+            if b != b',' {
+                let whole = self.kitty_control.iter().rposition(|&b| b == b',');
+                self.kitty_control.truncate(whole.unwrap_or(1));
+            }
+            self.kitty_control_open = false;
         }
     }
 
@@ -2130,8 +2167,9 @@ impl SeqTracker {
             self.dcs_head[usize::from(self.dcs_head_len)] = b;
             self.dcs_head_len += 1;
         }
+        self.push_kitty_control(b);
         // The body is what a decoder needs and the head is not: 128 bytes
-        // holds a control block, never an image. Bounded, and the flag says
+        // holds a name list, never an image. Bounded, and the flag says
         // which of the two this is, so a truncated payload is reported as
         // uncaptured rather than decoded into a plausible wrong picture.
         if self.dcs_body.len() < self.capture {
@@ -2787,6 +2825,86 @@ mod tests {
         assert_eq!(seen[0].data(), Some(&b"AAAACCCC"[..]));
     }
 
+    /// A control block naming every key a transmission and its placement
+    /// take, each at a long value, as a client may send it: 142 bytes after
+    /// the `G`. Byte 127 falls inside `r=1000`.
+    const LONG_CONTROL: &str = "a=T,f=24,t=d,o=z,i=4294967295,p=4294967295,s=10000,v=10000,\
+        x=10000,y=10000,w=10000,h=10000,X=100,Y=100,z=-1073741824,c=1000,r=1000,C=1,q=2,m=1";
+
+    /// kitty reads a control block off its escape buffer, however long it
+    /// is (`parse_graphics_code`). termlens read it from the first 128
+    /// bytes of the escape: a value that straddled byte 127 was cut short
+    /// (`r=1000` read as `r=1`) and every key past it was dropped — and
+    /// when one of those was the `m=1` of a first chunk, the upload ended
+    /// at once and its second chunk was counted as an image of its own
+    /// (#700).
+    #[test]
+    fn a_kitty_control_block_is_read_past_its_first_128_bytes() {
+        let head = &format!("G{LONG_CONTROL}")[..128];
+        assert!(head.ends_with(",r=1"), "byte 127 must fall in `r=`: {head}");
+        let first = format!("\x1b_G{LONG_CONTROL};AAAA\x1b\\");
+        let wire = [first.as_bytes(), b"\x1b_Gm=0;BBBB\x1b\\"].concat();
+        // At every capture bound: the keys are not read off the retained
+        // body, which a bound of zero does not keep.
+        for capture in [crate::graphics::DEFAULT_CAPTURE, 0] {
+            let mut tracker = SeqTracker::new(capture, TEST_ROWS, TEST_COLS);
+            let mut seen = Vec::new();
+            for &byte in &wire {
+                if let SeqEvent::Graphics(payload, placement) = tracker.step(byte) {
+                    seen.push((*payload, placement));
+                }
+            }
+            assert_eq!(seen.len(), 1, "one image in two chunks: {seen:?}");
+            let (image, placement) = &seen[0];
+            assert_eq!(image.chunks(), 2, "capture {capture}");
+            assert_eq!(image.id(), Some(u32::MAX));
+            assert_eq!(image.cells(), Some((1000, 1000)), "`r=` whole");
+            assert!(!placement.moves, "`C=1` sits past byte 127");
+            assert_eq!(tracker.graphics().kitty, 1, "capture {capture}");
+            assert_eq!(
+                image.data(),
+                (capture > 0).then_some(&b"AAAABBBB"[..]),
+                "capture {capture}"
+            );
+        }
+        // The reviewer's shape: keys kitty accepts repeated pad the block,
+        // and every fact of the image sits past byte 127.
+        let pad = "z=-1073741824,".repeat(9);
+        let first = format!("\x1b_Ga=t,{pad}i=9,f=24,s=1,v=2,m=1;AAAA\x1b\\");
+        let seen = payloads(&[first.as_bytes(), b"\x1b_Gm=0;AAAA\x1b\\"].concat());
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(
+            (seen[0].id(), seen[0].format(), seen[0].size()),
+            (Some(9), GraphicsFormat::Rgb, Some((1, 2)))
+        );
+    }
+
+    /// The control block is kept up to the length at which kitty gives up on
+    /// an escape that is still arriving, and no further. A key that ends on
+    /// the near side of [`KITTY_CONTROL_MAX`] is read; one the bound cuts in
+    /// two is dropped whole rather than read as its first digits, which is
+    /// what the old head did to `r=1000`; and one past it is not read.
+    #[test]
+    fn a_kitty_control_block_is_cut_where_kitty_stops_reading() {
+        // `Ga=t,`, then `pad` bytes of pairs kitty accepts, then `key`.
+        let id_after = |pad: usize, key: &str| {
+            let full = pad / 5 - 1;
+            let last = "1".repeat(pad - 5 * full - 3);
+            let wire = format!(
+                "\x1b_Ga=t,{}z={last},{key};AAAA\x1b\\",
+                "z=-1,".repeat(full)
+            );
+            let seen = payloads(wire.as_bytes());
+            assert_eq!(seen.len(), 1, "{pad} bytes, then {key}");
+            seen[0].id()
+        };
+        let room = KITTY_CONTROL_MAX - "Ga=t,".len();
+        assert_eq!(id_after(room - 3, "i=9"), Some(9), "ends on the bound");
+        assert_eq!(id_after(room - 3, "i=91"), None, "not read as `i=9`");
+        assert_eq!(id_after(room - 2, "i=9"), None, "cut after its `=`");
+        assert_eq!(id_after(room, "i=9"), None, "starts past the bound");
+    }
+
     /// A placement in the middle of an upload is kitty's `case 'p'`, which
     /// never touches the load in progress (`grman_handle_command`); the
     /// action-less chunk after it then completes the load (#636). The
@@ -3406,20 +3524,26 @@ mod tests {
     fn hostile_input_cannot_panic_or_grow_a_buffer_past_its_bound() {
         let capture = crate::graphics::DEFAULT_CAPTURE;
         let mut tracker = SeqTracker::new(capture, TEST_ROWS, TEST_COLS);
-        // (links, label, osc, dcs_body) high-water marks.
-        let mut peak = (0usize, 0usize, 0usize, 0usize);
+        // (links, label, osc, dcs_body, kitty_control) high-water marks.
+        type Peak = (usize, usize, usize, usize, usize);
+        let mut peak: Peak = (0, 0, 0, 0, 0);
 
-        fn observe(t: &SeqTracker, capture: usize, peak: &mut (usize, usize, usize, usize)) {
+        fn observe(t: &SeqTracker, capture: usize, peak: &mut Peak) {
             assert!(t.links.len() <= LINK_HISTORY, "link log overran");
             assert!(t.link_label.len() <= LINK_LABEL_MAX, "label overran");
             assert!(t.osc_buf.len() <= OSC_CAPTURE_MAX, "osc buffer overran");
             assert!(t.dcs_body.len() <= capture, "dcs body overran");
             assert!(usize::from(t.seq_len) <= t.seq_buf.len());
             assert!(usize::from(t.dcs_head_len) <= t.dcs_head.len());
+            assert!(
+                t.kitty_control.len() <= KITTY_CONTROL_MAX,
+                "kitty control block overran"
+            );
             peak.0 = peak.0.max(t.links.len());
             peak.1 = peak.1.max(t.link_label.len());
             peak.2 = peak.2.max(t.osc_buf.len());
             peak.3 = peak.3.max(t.dcs_body.len());
+            peak.4 = peak.4.max(t.kitty_control.len());
         }
 
         // Phase 1 — the panic net. xorshift64: a few lines, no dependency,
@@ -3463,12 +3587,24 @@ mod tests {
         feed(b"\x1b]0;", &mut tracker, &mut peak);
         feed(&vec![b'T'; OSC_CAPTURE_MAX * 2], &mut tracker, &mut peak);
         feed(b"\x07", &mut tracker, &mut peak);
+        // (d) one kitty control block that never reaches its `;`.
+        feed(b"\x1b_G", &mut tracker, &mut peak);
+        feed(
+            &b"z=-1,".repeat(KITTY_CONTROL_MAX / 5 * 2),
+            &mut tracker,
+            &mut peak,
+        );
+        feed(b"\x1b\\", &mut tracker, &mut peak);
 
         // The corpus must actually have reached each bound, or every check
         // above was inert.
         assert_eq!(peak.0, LINK_HISTORY, "the link log was never filled");
         assert_eq!(peak.1, LINK_LABEL_MAX, "the label bound was never reached");
         assert_eq!(peak.2, OSC_CAPTURE_MAX, "the osc bound was never reached");
+        assert_eq!(
+            peak.4, KITTY_CONTROL_MAX,
+            "the kitty control bound was never reached"
+        );
 
         // And the accessors stay total on whatever state that left behind.
         let _ = tracker.title();

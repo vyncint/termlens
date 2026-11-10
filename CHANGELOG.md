@@ -121,6 +121,14 @@ reads that marker.
   its sixel once, as xterm and Windows Terminal read it. It painted nothing
   and did not advance, so `~!0~~` decoded two pixels wide where it is
   three. (#698)
+- A kitty control block is read whole, however long it is. Its keys were
+  read from the first 128 bytes of the escape, so in a longer block a value
+  that straddled byte 127 was cut short and every key after it was lost: a
+  first chunk whose `m=1` sat there ended the upload at once, and one image
+  sent in two chunks was counted as two. A block that names every key of a
+  transmission and its placement at long values is about 140 bytes. The
+  block is now kept up to 256 KiB, the length at which kitty itself gives
+  up on an escape that is still arriving. (#700)
 
 ## [0.11.8] - 2026-11-03
 
