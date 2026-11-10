@@ -148,6 +148,14 @@ reads that marker.
   said such a row "still reads", which is true of parsing and not of the
   picture. The corpus now holds a pair 0.11.6 wrote, with tests pinning
   that reading and its difference from the JSON twin. (#723)
+- `Screen::contains` and `Screen::find` describe their matching as it is:
+  NFC on both sides, then a substring search. They called it
+  "grapheme-shaped", but NFC joins a mark to its base only where Unicode
+  has a precomposed character, so a needle matches a base character under
+  any other mark (`contains("q")` on a screen showing `q` with U+0353
+  under it), and a multi-row needle must include the mark on a row that
+  ends in one. Which needles match is unchanged; a doctest, a unit test
+  and LIMITATIONS now say so. (#726)
 
 ## [0.11.8] - 2026-11-03
 

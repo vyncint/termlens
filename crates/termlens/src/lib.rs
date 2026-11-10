@@ -81,8 +81,10 @@
 //! Needles are matched by what the terminal draws rather than by how it is
 //! spelled: [`contains`](Screen::contains) and [`find`](Screen::find) fold
 //! both sides to NFC, so a needle typed in an editor finds text an
-//! application normalized the other way. The grid keeps exactly the
-//! codepoints the application sent.
+//! application normalized the other way. The fold is NFC's and no more: a
+//! mark with no precomposed form stays a character of its own, and a
+//! needle can match the base under it, as [`contains`](Screen::contains)
+//! shows. The grid keeps exactly the codepoints the application sent.
 //!
 //! With the default `insta` feature, snapshot-test whole screens — after
 //! waiting for what the application paints and for the picture to hold
