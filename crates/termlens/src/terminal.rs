@@ -232,6 +232,12 @@ struct WriteRequest {
     /// them from the pending count once they are genuinely out. Zero for
     /// typed input, which reports through `ack` instead.
     replies: usize,
+    /// How many of `bytes` are those replies: all of them or none. The
+    /// writer takes exactly these off the reply budget
+    /// ([`REPLY_QUEUE_BYTES`]) once they are out. It took off every byte it
+    /// wrote, so a send the application read at last cleared the budget of
+    /// replies still queued behind it (#704).
+    reply_bytes: usize,
 }
 
 /// The least time a send waits for the writer to acknowledge its bytes,
@@ -2295,52 +2301,7 @@ impl TerminalBuilder {
                 let busy = Arc::clone(&writer_busy);
                 thread::Builder::new()
                     .name("termlens-pty-writer".into())
-                    .spawn(move || {
-                        while let Ok(request) = rx.recv() {
-                            // Take everything already queued behind this one
-                            // and write it as a single `write(2)`. One
-                            // syscall per burst instead of one per entry is
-                            // what keeps the writer from becoming the
-                            // bottleneck the reader outruns.
-                            let mut bytes = request.bytes;
-                            let mut acks: Vec<_> = request.ack.into_iter().collect();
-                            let mut replies = request.replies;
-                            while let Ok(next) = rx.try_recv() {
-                                bytes.extend_from_slice(&next.bytes);
-                                acks.extend(next.ack);
-                                replies += next.replies;
-                            }
-                            let queued = bytes.len();
-                            busy.store(true, Ordering::Relaxed);
-                            let result = pty_writer
-                                .write_all(&bytes)
-                                .and_then(|()| pty_writer.flush());
-                            busy.store(false, Ordering::Relaxed);
-                            // Only after the bytes are actually out: while
-                            // this write is blocked, those replies are
-                            // undelivered, and that is precisely what the
-                            // next wait's error needs to be able to say.
-                            written.fetch_sub(replies, Ordering::Relaxed);
-                            drained.fetch_sub(
-                                queued.min(drained.load(Ordering::Relaxed)),
-                                Ordering::Relaxed,
-                            );
-                            let failed = result.is_err();
-                            for ack in acks {
-                                // Every waiter in the batch learns the same
-                                // outcome, which is the truth: their bytes
-                                // went out together. Callers may have given
-                                // up already.
-                                let _ = ack.send(match &result {
-                                    Ok(()) => Ok(()),
-                                    Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
-                                });
-                            }
-                            if failed {
-                                break; // terminal gone; nothing left to write
-                            }
-                        }
-                    })
+                    .spawn(move || writer_loop(&mut pty_writer, &rx, &written, &drained, &busy))
                     .map_err(Error::Io)?;
                 Some(tx)
             }
@@ -2670,6 +2631,58 @@ fn panic_detail(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// Write what the test types and the reader answers into the PTY, until
+/// the queue closes or a write fails. Runs on a dedicated thread.
+fn writer_loop(
+    pty_writer: &mut dyn Write,
+    requests: &mpsc::Receiver<WriteRequest>,
+    pending: &AtomicUsize,
+    queued_bytes: &AtomicUsize,
+    busy: &AtomicBool,
+) {
+    while let Ok(request) = requests.recv() {
+        // Take everything already queued behind this one and write it as a
+        // single `write(2)`. One syscall per burst instead of one per entry
+        // is what keeps the writer from becoming the bottleneck the reader
+        // outruns.
+        let mut bytes = request.bytes;
+        let mut acks: Vec<_> = request.ack.into_iter().collect();
+        let mut replies = request.replies;
+        let mut reply_bytes = request.reply_bytes;
+        while let Ok(next) = requests.try_recv() {
+            bytes.extend_from_slice(&next.bytes);
+            acks.extend(next.ack);
+            replies += next.replies;
+            reply_bytes += next.reply_bytes;
+        }
+        busy.store(true, Ordering::Relaxed);
+        let result = pty_writer
+            .write_all(&bytes)
+            .and_then(|()| pty_writer.flush());
+        busy.store(false, Ordering::Relaxed);
+        // Only after the bytes are actually out: while this write is
+        // blocked, those replies are undelivered, and that is precisely what
+        // the next wait's error needs to be able to say. Only the replies in
+        // this write come off either count, and `queue_replies` added each
+        // of them before it queued them, so neither can go below zero.
+        pending.fetch_sub(replies, Ordering::Relaxed);
+        queued_bytes.fetch_sub(reply_bytes, Ordering::Relaxed);
+        let failed = result.is_err();
+        for ack in acks {
+            // Every waiter in the batch learns the same outcome, which is
+            // the truth: their bytes went out together. Callers may have
+            // given up already.
+            let _ = ack.send(match &result {
+                Ok(()) => Ok(()),
+                Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
+            });
+        }
+        if failed {
+            break; // terminal gone; nothing left to write
+        }
+    }
+}
+
 /// Drain the PTY into the emulator until EOF. Runs on a dedicated thread.
 fn reader_loop(
     mut reader: Box<dyn Read + Send>,
@@ -2879,6 +2892,7 @@ fn queue_replies(
         bytes: batch,
         ack: None, // fire and forget: never wait
         replies: count,
+        reply_bytes: size,
     };
     if tx.send(request).is_err() {
         pending.fetch_sub(count, Ordering::Relaxed);
@@ -3611,6 +3625,7 @@ impl Terminal {
             ack: Some(ack_tx),
             // Typed input, not a reply: it reports through `ack`.
             replies: 0,
+            reply_bytes: 0,
         };
         // The queue is unbounded, so handing off cannot block and there is
         // no full-queue case to retry. The deadline that matters is the
@@ -5418,6 +5433,161 @@ mod tests {
         assert_eq!(reply.bytes, b"\x1b[1;6R");
         drop(state);
         reader.join().expect("the reader ends at EOF");
+    }
+
+    /// A writer that takes a write only when the test lets it, as a PTY
+    /// takes none while its application is not reading, and reports the
+    /// size of each write as it begins.
+    struct GatedWriter {
+        began: std::sync::mpsc::Sender<usize>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl std::io::Write for GatedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let _ = self.began.send(buf.len());
+            self.release
+                .recv()
+                .map_err(|_| std::io::ErrorKind::BrokenPipe)?;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Replies queued behind a blocked send stay on the reply budget until
+    /// they are written themselves (#704). The writer took every byte it
+    /// wrote off `queued_bytes`, typed input included, though only replies
+    /// are ever added to it: once the application read a 200,000-byte send,
+    /// the counter said 0 with 120,000 reply bytes still waiting, and the
+    /// 1 MiB bound admitted that much again on top.
+    #[test]
+    fn typed_input_is_not_taken_off_the_reply_budget() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        use super::{queue_replies, writer_loop, WriteRequest, REPLY_QUEUE_BYTES};
+
+        // Nothing here waits on a clock: every step is a hand-off, and this
+        // only bounds a writer thread that has stopped handing off.
+        const WATCHDOG: Duration = Duration::from_secs(30);
+        const TYPED: usize = 200_000;
+        const REPLY: &[u8] = b"\x1b[1;1R";
+        const REPLIES: usize = 20_000;
+
+        let (tx, rx) = mpsc::channel::<WriteRequest>();
+        let (began_tx, began) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let queued = Arc::new(AtomicUsize::new(0));
+        let writer = {
+            let (pending, queued) = (Arc::clone(&pending), Arc::clone(&queued));
+            std::thread::spawn(move || {
+                let mut pty = GatedWriter {
+                    began: began_tx,
+                    release: release_rx,
+                };
+                writer_loop(&mut pty, &rx, &pending, &queued, &AtomicBool::new(false));
+            })
+        };
+        let typed = |bytes: usize| {
+            let (ack, acked) = mpsc::sync_channel(1);
+            let request = WriteRequest {
+                bytes: vec![b'x'; bytes],
+                ack: Some(ack),
+                replies: 0,
+                reply_bytes: 0,
+            };
+            (request, acked)
+        };
+        let counters = || {
+            (
+                pending.load(Ordering::Relaxed),
+                queued.load(Ordering::Relaxed),
+            )
+        };
+        let mut state = EmuState::new(
+            Box::new(super::Vt100Emulator::new(
+                4,
+                20,
+                0,
+                crate::graphics::DEFAULT_CAPTURE,
+                false,
+            )),
+            Responder {
+                respond: true,
+                background: (0, 0, 0),
+                foreground: (255, 255, 255),
+                cell_size: None,
+                graphics: Graphics::default(),
+                term_name: "xterm-256color".into(),
+            },
+            Arc::clone(&pending),
+        );
+
+        // The test types, and the write blocks: nothing is reading.
+        let (request, typed_acked) = typed(TYPED);
+        tx.send(request).expect("the writer is running");
+        assert_eq!(began.recv_timeout(WATCHDOG), Ok(TYPED));
+        // The application asks 20,000 questions; the answers queue behind.
+        let mut replies = vec![REPLY.to_vec(); REPLIES];
+        queue_replies(&tx, &mut replies, &mut state, &pending, &queued);
+        assert_eq!(counters(), (REPLIES, REPLIES * REPLY.len()));
+
+        // The application reads what was typed, and no more. The writer is
+        // then blocked in the replies' write, with none of them delivered.
+        release.send(()).expect("the writer is running");
+        assert!(matches!(typed_acked.recv_timeout(WATCHDOG), Ok(Ok(()))));
+        assert_eq!(began.recv_timeout(WATCHDOG), Ok(REPLIES * REPLY.len()));
+        assert_eq!(
+            counters(),
+            (REPLIES, REPLIES * REPLY.len()),
+            "replies still queued must stay on the budget once typed input is written"
+        );
+
+        // So the bound holds: what is left of it fits, and nothing more.
+        let room = REPLY_QUEUE_BYTES - REPLIES * REPLY.len();
+        queue_replies(
+            &tx,
+            &mut vec![vec![b'r'; room]],
+            &mut state,
+            &pending,
+            &queued,
+        );
+        assert_eq!(state.replies_dropped, 0, "the budget has room for these");
+        assert_eq!(counters(), (REPLIES + 1, REPLY_QUEUE_BYTES));
+        queue_replies(
+            &tx,
+            &mut vec![REPLY.to_vec()],
+            &mut state,
+            &pending,
+            &queued,
+        );
+        assert_eq!(
+            state.replies_dropped, 1,
+            "a reply past the bound is dropped"
+        );
+        assert_eq!(counters(), (REPLIES + 1, REPLY_QUEUE_BYTES));
+
+        // The application reads everything: both reply writes go out, and a
+        // last send behind them is acknowledged once they are accounted for.
+        release.send(()).expect("the writer is running");
+        assert_eq!(began.recv_timeout(WATCHDOG), Ok(room));
+        let (request, last_acked) = typed(1);
+        tx.send(request).expect("the writer is running");
+        release.send(()).expect("the writer is running");
+        assert_eq!(began.recv_timeout(WATCHDOG), Ok(1));
+        release.send(()).expect("the writer is running");
+        assert!(matches!(last_acked.recv_timeout(WATCHDOG), Ok(Ok(()))));
+        assert_eq!(counters(), (0, 0), "everything queued was written");
+
+        drop(tx);
+        writer
+            .join()
+            .expect("the writer ends when its queue closes");
     }
 
     /// A reply to a cursor or size query costs the same on any grid. Each

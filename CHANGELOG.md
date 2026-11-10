@@ -119,6 +119,14 @@ reads that marker.
   Dependabot's own commit: Dependabot signs off as
   `dependabot[bot] <support@github.com>`, never as its author address, so it
   is let through when its author and its sign-off are both Dependabot's.
+- Query replies queued behind a blocked send stay under the 1 MiB reply
+  bound until they are written themselves. The writer thread took every
+  byte it wrote off the count of queued reply bytes, typed input included,
+  so once an application read a 200,000-byte `send_str` it had kept
+  waiting, the count read 0 with 120,000 reply bytes still queued, and the
+  bound let in as many bytes over 1 MiB as the test had typed. Each write
+  now carries how many of its bytes are replies, and only those come off
+  the count. (#704)
 
 ## [0.11.8] - 2026-11-03
 
