@@ -3739,8 +3739,9 @@ impl Terminal {
     /// free from [`wait_frame`](Self::wait_frame), which sees only complete
     /// frames and hands back the one it matched — but not rule 1: a
     /// predicate true of a frame you did not mean returns that frame
-    /// (`docs/DESIGN.md` §2, rule 4). After a [`resize`](Self::resize),
-    /// also see the stale-frame trap documented there.
+    /// (`docs/DESIGN.md` §2, the note on `wait_frame` under the rules).
+    /// After a [`resize`](Self::resize), also see the stale-frame trap
+    /// documented there.
     ///
     /// # Errors
     ///
@@ -3895,8 +3896,9 @@ impl Terminal {
     /// A complete frame is not necessarily the frame that answers your
     /// input. The cursor sits at the last frame *returned*, so after
     /// `send(key)` a predicate that is also true of the pre-key screen gets
-    /// the pre-key frame, if that one was never returned — rule 4 of
-    /// `docs/DESIGN.md` §2. Name what the key changes:
+    /// the pre-key frame, if that one was never returned — the note on
+    /// `wait_frame` under the three rules of `docs/DESIGN.md` §2. Name what
+    /// the key changes:
     ///
     /// ```
     /// # fn main() -> termlens::Result<()> {
