@@ -106,10 +106,13 @@ runs:
 
         # A file name goes into HTML, so its markup is escaped, and a newline
         # becomes a character reference: a blank line would end the HTML block
-        # it sits in and turn the rest of the entry into Markdown.
+        # it sits in and turn the rest of the entry into Markdown. So does a
+        # carriage return, which awk passes through but CommonMark ends a
+        # line at as it does at a newline (#708).
         html() {
           printf '%s' "$1" | awk 'BEGIN { ORS = "" } {
             gsub(/&/, "\\&amp;"); gsub(/</, "\\&lt;"); gsub(/>/, "\\&gt;"); gsub(/"/, "\\&quot;")
+            gsub(/\r/, "\\&#13;")
             if (NR > 1) print "&#10;"
             print
           }'

@@ -20,6 +20,8 @@
 #     that nothing inside closes, and nothing leaks out as Markdown (#648)
 #   - a file name holding a newline and markup: one entry, not two, with the
 #     name escaped, and an artifact file name upload-artifact accepts (#648)
+#   - a file name holding carriage returns around a `# heading`: one line,
+#     each CR a character reference, none left raw (#708)
 #
 # Root reads a chmod 000 directory anyway, so as root the first two cases
 # cannot fail and are skipped by name rather than passed.
@@ -201,6 +203,25 @@ fi
 if ! grep -Fq "rendered 1 screen(s)" "$rt/out.log"; then
   printf '  FAIL  %-58s %s\n' "  and the step counts one screen" "$(tail -1 "$rt/out.log")" >&2
   status=1
+fi
+
+# CommonMark ends a line at a lone CR as at an LF, so a raw `\r\r` in a
+# name ended the HTML block it sits in and rendered the rest as Markdown: a
+# real heading here (#708). Every CR becomes `&#13;`, and none is left.
+workspace cr-name
+rm -rf "$scratch/blocks"; mkdir -p "$scratch/blocks"
+cr=$(printf '\r')
+odd="$artifacts/x${cr}${cr}# Injected **bold**${cr}${cr}y.txt"
+printf 'one screen\n' > "$odd"
+expect "a file name with a carriage return is one line, escaped" \
+  "<code>$artifacts/x&#13;&#13;# Injected **bold**&#13;&#13;y.txt</code>"
+verbatim "  holding its screen verbatim" 1 "$odd"
+label="  and no carriage return is left in the summary"
+if LC_ALL=C grep -q "$cr" "$rt/summary.md"; then
+  printf '  FAIL  %-58s\n' "$label" >&2
+  status=1
+else
+  printf '  ok    %-58s\n' "$label"
 fi
 
 if [ "$status" -eq 0 ]; then

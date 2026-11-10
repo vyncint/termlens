@@ -75,7 +75,7 @@ tools/report-pin-gate-selftest/run.sh                   # …and the report-pin 
 tools/attribution-gate-selftest/run.sh                  # …and the AI-attribution gate, likewise
 tools/dco-gate-selftest/run.sh                          # …and the DCO gate, its one-commit squash exemption included
 tools/preflight-selftest/run.sh                         # …and the runner accounts for each gate it runs, failures included
-tools/report-action-selftest/run.sh                     # …and the report action writes its summary past a directory it cannot read, a fence or a newline in a name
+tools/report-action-selftest/run.sh                     # …and the report action writes its summary past a directory it cannot read, a fence or a newline or CR in a name
 tools/gates-listed-selftest/run.sh                      # …and the gates-listed gate, named, quoted and folded gates included
 tools/snippet-gate-selftest/run.sh                      # …and the snippet gate reads indented and variant-tagged Rust blocks
 tools/release-notes-selftest/run.sh                     # …and the release notes carry the link definitions their section uses

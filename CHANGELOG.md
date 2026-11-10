@@ -142,6 +142,12 @@ reads that marker.
   cargo-nextest retried, both wrote `<test>-1`, and the report showed only
   the second screen. The file is now created exclusively, and a taken
   name moves `<n>` on. Names are unchanged when nothing collides.
+- The report action escapes a carriage return in a file name as `&#13;`,
+  as it has escaped a newline since #648 (#708). It wrote the CR raw, and
+  CommonMark ends a line at a lone CR, so `\r\r` in a snapshot's path
+  ended the HTML block the name sits in and the rest of the name rendered
+  as Markdown: a heading, emphasis or a link in the step summary. The name
+  now renders as one line of text.
 
 ## [0.11.8] - 2026-11-03
 
