@@ -55,7 +55,9 @@ CHANGELOG entry.
   Other ANSI modes the backend drops (`LNM` and the rest) are not
   modelled — and *say so*: `Screen::unsupported()` lists every sequence the emulator did
   not implement, in the form `^[[20h`, so a test can tell a
-  plausible-looking wrong grid from a right one.
+  plausible-looking wrong grid from a right one. An `OSC` is listed by the
+  first 64 bytes of its content, ending in `…` where it was cut, so an
+  iTerm2 inline image (`OSC 1337 ; File=…`) is named there, not kept.
 - **A soft-wrapped line is two rows.** `contains` and `find` read the grid
   row by row and do not span the wrap; `Screen::row_wrapped(row)` reports
   the backend's record of where a line wrapped, and

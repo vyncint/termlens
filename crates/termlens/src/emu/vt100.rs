@@ -1618,13 +1618,17 @@ mod tests {
         assert_eq!(s.mouse_mode(), MouseMode::None);
     }
 
-    /// That the one unsupported shape is `expected`, without printing 64 KiB
-    /// of it when it is not.
-    fn assert_one_shape(s: &Screen, expected: &str, at: &str) {
-        let shapes: Vec<&str> = s.unsupported().iter().collect();
-        let lengths: Vec<usize> = shapes.iter().map(|shape| shape.len()).collect();
-        assert_eq!(lengths, [expected.len()], "{at}: shape lengths");
-        assert!(shapes[0] == expected, "{at}: the shape differs");
+    /// That the one unsupported shape is `expected`, and that `body` bytes
+    /// of the OSC's content reached vt100. The entry is a prefix since
+    /// #695, so the length is the callback's record of it.
+    fn assert_one_osc(emu: &Vt100Emulator, expected: &str, body: usize, at: &str) {
+        let s = emu.snapshot();
+        assert_eq!(s.unsupported(), [expected], "{at}: the entry");
+        assert_eq!(
+            emu.parser.callbacks().last_osc_len,
+            body,
+            "{at}: the content vt100 got"
+        );
     }
 
     /// `stream` fed in pieces cut at each of `cuts`, as reads would split it.
@@ -1643,9 +1647,13 @@ mod tests {
         // vte keeps an OSC string whole until its terminator, in each of
         // the two parsers, so an unterminated one grew the process without
         // bound (#694). The tracker keeps 64 KiB of it; the parsers now get
-        // exactly that much, which vt100 shows in the shape it reports.
+        // exactly that much, which vt100's callback measures, and the entry
+        // it leaves is the first 64 bytes of it (#695).
         let cap = super::super::seq::OSC_CAPTURE_MAX;
-        let kept = "a".repeat(cap - "777;".len());
+        let entry = format!(
+            "^[]777;{}…",
+            "a".repeat(super::super::unhandled::MAX_STRING_SHAPE - "777;".len())
+        );
         for terminator in [&b"\x07"[..], b"\x1b\\"] {
             let mut stream = b"\x1b]777;".to_vec();
             stream.resize(stream.len() + cap + 3 * 4096, b'a');
@@ -1662,10 +1670,10 @@ mod tests {
                 vec![at_bound - 1, at_bound, at_bound + 1],
                 vec![st + 1],
             ] {
-                let s = emu_fed_in_pieces(&stream, &cuts).snapshot();
+                let emu = emu_fed_in_pieces(&stream, &cuts);
                 let at = format!("{terminator:?}, cut at {cuts:?}");
-                assert_one_shape(&s, &format!("^[]777;{kept}"), &at);
-                assert_eq!(s.text(), "DONE\n\n\n", "{at}");
+                assert_one_osc(&emu, &entry, cap, &at);
+                assert_eq!(emu.snapshot().text(), "DONE\n\n\n", "{at}");
             }
         }
     }
@@ -1739,14 +1747,56 @@ mod tests {
 
     #[test]
     fn an_osc_at_the_capture_bound_reaches_the_parsers_whole() {
-        // Exactly the bound: nothing is withheld, and the shape is the
-        // whole string, as it was before #694.
+        // Exactly the bound: nothing is withheld, as before #694. The entry
+        // is the string's first 64 bytes, as for any long OSC (#695).
         let cap = super::super::seq::OSC_CAPTURE_MAX;
         let body = "b".repeat(cap - "777;".len());
         let stream = format!("\x1b]777;{body}\x07DONE");
-        let s = emu_fed_in_pieces(stream.as_bytes(), &[]).snapshot();
-        assert_one_shape(&s, &format!("^[]777;{body}"), "at the bound");
-        assert_eq!(s.text(), "DONE\n\n\n");
+        let emu = emu_fed_in_pieces(stream.as_bytes(), &[]);
+        let entry = format!(
+            "^[]777;{}…",
+            &body[..super::super::unhandled::MAX_STRING_SHAPE - "777;".len()]
+        );
+        assert_one_osc(&emu, &entry, cap, "at the bound");
+        assert_eq!(emu.snapshot().text(), "DONE\n\n\n");
+    }
+
+    /// Three iTerm2 inline images, each an OSC of 1 MiB, leave three
+    /// entries that name them, each at most the shape's bound, where they
+    /// left their whole payloads, as far as the 64 KiB the tracker lets
+    /// through (#695). The image after them still draws its text.
+    #[test]
+    fn an_inline_image_is_named_in_unsupported_and_not_kept() {
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+        for n in 1..=3 {
+            let mut image =
+                format!("\x1b]1337;File=name=aW1n{n};size=1048576;inline=1:").into_bytes();
+            image.resize(image.len() + (1 << 20), b'Q');
+            image.push(0x07);
+            for chunk in image.chunks(8192) {
+                feed_all(&mut emu, chunk);
+            }
+        }
+        feed_all(&mut emu, b"DONE");
+        let s = emu.snapshot();
+        let entries: Vec<&str> = s.unsupported().iter().collect();
+        let bound = "^[]".len() + super::super::unhandled::MAX_STRING_SHAPE + "…".len();
+        assert_eq!(
+            entries.len(),
+            3,
+            "{:?}",
+            entries.iter().map(|e| e.len()).collect::<Vec<_>>()
+        );
+        for (n, entry) in (1..).zip(&entries) {
+            assert!(entry.len() <= bound, "entry {n} is {} bytes", entry.len());
+            assert!(
+                entry.starts_with(&format!(
+                    "^[]1337;File=name=aW1n{n};size=1048576;inline=1:QQ"
+                )) && entry.ends_with('…'),
+                "{entry}"
+            );
+        }
+        assert_eq!(s.row_text(0).trim_end(), "DONE");
     }
 
     /// Feed a stream into an emulator with `scrollback` rows of history.

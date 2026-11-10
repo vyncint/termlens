@@ -65,6 +65,14 @@ reads that marker.
   `unsupported()` should find it in the timeout's note instead, and one
   that expected `^[[>4n` in the note should find it in `unsupported()`,
   where it was listed already. (#692)
+- `unsupported()` keeps an `OSC` to the first 64 bytes of its content,
+  ending the entry in `…` where it was cut. Each unhandled `OSC` was kept
+  whole, so an iTerm2 inline image (`OSC 1337 ; File=… : <base64>`) left
+  its payload in the list, as far as the 64 KiB the tracker lets through,
+  once per image up to 32, in every snapshot. Two `OSC`s that agree in
+  their first 64 bytes are now one entry. A test that pinned a longer
+  `OSC` entry exactly should expect `^[]`, the first 64 bytes of its
+  content and a `…`, or match the entry's start with `starts_with`. (#695)
 
 ### Fixed
 

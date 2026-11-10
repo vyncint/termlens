@@ -28,6 +28,18 @@ use vt100::Callbacks;
 /// Distinct shapes kept before the record only counts.
 pub(super) const MAX_UNSUPPORTED: usize = 32;
 
+/// Bytes of an OSC string's content an entry keeps: enough for the command
+/// number and its first parameters, which is what names the sequence, and
+/// an entry ends in `…` where it was cut.
+///
+/// The content is the application's, and the list kept every unhandled
+/// OSC whole — an iTerm2 inline image (`OSC 1337 ; File=… : <base64>`) is
+/// one, so its whole payload, up to the 64 KiB the tracker lets through,
+/// sat in every snapshot's list, once per distinct image up to 32 (#695).
+/// No other string sequence reaches the list: vt100 has no callback for a
+/// DCS, APC, PM or SOS it declines.
+pub(super) const MAX_STRING_SHAPE: usize = 64;
+
 /// The callback set the primary parser is built with.
 #[derive(Debug)]
 pub(super) struct Unhandled {
@@ -41,6 +53,11 @@ pub(super) struct Unhandled {
     /// Rows dropped off the front of the main screen's history since the
     /// emulator last took the count — see [`take_evicted`](Self::take_evicted).
     evicted: usize,
+    /// The content length of the last OSC recorded, before its entry was
+    /// cut: how much of a body reached vt100, which the capture-bound
+    /// tests read now that the entry no longer shows it (#694, #695).
+    #[cfg(test)]
+    pub(super) last_osc_len: usize,
 }
 
 impl Default for Unhandled {
@@ -51,6 +68,8 @@ impl Default for Unhandled {
             overflow: 0,
             visual_bells: 0,
             evicted: 0,
+            #[cfg(test)]
+            last_osc_len: 0,
         }
     }
 }
@@ -113,6 +132,41 @@ fn params_text(params: &[&[u16]]) -> String {
         .map(|p| p.iter().map(u16::to_string).collect::<Vec<_>>().join(":"))
         .collect::<Vec<_>>()
         .join(";")
+}
+
+/// An OSC's entry: `^[]` and the parameters as written, `;` between them,
+/// kept to [`MAX_STRING_SHAPE`] bytes of content and ending in `…` when
+/// cut. A cut falls on a character boundary of the rendering, so it never
+/// leaves half a character.
+fn osc_shape(params: &[&[u8]]) -> String {
+    // Join no more than the bound and a character's worth past it: a
+    // byte the rendering cannot decode only grows (to U+FFFD), so the
+    // first `MAX_STRING_SHAPE` bytes of the rendering come from at most
+    // that many bytes of the content.
+    let take = MAX_STRING_SHAPE + 4;
+    let mut content = Vec::with_capacity(take);
+    let mut total = 0;
+    for (i, p) in params.iter().enumerate() {
+        let sep: &[u8] = if i > 0 { b";" } else { b"" };
+        for part in [sep, p] {
+            total += part.len();
+            let room = take.saturating_sub(content.len());
+            content.extend_from_slice(&part[..part.len().min(room)]);
+        }
+    }
+    let text = String::from_utf8_lossy(&content);
+    let mut shape = String::from("^[]");
+    if total == content.len() && text.len() <= MAX_STRING_SHAPE {
+        shape.push_str(&text);
+    } else {
+        let mut end = MAX_STRING_SHAPE;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        shape.push_str(&text[..end]);
+        shape.push('…');
+    }
+    shape
 }
 
 /// DEC private modes the sequence tracker keeps itself, so a set or reset
@@ -303,14 +357,12 @@ impl Callbacks for Unhandled {
         if matches!(params.first(), Some(&b"8" | &b"52")) || colour_query || title {
             return;
         }
-        let mut shape = String::from("^[]");
-        for (i, p) in params.iter().enumerate() {
-            if i > 0 {
-                shape.push(';');
-            }
-            shape.push_str(&String::from_utf8_lossy(p));
+        #[cfg(test)]
+        {
+            self.last_osc_len =
+                params.iter().map(|p| p.len()).sum::<usize>() + params.len().saturating_sub(1);
         }
-        self.record(shape);
+        self.record(osc_shape(params));
     }
 }
 
@@ -508,6 +560,43 @@ mod tests {
         // takes no parameter but 0, and `OSC 12` sets as well as asks.
         assert_eq!(shapes(b"\x1b[>1q"), ["^[[>1q"]);
         assert_eq!(shapes(b"\x1b]12;#ff0000\x07"), ["^[]12;#ff0000"]);
+    }
+
+    /// An unhandled OSC is kept to a prefix that names it, not whole: an
+    /// iTerm2 inline image is an OSC, and its whole payload sat in the
+    /// list, up to 32 of them (#695).
+    #[test]
+    fn a_long_osc_is_kept_to_a_prefix_that_names_it() {
+        let head = "1337;File=name=aW1hZ2UucG5n;size=1048576;inline=1:";
+        let mut image = format!("\x1b]{head}").into_bytes();
+        image.resize(image.len() + (1 << 20), b'A');
+        image.push(0x07);
+        let kept = shapes(&image);
+        let expected = format!("^[]{head}{}…", "A".repeat(MAX_STRING_SHAPE - head.len()));
+        assert_eq!(
+            kept.iter().map(String::len).collect::<Vec<_>>(),
+            [expected.len()]
+        );
+        assert_eq!(kept, [expected]);
+        // At the bound, nothing is cut and nothing is added.
+        let whole = format!("777;{}", "b".repeat(MAX_STRING_SHAPE - 4));
+        assert_eq!(
+            shapes(format!("\x1b]{whole}\x07").as_bytes()),
+            [format!("^[]{whole}")]
+        );
+        // One byte past it, the cut shows.
+        let over = format!("{whole}b");
+        assert_eq!(
+            shapes(format!("\x1b]{over}\x07").as_bytes()),
+            [format!("^[]{whole}…")]
+        );
+        // A cut never splits a character: `é` is two bytes, and the one
+        // that would straddle the bound is left out whole.
+        let wide = format!("1337;{}", "é".repeat(MAX_STRING_SHAPE));
+        let kept = shapes(format!("\x1b]{wide}\x07").as_bytes());
+        let prefix = format!("1337;{}", "é".repeat((MAX_STRING_SHAPE - 5) / 2));
+        assert_eq!(prefix.len(), MAX_STRING_SHAPE - 1);
+        assert_eq!(kept, [format!("^[]{prefix}…")]);
     }
 
     #[test]
