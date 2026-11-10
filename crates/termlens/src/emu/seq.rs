@@ -1881,7 +1881,11 @@ impl SeqTracker {
         // continuation chunk too, which is `G` with `m=` and nothing else.
         // Any other APC is not graphics and leaves an upload where it was,
         // as kitty does; it used to be taken as the upload's next chunk.
-        if self.dcs_introducer == b'_' && self.dcs_head.first() == Some(&b'G') {
+        // The first byte captured, not slot 0: a reset zeroes only the
+        // length, so an empty APC found the last escape's `G` there (#735).
+        if self.dcs_introducer == b'_'
+            && self.dcs_head[..usize::from(self.dcs_head_len)].first() == Some(&b'G')
+        {
             let control = self.kitty_control.clone();
             // The control block is `G` followed by the comma-separated keys.
             let keys = control.strip_prefix(b"G").unwrap_or(&control);
@@ -2823,6 +2827,30 @@ mod tests {
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert_eq!(seen[0].chunks(), 2);
         assert_eq!(seen[0].data(), Some(&b"AAAACCCC"[..]));
+    }
+
+    /// Whether an APC is kitty's is read off its own first byte. The gate
+    /// read slot 0 of the head buffer whatever the head's length, and a
+    /// reset only zeroes the length, so an empty APC (`ESC _ ESC \`) after
+    /// a kitty escape found that escape's `G` there and was counted as a
+    /// kitty transmission of 0 bytes (#735). An APC with a first byte of
+    /// its own overwrote the slot, and is pinned here beside it.
+    #[test]
+    fn an_apc_is_kittys_only_by_its_own_first_byte() {
+        for apc in [&b"\x1b_\x1b\\"[..], b"\x1b_X\x1b\\", b"\x1b_XG;AAAA\x1b\\"] {
+            let shown = String::from_utf8_lossy(apc);
+            let wire = [&b"\x1b_Ga=d\x1b\\"[..], apc].concat();
+            let (seen, _, tracker) = kitty_events(&wire);
+            assert_eq!(seen.len(), 1, "{shown}: {seen:?}");
+            assert_eq!(tracker.graphics().kitty, 0, "{shown}");
+            // Nor is one taken as the next chunk of an upload.
+            let wire = [UPLOAD_OF_5, apc, b"\x1b_Gm=0;CCCC\x1b\\"].concat();
+            let (seen, _, tracker) = kitty_events(&wire);
+            assert_eq!(seen.len(), 1, "{shown}: {seen:?}");
+            assert_eq!(seen[0].chunks(), 2, "{shown}");
+            assert_eq!(seen[0].data(), Some(&b"AAAACCCC"[..]), "{shown}");
+            assert_eq!(tracker.graphics().kitty, 1, "{shown}");
+        }
     }
 
     /// A control block naming every key a transmission and its placement

@@ -136,6 +136,11 @@ reads that marker.
   kitty: with a number beside it the number decides, and without one
   kitty places nothing, so `a=p,i=0,c=2,r=3` no longer moves the cursor
   by its `c=` and `r=`. (#696)
+- An empty APC (`ESC _ ESC \`) after a kitty escape is not a kitty
+  escape. It was counted as a kitty transmission of 0 bytes, so
+  `graphics().kitty` counted an image the application never sent, and in
+  an upload it was taken as the last chunk. Whether an APC is kitty's was
+  read off a buffer slot the previous escape had left its `G` in. (#735)
 
 ## [0.11.8] - 2026-11-03
 
