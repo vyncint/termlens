@@ -46,6 +46,14 @@ reads that marker.
   `MouseMode::None` and `Error::Input`, and an application that means to
   go on receiving reports has to set its mode again after the reset, as
   it must on xterm. (#693)
+- `unsupported()` no longer lists the prefixed queries the responder
+  answers or names in the timeout: `CSI ? 6 n` (answered), every other
+  `CSI ? Ps n` and `CSI = Ps n`, `CSI = c` (DA3), `CSI > q` (XTVERSION)
+  and `OSC 12 ; ?`. They were listed beside the note that named them, so
+  a sequence termlens handled was reported twice, once as one it did not,
+  which the rustdoc of `Screen::unsupported` says it is not. A test that pinned `unsupported()`
+  exactly after one of these should drop that entry; the query is in the
+  timeout note, where it always was. (#691)
 
 ### Fixed
 

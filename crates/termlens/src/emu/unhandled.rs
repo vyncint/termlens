@@ -228,6 +228,13 @@ impl Callbacks for Unhandled {
             // DA2, the kitty keyboard probe and XTSMGRAPHICS, all of which
             // the responder names in a timeout (#641).
             (Some(b'>'), None, 'c') | (Some(b'?'), None, 'u' | 'S') => true,
+            // The prefixed queries `seq.rs` answers or names, in the shapes
+            // it claims them in: DECXCPR (`CSI ? 6 n`, answered) and every
+            // other `CSI ? Ps n` or `CSI = Ps n`, DA3 (`CSI = c`), and
+            // XTVERSION (`CSI > q`, whose only parameter is 0). These were
+            // listed here while the responder handled them (#691).
+            (Some(b'?' | b'='), None, 'n') | (Some(b'='), None, 'c') => true,
+            (Some(b'>'), None, 'q') => params == [&[0][..]],
             // The private modes the tracker keeps; any other private mode
             // vt100 declined is one nobody honoured.
             (Some(b'?'), None, 'h' | 'l') => params
@@ -276,7 +283,9 @@ impl Callbacks for Unhandled {
         // not answer *that*, it belongs here. A palette query is any
         // `4;…?`, which is the rule `seq.rs` applies to it.
         let colour_query = match params.first() {
-            Some(&b"10" | &b"11") => params.len() == 2 && params[1] == b"?",
+            // `12;?`, the cursor colour, is named rather than answered, and
+            // in the same one shape (#691).
+            Some(&b"10" | &b"11" | &b"12") => params.len() == 2 && params[1] == b"?",
             Some(&b"4") => matches!(params.last(), Some(&b"?")),
             _ => false,
         };
@@ -418,9 +427,12 @@ mod tests {
 
     #[test]
     fn parameterless_sequences_are_recorded_without_a_synthetic_zero() {
+        // The `>`-prefixed shape is XTMODKEYS's reset (`CSI > m`): this
+        // used `CSI > q`, which is XTVERSION, a question the responder
+        // names and so not unsupported (#691).
         assert_eq!(
-            shapes(b"\x1b[s\x1b[>q\x1b[?h\x1b[20h\x1b[?69h\x1b[58;5;1m"),
-            ["^[[s", "^[[>q", "^[[?h", "^[[20h", "^[[?69h", "^[[58;5;1m",]
+            shapes(b"\x1b[s\x1b[>m\x1b[?h\x1b[20h\x1b[?69h\x1b[58;5;1m"),
+            ["^[[s", "^[[>m", "^[[?h", "^[[20h", "^[[?69h", "^[[58;5;1m",]
         );
     }
 
@@ -457,6 +469,30 @@ mod tests {
                 String::from_utf8_lossy(bytes)
             );
         }
+    }
+
+    /// The prefixed queries the responder answers or names are accounted
+    /// for there, like their unprefixed kin, and `OSC 12 ; ?` with the
+    /// other colour queries. Each row here was listed (#691).
+    #[test]
+    fn the_prefixed_queries_the_responder_answers_or_names_are_not_reported() {
+        let mut listed = Vec::new();
+        for (label, bytes) in [
+            ("DECXCPR, answered", &b"\x1b[?6n"[..]),
+            ("XTVERSION, named", b"\x1b[>q"),
+            ("XTVERSION with its 0, named", b"\x1b[>0q"),
+            ("DA3, named", b"\x1b[=c"),
+            ("a private DSR, named", b"\x1b[?996n"),
+            ("another private DSR, named", b"\x1b[?5n"),
+            ("the cursor colour query, named", b"\x1b]12;?\x07"),
+        ] {
+            listed.extend(shapes(bytes).into_iter().map(|shape| (label, shape)));
+        }
+        assert!(listed.is_empty(), "{listed:?}");
+        // What the responder does not claim stays on record: XTVERSION
+        // takes no parameter but 0, and `OSC 12` sets as well as asks.
+        assert_eq!(shapes(b"\x1b[>1q"), ["^[[>1q"]);
+        assert_eq!(shapes(b"\x1b]12;#ff0000\x07"), ["^[]12;#ff0000"]);
     }
 
     #[test]
