@@ -206,7 +206,10 @@ application decide instead of wait.
 Whatever remains unanswered (DECRQSS, the `CSI t` reports other than the
 text-area and pixel sizes, …) is recorded, and the next wait timeout names
 it: "the application queried the terminal (`^[[14t`) and received no
-answer" — a hang becomes a diagnosis. `answer_queries(false)` mutes the
+answer" — a hang becomes a diagnosis. The record keeps eight distinct
+shapes and counts the rest, each once; the most recent query is named
+whatever came before it, and the note claims a cause only when no output
+arrived in a later read than that query. `answer_queries(false)` mutes the
 responder for tests that need a silent terminal; the diagnosis still
 works.
 

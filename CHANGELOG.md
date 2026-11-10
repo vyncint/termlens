@@ -73,6 +73,16 @@ reads that marker.
   their first 64 bytes are now one entry. A test that pinned a longer
   `OSC` entry exactly should expect `^[]`, the first 64 bytes of its
   content and a `…`, or match the entry's start with `starts_with`. (#695)
+- The timeout's note names the most recent unanswered query, and says it
+  may be the cause unless output arrived after it. Past the eight shapes
+  the record keeps, a program that sent eight unanswered queries, printed,
+  then blocked on a ninth had the ninth hidden in "and 1 more", and the
+  verdict came from the eight it had moved past: "probably not why this
+  wait failed". And "and N more" counted queries, so a ninth sent five
+  times was "and 5 more"; it counts distinct shapes now. A test that
+  matched the note after more than eight distinct unanswered queries
+  should expect the most recent named, first when it is the cause, and a
+  smaller count. (#690)
 
 ### Fixed
 
