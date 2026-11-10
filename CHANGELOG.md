@@ -118,6 +118,13 @@ reads that marker.
   group too, so the style is now left as it was. `unsupported()` also
   lists the sequences it had missed because every value in them was one
   of those parameters, such as `^[[5:6m`.
+- An unterminated CSI no longer grows the test process without bound
+  (#730). Both SGR rewriters held every byte of a CSI until its final
+  byte, to see whether it was an SGR, so a 16 MiB run of parameter bytes
+  raised peak memory by 48 MiB. A rewriter now holds at most 256 bytes of
+  one: past that a CSI of plain parameters is held as the parser holds it,
+  32 values at most and each capped at 65535, and any other passes through
+  as it comes. A long SGR draws what the same SGR written short draws.
 
 ## [0.11.8] - 2026-11-03
 

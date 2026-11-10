@@ -1678,17 +1678,18 @@ mod tests {
         }
     }
 
-    /// A 64 MiB OSC body, fed as the reader feeds it, in a child of this
-    /// test binary whose data segment is capped at 48 MiB: each parser held
-    /// the whole body before #694, about 128 MiB together, which the cap
-    /// turns into a failed allocation rather than a machine out of memory.
-    /// The child does the feeding only when it can see the cap in place.
-    #[test]
+    /// Whether this process is the calling test run again under a cap on
+    /// its data segment, having seen the cap in place. Otherwise that run
+    /// is started, as a child of this test binary under `ulimit -d`, and
+    /// asserted to pass.
+    ///
+    /// For a test of a memory bound: without the bound its body holds more
+    /// than the cap, which the cap turns into a failed allocation in the
+    /// child rather than a machine out of memory. The body runs only where
+    /// this returns `true`, so never uncapped.
     #[cfg(target_os = "linux")]
-    fn an_unterminated_osc_body_leaves_memory_bounded() {
-        const CHILD: &str = "TERMLENS_TEST_OSC_UNDER_CAP";
-        const CAP_KIB: u32 = 48 * 1024;
-        const NAME: &str = "emu::vt100::tests::an_unterminated_osc_body_leaves_memory_bounded";
+    fn under_data_cap(name: &str, cap_kib: u32) -> bool {
+        const CHILD: &str = "TERMLENS_TEST_UNDER_DATA_CAP";
         if std::env::var_os(CHILD).is_some() {
             let limits = std::fs::read_to_string("/proc/self/limits").unwrap();
             let data = limits
@@ -1696,18 +1697,8 @@ mod tests {
                 .find(|line| line.starts_with("Max data size"))
                 .unwrap();
             let soft = data.split_whitespace().nth(3).unwrap();
-            assert_eq!(soft, (u64::from(CAP_KIB) * 1024).to_string(), "{data}");
-            let mut emu = Vt100Emulator::new(24, 80, 1000, crate::graphics::DEFAULT_CAPTURE, false);
-            feed_all(&mut emu, b"\x1b]0;");
-            let chunk = [b'a'; 8192];
-            for _ in 0..(64 << 20) / chunk.len() {
-                feed_all(&mut emu, &chunk);
-            }
-            feed_all(&mut emu, b"\x07DONE");
-            let s = emu.snapshot();
-            assert_eq!(s.title().len(), super::super::seq::OSC_CAPTURE_MAX - 2);
-            assert_eq!(s.row_text(0).trim_end(), "DONE");
-            return;
+            assert_eq!(soft, (u64::from(cap_kib) * 1024).to_string(), "{data}");
+            return true;
         }
         let out = std::process::Command::new("sh")
             .args([
@@ -1715,9 +1706,9 @@ mod tests {
                 r#"ulimit -c 0 && ulimit -d "$1" && shift && exec "$@""#,
                 "sh",
             ])
-            .arg(CAP_KIB.to_string())
+            .arg(cap_kib.to_string())
             .arg(std::env::current_exe().unwrap())
-            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
             .env(CHILD, "1")
             .output()
             .unwrap();
@@ -1728,6 +1719,105 @@ mod tests {
             "{}\n{stdout}\n{stderr}",
             out.status
         );
+        false
+    }
+
+    /// A 64 MiB OSC body, fed as the reader feeds it, under a 48 MiB cap:
+    /// each parser held the whole body before #694, about 128 MiB together.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_unterminated_osc_body_leaves_memory_bounded() {
+        const NAME: &str = "emu::vt100::tests::an_unterminated_osc_body_leaves_memory_bounded";
+        if !under_data_cap(NAME, 48 * 1024) {
+            return;
+        }
+        let mut emu = Vt100Emulator::new(24, 80, 1000, crate::graphics::DEFAULT_CAPTURE, false);
+        feed_all(&mut emu, b"\x1b]0;");
+        let chunk = [b'a'; 8192];
+        for _ in 0..(64 << 20) / chunk.len() {
+            feed_all(&mut emu, &chunk);
+        }
+        feed_all(&mut emu, b"\x07DONE");
+        let s = emu.snapshot();
+        assert_eq!(s.title().len(), super::super::seq::OSC_CAPTURE_MAX - 2);
+        assert_eq!(s.row_text(0).trim_end(), "DONE");
+    }
+
+    /// A 32 MiB run of CSI parameter bytes that no final byte ends, fed as
+    /// the reader feeds it, under a 48 MiB cap: each of the two SGR
+    /// rewriters held the whole run before #730, to see whether it was an
+    /// SGR, and the child died growing one of them past 16 MiB.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_unterminated_csi_leaves_memory_bounded() {
+        const NAME: &str = "emu::vt100::tests::an_unterminated_csi_leaves_memory_bounded";
+        if !under_data_cap(NAME, 48 * 1024) {
+            return;
+        }
+        let mut emu = Vt100Emulator::new(24, 80, 1000, crate::graphics::DEFAULT_CAPTURE, false);
+        feed_all(&mut emu, b"\x1b[");
+        let chunk = [b'1'; 8192];
+        for _ in 0..(32 << 20) / chunk.len() {
+            feed_all(&mut emu, &chunk);
+        }
+        feed_all(&mut emu, b"mDONE");
+        assert_eq!(emu.snapshot().row_text(0).trim_end(), "DONE");
+    }
+
+    #[test]
+    fn an_sgr_too_long_to_hold_reads_as_the_same_sgr_written_short() {
+        // Past the rewriters' bound a plain CSI is held as vte holds it
+        // (#730), so a long SGR draws what its short form draws: in both
+        // grids, on record in `unsupported()` or not, fed whole or byte by
+        // byte. The zeros pad the first value; past 32 values vte stores
+        // nothing more, and a value saturates at 65535.
+        let pad = "0".repeat(300);
+        let ones = ";1".repeat(31);
+        for (long, short) in [
+            (format!("{pad}1;3;4mX"), "1;3;4mX".to_owned()),
+            (format!("{pad}5;8;9mX"), "5;8;9mX".to_owned()),
+            (
+                format!("5;8;9mA\x1b[{pad}1mX"),
+                "5;8;9mA\x1b[1mX".to_owned(),
+            ),
+            (
+                format!("5;8;9mA\x1b[{pad}25;28mX"),
+                "5;8;9mA\x1b[25;28mX".to_owned(),
+            ),
+            (format!("{pad}38:5:196;9mX"), "38:5:196;9mX".to_owned()),
+            (format!("{pad}9:1mX"), "9:1mX".to_owned()),
+            (format!("{pad}9{ones};5;0mX"), format!("9{ones}mX")),
+            (format!("{pad}99999999;8mX"), "65535;8mX".to_owned()),
+        ] {
+            let long = format!("\x1b[{long}");
+            let (whole, bytewise) = whole_and_bytewise(4, 10, 0, long.as_bytes());
+            let reference = emu_with(format!("\x1b[{short}").as_bytes());
+            assert_eq!(observed(&whole), observed(&reference), "{short:?}");
+            assert_eq!(observed(&bytewise), observed(&reference), "{short:?}");
+            assert_eq!(
+                whole.snapshot().unsupported(),
+                reference.snapshot().unsupported(),
+                "{short:?}"
+            );
+        }
+        // Spelled out once: the blink before it survives a long `1`.
+        let s = emu_with(format!("\x1b[5;8;9mA\x1b[{pad}1mX").as_bytes()).snapshot();
+        let x = *s.cell(0, 1).unwrap().style();
+        assert!(x.bold && x.blink && x.conceal && x.strikethrough, "{x:?}");
+    }
+
+    #[test]
+    fn a_csi_too_long_to_hold_is_carried_out_in_both_grids() {
+        // Not an SGR: the cursor moves and the cells shift in the shadow as
+        // in the grid, which the snapshot's lockstep assertion checks, and
+        // blink goes on (#730).
+        let pad = "0".repeat(300);
+        let stream = format!("\x1b[5mab\x1b[{pad}2;4HXZ\x1b[D\x1b[{pad}2@Y");
+        let (whole, bytewise) = whole_and_bytewise(4, 10, 0, stream.as_bytes());
+        let s = whole.snapshot();
+        assert_eq!(s.text(), "ab\n   XY Z\n\n", "{s}");
+        assert!(s.cell(1, 4).unwrap().style().blink, "{s}");
+        assert_eq!(observed(&whole), observed(&bytewise));
     }
 
     #[test]
