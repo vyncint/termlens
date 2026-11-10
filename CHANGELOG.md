@@ -114,6 +114,14 @@ reads that marker.
   read it took every later gate with it: they never ran, the totals counted
   only the gates before them, and the run passed. No gate in CONTRIBUTING
   §1 reads its input today. (#719)
+- A GitHub Release's notes keep a wrapped line that starts with a link
+  label and a colon, a regression in 0.11.8. `extract-changelog.sh` read
+  every such line as a link definition, so the line went missing from its
+  section's notes and stood in for the real definition in the notes of
+  every other section linking that label. A definition is now taken only
+  where CommonMark lets one start, and under a line of text the line is
+  text. No line of this file has the shape, and every released section
+  extracts byte for byte as before. (#717)
 
 ## [0.11.8] - 2026-11-03
 

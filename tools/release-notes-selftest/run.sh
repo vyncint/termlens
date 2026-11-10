@@ -27,6 +27,13 @@
 #     #674 passes this case, since it appended every mention; it is here
 #     against the opposite mistake, deleting code spans whole, which loses
 #     these labels and fails it
+#   - a line that starts with `[label]:` under a line of text continues
+#     that text, as in CommonMark, where a definition cannot interrupt a
+#     paragraph. It stays in its notes and defines nothing, whether the
+#     text is a list item or a paragraph, and whether or not the line above
+#     it is shaped the same way; right under a heading or a closed fence it
+#     is a definition (#717). Such a line vanished from its notes and stood
+#     in for the real definition in every other section's
 #
 # and then every section of the real CHANGELOG.md, both ways: the
 # definitions in its notes are exactly the ones its text names outside code,
@@ -206,6 +213,88 @@ cat > "$scratch/1.0.0.md" <<'EOF'
 EOF
 fixture="$scratch/nested/CHANGELOG.md"
 expect "a shorter fence inside a fence closes nothing" 1.0.0 zero "$scratch/1.0.0.md"
+
+# A line that starts with `[label]:` is a definition only where a paragraph
+# could start. Its own file: a reader that takes a wrapped line for one
+# gives every section naming the label that line in place of the real one.
+mkdir -p "$scratch/wrapped"
+cat > "$scratch/wrapped/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## [2.2.0] - 2027-04-01
+
+A paragraph can wrap the same way, for instance onto
+[guide]: read it first. The line is still text.
+
+### Added
+[local]: https://example.com/local
+
+- Uses the [local] one, defined right under the heading.
+
+  ```text
+  a fence
+  ```
+[fenced]: https://example.com/fenced
+
+- And the [fenced] one, defined right under the fence.
+
+## [2.1.0] - 2027-03-01
+
+- The type every test reads is now
+  [`Thing`]: a view of what the emulator dropped, and it
+  replaces the old list.
+- Two such lines, the second under a line shaped like a definition:
+  [guide]: the first, and
+  [plain]: the second.
+
+## [2.0.0] - 2027-02-01
+
+- First, adds [`Thing`] and the [guide].
+
+[`Thing`]: https://docs.rs/thing
+[guide]: https://example.com/guide
+[plain]: https://example.com/plain
+EOF
+cat > "$scratch/2.1.0.md" <<'EOF'
+- The type every test reads is now
+  [`Thing`]: a view of what the emulator dropped, and it
+  replaces the old list.
+- Two such lines, the second under a line shaped like a definition:
+  [guide]: the first, and
+  [plain]: the second.
+
+[`Thing`]: https://docs.rs/thing
+[guide]: https://example.com/guide
+[plain]: https://example.com/plain
+EOF
+cat > "$scratch/2.0.0.md" <<'EOF'
+- First, adds [`Thing`] and the [guide].
+
+[`Thing`]: https://docs.rs/thing
+[guide]: https://example.com/guide
+EOF
+cat > "$scratch/2.2.0.md" <<'EOF'
+A paragraph can wrap the same way, for instance onto
+[guide]: read it first. The line is still text.
+
+### Added
+
+- Uses the [local] one, defined right under the heading.
+
+  ```text
+  a fence
+  ```
+
+- And the [fenced] one, defined right under the fence.
+
+[local]: https://example.com/local
+[fenced]: https://example.com/fenced
+[guide]: https://example.com/guide
+EOF
+fixture="$scratch/wrapped/CHANGELOG.md"
+expect "a wrapped line that starts [label]: stays in its notes" 2.1.0 zero "$scratch/2.1.0.md"
+expect "and does not stand in for the real definition (#717)" 2.0.0 zero "$scratch/2.0.0.md"
+expect "under a heading or a fence, the same line is a definition" 2.2.0 zero "$scratch/2.2.0.md"
 fixture="$scratch/CHANGELOG.md"
 cat > "$scratch/0.4.0.md" <<'EOF'
 - Real links whose text holds code: [`Thing`], [`the guide`][guide],
@@ -229,7 +318,6 @@ expect "a missing section fails" 9.9.9 nonzero
 # The real file, both ways: the definitions a section's notes end with are
 # exactly the labels its text names outside code that the file defines.
 cd "$root"
-grep -E '^ {0,3}\[[^]]+\]:' CHANGELOG.md > "$scratch/defined"
 checked=0
 real_ok=1
 for version in $(sed -n 's/^## \[\([^]]*\)\].*/\1/p' CHANGELOG.md); do
@@ -240,35 +328,51 @@ for version in $(sed -n 's/^## \[\([^]]*\)\].*/\1/p' CHANGELOG.md); do
     continue
   fi
   checked=$((checked + 1))
-  if ! python3 - "$scratch/notes.md" "$scratch/defined" > "$scratch/check.log" 2>&1 <<'PY'
+  if ! python3 - "$scratch/notes.md" CHANGELOG.md > "$scratch/check.log" 2>&1 <<'PY'
 import re, sys
 
-DEF = re.compile(r"^ {0,3}\[([^\]]+)\]:")
+DEF = re.compile(r" {0,3}\[([^\]]+)\]:")
+HEADING = re.compile(r" {0,3}#{1,6}(\s|$)")
 norm = lambda s: " ".join(s.lower().split())
-defined = {norm(m.group(1)) for m in map(DEF.match, open(sys.argv[2])) if m}
-lines = open(sys.argv[1]).read().split("\n")
-appended = {norm(m.group(1)) for m in map(DEF.match, lines) if m}
+
+def read(path):
+    """Each line of a file with what it is: "code" for a fence and the
+    lines inside it, "def" for a link reference definition, else "text".
+    A definition cannot interrupt a paragraph, so a line shaped like one
+    is text when the line above it is: text, not blank and not a heading."""
+    out, fence, para = [], None, False
+    for line in open(path).read().split("\n"):
+        t = line.strip()
+        f = re.match(r"(`{3,}|~{3,})", t)
+        if fence:
+            if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence) and t == f.group(1):
+                fence = None
+            kind = "code"
+        # A backtick fence's info string holds no backtick: `` `x` `` is a span.
+        elif f and not (f.group(1)[0] == "`" and "`" in t[len(f.group(1)):]):
+            fence, kind = f.group(1), "code"
+        elif DEF.match(line) and not para:
+            kind = "def"
+        else:
+            kind = "text"
+        para = kind == "text" and bool(t) and not HEADING.match(line)
+        out.append((line, kind))
+    return out
+
+notes = read(sys.argv[1])
+defined = {norm(DEF.match(l).group(1)) for l, kind in read(sys.argv[2]) if kind == "def"}
+appended = {norm(DEF.match(l).group(1)) for l, kind in notes if kind == "def"}
 
 # Blocks of text outside fences: a blank line, a fence or a list item
 # starts a new one, so a code span cannot pair backticks across them.
-blocks, block, fence = [], [], None
-for line in lines:
-    if DEF.match(line):
+blocks, block = [], []
+for line, kind in notes:
+    if kind == "def":
         continue
     t = line.strip()
-    f = re.match(r"(`{3,}|~{3,})", t)
-    if fence:
-        if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence) and t == f.group(1):
-            fence = None
-        continue
-    # A backtick fence's info string holds no backtick: `` `x` `` is a span.
-    if f and not (f.group(1)[0] == "`" and "`" in t[len(f.group(1)):]):
+    if kind == "code" or not t or re.match(r"([-*+]|\d+[.)])(\s|$)", t):
         blocks.append(" ".join(block)); block = []
-        fence = f.group(1)
-        continue
-    if not t or re.match(r"([-*+]|\d+[.)])(\s|$)", t):
-        blocks.append(" ".join(block)); block = []
-    if t:
+    if t and kind != "code":
         block.append(t)
 blocks.append(" ".join(block))
 
