@@ -109,6 +109,13 @@ reads that marker.
   Dependabot's own commit: Dependabot signs off as
   `dependabot[bot] <support@github.com>`, never as its author address, so it
   is let through when its author and its sign-off are both Dependabot's.
+- `termlens diff - missing.snap` reports the missing file at once, as
+  `diff missing.snap -` has since #651. With `-` on the left, standard
+  input was read to its end before the right operand was opened, which at
+  a terminal meant Ctrl-D. The operand that is not `-` is now opened and
+  measured first, so one that is missing, is a directory or is past the
+  1 GiB bound is refused before standard input is read. The two screens
+  are still read in argument order. (#715)
 
 ## [0.11.8] - 2026-11-03
 

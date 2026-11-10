@@ -2340,6 +2340,41 @@ fn diff_reports_an_unreadable_left_operand_before_reading_stdin() -> termlens::R
     Ok(())
 }
 
+/// The mirror of #651: `diff - missing.snap` reports the right operand
+/// without reading standard input first (#715). With `-` on the left, stdin
+/// was read to its end before the right operand was opened. Under a PTY
+/// stdin never ends, so each wait below would time out.
+///
+/// Opening the operand is not enough. A directory opens and then fails its
+/// first read, and a file past the size bound is refused by its length, so
+/// each is found only once the operand is measured as well.
+#[test]
+fn diff_reports_an_unreadable_right_operand_before_reading_stdin() -> termlens::Result<()> {
+    let dir = std::env::temp_dir().join(format!("termlens-diff-right-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let big = dir.join("big.snap");
+    std::fs::File::create(&big)
+        .and_then(|file| file.set_len((1 << 30) + 1))
+        .expect("a sparse file one byte past the bound");
+    let name = dir.file_name().unwrap().to_str().unwrap();
+    for (operand, named) in [
+        (data("missing.snap"), "missing.snap"),
+        (dir.to_str().unwrap().to_owned(), name),
+        (big.to_str().unwrap().to_owned(), "larger than 1 GiB"),
+    ] {
+        // Wide, so the path in the diagnostic is not wrapped across two rows.
+        let mut t = termlens::bin!("termlens", size(200, 10), args(["diff", "-", &operand]))?;
+        assert_eq!(t.wait_exit()?.code(), Some(2), "{operand}: {}", t.screen());
+        assert!(
+            t.screen().contains("termlens: ") && t.screen().contains(named),
+            "{operand}: {}",
+            t.screen()
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
 /// Every rendering of `diff` ends in exactly one newline (#652). The plain
 /// one already ends its last line, and a second newline was printed after
 /// it; "no difference" and the coloured rendering do not, and need one.

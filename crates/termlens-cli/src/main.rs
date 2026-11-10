@@ -225,33 +225,73 @@ fn main() -> ExitCode {
 /// it a moment earlier. Only the reading changes; the parser already took a
 /// `&str` rather than a path.
 fn load(path: &str) -> Result<Screen, String> {
-    let name = name_of(path);
-    let too_large = || {
-        format!(
-            "{name}: larger than {} GiB, which no saved screen is",
-            MAX_INPUT >> 30
-        )
-    };
-    let raw = if path == STDIN {
-        read_bounded(io::stdin().lock(), 0, MAX_INPUT)
-    } else {
-        let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
-        // A regular file says how long it is, so one past the bound is
-        // refused before a byte is read, and one inside it is read into a
-        // buffer of its own size. A pipe or a device (`/dev/zero`) says 0
-        // and is bounded by the read itself.
-        let len = match file.metadata() {
-            Ok(meta) if meta.is_file() => meta.len(),
-            _ => 0,
-        };
-        if len > MAX_INPUT as u64 {
-            return Err(too_large());
-        }
-        read_bounded(file, len as usize, MAX_INPUT)
+    read(open(path)?)
+}
+
+/// An operand that has been opened and measured and not yet read: the
+/// first half of [`load`]. The halves are apart so that `diff` can learn
+/// that one operand will never be read before it waits on the other (#715).
+enum Source<'a> {
+    /// `-`: standard input, which has nothing to open.
+    Stdin,
+    /// A file, with its length when it is a regular one. A pipe or a
+    /// device (`/dev/zero`) says 0 and is bounded by the read itself.
+    File {
+        path: &'a str,
+        file: std::fs::File,
+        len: usize,
+    },
+}
+
+/// The refusal of an input past [`MAX_INPUT`], for an operand named `name`.
+fn too_large(name: &str) -> String {
+    format!(
+        "{name}: larger than {} GiB, which no saved screen is",
+        MAX_INPUT >> 30
+    )
+}
+
+/// Open the operand at `path` and find what can be known of it without
+/// reading it: that it is there, that it is not a directory, how long it is.
+fn open(path: &str) -> Result<Source<'_>, String> {
+    if path == STDIN {
+        return Ok(Source::Stdin);
     }
-    .map_err(|e| format!("{name}: {e}"))?;
-    let Some(raw) = raw else {
-        return Err(too_large());
+    let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+    // A regular file says how long it is, so one past the bound is refused
+    // before a byte is read, and one inside it is read into a buffer of its
+    // own size.
+    let len = match file.metadata() {
+        Ok(meta) if meta.is_file() => meta.len(),
+        // A directory opens like a file on Unix and refuses its first read.
+        // That read waits on nobody, so it is made here and the error is the
+        // operating system's own, the one `render --text /` has always
+        // printed. Where a directory can be read, it is no screen either way.
+        Ok(meta) if meta.is_dir() => match (&file).read(&mut [0; 1]) {
+            Ok(_) => 0,
+            Err(e) => return Err(format!("{path}: {e}")),
+        },
+        _ => 0,
+    };
+    if len > MAX_INPUT as u64 {
+        return Err(too_large(path));
+    }
+    Ok(Source::File {
+        path,
+        file,
+        len: len as usize,
+    })
+}
+
+/// Read an opened operand to its end and parse it: the second half of
+/// [`load`].
+fn read(source: Source<'_>) -> Result<Screen, String> {
+    let (name, raw) = match source {
+        Source::Stdin => (STDIN_NAME, read_bounded(io::stdin().lock(), 0, MAX_INPUT)),
+        Source::File { path, file, len } => (path, read_bounded(file, len, MAX_INPUT)),
+    };
+    let Some(raw) = raw.map_err(|e| format!("{name}: {e}"))? else {
+        return Err(too_large(name));
     };
     // The words `read_to_string` used, which this read replaced.
     let raw = String::from_utf8(raw)
@@ -267,9 +307,9 @@ fn load(path: &str) -> Result<Screen, String> {
     let body = strip_insta_header(&raw).trim_start_matches('\n');
     if body.starts_with('{') {
         return serde_json::from_str(body)
-            .map_err(|e| format!("{}: not a termlens Screen: {e}", name_of(path)));
+            .map_err(|e| format!("{name}: not a termlens Screen: {e}"));
     }
-    Screen::parse(strip_inspect_trailer(body)).map_err(|e| format!("{}: {e}", name_of(path)))
+    Screen::parse(strip_inspect_trailer(body)).map_err(|e| format!("{name}: {e}"))
 }
 
 /// The dash operand: standard input where a screen is read, standard
@@ -343,15 +383,6 @@ const REAP_GRACE: Duration = if cfg!(windows) {
 } else {
     Duration::from_millis(500)
 };
-
-/// A file operand as a diagnostic should name it.
-fn name_of(path: &str) -> &str {
-    if path == STDIN {
-        STDIN_NAME
-    } else {
-        path
-    }
-}
 
 /// insta writes `---\n<metadata>\n---\n` above the content; the content is
 /// what was snapshotted.
@@ -481,11 +512,24 @@ fn diff(args: &[String]) -> ExitCode {
     // that cannot be read is reported before the right one is touched, so
     // `diff missing.snap -` does not sit waiting for a stdin it will never
     // use (#651).
+    //
+    // The mirror takes one step out of that order (#715). With `-` on the
+    // left, the right operand is opened and measured before standard input
+    // is read, so `diff - missing.snap` does not wait either; the two are
+    // then read in argument order all the same.
+    let right = if a.as_str() == STDIN {
+        match open(b) {
+            Ok(source) => Some(source),
+            Err(e) => return fail(&e),
+        }
+    } else {
+        None
+    };
     let before = match load(a) {
         Ok(screen) => screen,
         Err(e) => return fail(&e),
     };
-    let after = match load(b) {
+    let after = match right.map_or_else(|| load(b), read) {
         Ok(screen) => screen,
         Err(e) => return fail(&e),
     };
