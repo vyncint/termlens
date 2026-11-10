@@ -17,8 +17,9 @@
 //! **window title** (`OSC 0`/`OSC 2`), kept whole in its own buffer — the
 //! diagnostic capture below truncates at 24 bytes, real titles don't fit —
 //! focus reporting (mode 1004), the cursor shape (`DECSCUSR`), and the
-//! **set of mouse tracking modes** the application asked for, which vt100
-//! collapses into the one protocol it would report in.
+//! mouse tracking modes twice over: the **set** the application asked for,
+//! which vt100 collapses into one value, and the **one protocol** reports
+//! are made in, which vt100 keeps after a reset xterm ends it on.
 //!
 //! And it holds the **character-set state** vt100 ignores: which glyph set
 //! `ESC ( ) * + Ps` designated into G0–G3, which of G0/G1 `SI`/`SO` has
@@ -56,7 +57,7 @@ use std::sync::Arc;
 
 use super::MouseEncoding;
 use crate::graphics::{GraphicsBuilder, GraphicsCounts, GraphicsPayload, Placement, SixelMeter};
-use crate::screen::{Clipboard, Link, MouseModes};
+use crate::screen::{Clipboard, Link, MouseMode, MouseModes};
 
 /// OSC strings are captured whole (titles must not truncate), but bounded:
 /// a buggy or hostile stream must not grow memory without limit. No real
@@ -702,6 +703,26 @@ fn key_is(control: &[u8], key: &[u8], value: &[u8]) -> bool {
     })
 }
 
+/// Whether `CSI Ps ; Ps t` with `count` parameters, the first two `first`
+/// and `second`, is one of xterm's window reports: a question, whose
+/// reply the responder gives (`14`, `16` and `18`, alone) or names in a
+/// timeout. Every report ctlseqs documents: the window state (11), its
+/// position (13) and pixel size (14), each also with `; 2`, the screen's
+/// size in pixels (15), the cell size (16), the text area's and the
+/// screen's size in characters (18, 19) and the icon label and title (20,
+/// 21). `15` and the `; 2` forms were missing, so a program blocked on one
+/// was never named (#692).
+///
+/// `unhandled.rs` reads this too, so what is named here is never also
+/// listed in `Screen::unsupported`.
+pub(super) fn is_window_report(count: usize, first: u32, second: u32) -> bool {
+    match count {
+        1 => matches!(first, 11 | 13 | 14 | 15 | 16 | 18 | 19 | 20 | 21),
+        2 => matches!(first, 13 | 14) && second == 2,
+        _ => false,
+    }
+}
+
 /// Render a captured escape sequence printably (`ESC` becomes `^[`).
 fn printable(bytes: &[u8]) -> String {
     let mut out = String::new();
@@ -726,6 +747,18 @@ fn mouse_bit(mode: u32) -> u8 {
         1002 => 4,
         1003 => 8,
         _ => 0,
+    }
+}
+
+/// The tracking mode a DEC private mode number turns on, if it is one of
+/// the four.
+fn mouse_mode_of(mode: u32) -> Option<MouseMode> {
+    match mode {
+        9 => Some(MouseMode::Press),
+        1000 => Some(MouseMode::PressRelease),
+        1002 => Some(MouseMode::ButtonMotion),
+        1003 => Some(MouseMode::AnyMotion),
+        _ => None,
     }
 }
 
@@ -801,8 +834,10 @@ pub(crate) struct SeqTracker {
     csi_saw_alternate: bool,
     /// The mouse tracking modes (`9`, `1000`, `1002`, `1003`) named in the
     /// current CSI's parameter list, as [`mouse_bit`]s — the same scan as
-    /// `csi_saw_1004`, for a group rather than one mode.
+    /// `csi_saw_1004`, for a group rather than one mode — and the last of
+    /// them named, which is the one a set leaves in force.
     csi_saw_mouse: u8,
+    csi_last_mouse: MouseMode,
     /// The mouse encodings (1005, 1006, 1015) named in the current CSI's
     /// parameter list, as bits, and the last of them: a set selects the
     /// last one named, since each replaces the one before, and a reset
@@ -881,6 +916,15 @@ pub(crate) struct SeqTracker {
     /// set is kept here so `DECRQM` can answer each mode on its own
     /// evidence and a snapshot can report what was requested (#151).
     mouse_tracking: u8,
+    /// The one protocol mouse events are reported in, by xterm's rule: the
+    /// tracking mode set last, and none once any of the four is reset,
+    /// whichever was in force — `really_set_mousemode` in xterm's
+    /// `charproc.c` sets `MOUSE_OFF` on a reset of 9, 1000, 1002 or 1003
+    /// alike. Tracked here and not read from vt100, which clears its mode
+    /// only when the reset names the one it holds: after `?1002h ?1000l`
+    /// it went on reporting, and `click` typed a report at an application
+    /// a terminal would have sent nothing (#693).
+    mouse_protocol: MouseMode,
     /// How mouse coordinates are encoded: the last of 1005, 1006 and 1015
     /// set and not since reset, as in xterm, where each replaces the one
     /// before and a reset clears only the one in force. Tracked here and
@@ -1003,6 +1047,7 @@ impl SeqTracker {
             csi_saw_irm: false,
             csi_saw_alternate: false,
             csi_saw_mouse: 0,
+            csi_last_mouse: MouseMode::None,
             csi_saw_encodings: 0,
             csi_last_encoding: None,
             seq_buf: [0; 24],
@@ -1024,6 +1069,7 @@ impl SeqTracker {
             frame_printable: 0,
             focus_events: false,
             mouse_tracking: 0,
+            mouse_protocol: MouseMode::None,
             mouse_encoding: MouseEncoding::Legacy,
             cursor_style: None,
             esc_intermediate: 0,
@@ -1329,9 +1375,16 @@ impl SeqTracker {
     }
 
     /// The mouse tracking modes the application has enabled and not yet
-    /// disabled — the requested set, not the one protocol vt100 reports in.
+    /// disabled — the requested set, not the one protocol reports are made
+    /// in, which is [`mouse_protocol`](Self::mouse_protocol).
     pub(crate) fn mouse_tracking(&self) -> MouseModes {
         MouseModes::from_bits(self.mouse_tracking)
+    }
+
+    /// The protocol mouse events are reported in — see the `mouse_protocol`
+    /// field for the rule.
+    pub(crate) fn mouse_protocol(&self) -> MouseMode {
+        self.mouse_protocol
     }
 
     /// The mouse coordinate encoding in force — see `mouse_encoding`.
@@ -1506,6 +1559,7 @@ impl SeqTracker {
         self.csi_saw_irm = false;
         self.csi_saw_alternate = false;
         self.csi_saw_mouse = 0;
+        self.csi_last_mouse = MouseMode::None;
         self.csi_saw_encodings = 0;
         self.csi_last_encoding = None;
     }
@@ -1544,6 +1598,9 @@ impl SeqTracker {
             self.csi_saw_alternate = true;
         }
         self.csi_saw_mouse |= mouse_bit(self.csi_param);
+        if let Some(mode) = mouse_mode_of(self.csi_param) {
+            self.csi_last_mouse = mode;
+        }
         if let Some(encoding) = mouse_encoding_of(self.csi_param) {
             self.csi_saw_encodings |= encoding_bit(encoding);
             self.csi_last_encoding = Some(encoding);
@@ -1703,11 +1760,20 @@ impl SeqTracker {
 
         // The mouse tracking modes, kept as the set the application asked
         // for — see `mouse_tracking`. Every mode named in one list is set
-        // or cleared together, which is how they arrive.
+        // or cleared together, which is how they arrive. And the one
+        // protocol reports are made in — see `mouse_protocol`: a list is
+        // applied in order, so a set leaves the last mode it names in
+        // force, and a reset naming any of them turns reporting off.
         if self.csi_prefix == b'?' && self.csi_saw_mouse != 0 {
             match b {
-                b'h' => self.mouse_tracking |= self.csi_saw_mouse,
-                b'l' => self.mouse_tracking &= !self.csi_saw_mouse,
+                b'h' => {
+                    self.mouse_tracking |= self.csi_saw_mouse;
+                    self.mouse_protocol = self.csi_last_mouse;
+                }
+                b'l' => {
+                    self.mouse_tracking &= !self.csi_saw_mouse;
+                    self.mouse_protocol = MouseMode::None;
+                }
                 _ => {}
             }
         }
@@ -1839,8 +1905,12 @@ impl SeqTracker {
             // graphics either way.
             (0, b't') if single(14) => Some(Query::WindowSizePixels),
             (0, b't') if single(16) => Some(Query::CellSizePixels),
-            // Questions we can recognize but not answer.
-            (_, b'n') | (b'=', b'c') => Some(Query::Unanswerable(self.seq_printable())),
+            // Questions we can recognize but not answer: the DSR family,
+            // and DA3. Not `CSI > Ps n`, which is XTMODKEYS's "disable", a
+            // setting with no reply (#692).
+            (0 | b'?' | b'=', b'n') | (b'=', b'c') => {
+                Some(Query::Unanswerable(self.seq_printable()))
+            }
             // XTSMGRAPHICS (`CSI ? Pi ; Pa ; Pv S`): sixel programs ask it
             // for the colour registers and the geometry right after DA1
             // claims sixel. Every form gets a reply from xterm, a set
@@ -1854,9 +1924,14 @@ impl SeqTracker {
                 // terminal, but the probe itself is still unanswered.
                 Some(Query::Unanswerable(self.seq_printable()))
             }
+            // The other window reports; `14`, `16` and `18` alone are
+            // classified above.
             (0, b't')
-                if matches!(self.csi_first_param, 11 | 13 | 19 | 20 | 21)
-                    && self.csi_param_count == 1 =>
+                if is_window_report(
+                    usize::from(self.csi_param_count),
+                    self.csi_first_param,
+                    self.csi_second_param,
+                ) =>
             {
                 Some(Query::Unanswerable(self.seq_printable()))
             }
@@ -2466,6 +2541,7 @@ impl SeqTracker {
                     self.sync_update = false;
                     self.frame_printable = 0;
                     self.mouse_tracking = 0;
+                    self.mouse_protocol = MouseMode::None;
                     self.mouse_encoding = MouseEncoding::Legacy;
                     self.insert_mode = false;
                     self.tabs.reset();
@@ -4211,6 +4287,68 @@ mod tests {
         assert_eq!(encoding(b"\x1b[1015h"), MouseEncoding::Legacy);
     }
 
+    /// The protocol mouse events are reported in is the tracking mode set
+    /// last, and a reset of any of the four turns reporting off, whichever
+    /// is in force — xterm's `really_set_mousemode`, which vt100 follows
+    /// only for a reset of the mode it holds (#693). Unlike the encoding
+    /// above, where a reset clears only the one in force.
+    #[test]
+    fn the_mouse_protocol_is_the_last_mode_set_and_any_reset_ends_it() {
+        let protocol = |bytes: &[u8]| fed(bytes).mouse_protocol();
+        assert_eq!(protocol(b""), MouseMode::None);
+        assert_eq!(protocol(b"\x1b[?9h"), MouseMode::Press);
+        assert_eq!(protocol(b"\x1b[?1000h"), MouseMode::PressRelease);
+        assert_eq!(protocol(b"\x1b[?1002h"), MouseMode::ButtonMotion);
+        assert_eq!(protocol(b"\x1b[?1003h"), MouseMode::AnyMotion);
+        // The last one set wins, whichever reports more.
+        assert_eq!(protocol(b"\x1b[?1000h\x1b[?1003h"), MouseMode::AnyMotion);
+        assert_eq!(protocol(b"\x1b[?1003h\x1b[?1000h"), MouseMode::PressRelease);
+        // In one list too, which is applied in order.
+        assert_eq!(protocol(b"\x1b[?1000;1002;1003h"), MouseMode::AnyMotion);
+        assert_eq!(protocol(b"\x1b[?1003;1006;9h"), MouseMode::Press);
+        // A reset of the mode in force, of another one, or of one never
+        // set: reporting is off after each.
+        assert_eq!(protocol(b"\x1b[?1002h\x1b[?1002l"), MouseMode::None);
+        assert_eq!(protocol(b"\x1b[?1002h\x1b[?1000l"), MouseMode::None);
+        assert_eq!(protocol(b"\x1b[?9h\x1b[?1000l"), MouseMode::None);
+        assert_eq!(
+            protocol(b"\x1b[?1000h\x1b[?1003h\x1b[?1000l"),
+            MouseMode::None
+        );
+        assert_eq!(protocol(b"\x1b[?1003h\x1b[?25;1002l"), MouseMode::None);
+        // A reset that names none of the four leaves it, and so does a set
+        // of another mode.
+        assert_eq!(
+            protocol(b"\x1b[?1002h\x1b[?1006l\x1b[?25l\x1b[?1004h"),
+            MouseMode::ButtonMotion
+        );
+        // Set again after a reset, it is back.
+        assert_eq!(
+            protocol(b"\x1b[?1002h\x1b[?1000l\x1b[?1002h"),
+            MouseMode::ButtonMotion
+        );
+        // RIS turns reporting off; DECSTR keeps it, as xterm does (#687).
+        assert_eq!(protocol(b"\x1b[?1002h\x1bc"), MouseMode::None);
+        assert_eq!(protocol(b"\x1b[?1002h\x1b[!p"), MouseMode::ButtonMotion);
+        // An ANSI mode of the same number is not a tracking mode, and
+        // neither is any other final byte.
+        assert_eq!(protocol(b"\x1b[1000h"), MouseMode::None);
+        assert_eq!(protocol(b"\x1b[?1002h\x1b[1000l"), MouseMode::ButtonMotion);
+        assert_eq!(
+            protocol(b"\x1b[?1002h\x1b[?1000$p"),
+            MouseMode::ButtonMotion
+        );
+
+        // The set the application asked for is a different fact: a reset
+        // takes out the modes it names and no others.
+        let tracker = fed(b"\x1b[?1002h\x1b[?1003h\x1b[?1000l");
+        assert_eq!(tracker.mouse_protocol(), MouseMode::None);
+        assert_eq!(
+            tracker.mouse_tracking().iter().collect::<Vec<_>>(),
+            [MouseMode::ButtonMotion, MouseMode::AnyMotion]
+        );
+    }
+
     /// RIS returns focus reporting and synchronized output to power-on: left
     /// on, `focus_in` typed at a program that had reset, and an update begun
     /// before the reset stayed open for good (#623). `DECSTR` keeps focus
@@ -4628,6 +4766,42 @@ mod tests {
         // Any CSI …n is a DSR-family status request by definition.
         let q = queries_of(b"\x1b[6;1n");
         assert_eq!(q, vec![Query::Unanswerable("^[[6;1n".into())]);
+    }
+
+    /// `CSI > Ps n` is XTMODKEYS's "disable", a setting with no reply,
+    /// and naming it in a timeout pointed the reader at a question nobody
+    /// asked (#692).
+    #[test]
+    fn xtmodkeys_disable_is_not_a_question() {
+        for wire in [&b"\x1b[>4n"[..], b"\x1b[>n", b"\x1b[>0n", b"\x1b[>1n"] {
+            assert_eq!(queries_of(wire), Vec::<Query>::new(), "{}", printable(wire));
+        }
+        // The other prefixes are still the DSR family's.
+        assert_eq!(
+            queries_of(b"\x1b[?996n"),
+            vec![Query::Unanswerable("^[[?996n".into())]
+        );
+    }
+
+    /// xterm's window reports, every one documented in ctlseqs: the screen
+    /// size in pixels (`15 t`) and the `; 2` forms of the position and the
+    /// pixel size (`13 ; 2 t`, `14 ; 2 t`) are questions termlens does not
+    /// answer, and were never named (#692).
+    #[test]
+    fn every_xterm_window_report_is_a_question() {
+        for wire in [&b"\x1b[15t"[..], b"\x1b[14;2t", b"\x1b[13;2t"] {
+            assert_eq!(
+                queries_of(wire),
+                vec![Query::Unanswerable(printable(wire))],
+                "{}",
+                printable(wire)
+            );
+        }
+        // Not reports: a resize, the title stack, and a second parameter
+        // xterm gives no meaning to.
+        for wire in [&b"\x1b[8;24;80t"[..], b"\x1b[22;0t", b"\x1b[11;2t"] {
+            assert_eq!(queries_of(wire), Vec::<Query>::new(), "{}", printable(wire));
+        }
     }
 
     #[test]

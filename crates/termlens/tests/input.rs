@@ -769,6 +769,53 @@ fn clicking_without_mouse_tracking_is_a_typed_error() -> termlens::Result<()> {
     Ok(())
 }
 
+/// A reset of any tracking mode turns reporting off, whichever mode is in
+/// force, as xterm does (`really_set_mousemode` in its `charproc.c`) and as
+/// `Screen::mouse_mode` says. After `?1002h ?1000l`, or `?9h ?1000l`, the
+/// mode stayed and `click` typed a report at an application a terminal
+/// would have sent nothing (#693).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward the mode sets an application sends, so mouse and focus modes are never observed (#149)"
+)]
+fn a_reset_of_another_tracking_mode_turns_reporting_off() -> termlens::Result<()> {
+    use termlens::MouseMode;
+    for (set, in_force) in [
+        ("?1002h", MouseMode::ButtonMotion),
+        ("?9h", MouseMode::Press),
+    ] {
+        let mut t = util::spawn_emit(
+            Terminal::builder()
+                .size(40, 4)
+                .timeout(Duration::from_secs(10)),
+            &[
+                "--csi", set, "ON", "--wait", "--csi", "?1000l", "OFF", "--wait",
+            ],
+        )?;
+        t.wait_until(|s| s.contains("ON") && s.mouse_mode() == in_force)?;
+        t.send(Key::Enter)?;
+        // `OFF` follows the reset in the stream, so the reset has been seen.
+        t.wait_until(|s| s.contains("OFF"))?;
+        let s = t.screen();
+        assert_eq!(s.mouse_mode(), MouseMode::None, "after {set} ?1000l: {s}");
+        // The set is what the application asked for and has not disabled.
+        assert_eq!(s.mouse_modes().iter().collect::<Vec<_>>(), [in_force]);
+        let err = t
+            .click(1, 1)
+            .expect_err("a terminal with reporting off sends nothing");
+        assert!(matches!(err, Error::Input(_)), "after {set} ?1000l: {err}");
+        // The refusal does not say no `h` was seen: one was.
+        let message = err.to_string();
+        assert!(message.contains("mouse tracking"), "{message}");
+        assert!(message.contains("turned off"), "{message}");
+        assert!(!message.contains("h was seen"), "{message}");
+        t.send(Key::Enter)?;
+        assert!(t.wait_exit()?.success());
+    }
+    Ok(())
+}
+
 /// A real terminal cannot report a click outside its window. Off-grid
 /// coordinates used to encode and send anyway (and at `u16::MAX` the SGR
 /// path wrapped or panicked). Refuse with the position and the grid size

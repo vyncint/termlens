@@ -31,6 +31,58 @@ reads that marker.
   bracketed-paste reporting or to restore the tab stops should expect them
   kept, as a real xterm keeps them, and have the application reset each
   mode itself or send `RIS`. (#687)
+- A reset of any mouse tracking mode turns mouse reporting off, whichever
+  mode is in force, as xterm does and as `Screen::mouse_mode` says. After
+  `CSI ? 1002 h` and then `CSI ? 1000 l`, or `CSI ? 9 h` and then
+  `CSI ? 1000 l`, `mouse_mode()` still named the mode that was set, and
+  `click`, `drag` and `scroll` typed reports at an application a terminal
+  would have sent none: the backend ends reporting only on a reset of the
+  mode it holds. The protocol is now the tracking mode set last, and none
+  after a reset of `?9`, `?1000`, `?1002` or `?1003`. `mouse_modes()` and
+  the `DECRQM` replies are unchanged: they report each mode the
+  application set and has not itself reset. The refusal now says that a
+  reset turns reporting off, where it said that no `h` was seen. A test
+  that read `mouse_mode()` or clicked after such a reset should expect
+  `MouseMode::None` and `Error::Input`, and an application that means to
+  go on receiving reports has to set its mode again after the reset, as
+  it must on xterm. (#693)
+- `unsupported()` no longer lists the prefixed queries the responder
+  answers or names in the timeout: `CSI ? 6 n` (answered), every other
+  `CSI ? Ps n` and `CSI = Ps n`, `CSI = c` (DA3), `CSI > q` (XTVERSION)
+  and `OSC 12 ; ?`. They were listed beside the note that named them, so
+  a sequence termlens handled was reported twice, once as one it did not,
+  which the rustdoc of `Screen::unsupported` says it is not. A test that
+  pinned `unsupported()` exactly after one of these should drop that
+  entry; the query is in the timeout note, where it always was. (#691)
+- The timeout note names xterm's window reports it did not:
+  `CSI 15 t` (the screen's size in pixels), `CSI 13 ; 2 t` and
+  `CSI 14 ; 2 t`. They are questions termlens does not answer, and an
+  application blocked on one timed out with nothing naming it, while
+  `unsupported()` listed it as a sequence nobody honoured. And the note
+  no longer names `CSI > Ps n`, XTMODKEYS's "disable", which is a setting
+  with no reply: it said the application was blocked waiting for an
+  answer to it. A test that matched `^[[15t`, `^[[13;2t` or `^[[14;2t` in
+  `unsupported()` should find it in the timeout's note instead, and one
+  that expected `^[[>4n` in the note should find it in `unsupported()`,
+  where it was listed already. (#692)
+- `unsupported()` keeps an `OSC` to the first 64 bytes of its content,
+  ending the entry in `…` where it was cut. Each unhandled `OSC` was kept
+  whole, so an iTerm2 inline image (`OSC 1337 ; File=… : <base64>`) left
+  its payload in the list, as far as the 64 KiB the tracker lets through,
+  once per image up to 32, in every snapshot. Two `OSC`s that agree in
+  their first 64 bytes are now one entry. A test that pinned a longer
+  `OSC` entry exactly should expect `^[]`, the first 64 bytes of its
+  content and a `…`, or match the entry's start with `starts_with`. (#695)
+- The timeout's note names the most recent unanswered query, and says it
+  may be the cause unless output arrived after it. Past the eight shapes
+  the record keeps, a program that sent eight unanswered queries, printed,
+  then blocked on a ninth had the ninth hidden in "and 1 more", and the
+  verdict came from the eight it had moved past: "probably not why this
+  wait failed". And "and N more" counted queries, so a ninth sent five
+  times was "and 5 more"; it counts distinct shapes now. A test that
+  matched the note after more than eight distinct unanswered queries
+  should expect the most recent named, first when it is the cause, and a
+  smaller count. (#690)
 - A mouse release keeps the modifier keys in the legacy, UTF-8 (`?1005`)
   and urxvt (`?1015`) encodings, as xterm and Windows Terminal send it:
   button `3` plus the modifier bits. `click_with` and `drag` sent a bare
