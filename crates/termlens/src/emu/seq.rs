@@ -316,11 +316,13 @@ struct SavedCharsets {
 /// What the tracker follows of one screen — the main one or the alternate —
 /// beside vt100, which keeps the same state per grid and exposes none of it.
 ///
-/// The margin and origin mode are kept for the cursor position report,
-/// which counts rows from the top margin under origin mode (#689). They
-/// follow vt100's rules rather than xterm's wherever the two differ, since
-/// a report is read back as a `CUP` that vt100 carries out: a region per
-/// grid, `1049` clearing the alternate grid's, a resize clearing both.
+/// The margins and origin mode are kept for the cursor position report,
+/// which counts rows from the top margin under origin mode (#689), and for
+/// `IL` and `DL`, which move the cursor to the left margin only inside the
+/// region (#686). They follow vt100's rules rather than xterm's wherever
+/// the two differ, since a report is read back as a `CUP` that vt100
+/// carries out, and vt100 decides whether a line moves: a region per grid,
+/// `1049` clearing the alternate grid's, a resize clearing both.
 /// The charset slot is xterm's `screen->sc[screen->whichBuf]`, one per
 /// screen, so a restore on the main screen never reads what the alternate
 /// screen saved (#685).
@@ -328,6 +330,9 @@ struct SavedCharsets {
 struct ScreenFrame {
     /// The top margin `DECSTBM` set, 0-based; 0 with no region set.
     top: u16,
+    /// The bottom margin `DECSTBM` set, 0-based; `None` with no region
+    /// set, for the screen's last row whatever its height.
+    bottom: Option<u16>,
     /// Origin mode (`DECOM`, `CSI ? 6 h`).
     origin: bool,
     /// The origin mode `DECSC` saved and `DECRC` restores. vt100 saves it
@@ -459,6 +464,11 @@ pub(crate) enum SeqEvent {
     /// A tab-stop operation completed, and needs the cursor column to
     /// finish — carried out for the same reason a graphics placement is.
     Tabs(TabOp),
+    /// `IL` or `DL` (`CSI L`, `CSI M`) completed. vt100 moves the lines and
+    /// leaves the cursor; xterm also moves it to the left margin and clears
+    /// a pending wrap when the cursor is inside the scroll region, which
+    /// only the emulator can check, since the row is the grid's (#686).
+    LinesMoved,
 }
 
 /// A terminal query the application issued. The tracker classifies;
@@ -959,7 +969,7 @@ impl SeqTracker {
         let size = (rows.max(1), cols.max(1));
         if size != (self.rows, self.cols) {
             for screen in &mut self.screens {
-                screen.top = 0;
+                (screen.top, screen.bottom) = (0, None);
             }
         }
         (self.rows, self.cols) = size;
@@ -985,6 +995,13 @@ impl SeqTracker {
         } else {
             0
         }
+    }
+
+    /// Whether `row` is inside the scroll region of the screen on display,
+    /// margins included: where vt100 carries out `IL` and `DL`.
+    pub(crate) fn in_scroll_region(&self, row: u16) -> bool {
+        let frame = self.frame();
+        (frame.top..=frame.bottom.unwrap_or(self.rows - 1)).contains(&row)
     }
 
     /// Save the character sets into the slot of the screen on display.
@@ -1050,7 +1067,12 @@ impl SeqTracker {
             given(self.csi_second_param, self.rows)
         };
         let (top, bottom) = (top - 1, (bottom - 1).min(self.rows - 1));
-        self.frame_mut().top = if top < bottom { top } else { 0 };
+        let frame = self.frame_mut();
+        (frame.top, frame.bottom) = if top < bottom {
+            (top, Some(bottom))
+        } else {
+            (0, None)
+        };
     }
 
     /// Set or reset one of the modes that move a [`ScreenFrame`], in vt100's
@@ -1492,9 +1514,9 @@ impl SeqTracker {
 
     /// The event (if any) implied by a CSI final byte.
     fn csi_final(&mut self, b: u8) -> SeqEvent {
-        // ED and DECSTBM read the first value of a parameter with
+        // ED, DECSTBM, IL and DL read the first value of a parameter with
         // sub-parameters in vt100, so they act on one; nothing else does.
-        if self.csi_invalid || (self.csi_colon && !matches!(b, b'J' | b'r')) {
+        if self.csi_invalid || (self.csi_colon && !matches!(b, b'J' | b'r' | b'L' | b'M')) {
             return SeqEvent::None;
         }
         if self.csi_has_digits {
@@ -1698,6 +1720,9 @@ impl SeqTracker {
                 // ED 3, erase the saved lines. vt100 reads the first
                 // parameter alone, and so does this.
                 b'J' if ps == 3 => return SeqEvent::ScrollbackErased,
+                // IL and DL, whatever their parameters: vt100 dispatches
+                // every plain one.
+                b'L' | b'M' => return SeqEvent::LinesMoved,
                 _ => {}
             }
         }

@@ -889,6 +889,21 @@ impl Emulator for Vt100Emulator {
                     fed = i + 1;
                     None
                 }
+                SeqEvent::LinesMoved => {
+                    // xterm's `InsertLine` and `DeleteLine` move the cursor
+                    // to the left margin and reset a pending wrap, inside
+                    // the region only; vt100 moves the lines alone (#686).
+                    // A CR does both in vt100, and in the shadow with it.
+                    // The row is read after the sequence, which never
+                    // moves it.
+                    self.feed_staged(&bytes[fed..=i]);
+                    fed = i + 1;
+                    let row = self.parser.screen().cursor_position().0;
+                    if self.tracker.in_scroll_region(row) {
+                        self.feed(b"\r");
+                    }
+                    None
+                }
                 SeqEvent::None => None,
                 SeqEvent::SyncBegin => {
                     // Stamped here, at the byte that opened the update,
@@ -3455,6 +3470,85 @@ mod tests {
     /// streams mix every sequence that moves either — regions valid and
     /// not, both screen switches, the saves, both resets — with resizes.
     #[test]
+    fn insert_and_delete_line_move_the_cursor_to_the_left_margin() {
+        // xterm's `InsertLine` and `DeleteLine` (util.c): the cursor goes
+        // to the left margin and a pending wrap is reset (#686). Text,
+        // cursor and wrap flags, fed whole and byte by byte.
+        let two_rows = "abcdefghij\r\nklmnopqrst";
+        for (stream, text, cursor) in [
+            (
+                format!("{two_rows}\x1b[2;5H\x1b[LX"),
+                "abcdefghij\nX\nklmnopqrst\n",
+                (1, 1),
+            ),
+            (
+                format!("{two_rows}\x1b[1;5H\x1b[MX"),
+                "Xlmnopqrst\n\n\n",
+                (0, 1),
+            ),
+            (
+                format!("{two_rows}\x1b[2;5H\x1b[0;7LX"),
+                "abcdefghij\nX\nklmnopqrst\n",
+                (1, 1),
+            ),
+            (format!("{two_rows}\x1b[1;5H\x1b[2:1MX"), "X\n\n\n", (0, 1)),
+            // Pending wrap: X lands at the start of the inserted row and
+            // the row it would have wrapped onto keeps its `a`.
+            ("abcdefghij\x1b[LX".to_owned(), "X\nabcdefghij\n\n", (0, 1)),
+            ("abcdefghij\x1b[MX".to_owned(), "X\n\n\n", (0, 1)),
+        ] {
+            let (whole, bytewise) = whole_and_bytewise(4, 10, 0, stream.as_bytes());
+            let s = whole.snapshot();
+            assert_eq!(s.text(), text, "{stream:?}");
+            assert_eq!((s.cursor().0, s.cursor().1), cursor, "{stream:?}");
+            assert_eq!(observed(&whole), observed(&bytewise), "{stream:?}");
+        }
+    }
+
+    #[test]
+    fn insert_and_delete_line_outside_the_region_leave_the_cursor() {
+        // Outside the scroll region xterm ignores both, and so does vt100:
+        // the cursor keeps its column. On the margins it is inside. Each
+        // screen has its own region: `47` keeps the alternate grid's, and
+        // `1049` clears it (#686).
+        for (stream, at) in [
+            ("\x1b[2;3r\x1b[4;5H\x1b[LX", (3, 4)),
+            ("\x1b[2;3r\x1b[1;5H\x1b[MX", (0, 4)),
+            ("\x1b[2;3r\x1b[3;5H\x1b[LX", (2, 0)),
+            ("\x1b[2;3r\x1b[2;5H\x1b[MX", (1, 0)),
+            ("\x1b[2;3r\x1b[?47h\x1b[4;5H\x1b[LX", (3, 0)),
+            ("\x1b[2;3r\x1b[?47h\x1b[?47l\x1b[4;5H\x1b[LX", (3, 4)),
+            (
+                "\x1b[?47h\x1b[1;2r\x1b[?47l\x1b[?47h\x1b[4;5H\x1b[LX",
+                (3, 4),
+            ),
+            (
+                "\x1b[?47h\x1b[1;2r\x1b[?47l\x1b[?1049h\x1b[4;5H\x1b[LX",
+                (3, 0),
+            ),
+            // A resize clears the region, and a region that is no region
+            // leaves the whole screen one.
+            ("\x1b[1;2r\x1b[3;3rRESIZE\x1b[4;5H\x1b[LX", (3, 0)),
+            ("\x1b[1;2r\x1b[3;3r\x1b[4;5H\x1b[LX", (3, 0)),
+            ("\x1b[1;2r\x1b[4;5H\x1b[LX", (3, 4)),
+        ] {
+            let (before, after) = stream.split_once("RESIZE").unwrap_or((stream, ""));
+            let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+            feed_all(&mut emu, before.as_bytes());
+            if !after.is_empty() {
+                emu.set_size(5, 10);
+            }
+            feed_all(&mut emu, after.as_bytes());
+            let s = emu.snapshot();
+            let x = s.text().lines().enumerate().find_map(|(row, line)| {
+                line.find('X')
+                    .map(|col| (u16::try_from(row).unwrap(), u16::try_from(col).unwrap()))
+            });
+            assert_eq!(x, Some(at), "{stream:?}\n{s}");
+        }
+    }
+
+    #[test]
     fn the_report_origin_follows_vt100s_margins_and_origin_mode() {
         const PIECES: &[&str] = &[
             "\x1b[2;4r",
@@ -3515,6 +3609,19 @@ mod tests {
                 homed.cursor_position().0,
                 "case {case}: {ops:?}"
             );
+            // The region `IL` and `DL` act in (#686): under origin mode
+            // vt100 homes the cursor to the top margin and clamps it to
+            // the bottom one, and no row past them is inside.
+            let top = run(b"\x1b[?6h").cursor_position().0;
+            let bottom = run(b"\x1b[?6h\x1b[999H").cursor_position().0;
+            let (rows, _) = emu.size();
+            for row in 0..rows {
+                assert_eq!(
+                    emu.tracker.in_scroll_region(row),
+                    (top..=bottom).contains(&row),
+                    "case {case}, row {row}: {ops:?}"
+                );
+            }
         }
     }
 }

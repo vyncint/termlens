@@ -31,6 +31,14 @@ reads that marker.
   bracketed-paste reporting or to restore the tab stops should expect them
   kept, as a real xterm keeps them, and have the application reset each
   mode itself or send `RIS`. (#687)
+- Insert Line and Delete Line (`CSI L`, `CSI M`) with the cursor inside
+  the scroll region move the cursor to the start of its row and cancel a
+  pending wrap, as xterm does (#686). The cursor kept its column, so text
+  written after one began part-way along the row, and after a full row the
+  next character wrapped onto the line the insert had just moved down.
+  Outside the region both are still ignored and the cursor stays. A test
+  that expected the cursor's column, or text written after one of them,
+  where the application left it should expect column 0, as in xterm.
 
 ### Fixed
 
