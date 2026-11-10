@@ -109,6 +109,11 @@ reads that marker.
   Dependabot's own commit: Dependabot signs off as
   `dependabot[bot] <support@github.com>`, never as its author address, so it
   is let through when its author and its sign-off are both Dependabot's.
+- `tools/preflight.sh` runs each gate with an empty standard input. Each
+  gate was given the rest of the gate list as its input, so a gate that
+  read it took every later gate with it: they never ran, the totals counted
+  only the gates before them, and the run passed. No gate in CONTRIBUTING
+  §1 reads its input today. (#719)
 
 ## [0.11.8] - 2026-11-03
 
