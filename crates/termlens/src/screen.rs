@@ -550,8 +550,9 @@ pub(crate) struct TermState {
     pub(crate) alternate_screen: bool,
     pub(crate) bracketed_paste: bool,
     pub(crate) application_cursor: bool,
-    /// The one protocol the terminal reports in — the backend's collapsed
-    /// value, which is also what `click` and `scroll` encode for.
+    /// The one protocol the terminal reports in — the tracking mode set
+    /// last, and none once any of them is reset (#693) — which is also
+    /// what `click` and `scroll` encode for.
     pub(crate) mouse: MouseMode,
     /// The tracking modes the application has asked for and not yet
     /// released, kept by the sequence tracker (#151).
@@ -1152,6 +1153,13 @@ impl Screen {
     /// since the screen does show their effect. A request to resize the
     /// window (`CSI 8 ; rows ; cols t`) *is* listed: the grid's size is the
     /// test's to set, so the request is recorded rather than honoured.
+    ///
+    /// An operating system command (`OSC`) is kept to the first 64 bytes of
+    /// its content, which hold its number and first parameters, and ends in
+    /// `…` where it was cut, so an iTerm2 inline image (`OSC 1337 ;
+    /// File=…`) is listed by its number, its first parameters and the start
+    /// of its payload, not by the whole payload. Two that agree in those 64
+    /// bytes are one entry.
     ///
     /// ```no_run
     /// # fn main() -> termlens::Result<()> {

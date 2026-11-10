@@ -525,6 +525,94 @@ fn mouse_reports_follow_the_urxvt_encoding() -> termlens::Result<()> {
     Ok(())
 }
 
+/// A release keeps the modifier keys in the legacy, UTF-8 and urxvt
+/// encodings, as it always has in SGR. xterm's `BtnCode` (`button.c`)
+/// starts from `32 + (KeyState << 2)` and adds 3 for a release, and
+/// Windows Terminal sets the same three bits on its release code
+/// (`_windowsButtonToXEncoding`). termlens sent a bare 3, so an
+/// application saw ctrl go down with the button and come up without it
+/// (#701).
+///
+/// One program, four modes in turn. Each marker is written after its mode
+/// is set and after the read before it returned, so waiting for it is
+/// waiting for both.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "the wire is read in raw mode, a tcsetattr, and ConPTY turns typed bytes into console events rather than forwarding them (#149)"
+)]
+fn a_release_keeps_the_modifier_keys_in_every_encoding() -> termlens::Result<()> {
+    use termlens::MouseButton;
+
+    let mut t = util::spawn_emit(
+        Terminal::builder()
+            .size(120, 24)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\e[?1000h",
+            "LEGACY ",
+            "--read-hex",
+            "12",
+            "NL",
+            "--raw",
+            r"\e[?1015h",
+            "URXVT ",
+            "--read-hex",
+            "18",
+            "NL",
+            "--raw",
+            r"\e[?1015l\e[?1005h",
+            "UTF8 ",
+            "--read-hex",
+            "14",
+            "NL",
+            "--raw",
+            r"\e[?1005l\e[?1002h",
+            "DRAG ",
+            "--read-hex",
+            "18",
+            " WIRE-EOF",
+            "--wait",
+        ],
+    )?;
+
+    // ctrl + left: press 32 + 16, release 32 + 16 + 3.
+    t.wait_until(|s| s.contains("LEGACY"))?;
+    t.click_with(MouseButton::Left.ctrl(), 4, 2)?;
+    // shift + alt + left, in decimal: press 32 + 12, release 32 + 12 + 3.
+    t.wait_until(|s| s.contains("URXVT"))?;
+    t.click_with(MouseButton::Left.shift().alt(), 4, 2)?;
+    // ctrl + shift + left past column 94, where UTF-8 writes the column as
+    // two bytes: press 32 + 20, release 32 + 20 + 3.
+    t.wait_until(|s| s.contains("UTF8"))?;
+    t.click_with(MouseButton::Left.ctrl().shift(), 100, 3)?;
+    // shift + left, dragged one cell: press 32 + 4, motion 32 + 4 + 32,
+    // release 32 + 4 + 3.
+    t.wait_until(|s| s.contains("DRAG"))?;
+    t.drag(MouseButton::Left.shift(), 1, 1, 2, 1)?;
+    t.wait_until(|s| s.contains("WIRE-EOF"))?;
+    let screen = t.screen();
+
+    // All four rows in one comparison, so a failure shows every encoding.
+    let wire: Vec<String> = (0..4)
+        .map(|row| screen.row_text(row).trim_end().to_owned())
+        .collect();
+    assert_eq!(
+        wire,
+        [
+            "LEGACY 1b5b4d3025231b5b4d332523",
+            "URXVT 1b5b34343b353b334d1b5b34373b353b334d",
+            "UTF8 1b5b4d34c285241b5b4d37c28524",
+            "DRAG 1b5b4d2422221b5b4d4423221b5b4d272322 WIRE-EOF",
+        ]
+    );
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// With no extended encoding enabled, a click past column 222 is refused,
 /// and the message says the legacy form is in force because nothing else
 /// was enabled — not that the application selected it (#640).
@@ -678,6 +766,53 @@ fn clicking_without_mouse_tracking_is_a_typed_error() -> termlens::Result<()> {
 
     t.send(Key::Char('q'))?;
     assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// A reset of any tracking mode turns reporting off, whichever mode is in
+/// force, as xterm does (`really_set_mousemode` in its `charproc.c`) and as
+/// `Screen::mouse_mode` says. After `?1002h ?1000l`, or `?9h ?1000l`, the
+/// mode stayed and `click` typed a report at an application a terminal
+/// would have sent nothing (#693).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward the mode sets an application sends, so mouse and focus modes are never observed (#149)"
+)]
+fn a_reset_of_another_tracking_mode_turns_reporting_off() -> termlens::Result<()> {
+    use termlens::MouseMode;
+    for (set, in_force) in [
+        ("?1002h", MouseMode::ButtonMotion),
+        ("?9h", MouseMode::Press),
+    ] {
+        let mut t = util::spawn_emit(
+            Terminal::builder()
+                .size(40, 4)
+                .timeout(Duration::from_secs(10)),
+            &[
+                "--csi", set, "ON", "--wait", "--csi", "?1000l", "OFF", "--wait",
+            ],
+        )?;
+        t.wait_until(|s| s.contains("ON") && s.mouse_mode() == in_force)?;
+        t.send(Key::Enter)?;
+        // `OFF` follows the reset in the stream, so the reset has been seen.
+        t.wait_until(|s| s.contains("OFF"))?;
+        let s = t.screen();
+        assert_eq!(s.mouse_mode(), MouseMode::None, "after {set} ?1000l: {s}");
+        // The set is what the application asked for and has not disabled.
+        assert_eq!(s.mouse_modes().iter().collect::<Vec<_>>(), [in_force]);
+        let err = t
+            .click(1, 1)
+            .expect_err("a terminal with reporting off sends nothing");
+        assert!(matches!(err, Error::Input(_)), "after {set} ?1000l: {err}");
+        // The refusal does not say no `h` was seen: one was.
+        let message = err.to_string();
+        assert!(message.contains("mouse tracking"), "{message}");
+        assert!(message.contains("turned off"), "{message}");
+        assert!(!message.contains("h was seen"), "{message}");
+        t.send(Key::Enter)?;
+        assert!(t.wait_exit()?.success());
+    }
     Ok(())
 }
 
