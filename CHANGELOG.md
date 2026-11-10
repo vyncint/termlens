@@ -124,6 +124,35 @@ reads that marker.
   `.env()` or `--env`, either still reaches the program as given. A test
   that relied on an inherited `COLUMNS` or `LINES` should set it with
   `.env()`, or size the terminal with `size()` instead.
+- `Screen::diff` and `termlens diff` take a cell that holds only
+  whitespace for the blank a terminal shows, whichever whitespace it is.
+  The text format strips a row's trailing whitespace by Unicode's
+  definition, so a no-break space (U+00A0) or an ideographic space
+  (U+3000) an application drew there parses back as blank cells, and the
+  diff of a screen against its own snapshot, or of a text save against its
+  JSON twin, marked a blank against a blank and `termlens diff` exited 1.
+  A no-break space is now the same as a space or an erased cell in the
+  same style, at the end of a row or inside one, and U+3000 with the
+  second column it takes is the same as two. `==` on `Screen`, the text
+  and the JSON are unchanged, and DESIGN §3 lists the case with what else
+  the text does not carry. A test that used `diff` to tell a no-break
+  space from a space should compare `cell(row, col).contents()` instead.
+  (#724)
+- `Screen::to_svg` draws its text on the 9×18 px grid its backgrounds are
+  on. Each run was one `<text>` laid out at the font's own advance, about
+  8.4 px where a cell is 9 and 14 px where a wide character takes 18, so
+  text drifted left of its highlights along a row, ten CJK characters
+  covered fifteen columns, and in an 80-column box the right border sat
+  near column 74 on rows drawn as one run and at column 79 on a row where
+  a highlight started a new one. Every `<text>` now says how long it is,
+  `textLength` at 9 px a cell with `lengthAdjust="spacingAndGlyphs"`, and
+  a run is split where narrow cells meet wide ones, so a viewer that
+  honours it (browsers, Inkscape) fits each glyph to its cells; a CJK
+  glyph is stretched to its two columns. A test holding a `to_svg`
+  snapshot should re-accept it after checking that each `<text>` gained
+  those two attributes and that a run which opens with blanks before wide
+  characters now starts at the first wide one, its leading blanks left
+  out as its trailing ones were. (#725)
 
 ### Fixed
 
@@ -298,6 +327,24 @@ reads that marker.
   before the next would pass about 900 KiB and ends the summary with a
   line saying how many more there are. Every screen is still rendered into
   the artifact.
+- DESIGN §3, `Screen::parse` and LIMITATIONS say what a text screen saved
+  by 0.11.6 or earlier reads as when a row holds an emoji with a
+  presentation selector (`⚠️`) and has room after it. Those releases drew
+  the emoji one column wide, the text does not say so, and the reader lays
+  it out two columns wide, as 0.11.7 writes it: every cell after it moves
+  a column right, while the `styles:` spans and the cursor keep their
+  columns and land a character left of what they marked. The 0.11.7 entry
+  said such a row "still reads", which is true of parsing and not of the
+  picture. The corpus now holds a pair 0.11.6 wrote, with tests pinning
+  that reading and its difference from the JSON twin. (#723)
+- `Screen::contains` and `Screen::find` describe their matching as it is:
+  NFC on both sides, then a substring search. They called it
+  "grapheme-shaped", but NFC joins a mark to its base only where Unicode
+  has a precomposed character, so a needle matches a base character under
+  any other mark (`contains("q")` on a screen showing `q` with U+0353
+  under it), and a multi-row needle must include the mark on a row that
+  ends in one. Which needles match is unchanged; a doctest, a unit test
+  and LIMITATIONS now say so. (#726)
 
 ## [0.11.8] - 2026-11-03
 

@@ -1516,9 +1516,36 @@ impl Screen {
     /// on normalization compares those directly. A snapshot is an
     /// observation; only the search over it is forgiving.
     ///
-    /// Note that this makes matching grapheme-shaped rather than
-    /// byte-shaped: on a screen showing `caf\u{e9}`, `contains("cafe")` is
-    /// **false**, because the screen does not show `cafe`.
+    /// The match itself is a substring search over the folded text — the
+    /// rows of [`text`](Self::text) joined by `\n` — and no more
+    /// grapheme-aware than NFC is. Where Unicode has a precomposed
+    /// character, the fold makes base and mark one character: on a screen
+    /// showing `cafe\u{301}`, `contains("cafe")` is **false**, because it
+    /// is compared against `caf\u{e9}`. Most marks have none — U+0353
+    /// under `q`, Thai and Devanagari vowel signs, most stacked marks — and
+    /// stay a character of their own after the fold, so a needle matches
+    /// the base character without its mark: `contains("q")` is **true** on
+    /// a screen that shows only `q\u{353}`, and
+    /// [`mask_matching`](Self::mask_matching) masks that cell, mark and
+    /// all. A multi-row needle meets the same text at a row's end, where
+    /// the mark is the row's last character: every line of the needle
+    /// before a `\n` must run to the end of its row, so it must include
+    /// the mark, and only its last line may stop before one, as a
+    /// single-row needle may.
+    ///
+    /// ```
+    /// # fn main() -> termlens::Result<()> {
+    /// let s = termlens::Screen::parse("size: 6x2  cursor: 0,0\nq\u{353}\nq\u{353}\n")?;
+    /// assert!(s.contains("q"), "the base, under a mark NFC cannot compose");
+    /// assert_eq!(s.find_all("q"), [(0, 0), (1, 0)]);
+    /// assert!(!s.contains("q\nq"), "row 0 ends with the mark, not `q`");
+    /// assert!(s.contains("q\u{353}\nq"));
+    ///
+    /// let composed = termlens::Screen::parse("size: 6x1  cursor: 0,0\ne\u{301}\n")?;
+    /// assert!(!composed.contains("e"), "NFC made it `\u{e9}`");
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// Text pulled out as a `String` and matched with `str` methods —
     /// `full_text().contains(..)` — is byte-exact, since the comparison is
@@ -1564,6 +1591,14 @@ impl Screen {
     /// is found here precisely when `contains` is true. The reported column
     /// is the real one: folding happens per cell, so the byte-to-column map
     /// stays exact even where a composition shortened the text.
+    ///
+    /// It is the same substring search, with the same result for a mark
+    /// NFC cannot compose: on a row reading `q\u{353}`, `find("q")` is that
+    /// cell, though the cell shows `q` with a mark under it, while a
+    /// multi-row needle has to include the mark on any row it runs to the
+    /// end of, so on two such rows `find("q\nq")` is `None` and
+    /// `find("q\u{353}\nq")` is `(0, 0)`. [`contains`](Self::contains) has
+    /// the example.
     ///
     /// Trailing whitespace is trimmed per row before either searches, so
     /// the blank padding past a row's last glyph is never matched: on a
@@ -2637,13 +2672,45 @@ mod tests {
         assert_ne!(on_nfd.text(), on_nfc.text());
     }
 
-    /// Matching is grapheme-shaped once folding applies: the screen shows
-    /// `caf\u{e9}`, so it does not show `cafe`.
+    /// A mark with a precomposed form folds into its base: the screen is
+    /// compared as `caf\u{e9}`, so it does not show `cafe`.
     #[test]
     fn a_folded_match_does_not_split_a_composed_character() {
         let on_nfd = screen(10, 1, &["cafe\u{301}"]);
         assert!(!on_nfd.contains("cafe"), "the screen shows caf\u{e9}");
         assert!(on_nfd.contains("caf"));
+    }
+
+    /// A mark with none stays its own character after the fold, and the
+    /// search is a substring search, so the bare base matches under it
+    /// (#726). Pinned as documented on `contains` and `find`, not as a
+    /// promise of grapheme matching: a row's end is where the two shapes
+    /// of needle part, since a multi-row needle must run to the end of
+    /// every row but its last.
+    #[test]
+    fn a_mark_with_no_precomposed_form_does_not_stop_its_base_matching() {
+        let s = screen(6, 2, &["q\u{353}", "q\u{353}"]);
+        assert!(s.contains("q"));
+        assert_eq!(s.find_all("q"), [(0, 0), (1, 0)]);
+        let masked = s.mask_matching("q", '*');
+        assert_eq!(
+            masked.cell(0, 0).map(Cell::contents),
+            Some("*"),
+            "mark and all"
+        );
+        assert!(!s.contains("q\nq"));
+        assert_eq!(s.find("q\nq"), None);
+        assert_eq!(s.find("q\u{353}\nq"), Some((0, 0)));
+        let shifted = screen(6, 2, &["xq\u{353}", "q\u{353}x"]);
+        assert!(shifted.find_all("q\nq").is_empty());
+        assert_eq!(shifted.find_all("q\u{353}\nq"), [(0, 1)]);
+        // Thai: the vowel sign U+0E34 has no composed form with U+0E01.
+        let thai = screen(6, 1, &["\u{e01}\u{e34}\u{e19}"]);
+        assert!(thai.contains("\u{e01}"));
+        assert!(
+            !thai.contains("\u{e01}\u{e19}"),
+            "the sign is still between"
+        );
     }
 
     /// Columns must survive folding: NFD text is longer in bytes than its

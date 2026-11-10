@@ -264,3 +264,23 @@ CHANGELOG entry.
   [DESIGN.md](DESIGN.md).
 - Exotic grapheme clusters render as the vt100 crate renders them; the
   unicode-torture fixture pins the current behaviour.
+- **Needle matching is NFC, then substring, not grapheme matching.**
+  `contains`, `find` and `mask_matching` fold both sides to NFC, which
+  joins a base and a mark only where Unicode has a precomposed character
+  (`e` + U+0301 is `é`, so `contains("e")` misses it). Any other mark —
+  U+0353, Thai and Devanagari vowel signs — stays a character of its
+  own, so `contains("q")` is true on a screen showing only `q` with
+  U+0353 under it, and a mask covers that cell. A multi-row needle has to
+  include such a mark wherever its row ends in one, so `"q\nq"` is not
+  found over two of those rows (#726). Making the match grapheme-shaped
+  would change which needles match, so it is left for a 0.12 candidate.
+- **A saved text screen from before 0.11.7 can read a VS16 emoji a column
+  too wide.** Releases up to 0.11.6 drew `⚠️` and other emoji with a
+  presentation selector (U+FE0F) one column wide; later ones draw two,
+  and the text format does not say which wrote a file. `Screen::parse`
+  reads a row two columns wide whenever it fits, so on an old row with
+  room after the emoji every cell after it is one column right of where
+  it was drawn, and the `styles:` spans and the cursor, which keep their
+  columns, land one character left of what they marked (#723). The file
+  still parses and renders back as written. The JSON twin (`serde`)
+  holds the columns its writer drew; keep that where they matter.

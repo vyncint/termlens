@@ -167,6 +167,69 @@ fn runs(screen: &Screen, row: u16) -> Vec<(u16, u16, Style, String)> {
     runs
 }
 
+/// The text of one style run as the SVG draws it: `(start col, columns,
+/// text)` for each stretch of the run's cells that are all one width.
+///
+/// A viewer lays a `<text>` out at its font's own advance: at 14 px that
+/// is about 8.4 px or less for the fonts in the stack and 14 px for a CJK
+/// fallback, and a cell is 9 px. So every piece is written with its length
+/// in cells and the viewer fits the glyphs to it (#725). One fit spreads a
+/// piece evenly, which puts each glyph on its cell only when they are all
+/// as wide as each other: hence a piece per width, and a piece of its own
+/// for a wide character a resize left without its second column, which is
+/// a wide glyph in one cell.
+///
+/// Blanks at the end of the run draw nothing as text, since the background
+/// `<rect>` is what paints them, and neither does a piece that is blank
+/// throughout; both are left out. `keep_blanks` is for a run whose blanks
+/// do draw: an underline or a strikethrough runs under them, and an
+/// underlined empty form field is all blanks (#586).
+fn text_pieces(
+    screen: &Screen,
+    row: u16,
+    start: u16,
+    cols: u16,
+    keep_blanks: bool,
+) -> Vec<(u16, u16, String)> {
+    // Each cell that holds a glyph: its column, the columns it takes, and
+    // whether the glyph is a wide one.
+    let mut cells: Vec<(u16, u16, bool, &str)> = Vec::new();
+    for col in start..start.saturating_add(cols) {
+        let Some(cell) = screen.cell(row, col) else {
+            break;
+        };
+        if cell.is_wide_continuation() {
+            if let Some(last) = cells.last_mut() {
+                last.1 += 1;
+            }
+            continue;
+        }
+        cells.push((col, 1, cell.is_wide(), glyph(cell)));
+    }
+    let blank = |text: &str| text.chars().all(char::is_whitespace);
+    if !keep_blanks {
+        while cells.last().is_some_and(|cell| blank(cell.3)) {
+            cells.pop();
+        }
+    }
+    let mut pieces: Vec<(u16, u16, String)> = Vec::new();
+    let mut width = None;
+    for (col, columns, wide, text) in cells {
+        match pieces.last_mut() {
+            Some(last) if width == Some((wide, columns)) => {
+                last.1 += columns;
+                last.2.push_str(text);
+            }
+            _ => pieces.push((col, columns, text.to_owned())),
+        }
+        width = Some((wide, columns));
+    }
+    if !keep_blanks {
+        pieces.retain(|piece| !blank(&piece.2));
+    }
+    pieces
+}
+
 impl Screen {
     /// The screen as ANSI: one line per row, every cell painted through SGR
     /// sequences derived from its [`Style`], a reset at each row's end, a
@@ -194,13 +257,30 @@ impl Screen {
         out
     }
 
-    /// The screen as a self-contained SVG: a `<rect>` per background run, a
-    /// `<text>` per foreground run, fixed cell metrics (9×18 px), a
-    /// monospace fallback font stack and no font embedding — enough for a
-    /// bug report or a README, not a typeset transcript. Concealed text is
-    /// drawn as blanks, as a terminal shows it; dim is opacity, and blink is
-    /// an `<animate>` on the glyph's own opacity — the background `<rect>`
-    /// is a sibling, so it keeps painting, as it does in a terminal.
+    /// The screen as a self-contained SVG: a `<rect>` per background run,
+    /// the text of each run in `<text>` elements fitted to the cells they
+    /// cover, fixed cell metrics (9×18 px), a monospace fallback font stack
+    /// and no font embedding — enough for a bug report or a README, not a
+    /// typeset transcript. Concealed text is drawn as blanks, as a terminal
+    /// shows it; dim is opacity, and blink is an `<animate>` on the glyph's
+    /// own opacity — the background `<rect>` is a sibling, so it keeps
+    /// painting, as it does in a terminal.
+    ///
+    /// No font in the stack advances exactly one cell, so each `<text>`
+    /// says how long it is — `textLength`, its cells at 9 px each — and
+    /// asks for the glyphs to be fitted to that length
+    /// (`lengthAdjust="spacingAndGlyphs"`). Text then stays on the grid the
+    /// `<rect>`s are on: a wide character fills its two columns, and the
+    /// border of a box ends at its corner. The fit stretches the glyphs as
+    /// well as spacing them: a narrow one by the few percent its font's
+    /// advance is short of 9 px, and a CJK one, 14 px in its font, to 18,
+    /// so it is drawn some 30% wider than a terminal draws it. A run
+    /// is split where narrow cells meet wide ones, since one fit suits
+    /// glyphs of one width. Two things the fit cannot do: a glyph the
+    /// viewer takes from a fallback font of another width shifts its
+    /// neighbours within that one `<text>`, and a viewer that ignores
+    /// `textLength` lays the text out at its font's own advance, off the
+    /// grid.
     ///
     /// Unlike the HTML rendering, the SVG one cannot honour
     /// `prefers-reduced-motion`: SMIL is not reachable from CSS, and an
@@ -244,7 +324,7 @@ impl Screen {
         );
         for row in 0..self.rows() {
             let y = u32::from(row) * CELL_H;
-            for (col, cols, style, text) in runs(self, row) {
+            for (col, cols, style, _) in runs(self, row) {
                 let (fg, bg) = painted(&style);
                 let x = u32::from(col) * CELL_W;
                 if bg != DEFAULT_BG {
@@ -254,62 +334,60 @@ impl Screen {
                         u32::from(cols) * CELL_W
                     );
                 }
-                // Trailing blanks draw nothing as text — the background run
-                // above is what paints them — so the element carries only
-                // the glyphs. Concealed text is blanks, as a terminal shows it.
-                // An underline or strikethrough is drawn under blanks too, so
-                // a decorated run keeps them: an underlined empty form field
-                // is all blanks, and trimming it dropped the field (#586).
-                let shown = if style.conceal {
-                    ""
-                } else if style.underline || style.strikethrough {
-                    text.as_str()
-                } else {
-                    text.trim_end()
-                };
-                if shown.is_empty() {
+                // Concealed text is blanks, as a terminal shows it.
+                if style.conceal {
                     continue;
                 }
-                let _ = write!(
-                    out,
-                    "<text x=\"{x}\" y=\"{}\" fill=\"{fg}\" xml:space=\"preserve\"",
-                    y + 14
-                );
-                if style.bold {
-                    out.push_str(" font-weight=\"bold\"");
-                }
-                if style.italic {
-                    out.push_str(" font-style=\"italic\"");
-                }
-                if style.dim {
-                    out.push_str(" opacity=\"0.6\"");
-                }
-                let mut decoration = Vec::new();
-                if style.underline {
-                    decoration.push("underline");
-                }
-                if style.strikethrough {
-                    decoration.push("line-through");
-                }
-                if !decoration.is_empty() {
-                    let _ = write!(out, " text-decoration=\"{}\"", decoration.join(" "));
-                }
-                out.push('>');
-                escape_xml(shown, &mut out);
-                if style.blink {
-                    // A hard toggle, not a fade, and the glyph alone: the
-                    // background `<rect>` above is a sibling. An SMIL
-                    // animation outranks the attribute it animates, so a
-                    // dim blink carries dim's 0.6 in its values or it would
-                    // animate back to full opacity.
-                    let opacity = if style.dim { "0.6" } else { "1" };
+                let decorated = style.underline || style.strikethrough;
+                for (col, cols, text) in text_pieces(self, row, col, cols, decorated) {
+                    // The length is the piece's cells, and the glyphs are
+                    // fitted to it, not only spaced out over it: stretched
+                    // by the few percent their advance is short of the
+                    // cell, box-drawing characters go on meeting each other.
                     let _ = write!(
                         out,
-                        "<animate attributeName=\"opacity\" values=\"{opacity};0\" \
-                         calcMode=\"discrete\" dur=\"1s\" repeatCount=\"indefinite\"/>"
+                        "<text x=\"{}\" y=\"{}\" textLength=\"{}\" \
+                         lengthAdjust=\"spacingAndGlyphs\" fill=\"{fg}\" xml:space=\"preserve\"",
+                        u32::from(col) * CELL_W,
+                        y + 14,
+                        u32::from(cols) * CELL_W
                     );
+                    if style.bold {
+                        out.push_str(" font-weight=\"bold\"");
+                    }
+                    if style.italic {
+                        out.push_str(" font-style=\"italic\"");
+                    }
+                    if style.dim {
+                        out.push_str(" opacity=\"0.6\"");
+                    }
+                    let mut decoration = Vec::new();
+                    if style.underline {
+                        decoration.push("underline");
+                    }
+                    if style.strikethrough {
+                        decoration.push("line-through");
+                    }
+                    if !decoration.is_empty() {
+                        let _ = write!(out, " text-decoration=\"{}\"", decoration.join(" "));
+                    }
+                    out.push('>');
+                    escape_xml(&text, &mut out);
+                    if style.blink {
+                        // A hard toggle, not a fade, and the glyph alone:
+                        // the background `<rect>` above is a sibling. An
+                        // SMIL animation outranks the attribute it
+                        // animates, so a dim blink carries dim's 0.6 in its
+                        // values or it would animate back to full opacity.
+                        let opacity = if style.dim { "0.6" } else { "1" };
+                        let _ = write!(
+                            out,
+                            "<animate attributeName=\"opacity\" values=\"{opacity};0\" \
+                             calcMode=\"discrete\" dur=\"1s\" repeatCount=\"indefinite\"/>"
+                        );
+                    }
+                    out.push_str("</text>\n");
                 }
-                out.push_str("</text>\n");
             }
         }
         out.push_str("</svg>\n");
