@@ -53,6 +53,19 @@ impl Screen {
     /// and [`diff`](Self::diff) does not report one as a difference. The
     /// JSON (`serde` feature) keeps the character.
     ///
+    /// An emoji with a presentation selector (U+FE0F, `⚠️`) is read two
+    /// columns wide, as releases since 0.11.7 write it. Earlier releases
+    /// gave it one column, and the text does not say which layout a file
+    /// is in. A row that only fits at one column is read that way; a row
+    /// with room after the emoji is read at two, so for a file an earlier
+    /// release wrote every cell after the emoji is one column right of
+    /// where its writer drew it, while the `styles:` spans and the cursor
+    /// keep their column numbers and so land one character left of what
+    /// they marked. The file still renders back byte for byte, but its
+    /// [`diff`](Self::diff) against the screen its JSON twin holds is not
+    /// empty. Keep the JSON where an old file's columns matter (DESIGN §3,
+    /// rule 4).
+    ///
     /// ```
     /// # fn main() -> termlens::Result<()> {
     /// # let mut t = termlens::Terminal::builder()
@@ -209,6 +222,11 @@ pub(super) fn cell_width(ch: char) -> std::result::Result<usize, String> {
 /// layout wrote it; a row that only fits at one column per such cell can
 /// only be one of those, and is read that way, so no file an earlier
 /// release wrote stops parsing.
+/// A row that fits both ways is read wide, which for an earlier
+/// release's row with room after the emoji is a column off from what it
+/// drew, its `styles:` spans and cursor included (#723): the price of
+/// reading what 0.11.7 and later write as written, since nothing in the
+/// text tells the two apart.
 ///
 /// A row that fits neither way but would at one column for some of its
 /// wide characters is the other shape releases up to 0.11.6 wrote: vt100

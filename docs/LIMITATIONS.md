@@ -241,3 +241,13 @@ CHANGELOG entry.
   [DESIGN.md](DESIGN.md).
 - Exotic grapheme clusters render as the vt100 crate renders them; the
   unicode-torture fixture pins the current behaviour.
+- **A saved text screen from before 0.11.7 can read a VS16 emoji a column
+  too wide.** Releases up to 0.11.6 drew `⚠️` and other emoji with a
+  presentation selector (U+FE0F) one column wide; later ones draw two,
+  and the text format does not say which wrote a file. `Screen::parse`
+  reads a row two columns wide whenever it fits, so on an old row with
+  room after the emoji every cell after it is one column right of where
+  it was drawn, and the `styles:` spans and the cursor, which keep their
+  columns, land one character left of what they marked (#723). The file
+  still parses and renders back as written. The JSON twin (`serde`)
+  holds the columns its writer drew; keep that where they matter.

@@ -660,7 +660,17 @@ Rules:
    (U+FE0F) makes the emoji it follows two columns, as vt100 0.18 lays it
    out. Releases before 0.11.7 gave such an emoji one column and the text
    does not say which wrote it, so the reader widens it unless the row
-   then would not fit, and reads that row the earlier way.
+   then would not fit, and reads that row the earlier way. A row an
+   earlier release wrote with room after the emoji therefore reads at the
+   later layout (#723): every cell after the emoji is one column right of
+   where its writer drew it, while the row's `styles:` spans and the
+   header's cursor keep their column numbers, so each lands one character
+   left of what it marked. `⚠️` and a red `ERR ok` written by 0.11.6 read
+   with the span `1-3` on the emoji's second half and `ER`, and the cursor
+   it left after `ok` on the `k`. No rule can tell the layouts apart — a
+   span or a cursor that only makes sense narrow hints at one, and is no
+   proof — so the JSON is the format to keep where an old file's columns
+   matter. `tests/compat/0.11.6/vs16-styled-after` pins the reading.
 5. Styles are text-invisible by default; `Screen::with_styles()` opts in.
    Its rendering is the plain `Display` output followed by a blank line
    and a `styles:` block:
@@ -872,7 +882,10 @@ there either, though the text keeps it; `Cell::contents` tells the two
 apart, and so does the JSON. One header releases before 0.11.2 wrote
 does not render back as written: a visible cursor at `col == cols`, the
 pending-wrap column (#401), reads onto the last cell, as the JSON reader
-reads it, so the header comes back one column left (#643).
+reads it, so the header comes back one column left (#643). And one row
+releases before 0.11.7 wrote renders back as written but is not the
+picture its writer saw: a VS16 emoji with room after it reads two columns
+wide, as rule 4 says, so it differs from its own JSON twin (#723).
 
 The header's row count is what decides where the grid ends — not a search
 for the `styles:` marker — so a grid may hold the words `styles:` or

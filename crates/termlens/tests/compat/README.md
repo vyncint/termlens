@@ -57,3 +57,15 @@ them in `EXTRA_SHAPES`:
 | `0.11.1/pending-wrap-visible` | `printf '\r\nabcdef'` on 6x2: the visible cursor at `1,6`, one past the last column, in the text header. It reads clamped onto `1,5`, as the JSON reader clamps it |
 | `0.11.6/stranded-wide` | `printf 'abcd東xy\r\nABC東'` on 8x3, then `resize(5, 3)`: `東` left wide in the last column with no continuation cell (DESIGN §3's truncation case). It reads as that cell and renders back byte for byte |
 | `0.11.6/stranded-wide-redrawn` | `printf 'abcd東xyz'` on 8x2, `resize(5, 2)`, `resize(8, 2)`, then `printf '\033[1;6HZyw'`: the stranded `東` left before `Zyw`, which fills the row to the edge (#683). It reads with `東` as the one-column cell its JSON twin has, and renders back byte for byte |
+
+One pair sits outside `EXTRA_SHAPES` because its twins do not show one
+picture, and the extra shapes are held to showing one:
+`0.11.6/vs16-styled-after`, written by the published 0.11.6 the same way
+as the two above. It is `printf '⚠️\033[31mERR\033[0m ok'` on 10x2:
+0.11.6 drew the emoji one column wide, which its JSON twin records; the
+text is the same bytes in either layout, and the reader takes it two
+columns wide because the row has room (DESIGN §3, rule 4; #723). Its own two tests in
+`tests/compat.rs` (`VS16_BEFORE_0_11_7`) pin that reading: the text
+renders back byte for byte, every cell after the emoji sits a column
+right, the `styles:` span and the cursor keep their columns, and the
+diff against the JSON twin is that row and nothing else.

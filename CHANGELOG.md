@@ -138,6 +138,16 @@ reads that marker.
   Dependabot's own commit: Dependabot signs off as
   `dependabot[bot] <support@github.com>`, never as its author address, so it
   is let through when its author and its sign-off are both Dependabot's.
+- DESIGN §3, `Screen::parse` and LIMITATIONS say what a text screen saved
+  by 0.11.6 or earlier reads as when a row holds an emoji with a
+  presentation selector (`⚠️`) and has room after it. Those releases drew
+  the emoji one column wide, the text does not say so, and the reader lays
+  it out two columns wide, as 0.11.7 writes it: every cell after it moves
+  a column right, while the `styles:` spans and the cursor keep their
+  columns and land a character left of what they marked. The 0.11.7 entry
+  said such a row "still reads", which is true of parsing and not of the
+  picture. The corpus now holds a pair 0.11.6 wrote, with tests pinning
+  that reading and its difference from the JSON twin. (#723)
 
 ## [0.11.8] - 2026-11-03
 
