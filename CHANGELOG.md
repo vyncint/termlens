@@ -153,6 +153,30 @@ reads that marker.
   those two attributes and that a run which opens with blanks before wide
   characters now starts at the first wide one, its leading blanks left
   out as its trailing ones were. (#725)
+- A `wait_frame` timeout after a `resize` names the resize as what the
+  application has not repainted since: "…has not completed a repaint since
+  the resize to 30x6…", or "1 complete frame since the resize to 30x6, 2
+  in total" when it repainted and no frame matched. It read "since the
+  frame this terminal last returned", with advice about "this input",
+  though the resize had moved the frame cursor, no frame had been returned
+  and nothing typed. Once `wait_frame` returns a frame, the message is
+  about that frame again. A test that matched "since the frame this
+  terminal last returned" or "since the last one returned" on a timeout
+  after a resize should match "since the resize to" instead. (#705)
+- On Unix, dropping a `Terminal` stops the program's process group, not
+  the program alone, and so does `termlens inspect` when it kills a
+  program still running at the end of its wait. A member that ignores
+  SIGHUP, a `nohup`ed helper or a background job that traps it, kept
+  running after the drop, attached to a PTY nobody held: the hang-up went
+  to the child's pid, and the kernel's own, as the session leader exits,
+  the member ignores. The group is now hung up, then killed once the child
+  has exited or has outlived the hang-up's grace, and the child is reaped
+  last, so the group's id is still the child's when it is signalled. Once
+  the child is reaped, by `wait_exit` or by the kernel where SIGCHLD is
+  ignored, nothing is signalled, as before; `signal` still reaches the
+  child alone. A test whose program leaves a helper running on purpose
+  must have the helper leave the program's process group (`setsid`), or
+  the drop now kills it. (#714)
 
 ### Fixed
 
@@ -345,6 +369,28 @@ reads that marker.
   under it), and a multi-row needle must include the mark on a row that
   ends in one. Which needles match is unchanged; a doctest, a unit test
   and LIMITATIONS now say so. (#726)
+- Query replies queued behind a blocked send stay under the 1 MiB reply
+  bound until they are written themselves. The writer thread took every
+  byte it wrote off the count of queued reply bytes, typed input included,
+  so once an application read a 200,000-byte `send_str` it had kept
+  waiting, the count read 0 with 120,000 reply bytes still queued, and the
+  bound let in as many bytes over 1 MiB as the test had typed. Each write
+  now carries how many of its bytes are replies, and only those come off
+  the count. (#704)
+- The comment in `Terminal`'s drop on the order it closes its handles in
+  states the constraint the code has. It said the writer had to close
+  before the master because the reader thread polled the master while
+  holding the PTY lifecycle lock. The reader reads with no lock held and
+  takes that one only to close its own duplicate of the master, which a
+  test now pins; the order that matters is that teardown is unblocked
+  before the writer, whose drop writes, is closed. (#707)
+- `docs/DESIGN.md` §1 and `docs/LIMITATIONS.md` no longer say that on
+  Linux the replies an application never reads are lost without a count.
+  That is canonical mode's behaviour, where `n_tty` keeps 4,095 bytes,
+  about 680 replies, and discards the rest. In raw mode, the mode of an
+  application that reads its replies, Linux blocks the write once about
+  2,300 replies (13.8 KB) are queued, as macOS blocks, and the next wait's
+  error counts the replies stuck behind it, on Linux too. (#703)
 
 ## [0.11.8] - 2026-11-03
 
