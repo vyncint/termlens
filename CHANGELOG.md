@@ -51,9 +51,9 @@ reads that marker.
   `CSI ? Ps n` and `CSI = Ps n`, `CSI = c` (DA3), `CSI > q` (XTVERSION)
   and `OSC 12 ; ?`. They were listed beside the note that named them, so
   a sequence termlens handled was reported twice, once as one it did not,
-  which the rustdoc of `Screen::unsupported` says it is not. A test that pinned `unsupported()`
-  exactly after one of these should drop that entry; the query is in the
-  timeout note, where it always was. (#691)
+  which the rustdoc of `Screen::unsupported` says it is not. A test that
+  pinned `unsupported()` exactly after one of these should drop that
+  entry; the query is in the timeout note, where it always was. (#691)
 - The timeout note names xterm's window reports it did not:
   `CSI 15 t` (the screen's size in pixels), `CSI 13 ; 2 t` and
   `CSI 14 ; 2 t`. They are questions termlens does not answer, and an
