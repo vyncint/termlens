@@ -55,11 +55,11 @@ pub(crate) struct Vt100Emulator {
     /// Inline graphics payloads, oldest first, behind an `Arc` so a
     /// snapshot costs one refcount rather than a copy of every image.
     graphics: Arc<Vec<GraphicsPayload>>,
-    /// For each payload in `graphics`, the image ids a kitty delete freed
-    /// ([`Placement::forgets`]), so a later `a=p` of one is not sized from
-    /// an image kitty has forgotten (#672). Kept in lockstep with
-    /// `graphics`, one entry each, and so bounded by the same two bounds.
-    graphics_forgets: VecDeque<Option<(u32, u32)>>,
+    /// For each payload in `graphics`, what its escape said of the images
+    /// it concerns and the payload itself does not carry ([`Named`]). Kept
+    /// in lockstep with `graphics`, one entry each, and so bounded by the
+    /// same two bounds.
+    graphics_named: VecDeque<Named>,
     /// Payload bytes currently retained, so eviction is a subtraction
     /// rather than a walk.
     graphics_bytes: usize,
@@ -75,6 +75,19 @@ pub(crate) struct Vt100Emulator {
     /// the parsers see is then no longer a sub-slice of the read. Kept
     /// between calls only for its allocation.
     staged: Vec<u8>,
+}
+
+/// The images a logged kitty escape names, as its [`Placement`] carried
+/// them: what a later `a=p` needs in order to find the image it places, or
+/// to find that kitty no longer has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Named {
+    /// The image ids a delete freed ([`Placement::forgets`]), so a later
+    /// `a=p` of one is not sized from an image kitty has forgotten (#672).
+    forgets: Option<(u32, u32)>,
+    /// The image number the escape gave ([`Placement::number`]), 0 for
+    /// none, so a later `a=p,I=` finds the newest image sent with it (#696).
+    number: u32,
 }
 
 /// How far past an image the declared terminal moves the cursor.
@@ -129,7 +142,7 @@ impl Vt100Emulator {
             captured: 0,
             history_reset: false,
             graphics: Arc::new(Vec::new()),
-            graphics_forgets: VecDeque::new(),
+            graphics_named: VecDeque::new(),
             graphics_bytes: 0,
             capture,
             image_support: Graphics::None,
@@ -176,20 +189,40 @@ impl Vt100Emulator {
                     // `handle_put_command`): nothing is placed, so nothing
                     // moves — even with `c=` and `r=` given (#672). It was
                     // sized from the image kitty no longer has.
+                    //
+                    // The image is the one the id names, or, with no id, the
+                    // newest one sent with the image number (`I=`): kitty's
+                    // `handle_put_command` looks it up by `g->id` and
+                    // otherwise by `img_by_client_number`. With neither,
+                    // kitty places nothing ("Put graphics command without
+                    // image id or number"), and zero is neither. A number
+                    // was never looked up, so `a=p,I=` never moved (#696).
                     GraphicsAction::Place => {
-                        let id = payload.id()?;
-                        let newest = self.graphics.iter().zip(&self.graphics_forgets).rev().find(
-                            |(earlier, forgets)| {
-                                forgets.is_some_and(|(first, last)| (first..=last).contains(&id))
-                                    || (earlier.protocol() == GraphicsProtocol::Kitty
-                                        && earlier.action().carries_image()
-                                        && earlier.id() == Some(id))
-                            },
-                        );
-                        match newest {
-                            Some((_, Some(_))) => return None,
-                            Some((earlier, None)) => earlier.size(),
-                            None => None,
+                        let is_image = |earlier: &GraphicsPayload| {
+                            earlier.protocol() == GraphicsProtocol::Kitty
+                                && earlier.action().carries_image()
+                        };
+                        let mut log = self.graphics.iter().zip(&self.graphics_named).rev();
+                        match (payload.id().filter(|&id| id != 0), placement.number) {
+                            (Some(id), _) => {
+                                let newest = log.find(|(earlier, named)| {
+                                    named
+                                        .forgets
+                                        .is_some_and(|(first, last)| (first..=last).contains(&id))
+                                        || (is_image(earlier) && earlier.id() == Some(id))
+                                });
+                                match newest {
+                                    Some((_, named)) if named.forgets.is_some() => return None,
+                                    Some((earlier, _)) => earlier.size(),
+                                    None => None,
+                                }
+                            }
+                            (None, 0) => return None,
+                            (None, number) => log
+                                .find(|(earlier, named)| {
+                                    is_image(earlier) && named.number == number
+                                })
+                                .and_then(|(earlier, _)| earlier.size()),
                         }
                     }
                     _ => return None,
@@ -212,9 +245,20 @@ impl Vt100Emulator {
     /// column past its right edge, or to the start of the next row when that
     /// is past the screen's. No count scrolls further than the screen is
     /// tall: past that every row it pushed out was blank.
+    ///
+    /// Past the bottom margin of a scroll region, kitty does not leave the
+    /// cursor on the margin, as line feeds do: `screen_handle_graphics_command`
+    /// moves it to the image's last row, scrolls the region by as many rows
+    /// as that is past the margin, and then clamps the cursor to the screen —
+    /// to the region only under origin mode, and only when the last row was
+    /// inside it before the wrap to the next row. The protocol leaves the
+    /// position open ("undefined, and up to implementations"); termlens
+    /// follows kitty (#697). Not where the cursor starts below the region:
+    /// kitty scrolls the region then too, which line feeds there do not do,
+    /// and termlens keeps the line feeds.
     fn move_past_image(&mut self, step: ImageStep) {
         let (screen_rows, screen_cols) = size(self.parser.screen());
-        let (_, col) = self.cursor_position();
+        let (row, col) = self.cursor_position();
         let (rows, across) = match step {
             ImageStep::Kitty { cols, rows } => (rows, Some(u32::from(col).saturating_add(cols))),
             ImageStep::Sixel { rows } => (rows, None),
@@ -230,6 +274,18 @@ impl Vt100Emulator {
             _ => {}
         }
         self.feed(&bytes);
+        // Where kitty leaves it, clamped to the screen: the line feeds above
+        // stopped short of it only by scrolling at the bottom margin, and
+        // scrolled the region by exactly kitty's count.
+        let last = u32::from(row).saturating_add(rows.saturating_sub(1));
+        let kitty_row = (u32::from(row) + down).min(u32::from(screen_rows.saturating_sub(1)));
+        let (fed_row, _) = self.cursor_position();
+        let held_in_region = self.tracker.origin_mode() && u32::from(fed_row) == last;
+        if across.is_some() && u32::from(fed_row) < kitty_row && !held_in_region {
+            // `VPA`, which vt100 takes as an absolute row whatever the
+            // margins and origin mode say.
+            self.feed(format!("\x1b[{}d", kitty_row + 1).as_bytes());
+        }
     }
 
     /// Hand the grid the bytes the tracker has already scanned.
@@ -316,18 +372,18 @@ impl Vt100Emulator {
     /// labels.
     ///
     /// [`move_past_image`]: Self::move_past_image
-    fn record_graphics(&mut self, mut payload: GraphicsPayload, forgets: Option<(u32, u32)>) {
+    fn record_graphics(&mut self, mut payload: GraphicsPayload, named: Named) {
         payload.place(self.cursor_position());
         let kept = payload.data().map_or(0, <[u8]>::len);
         let log = Arc::make_mut(&mut self.graphics);
         log.push(payload);
-        self.graphics_forgets.push_back(forgets);
+        self.graphics_named.push_back(named);
         self.graphics_bytes += kept;
         // Evict oldest-first, on both bounds. A snapshot already taken keeps
         // its own view: it holds an `Arc` to the vector as it stood.
         while log.len() > HISTORY || (self.graphics_bytes > self.capture && log.len() > 1) {
             let dropped = log.remove(0);
-            self.graphics_forgets.pop_front();
+            self.graphics_named.pop_front();
             self.graphics_bytes -= dropped.data().map_or(0, <[u8]>::len);
         }
     }
@@ -339,7 +395,11 @@ impl Vt100Emulator {
         // earlier transmission and not itself; moved after it is stamped, so
         // `at` is the top-left corner.
         let step = self.image_step(&payload, placement);
-        self.record_graphics(payload, placement.forgets);
+        let named = Named {
+            forgets: placement.forgets,
+            number: placement.number,
+        };
+        self.record_graphics(payload, named);
         if let Some(step) = step {
             self.move_past_image(step);
         }
@@ -957,7 +1017,7 @@ impl Emulator for Vt100Emulator {
             alternate_screen: screen.alternate_screen(),
             bracketed_paste: screen.bracketed_paste(),
             application_cursor: screen.application_cursor(),
-            mouse: convert_mouse(screen.mouse_protocol_mode()),
+            mouse: self.tracker.mouse_protocol(),
             mouse_modes: self.tracker.mouse_tracking(),
             clipboard: self.tracker.clipboard(),
             bells: self.tracker.bells(),
@@ -1015,10 +1075,12 @@ impl Emulator for Vt100Emulator {
     fn input_modes(&self) -> InputModes {
         let screen = self.parser.screen();
         InputModes {
-            mouse: convert_mouse(screen.mouse_protocol_mode()),
-            // The tracker's, not vt100's: vt100 does not implement 1015,
-            // and so cannot say when it replaced or cleared the others
-            // (#640).
+            // The tracker's, not vt100's: vt100 goes on reporting after a
+            // reset of a tracking mode other than the one in force, where
+            // xterm stops (#693).
+            mouse: self.tracker.mouse_protocol(),
+            // The tracker's too: vt100 does not implement 1015, and so
+            // cannot say when it replaced or cleared the others (#640).
             mouse_encoding: self.tracker.mouse_encoding(),
             bracketed_paste: screen.bracketed_paste(),
             application_cursor: screen.application_cursor(),
@@ -1101,16 +1163,6 @@ impl Emulator for Vt100Emulator {
 /// `Screen` reads it and a replay nothing can check is a claim nothing can
 /// catch.
 const SOFT_RESET_REPLAY: &[u8] = b"\x1b[?1l\x1b[?25h\x1b[0m\x1b[r\x1b[?6l\x1b7";
-
-fn convert_mouse(mode: ::vt100::MouseProtocolMode) -> MouseMode {
-    match mode {
-        ::vt100::MouseProtocolMode::None => MouseMode::None,
-        ::vt100::MouseProtocolMode::Press => MouseMode::Press,
-        ::vt100::MouseProtocolMode::PressRelease => MouseMode::PressRelease,
-        ::vt100::MouseProtocolMode::ButtonMotion => MouseMode::ButtonMotion,
-        ::vt100::MouseProtocolMode::AnyMotion => MouseMode::AnyMotion,
-    }
-}
 
 /// Build a [`Cell`] from the primary grid cell and its shadow counterpart,
 /// whose bold/italic/underline flags are this cell's
@@ -1626,13 +1678,17 @@ mod tests {
         assert_eq!(s.mouse_mode(), MouseMode::None);
     }
 
-    /// That the one unsupported shape is `expected`, without printing 64 KiB
-    /// of it when it is not.
-    fn assert_one_shape(s: &Screen, expected: &str, at: &str) {
-        let shapes: Vec<&str> = s.unsupported().iter().collect();
-        let lengths: Vec<usize> = shapes.iter().map(|shape| shape.len()).collect();
-        assert_eq!(lengths, [expected.len()], "{at}: shape lengths");
-        assert!(shapes[0] == expected, "{at}: the shape differs");
+    /// That the one unsupported shape is `expected`, and that `body` bytes
+    /// of the OSC's content reached vt100. The entry is a prefix since
+    /// #695, so the length is the callback's record of it.
+    fn assert_one_osc(emu: &Vt100Emulator, expected: &str, body: usize, at: &str) {
+        let s = emu.snapshot();
+        assert_eq!(s.unsupported(), [expected], "{at}: the entry");
+        assert_eq!(
+            emu.parser.callbacks().last_osc_len,
+            body,
+            "{at}: the content vt100 got"
+        );
     }
 
     /// `stream` fed in pieces cut at each of `cuts`, as reads would split it.
@@ -1651,9 +1707,13 @@ mod tests {
         // vte keeps an OSC string whole until its terminator, in each of
         // the two parsers, so an unterminated one grew the process without
         // bound (#694). The tracker keeps 64 KiB of it; the parsers now get
-        // exactly that much, which vt100 shows in the shape it reports.
+        // exactly that much, which vt100's callback measures, and the entry
+        // it leaves is the first 64 bytes of it (#695).
         let cap = super::super::seq::OSC_CAPTURE_MAX;
-        let kept = "a".repeat(cap - "777;".len());
+        let entry = format!(
+            "^[]777;{}…",
+            "a".repeat(super::super::unhandled::MAX_STRING_SHAPE - "777;".len())
+        );
         for terminator in [&b"\x07"[..], b"\x1b\\"] {
             let mut stream = b"\x1b]777;".to_vec();
             stream.resize(stream.len() + cap + 3 * 4096, b'a');
@@ -1670,10 +1730,10 @@ mod tests {
                 vec![at_bound - 1, at_bound, at_bound + 1],
                 vec![st + 1],
             ] {
-                let s = emu_fed_in_pieces(&stream, &cuts).snapshot();
+                let emu = emu_fed_in_pieces(&stream, &cuts);
                 let at = format!("{terminator:?}, cut at {cuts:?}");
-                assert_one_shape(&s, &format!("^[]777;{kept}"), &at);
-                assert_eq!(s.text(), "DONE\n\n\n", "{at}");
+                assert_one_osc(&emu, &entry, cap, &at);
+                assert_eq!(emu.snapshot().text(), "DONE\n\n\n", "{at}");
             }
         }
     }
@@ -1747,14 +1807,56 @@ mod tests {
 
     #[test]
     fn an_osc_at_the_capture_bound_reaches_the_parsers_whole() {
-        // Exactly the bound: nothing is withheld, and the shape is the
-        // whole string, as it was before #694.
+        // Exactly the bound: nothing is withheld, as before #694. The entry
+        // is the string's first 64 bytes, as for any long OSC (#695).
         let cap = super::super::seq::OSC_CAPTURE_MAX;
         let body = "b".repeat(cap - "777;".len());
         let stream = format!("\x1b]777;{body}\x07DONE");
-        let s = emu_fed_in_pieces(stream.as_bytes(), &[]).snapshot();
-        assert_one_shape(&s, &format!("^[]777;{body}"), "at the bound");
-        assert_eq!(s.text(), "DONE\n\n\n");
+        let emu = emu_fed_in_pieces(stream.as_bytes(), &[]);
+        let entry = format!(
+            "^[]777;{}…",
+            &body[..super::super::unhandled::MAX_STRING_SHAPE - "777;".len()]
+        );
+        assert_one_osc(&emu, &entry, cap, "at the bound");
+        assert_eq!(emu.snapshot().text(), "DONE\n\n\n");
+    }
+
+    /// Three iTerm2 inline images, each an OSC of 1 MiB, leave three
+    /// entries that name them, each at most the shape's bound, where they
+    /// left their whole payloads, as far as the 64 KiB the tracker lets
+    /// through (#695). The image after them still draws its text.
+    #[test]
+    fn an_inline_image_is_named_in_unsupported_and_not_kept() {
+        let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+        for n in 1..=3 {
+            let mut image =
+                format!("\x1b]1337;File=name=aW1n{n};size=1048576;inline=1:").into_bytes();
+            image.resize(image.len() + (1 << 20), b'Q');
+            image.push(0x07);
+            for chunk in image.chunks(8192) {
+                feed_all(&mut emu, chunk);
+            }
+        }
+        feed_all(&mut emu, b"DONE");
+        let s = emu.snapshot();
+        let entries: Vec<&str> = s.unsupported().iter().collect();
+        let bound = "^[]".len() + super::super::unhandled::MAX_STRING_SHAPE + "…".len();
+        assert_eq!(
+            entries.len(),
+            3,
+            "{:?}",
+            entries.iter().map(|e| e.len()).collect::<Vec<_>>()
+        );
+        for (n, entry) in (1..).zip(&entries) {
+            assert!(entry.len() <= bound, "entry {n} is {} bytes", entry.len());
+            assert!(
+                entry.starts_with(&format!(
+                    "^[]1337;File=name=aW1n{n};size=1048576;inline=1:QQ"
+                )) && entry.ends_with('…'),
+                "{entry}"
+            );
+        }
+        assert_eq!(s.row_text(0).trim_end(), "DONE");
     }
 
     /// Feed a stream into an emulator with `scrollback` rows of history.
@@ -2543,6 +2645,87 @@ mod tests {
         assert_eq!(screen.scrollback_text(), "top\n");
     }
 
+    /// A placement past the bottom of a scroll region leaves the cursor
+    /// where kitty 0.49.2 leaves it (#697): on the image's last row, below
+    /// the margin, clamped to the screen, with the region scrolled by as
+    /// many rows as that is past the margin. Line feeds stopped on the
+    /// margin. The protocol leaves the position "undefined, and up to
+    /// implementations". 20 rows of 24 columns, `X` placed after a 2-column
+    /// image, so it lands one column past the image's last row.
+    #[test]
+    fn a_kitty_placement_past_a_scroll_region_leaves_the_cursor_where_kitty_does() {
+        let place = |setup: &str, rows: u32| {
+            let wire = format!("{setup}\x1b_Ga=T,f=24,s=1,v=1,c=2,r={rows};AAAA\x1b\\X");
+            let screen = graphics_emu(Graphics::Kitty, 20, 24, wire.as_bytes()).snapshot();
+            (screen.find("X"), screen.find("MARK"), screen.find("LOW"))
+        };
+        // Region rows 0-9, `MARK` on row 2, `LOW` on row 12 below it.
+        let region = "\x1b[1;10r\x1b[3;1HMARK\x1b[13;1HLOW";
+        // From row 7, 5 rows: the last is row 11, 2 past the margin. The
+        // region scrolls by 2 and the cursor stays on row 11; below the
+        // region nothing moves.
+        assert_eq!(
+            place(&format!("{region}\x1b[8;1H"), 5),
+            (Some((11, 2)), Some((0, 0)), Some((12, 0)))
+        );
+        // Under origin mode too: the last row is outside the region, so
+        // kitty clamps to the screen. `CSI 8;1H` is row 7 there as well.
+        assert_eq!(
+            place(&format!("{region}\x1b[?6h\x1b[8;1H"), 5),
+            (Some((11, 2)), Some((0, 0)), Some((12, 0)))
+        );
+        // Past the screen's bottom: clamped to the last row, the region
+        // scrolled by the whole overshoot (row 7 + 14 is 12 past row 9).
+        assert_eq!(
+            place(&format!("{region}\x1b[8;1H"), 15),
+            (Some((19, 2)), None, Some((12, 0)))
+        );
+        // Inside the region it is as before.
+        assert_eq!(
+            place(&format!("{region}\x1b[3;1H"), 5),
+            (Some((6, 2)), Some((2, 0)), Some((12, 0)))
+        );
+        // From above a region, as from inside it.
+        // Region rows 4-9: from row 1, 12 rows end on row 12, 3 past it.
+        let lower = "\x1b[5;10r\x1b[9;1HMARK\x1b[15;1HLOW";
+        assert_eq!(
+            place(&format!("{lower}\x1b[2;1H"), 12),
+            (Some((12, 2)), Some((5, 0)), Some((14, 0)))
+        );
+        // From below the region, the line feeds' position, which is kitty's
+        // too — but the region does not scroll. kitty scrolls it then,
+        // which termlens does not copy.
+        assert_eq!(
+            place(&format!("{region}\x1b[16;1H"), 3),
+            (Some((17, 2)), Some((2, 0)), Some((12, 0)))
+        );
+        // Without a region, the screen scrolls and the cursor is on its
+        // last row, as before.
+        assert_eq!(
+            place("\x1b[3;1HMARK\x1b[13;1HLOW\x1b[18;1H", 5),
+            (Some((19, 2)), Some((0, 0)), Some((10, 0)))
+        );
+    }
+
+    /// A wrap to the next row past the margin, as kitty does it: the last
+    /// row is the margin, the cursor wraps to the row below it, and the
+    /// region scrolls by one. kitty then clamps the cursor to the screen,
+    /// leaving it below the margin — unless origin mode is set, where the
+    /// last row was inside the region and the cursor is clamped to it.
+    #[test]
+    fn a_kitty_placement_that_wraps_past_a_scroll_region_moves_as_kitty_does() {
+        let place = |modes: &str| {
+            let wire = format!(
+                "\x1b[1;10r{modes}\x1b[3;1HMARK\x1b[10;23H\
+                 \x1b_Ga=T,f=24,s=1,v=1,c=2,r=1;AAAA\x1b\\X"
+            );
+            let screen = graphics_emu(Graphics::Kitty, 20, 24, wire.as_bytes()).snapshot();
+            (screen.find("X"), screen.find("MARK"))
+        };
+        assert_eq!(place(""), (Some((10, 0)), Some((1, 0))));
+        assert_eq!(place("\x1b[?6h"), (Some((9, 0)), Some((1, 0))));
+    }
+
     #[test]
     fn a_kitty_placement_without_cells_is_sized_from_pixels_and_the_cell_size() {
         // A 20x40 image in 10x20 cells: 2x2. `a=p` of it, by id, later.
@@ -2594,6 +2777,97 @@ mod tests {
               \x1b_Ga=p,i=1\x1b\\X",
         );
         assert_eq!(x_at(&emu), Some((1, 2)));
+    }
+
+    /// Where `X` lands after `wire`, on a kitty terminal of 6 rows and 10
+    /// columns with 10x20-pixel cells.
+    fn x_after(wire: &str) -> Option<(u16, u16)> {
+        x_at(&graphics_emu(
+            Graphics::Kitty,
+            6,
+            10,
+            format!("{wire}X").as_bytes(),
+        ))
+    }
+
+    /// A placement may name its image by number (`I=`) rather than by id:
+    /// "All future commands that refer to images using the image number,
+    /// such as creating placements or deleting images, will act on only the
+    /// newest image with that number" (the protocol's "Requesting image ids
+    /// from the terminal"), which kitty's `handle_put_command` resolves
+    /// with `img_by_client_number`. termlens looked for an `i=`, found
+    /// none, and never moved the cursor, `c=` and `r=` given or not (#696).
+    #[test]
+    fn a_kitty_placement_by_image_number_moves_the_cursor() {
+        // The three rows of the issue. By id, the control: 2x3 cells.
+        assert_eq!(
+            x_after("\x1b_Ga=t,i=7,f=24,s=1,v=1;AAAA\x1b\\\x1b_Ga=p,i=7,c=2,r=3\x1b\\"),
+            Some((2, 2))
+        );
+        // The same by number.
+        assert_eq!(
+            x_after("\x1b_Ga=t,I=7,f=24,s=1,v=1;AAAA\x1b\\\x1b_Ga=p,I=7,c=2,r=3\x1b\\"),
+            Some((2, 2))
+        );
+        // And sized from the transmission: 30x50 px in 10x20 cells is 3x3.
+        assert_eq!(
+            x_after("\x1b_Ga=t,I=7,f=24,s=30,v=50;AAAA\x1b\\\x1b_Ga=p,I=7\x1b\\"),
+            Some((2, 3))
+        );
+    }
+
+    /// Which image a number names: the newest transmission that carried it
+    /// — a transmission by number always creates a new image, "even if an
+    /// existing image has the same number" — and no image sent under an id,
+    /// as an id names none sent under a number (#696).
+    #[test]
+    fn a_kitty_image_number_names_the_newest_image_sent_with_it() {
+        let big = "\x1b_Ga=t,I=7,f=24,s=30,v=50;AAAA\x1b\\";
+        let small = "\x1b_Ga=t,I=7,f=24,s=10,v=20;AAAA\x1b\\";
+        let place = "\x1b_Ga=p,I=7\x1b\\";
+        assert_eq!(x_after(&format!("{big}{small}{place}")), Some((0, 1)));
+        assert_eq!(x_after(&format!("{small}{big}{place}")), Some((2, 3)));
+        // The newest even when it declared no size, a PNG for one: there is
+        // then nothing to size the placement by, as for an id (#626).
+        let png = "\x1b_Ga=t,I=7,f=100;iVBORw0KGgo=\x1b\\";
+        assert_eq!(x_after(&format!("{big}{png}{place}")), Some((0, 0)));
+        // Another number, or an id of the same value, is another image.
+        for other in [
+            "\x1b_Ga=t,I=8,f=24,s=30,v=50;AAAA\x1b\\\x1b_Ga=p,I=7\x1b\\",
+            "\x1b_Ga=t,i=7,f=24,s=30,v=50;AAAA\x1b\\\x1b_Ga=p,I=7\x1b\\",
+            "\x1b_Ga=t,I=7,f=24,s=30,v=50;AAAA\x1b\\\x1b_Ga=p,i=7\x1b\\",
+        ] {
+            assert_eq!(x_after(other), Some((0, 0)), "{other:?}");
+        }
+        // The number is read off the first chunk of an upload, like the id.
+        assert_eq!(
+            x_after(
+                "\x1b_Ga=t,I=7,f=24,s=30,v=50,m=1;AAAA\x1b\\\x1b_Gm=0;AAAA\x1b\\\
+                 \x1b_Ga=p,I=7\x1b\\"
+            ),
+            Some((2, 3))
+        );
+        // `i=0` is no id, as in kitty (`if (g->id) … else if
+        // (g->image_number)`), so the number decides.
+        assert_eq!(
+            x_after(&format!("{big}\x1b_Ga=p,i=0,I=7\x1b\\")),
+            Some((2, 3))
+        );
+    }
+
+    /// A placement that names no image is not one: kitty reports "Put
+    /// graphics command without image id or number" and places nothing,
+    /// whatever `c=` and `r=` say. Neither is `i=0` or `I=0` a name.
+    #[test]
+    fn a_kitty_placement_that_names_no_image_does_not_move() {
+        let sent = "\x1b_Ga=t,i=7,f=24,s=30,v=50;AAAA\x1b\\";
+        for keys in ["a=p,c=2,r=3", "a=p,i=0,c=2,r=3", "a=p,I=0,c=2,r=3", "a=p"] {
+            assert_eq!(
+                x_after(&format!("{sent}\x1b_G{keys}\x1b\\")),
+                Some((0, 0)),
+                "{keys}"
+            );
+        }
     }
 
     /// A delete that frees an image makes kitty forget it, and a later
@@ -2658,7 +2932,7 @@ mod tests {
         wire.extend_from_slice(b"\x1b_Ga=t,f=24,s=20,v=40,i=8;AAAA\x1b\\\x1b_Ga=p,i=8\x1b\\X");
         let emu = graphics_emu(Graphics::Kitty, 6, 10, &wire);
         assert_eq!(x_at(&emu), Some((1, 2)));
-        assert_eq!(emu.graphics.len(), emu.graphics_forgets.len());
+        assert_eq!(emu.graphics.len(), emu.graphics_named.len());
     }
 
     /// A query that kitty took as an upload's last chunk completes the
@@ -2814,7 +3088,7 @@ mod tests {
             assert_eq!(emu.mode_state(mode), ModeState::Set, "mode {mode}");
         }
         assert_eq!(emu.mode_state(9), ModeState::Reset, "never asked for");
-        // The set is what was asked for; the protocol is vt100's collapse.
+        // The set is what was asked for; the protocol is the one set last.
         let screen = emu.snapshot();
         assert_eq!(screen.mouse_mode(), MouseMode::AnyMotion);
         assert_eq!(
@@ -2827,9 +3101,8 @@ mod tests {
         );
 
         // Releasing one member releases that member alone in the set, while
-        // vt100 — like xterm — turns reporting off, since the protocol it
-        // was reporting in is gone. Both facts are true; each is reported
-        // where it belongs.
+        // reporting turns off, as in xterm, where a reset of any member
+        // ends it. Both facts are true; each is reported where it belongs.
         let emu = emu_with(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1003l");
         assert_eq!(emu.mode_state(1003), ModeState::Reset);
         assert_eq!(emu.mode_state(1002), ModeState::Set);
@@ -2855,6 +3128,52 @@ mod tests {
         let emu = emu_with(b"\x1b[?1002h\x1b[?1002l");
         for mode in [9, 1000, 1002, 1003] {
             assert_eq!(emu.mode_state(mode), ModeState::Reset, "mode {mode}");
+        }
+    }
+
+    /// A reset of any tracking mode turns reporting off, whichever mode is
+    /// in force: xterm's `really_set_mousemode` sets `MOUSE_OFF` on a reset
+    /// of 9, 1000, 1002 or 1003 alike, and `Screen::mouse_mode` says so.
+    /// vt100 clears its mode only when the reset names the one it holds, so
+    /// after `?1002h ?1000l` the input path went on reporting (#693). The
+    /// set is a different fact and keeps what was asked for and not
+    /// disabled, as `DECRQM` reads it.
+    #[test]
+    fn a_reset_of_another_tracking_mode_turns_reporting_off() {
+        for (stream, asked) in [
+            (&b"\x1b[?1002h\x1b[?1000l"[..], MouseMode::ButtonMotion),
+            (b"\x1b[?9h\x1b[?1000l", MouseMode::Press),
+            (b"\x1b[?1000h\x1b[?1003h\x1b[?1000l", MouseMode::AnyMotion),
+            // In a list with a mode that is not a tracking mode.
+            (b"\x1b[?1003h\x1b[?25;1002l", MouseMode::AnyMotion),
+        ] {
+            let emu = emu_with(stream);
+            let at = String::from_utf8_lossy(stream).replace('\x1b', "^[");
+            assert_eq!(emu.input_modes().mouse, MouseMode::None, "{at}");
+            let screen = emu.snapshot();
+            assert_eq!(screen.mouse_mode(), MouseMode::None, "{at}");
+            assert_eq!(
+                screen.mouse_modes().iter().collect::<Vec<_>>(),
+                [asked],
+                "{at}: asked for, and not disabled"
+            );
+        }
+        // The last mode set is the one in force, in one list as across
+        // sequences, and setting one again after a reset turns it back on.
+        for (stream, in_force) in [
+            (&b"\x1b[?1003h\x1b[?1000h"[..], MouseMode::PressRelease),
+            (b"\x1b[?1003;9h", MouseMode::Press),
+            (
+                b"\x1b[?1002h\x1b[?1000l\x1b[?1002h",
+                MouseMode::ButtonMotion,
+            ),
+            // A reset naming no tracking mode leaves reporting alone.
+            (b"\x1b[?1002h\x1b[?1006l\x1b[?25l", MouseMode::ButtonMotion),
+        ] {
+            let emu = emu_with(stream);
+            let at = String::from_utf8_lossy(stream).replace('\x1b', "^[");
+            assert_eq!(emu.input_modes().mouse, in_force, "{at}");
+            assert_eq!(emu.snapshot().mouse_mode(), in_force, "{at}");
         }
     }
 

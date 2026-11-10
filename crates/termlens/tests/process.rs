@@ -521,7 +521,7 @@ fn a_panicking_child_puts_its_message_on_the_screen() -> termlens::Result<()> {
     // The runtime writes the location line and the message as separate
     // writes, so `contains("panicked")` is true one line before the message
     // exists — which went red on CI with the grid holding `panicked at
-    // …:281:37:` and nothing under it. Waiting for the message is rule 3 of
+    // …:281:37:` and nothing under it. Waiting for the message is rule 2 of
     // the wait-semantics contract (docs/DESIGN.md §2): name the last thing
     // the application paints, so that its truth implies the rest arrived.
     // "panicked" is then asserted rather than waited on — it cannot be

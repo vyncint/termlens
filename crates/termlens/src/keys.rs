@@ -411,7 +411,7 @@ pub(crate) fn mouse_utf8(button: u8, col: u16, row: u16) -> Vec<u8> {
 /// decimal. The button keeps the legacy `+ 32` — xterm writes the same
 /// value it would have sent as a byte — while the coordinates are plain
 /// 1-based numbers, which is what lifts the 222 limit. A release is button
-/// 3 and the same final `M`, as in the legacy form.
+/// 3 plus the modifier bits, and the same final `M`, as in the legacy form.
 pub(crate) fn mouse_urxvt(button: u8, col: u16, row: u16) -> Vec<u8> {
     format!(
         "\x1b[{};{};{}M",
