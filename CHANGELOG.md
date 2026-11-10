@@ -135,6 +135,13 @@ reads that marker.
   decoded behind its mark; without one the input is UTF-8 as before. The
   1 GiB bound holds for the decoded text too, and UTF-16 that is cut short
   or holds a lone surrogate is refused as not valid UTF-16.
+- A screen written to `TERMLENS_ARTIFACT_DIR` never replaces a file
+  already there (#711). The `<n>` in `<test>-<n>.screen.*` counts per
+  process, and `<test>` is the test's path inside its binary, so two test
+  binaries with a failing test of the same name, or a test that
+  cargo-nextest retried, both wrote `<test>-1`, and the report showed only
+  the second screen. The file is now created exclusively, and a taken
+  name moves `<n>` on. Names are unchanged when nothing collides.
 
 ## [0.11.8] - 2026-11-03
 
