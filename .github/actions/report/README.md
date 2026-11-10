@@ -26,6 +26,10 @@ rendered: insta keeps their new values in `.pending-snap` files, JSON
 records for `cargo insta review` rather than a screen, and the action does
 not collect them.
 
+GitHub drops a step's whole summary once more than 1 MiB is written to it,
+so the action stops adding screens at about 900 KiB. Every screen is still
+in the artifact, and the summary ends by saying how many it leaves out.
+
 Nothing to install: the action `cargo install`s `termlens-cli` on the
 runner. Inputs:
 
@@ -34,7 +38,11 @@ runner. Inputs:
   else `$RUNNER_TEMP/termlens`. A variable in the test step's own `env:`
   reaches that step only, so the action never sees it: pass the same value
   here, as above. Without it the action finds nothing, unless the value
-  happens to be `$RUNNER_TEMP/termlens`.
+  happens to be `$RUNNER_TEMP/termlens`. It must be an absolute path, in
+  both places: `cargo test` runs each test binary in its own package's
+  directory, so a relative `TERMLENS_ARTIFACT_DIR` puts each crate's
+  screens in that crate's directory, where the action does not look. Given
+  a relative one, the action warns and says so in the summary.
 - `name`: the artifact's, default `termlens-report`. Give each matrix leg
   its own, as above. upload-artifact refuses a second artifact of one name
   in a run, so with the default only one failing leg's screens are kept.

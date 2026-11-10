@@ -151,15 +151,23 @@ fn inspect_clears_and_selectively_sets_the_child_environment() {
         "cleared/selected environment missing from:\n{stdout}"
     );
 
+    // But for the caller's COLUMNS and LINES, which curses prefers to the
+    // terminal's size (#709), as `termlens inspect` leaves them out.
     let inherited = Command::new(bin)
         .env("TERMLENS_INSPECT_INHERITED", "yes")
-        .args(["--inherit-env"])
-        .args(["sh", "-c", "printf inherited:$TERMLENS_INSPECT_INHERITED"])
+        .env("COLUMNS", "200")
+        .env("LINES", "50")
+        .args(["--inherit-env", "--size", "40x10"])
+        .args([
+            "sh",
+            "-c",
+            "printf inherited:$TERMLENS_INSPECT_INHERITED:${COLUMNS-unset}:${LINES-unset}",
+        ])
         .output()
         .expect("inspect runs");
     let stdout = String::from_utf8_lossy(&inherited.stdout);
     assert!(
-        stdout.contains("inherited:yes"),
+        stdout.contains("inherited:yes:unset:unset"),
         "inherited environment missing from:\n{stdout}"
     );
 }

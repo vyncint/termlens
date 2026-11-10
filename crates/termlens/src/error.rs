@@ -23,7 +23,14 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// written there as it is embedded: `<test>-<n>.screen.json` with the
 /// `serde` feature, `<test>-<n>.screen.txt` (the `with_styles` rendering,
 /// which [`Screen::parse`] reads back) without, where `<test>` is the
-/// current thread's name — under `cargo test`, the test's path. Every such
+/// current thread's name — under `cargo test`, the test's path — and `<n>`
+/// counts this process's screens from 1, stepping past any name already in
+/// the directory: a file there is never replaced, so two test binaries
+/// with a test of the same name each leave their own. Give it an absolute
+/// path: a relative one is taken against the test process's working
+/// directory, and `cargo test` runs each test binary in its own package's
+/// directory, so in a workspace each crate's screens land in that crate's
+/// directory rather than in one place (#712). Every such
 /// error is recorded, an expected one included: a test that asserts a
 /// timeout or EOF leaves that screen in the directory too, so set the
 /// variable for the steps whose failures you want to see (#596). Unset, the
@@ -181,6 +188,7 @@ impl Error {
 /// tests can pick it up — the `report` action in this repository renders
 /// each into the pull request's step summary.
 pub(crate) mod artifact {
+    use std::io::{self, Write};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -190,8 +198,14 @@ pub(crate) mod artifact {
     pub(crate) const VAR: &str = "TERMLENS_ARTIFACT_DIR";
 
     /// One counter per test process, so two screens from one test are two
-    /// files rather than one overwritten.
+    /// files rather than one overwritten. It is not enough alone: another
+    /// process counts from 1 too, and its test may have the same name.
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// How many taken names one screen steps past before it gives up. Each
+    /// is a screen another process left in the directory, so this is far
+    /// past what one directory holds from a run.
+    const ATTEMPTS: usize = 1 << 16;
 
     /// Write `screen` to `$TERMLENS_ARTIFACT_DIR/<test>-<n>.screen.json`
     /// (with the `serde` feature) or `.screen.txt` (the `with_styles`
@@ -199,12 +213,17 @@ pub(crate) mod artifact {
     /// current thread's name, which under `cargo test` is the test's path.
     /// Best effort: a directory that cannot be written is reported once on
     /// stderr, and the error the screen came from is returned regardless.
+    ///
+    /// A file already there is never replaced: the name is created
+    /// exclusively, and a taken one moves `<n>` on. Two test binaries with a
+    /// test of the same name, or two attempts at one test under a runner
+    /// that retries, each count from 1 in a directory they share, and the
+    /// second screen used to replace the first (#711).
     pub(crate) fn write(screen: &Screen) {
         let Some(dir) = std::env::var_os(VAR).filter(|d| !d.is_empty()) else {
             return;
         };
         let dir = PathBuf::from(dir);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
         let thread = std::thread::current();
         let test: String = thread
             .name()
@@ -218,26 +237,46 @@ pub(crate) mod artifact {
                 }
             })
             .collect();
-        let (name, body) = render(screen, &format!("{test}-{n}"));
-        let path = dir.join(name);
-        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, body)) {
-            eprintln!("termlens: could not write {} ({VAR}): {e}", path.display());
+        let (ext, body) = render(screen);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("termlens: could not write {} ({VAR}): {e}", dir.display());
+            return;
         }
+        let mut path = PathBuf::new();
+        for _ in 0..ATTEMPTS {
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+            path = dir.join(format!("{test}-{n}.screen.{ext}"));
+            let created = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path);
+            match created.and_then(|mut file| file.write_all(body.as_bytes())) {
+                Ok(()) => return,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    eprintln!("termlens: could not write {} ({VAR}): {e}", path.display());
+                    return;
+                }
+            }
+        }
+        eprintln!(
+            "termlens: could not write {} ({VAR}): {ATTEMPTS} names in a row were taken",
+            path.display()
+        );
     }
 
+    /// The file extension after `.screen.`, and the file's contents.
     #[cfg(feature = "serde")]
-    fn render(screen: &Screen, stem: &str) -> (String, String) {
+    fn render(screen: &Screen) -> (&'static str, String) {
         let json =
             serde_json::to_string(screen).unwrap_or_else(|_| screen.with_styles().to_string());
-        (format!("{stem}.screen.json"), json)
+        ("json", json)
     }
 
+    /// The file extension after `.screen.`, and the file's contents.
     #[cfg(not(feature = "serde"))]
-    fn render(screen: &Screen, stem: &str) -> (String, String) {
-        (
-            format!("{stem}.screen.txt"),
-            screen.with_styles().to_string(),
-        )
+    fn render(screen: &Screen) -> (&'static str, String) {
+        ("txt", screen.with_styles().to_string())
     }
 }
 
