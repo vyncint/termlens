@@ -31,6 +31,15 @@ reads that marker.
   bracketed-paste reporting or to restore the tab stops should expect them
   kept, as a real xterm keeps them, and have the application reset each
   mode itself or send `RIS`. (#687)
+- A spawned program no longer inherits `COLUMNS` or `LINES` from the test
+  process, and `termlens inspect --inherit-env` no longer passes the
+  caller's (#709). curses and `tput` take both over the terminal's own
+  size, so a suite run from a shell that exported them had its program
+  lay out at that shell's size rather than at `size()` or `--size`, and
+  keep it after a resize. Without them the program asks the PTY. Set with
+  `.env()` or `--env`, either still reaches the program as given. A test
+  that relied on an inherited `COLUMNS` or `LINES` should set it with
+  `.env()`, or size the terminal with `size()` instead.
 
 ### Fixed
 

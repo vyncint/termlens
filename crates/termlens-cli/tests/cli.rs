@@ -1825,6 +1825,41 @@ fn inspect_clears_the_caller_env_unless_inherit_env_is_passed() -> termlens::Res
     Ok(())
 }
 
+/// `--inherit-env` leaves out the caller's `COLUMNS` and `LINES`, which
+/// curses and `tput` prefer to the terminal's size (#709): from a shell
+/// that exported them, the program laid out at the shell's size, not at
+/// `--size`. Given with `--env` they still reach it.
+#[test]
+#[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
+fn inspect_inherit_env_leaves_out_the_callers_columns_and_lines() -> termlens::Result<()> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let probe = "echo \"[${COLUMNS-unset} ${LINES-unset}]\"; stty size";
+    let run = |extra: &[&str]| -> termlens::Result<String> {
+        let mut args = vec!["inspect", "--size", "40x10", "--inherit-env"];
+        args.extend(extra);
+        args.extend(["sh", "-c", probe]);
+        let mut t = termlens::bin!(
+            "termlens",
+            size(60, 14),
+            env("PATH", &path),
+            env("COLUMNS", "200"),
+            env("LINES", "50"),
+            args(args)
+        )?;
+        assert_eq!(t.wait_exit()?.code(), Some(0), "{}", t.screen());
+        Ok(t.screen().text())
+    };
+    let s = run(&[])?;
+    assert!(
+        s.contains("[unset unset]"),
+        "the caller's size leaked in: {s}"
+    );
+    assert!(s.contains("10 40"), "{s}");
+    let s = run(&["--env", "COLUMNS=40"])?;
+    assert!(s.contains("[40 unset]"), "--env is not passed: {s}");
+    Ok(())
+}
+
 /// `--env KEY=VALUE` sets variables in the otherwise bare child
 /// environment, and splits on the **first** `=` so a value may contain
 /// more of them (#367).

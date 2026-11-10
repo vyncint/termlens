@@ -185,6 +185,74 @@ fn env_clear_blocks_inheritance_but_keeps_explicit_vars_and_term() -> termlens::
     Ok(())
 }
 
+/// `COLUMNS` and `LINES` are not inherited (#709). curses and `tput` take
+/// them over the terminal's own size, so a test run from a shell that
+/// exports them had its program lay out at that shell's width, not at the
+/// PTY's, and keep doing so after a resize. Set on the builder they still
+/// reach the child, as any variable does.
+///
+/// The test process cannot set its own environment safely while other
+/// tests run, so it runs itself again with both set, and that run is the
+/// one that spawns. A third variable set the same way shows the run did
+/// inherit the rest.
+#[test]
+fn columns_and_lines_are_not_inherited_but_can_be_set() -> termlens::Result<()> {
+    const NAME: &str = "columns_and_lines_are_not_inherited_but_can_be_set";
+    const CHILD: &str = "TERMLENS_COLUMNS_LINES_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let out = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("COLUMNS", "200")
+            .env("LINES", "50")
+            .output()?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "{}\n{stdout}\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return Ok(());
+    }
+    let steps = [
+        "kept=",
+        "--env",
+        CHILD,
+        " columns=",
+        "--env",
+        "COLUMNS",
+        " lines=",
+        "--env",
+        "LINES",
+        " .",
+        "--wait",
+    ];
+    let mut t = common::spawn_emit(Terminal::builder().size(40, 10), &steps)?;
+    t.wait_until(|s| s.contains(" ."))?;
+    assert!(
+        t.screen().contains("kept=1 columns=unset lines=unset ."),
+        "{}",
+        t.screen()
+    );
+    t.send(Key::Enter)?;
+    t.wait_exit()?;
+
+    let mut t = common::spawn_emit(
+        Terminal::builder().size(40, 10).env("COLUMNS", "33"),
+        &steps,
+    )?;
+    t.wait_until(|s| s.contains(" ."))?;
+    assert!(
+        t.screen().contains("kept=1 columns=33 lines=unset ."),
+        "{}",
+        t.screen()
+    );
+    t.send(Key::Enter)?;
+    t.wait_exit()?;
+    Ok(())
+}
+
 #[test]
 fn explicit_term_overrides_the_default() -> termlens::Result<()> {
     let mut t = common::spawn_emit(

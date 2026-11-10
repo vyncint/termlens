@@ -61,8 +61,8 @@ exits, or, once it has drawn something, its output has been silent for
 both, and a program still running when the wait ends is killed.
 The child environment is cleared except for PATH, and gets
 TERM=xterm-256color and SHELL=/bin/sh; --inherit-env keeps the caller's
-environment instead, but for TERM, and repeatable --env sets selected
-values, TERM included.
+environment instead, but for TERM, COLUMNS and LINES, and repeatable
+--env sets selected values, those three included.
 --cwd runs the program in DIR, which must be an existing directory. A
 relative DIR is taken from where inspect runs, and a relative program
 path such as ./myapp is then found inside DIR.

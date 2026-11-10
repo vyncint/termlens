@@ -1818,7 +1818,9 @@ impl TerminalBuilder {
     /// Set an environment variable for the child.
     ///
     /// Variables set here always reach the child, regardless of call order
-    /// relative to [`env_clear`](Self::env_clear).
+    /// relative to [`env_clear`](Self::env_clear). That includes `COLUMNS`
+    /// and `LINES`, the two the child never inherits (see
+    /// [`spawn`](Self::spawn)).
     #[must_use]
     pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         self.envs
@@ -2133,6 +2135,15 @@ impl TerminalBuilder {
     /// [`env_clear`](Self::env_clear) it also gets `SHELL=/bin/sh` unless
     /// `SHELL` was set explicitly, so its environment is a function of the
     /// builder alone rather than of the machine's login shell.
+    ///
+    /// Otherwise the child inherits the test process's environment, but for
+    /// `COLUMNS` and `LINES`. curses and `tput` prefer those to the
+    /// terminal's own size, so an inherited pair, exported by the shell
+    /// that ran the tests, laid the program out at that shell's size rather
+    /// than at [`size`](Self::size), and kept it there after a
+    /// [`resize`](Terminal::resize). Without them the program asks the PTY.
+    /// Set either with [`env`](Self::env) and it reaches the child as given
+    /// (before 0.11.9 both were inherited: #709).
     ///
     /// # Errors
     ///
