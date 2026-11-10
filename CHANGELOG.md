@@ -31,6 +31,20 @@ reads that marker.
   bracketed-paste reporting or to restore the tab stops should expect them
   kept, as a real xterm keeps them, and have the application reset each
   mode itself or send `RIS`. (#687)
+- `Screen::diff` and `termlens diff` take a cell that holds only
+  whitespace for the blank a terminal shows, whichever whitespace it is.
+  The text format strips a row's trailing whitespace by Unicode's
+  definition, so a no-break space (U+00A0) or an ideographic space
+  (U+3000) an application drew there parses back as blank cells, and the
+  diff of a screen against its own snapshot, or of a text save against its
+  JSON twin, marked a blank against a blank and `termlens diff` exited 1.
+  A no-break space is now the same as a space or an erased cell in the
+  same style, at the end of a row or inside one, and U+3000 with the
+  second column it takes is the same as two. `==` on `Screen`, the text
+  and the JSON are unchanged, and DESIGN §3 lists the case with what else
+  the text does not carry. A test that used `diff` to tell a no-break
+  space from a space should compare `cell(row, col).contents()` instead.
+  (#724)
 
 ### Fixed
 

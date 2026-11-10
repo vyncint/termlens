@@ -940,3 +940,56 @@ fn a_hidden_cursor_round_trips_as_the_same_picture() -> termlens::Result<()> {
     t.wait_exit()?;
     Ok(())
 }
+
+/// A no-break space or an ideographic space an application draws at the end
+/// of a row is trimmed from the text form with the padding, so it parses
+/// back as a blank cell. A terminal shows a blank for either, and `diff`
+/// compares pictures: the parsed screen, the screen it was saved from and
+/// that screen's JSON all diff empty, where the diff used to mark a blank
+/// against a blank (#724).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY re-renders wide characters into columns of its own choosing (#149)"
+)]
+fn a_row_ending_in_drawn_whitespace_round_trips_as_the_same_picture() -> termlens::Result<()> {
+    let mut t = emit(&[
+        "--raw",
+        "a\u{a0}\\r\\n\\e[41m\u{3000}\\e[0m\\r\\nREADY",
+        "--wait",
+    ])?;
+    t.wait_until(|s| s.contains("READY"))?;
+    let screen = t.screen();
+    assert_eq!(screen.cell(0, 1).unwrap().contents(), "\u{a0}");
+    let ideographic = screen.cell(1, 0).unwrap();
+    assert_eq!(ideographic.contents(), "\u{3000}");
+    assert!(ideographic.is_wide(), "{screen:?}");
+    assert!(screen.cell(1, 1).unwrap().is_wide_continuation());
+
+    let saved = screen.with_styles().to_string();
+    assert!(
+        !saved.contains(['\u{a0}', '\u{3000}']),
+        "both are trimmed from the text: {saved:?}"
+    );
+    let parsed = Screen::parse(&saved)?;
+    assert_eq!(parsed.cell(0, 1).unwrap().contents(), "");
+    assert!(!parsed.cell(1, 0).unwrap().is_wide());
+    assert_eq!(parsed.with_styles().to_string(), saved);
+    assert!(screen.diff(&parsed).is_empty(), "{}", screen.diff(&parsed));
+    assert!(parsed.diff(&screen).is_empty(), "{}", parsed.diff(&screen));
+
+    // The JSON carries both characters, and is the same picture as the text.
+    #[cfg(feature = "serde")]
+    {
+        let json = serde_json::to_string(&screen).expect("serializes");
+        let from_json: Screen = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(from_json, screen);
+        assert_eq!(from_json.cell(1, 0).unwrap().contents(), "\u{3000}");
+        let diff = from_json.diff(&parsed);
+        assert!(diff.is_empty(), "{diff}");
+    }
+
+    t.send(Key::Enter)?;
+    t.wait_exit()?;
+    Ok(())
+}

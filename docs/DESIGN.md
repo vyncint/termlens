@@ -649,6 +649,9 @@ Rules:
 3. **Trailing whitespace is stripped per line** (snapshot files stay
    readable and diff-able), but blanks are *preserved inside* the `Screen`
    grid, so `cell()`, `row_text()`, and `find()` coordinates are unaffected.
+   Whitespace is Unicode's (`str::trim_end`), so a no-break space or an
+   ideographic space the application drew at the end of a row is stripped
+   with the padding; "Reading it back" says what that costs.
 4. Wide characters occupy their real columns: the character appears once;
    its continuation cell contributes nothing to the text but does count
    for column arithmetic (`find` returns true terminal columns). The
@@ -854,12 +857,19 @@ against the original. It is not `==` to the original, and rule 5's last
 paragraph is why: equality is "the same observation" and the text format is
 deliberately blind to most of it. What does not survive is exactly what the
 rules above never wrote down — an erased cell and a written blank are one
-character either way; the out-of-band state, the title, the mode flags, the
-counters and the history, comes back default; and a hidden cursor's position
-is not recorded, so `cursor: hidden` parses back to a hidden cursor at
-`0,0`. `diff` reports none of those as a difference, which is the same claim
-from the other side: the text format is the *picture*, and two screens that
-render alike are the same picture. One header releases before 0.11.2 wrote
+character either way; whitespace of any other kind at the end of a row, a
+no-break space (U+00A0) or an ideographic space (U+3000) the application
+drew there, is stripped by rule 3 and comes back as blank cells, U+3000 as
+the two it covered (#724); the out-of-band state, the title, the mode
+flags, the counters and the history, comes back default; and a hidden
+cursor's position is not recorded, so `cursor: hidden` parses back to a
+hidden cursor at `0,0`. `diff` reports none of those as a difference, which
+is the same claim from the other side: the text format is the *picture*,
+and two screens that render alike are the same picture. For `diff` a cell
+that holds only whitespace is a blank wherever it sits, as it is on a
+terminal, so a no-break space inside a row does not differ from a space
+there either, though the text keeps it; `Cell::contents` tells the two
+apart, and so does the JSON. One header releases before 0.11.2 wrote
 does not render back as written: a visible cursor at `col == cols`, the
 pending-wrap column (#401), reads onto the last cell, as the JSON reader
 reads it, so the header comes back one column left (#643).

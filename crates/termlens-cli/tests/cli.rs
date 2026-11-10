@@ -192,6 +192,47 @@ fn diff_across_sizes_keeps_every_separator_in_one_column() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A text save and a JSON save of one screen are the same picture, a row
+/// ending in a no-break space or an ideographic space included (#724). The
+/// text form trims both with the padding and the JSON keeps them, so the
+/// diff of the two exited 1 over a blank against a blank. The screen is the
+/// one an `a`, a U+00A0, a new line and a U+3000 on a red background leave
+/// on 6x2.
+#[test]
+fn diff_of_a_text_save_and_its_json_twin_is_empty_over_trailing_whitespace() {
+    use std::process::Command;
+    let screen = Screen::parse("size: 6x2  cursor: 1,2\na\u{a0}\n\u{3000}\n\nstyles:\n1: 0-1 bg=1")
+        .expect("a 6x2 screen");
+    assert!(screen.cell(1, 0).expect("the wide cell").is_wide());
+    let text = screen.with_styles().to_string();
+    assert_eq!(
+        text, "size: 6x2  cursor: 1,2\na\n\n\nstyles:\n1: 0-1 bg=1",
+        "the text keeps neither character"
+    );
+    let dir = std::env::temp_dir().join(format!("termlens-diff-twins-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let (text_file, json_file) = (dir.join("screen.txt"), dir.join("screen.json"));
+    std::fs::write(&text_file, text).expect("write the text save");
+    let json = serde_json::to_string_pretty(&screen).expect("serialize");
+    assert!(
+        json.contains('\u{a0}') && json.contains('\u{3000}'),
+        "{json}"
+    );
+    std::fs::write(&json_file, json).expect("write the JSON save");
+    for (first, second) in [(&text_file, &json_file), (&json_file, &text_file)] {
+        let out = Command::new(env!("CARGO_BIN_EXE_termlens"))
+            .arg("diff")
+            .arg(first)
+            .arg(second)
+            .output()
+            .expect("run termlens");
+        let printed = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{printed}");
+        assert_eq!(printed, "no difference\n");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Two 1000x1000 screens that differ in every cell. Painting used to ask
 /// the diff about each cell in turn, which took 8 s at 80,000 changed cells
 /// and would not finish here (#595).

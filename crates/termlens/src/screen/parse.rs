@@ -5,9 +5,11 @@
 //! diffed and rendered outside the test run that produced it.
 //!
 //! What the text format does not carry cannot come back: the out-of-band
-//! state is default, and an erased cell and a written blank are both a
-//! blank. That is the format's contract, not a loss here — `Screen::diff`
-//! and the renderings see the same picture either way.
+//! state is default, an erased cell and a written blank are both a blank,
+//! and so is any other whitespace drawn at the end of a row, which the
+//! format strips with the padding. That is the format's contract, not a
+//! loss here — `Screen::diff` and the renderings see the same picture
+//! either way.
 
 use unicode_width::UnicodeWidthChar;
 
@@ -42,6 +44,14 @@ impl Screen {
     /// [`diff`](Self::diff)s empty against the original. It does not
     /// compare `==` to the original — the title, the modes, the counters
     /// and the history are not in the text and come back default.
+    ///
+    /// Whitespace at the end of a row is not carried, whichever whitespace
+    /// it is. The format strips a no-break space (U+00A0) or an ideographic
+    /// space (U+3000) an application drew there together with the blank
+    /// padding, so the cell comes back blank, and U+3000, which is two
+    /// columns wide, as two blank cells. A terminal shows a blank for each,
+    /// and [`diff`](Self::diff) does not report one as a difference. The
+    /// JSON (`serde` feature) keeps the character.
     ///
     /// ```
     /// # fn main() -> termlens::Result<()> {
