@@ -157,6 +157,14 @@ reads that marker.
   its summary says the path is relative instead of that no screen was
   left. The value is still searched as before, so a workflow that works
   today is unchanged.
+- The report action keeps its step summary under GitHub's 1 MiB limit
+  (#710). It appended every screen whole and never counted, and past the
+  limit GitHub replaces the step's whole summary with an error, small
+  entries included: three failing 250x80 coloured snapshots came to
+  720 KB, so five lost the report. The action now stops adding screens
+  before the next would pass about 900 KiB and ends the summary with a
+  line saying how many more there are. Every screen is still rendered into
+  the artifact.
 
 ## [0.11.8] - 2026-11-03
 

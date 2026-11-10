@@ -157,7 +157,15 @@ runs:
           echo "$fence"
         }
 
+        # GitHub drops a step's whole summary, small entries included, once
+        # more than 1 MiB is written to it, and nothing here counted (#710).
+        # Each entry is built aside and appended only while the summary
+        # stays within this budget, which leaves room for the closing lines.
+        # From the first entry that would pass it, every screen still goes
+        # to the artifact, and the summary says how many it does not show.
+        budget=921600
         n=0
+        unshown=0
         while IFS= read -r -d '' file; do
           n=$((n + 1))
           # upload-artifact refuses a path holding any of these, and then the
@@ -170,6 +178,7 @@ runs:
           # used to leave an empty .svg in the artifact. Now it leaves none.
           termlens render --svg  --out "${out}/${stem}.svg"  "$file" || true
           termlens render --html --out "${out}/${stem}.html" "$file" || true
+          if [ "$unshown" -gt 0 ]; then unshown=$((unshown + 1)); continue; fi
           termlens render --text "$file" > "${work}/screen.txt" \
             || echo "(termlens could not read this file)" >> "${work}/screen.txt"
           {
@@ -189,12 +198,23 @@ runs:
             esac
             echo "</details>"
             echo
-          } >> "$GITHUB_STEP_SUMMARY"
+          } > "${work}/entry.md"
+          # `wc -c` pads its count with spaces on macOS; $(( )) drops them.
+          if [ $(($(wc -c < "$GITHUB_STEP_SUMMARY") + $(wc -c < "${work}/entry.md"))) -gt "$budget" ]; then
+            unshown=1
+            continue
+          fi
+          cat "${work}/entry.md" >> "$GITHUB_STEP_SUMMARY"
         done < "${work}/files.z"
+        if [ "$unshown" -gt 0 ]; then
+          if [ "$unshown" -eq 1 ]; then more="1 more screen is"; else more="${unshown} more screens are"; fi
+          echo "${more} not shown here, to keep this summary under GitHub's 1 MiB limit for a step; the artifact holds every screen." >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+        fi
         if [ "$n" -gt 0 ]; then
           echo "SVG and HTML renderings of each are in the \`${ARTIFACT_NAME:-termlens-report}\` artifact." >> "$GITHUB_STEP_SUMMARY"
         fi
-        echo "rendered ${n} screen(s) into the step summary"
+        echo "rendered ${n} screen(s), $((n - unshown)) of them into the step summary"
 
     - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:

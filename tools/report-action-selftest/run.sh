@@ -26,6 +26,10 @@
 #     TERMLENS_ARTIFACT_DIR: cargo put the screens in a crate's directory,
 #     so the step warns and its summary says why it found none (#712); an
 #     absolute one, Windows drive paths included, draws no warning
+#   - six screens of about 200 KB each, 1.2 MB in all: the summary stops
+#     before GitHub's 1 MiB limit, which drops a step's whole summary, says
+#     how many more screens the artifact holds, and the artifact holds all
+#     six (#710)
 #
 # Root reads a chmod 000 directory anyway, so as root the first two cases
 # cannot fail and are skipped by name rather than passed.
@@ -269,6 +273,38 @@ for abs in 'D:\a\_temp\termlens' 'D:/a/_temp/termlens' '\\server\share\termlens'
   input="$abs"
   expect "  and ${abs} is absolute, with no warning"
 done
+
+# GitHub drops a step's whole summary past 1 MiB, small entries included,
+# and the step never counted what it wrote (#710). Four of these screens
+# fit under the step's 900 KiB budget and a fifth would not: the summary
+# shows four, names the other two, and the artifact holds all six.
+workspace big
+rm -rf "$scratch/blocks"; mkdir -p "$scratch/blocks"
+for i in 1 2 3 4 5 6; do
+  awk -v i="$i" 'BEGIN { for (r = 0; r < 2000; r++) printf "screen %d row %091d\n", i, r }' \
+    > "$artifacts/big-$i.screen.txt"
+done
+expect "screens past 1 MiB stop before the limit and name the rest" \
+  "<code>$artifacts/big-4.screen.txt</code>" \
+  "2 more screens are not shown here" "termlens-report"
+size=$(($(wc -c < "$rt/summary.md")))
+label="  and the summary is under 900 KiB"
+if [ "$size" -le 921600 ]; then
+  printf '  ok    %-58s %s bytes\n' "$label" "$size"
+else
+  printf '  FAIL  %-58s %s bytes\n' "$label" "$size" >&2
+  status=1
+fi
+verbatim "  holding the first four screens verbatim" 4 \
+  "$artifacts/big-1.screen.txt" "$artifacts/big-2.screen.txt" \
+  "$artifacts/big-3.screen.txt" "$artifacts/big-4.screen.txt"
+label="  and the artifact holds all six"
+if [ "$(ls "$rt/termlens-report" | grep -c '[.]svg$')" -eq 6 ]; then
+  printf '  ok    %-58s\n' "$label"
+else
+  printf '  FAIL  %-58s artifact holds: %s\n' "$label" "$(ls "$rt/termlens-report")" >&2
+  status=1
+fi
 
 if [ "$status" -eq 0 ]; then
   echo "report action selftest: the render step writes its summary in every case"

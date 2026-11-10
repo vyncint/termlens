@@ -26,6 +26,10 @@ rendered: insta keeps their new values in `.pending-snap` files, JSON
 records for `cargo insta review` rather than a screen, and the action does
 not collect them.
 
+GitHub drops a step's whole summary once more than 1 MiB is written to it,
+so the action stops adding screens at about 900 KiB. Every screen is still
+in the artifact, and the summary ends by saying how many it leaves out.
+
 Nothing to install: the action `cargo install`s `termlens-cli` on the
 runner. Inputs:
 
