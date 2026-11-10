@@ -801,7 +801,10 @@ Rules:
    column. A terminal declared without the protocol ignores the escape and
    moves nothing, which is the default. The cursor is moved with line feeds
    and a cursor-forward fed to the grid, so a scroll it causes reaches
-   history like any other.
+   history like any other. Past a scroll region's bottom margin, where line
+   feeds stop on the margin, kitty leaves the cursor below it, on the
+   image's last row (#697): a `VPA` fed after the line feeds puts it there,
+   vt100 taking that row as absolute whatever the margins say.
 
    Decoding sits behind the `decode` feature and runs on demand, never as the
    bytes arrive: a suite that only asks whether an image went out should pay

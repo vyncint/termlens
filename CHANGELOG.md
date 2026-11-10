@@ -39,6 +39,18 @@ reads that marker.
   reads the release bytes of a modified click or drag in one of those
   three encodings should expect the modifier bits on the release too: `+4`
   for shift, `+8` for alt, `+16` for ctrl. (#701)
+- A kitty placement that runs past the bottom of a scroll region leaves
+  the cursor where kitty 0.49 leaves it: on the image's last row, below the
+  margin, clamped to the screen, with the region scrolled by as many rows
+  as that row is past the margin. termlens moved it a line feed at a time,
+  so the region scrolled the same but the cursor stopped on the margin:
+  `CSI 1;10 r`, the cursor on row 7 and `a=T,c=2,r=5` left it on row 9
+  where kitty leaves it on row 11. The protocol leaves this position open;
+  `docs/LIMITATIONS.md` now says termlens follows kitty, and that it does
+  not where the cursor starts below the region, which kitty scrolls too. A
+  test that placed an image past a scroll region's bottom and asserted
+  where the next text lands should expect it that many rows lower, below
+  the margin, and no lower than the screen's last row. (#697)
 
 ### Fixed
 

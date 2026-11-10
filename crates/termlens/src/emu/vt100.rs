@@ -245,9 +245,20 @@ impl Vt100Emulator {
     /// column past its right edge, or to the start of the next row when that
     /// is past the screen's. No count scrolls further than the screen is
     /// tall: past that every row it pushed out was blank.
+    ///
+    /// Past the bottom margin of a scroll region, kitty does not leave the
+    /// cursor on the margin, as line feeds do: `screen_handle_graphics_command`
+    /// moves it to the image's last row, scrolls the region by as many rows
+    /// as that is past the margin, and then clamps the cursor to the screen —
+    /// to the region only under origin mode, and only when the last row was
+    /// inside it before the wrap to the next row. The protocol leaves the
+    /// position open ("undefined, and up to implementations"); termlens
+    /// follows kitty (#697). Not where the cursor starts below the region:
+    /// kitty scrolls the region then too, which line feeds there do not do,
+    /// and termlens keeps the line feeds.
     fn move_past_image(&mut self, step: ImageStep) {
         let (screen_rows, screen_cols) = size(self.parser.screen());
-        let (_, col) = self.cursor_position();
+        let (row, col) = self.cursor_position();
         let (rows, across) = match step {
             ImageStep::Kitty { cols, rows } => (rows, Some(u32::from(col).saturating_add(cols))),
             ImageStep::Sixel { rows } => (rows, None),
@@ -263,6 +274,18 @@ impl Vt100Emulator {
             _ => {}
         }
         self.feed(&bytes);
+        // Where kitty leaves it, clamped to the screen: the line feeds above
+        // stopped short of it only by scrolling at the bottom margin, and
+        // scrolled the region by exactly kitty's count.
+        let last = u32::from(row).saturating_add(rows.saturating_sub(1));
+        let kitty_row = (u32::from(row) + down).min(u32::from(screen_rows.saturating_sub(1)));
+        let (fed_row, _) = self.cursor_position();
+        let held_in_region = self.tracker.origin_mode() && u32::from(fed_row) == last;
+        if across.is_some() && u32::from(fed_row) < kitty_row && !held_in_region {
+            // `VPA`, which vt100 takes as an absolute row whatever the
+            // margins and origin mode say.
+            self.feed(format!("\x1b[{}d", kitty_row + 1).as_bytes());
+        }
     }
 
     /// Hand the grid the bytes the tracker has already scanned.
@@ -2578,6 +2601,87 @@ mod tests {
         let screen = emu.snapshot();
         assert_eq!(screen.find("X"), Some((3, 2)));
         assert_eq!(screen.scrollback_text(), "top\n");
+    }
+
+    /// A placement past the bottom of a scroll region leaves the cursor
+    /// where kitty 0.49.2 leaves it (#697): on the image's last row, below
+    /// the margin, clamped to the screen, with the region scrolled by as
+    /// many rows as that is past the margin. Line feeds stopped on the
+    /// margin. The protocol leaves the position "undefined, and up to
+    /// implementations". 20 rows of 24 columns, `X` placed after a 2-column
+    /// image, so it lands one column past the image's last row.
+    #[test]
+    fn a_kitty_placement_past_a_scroll_region_leaves_the_cursor_where_kitty_does() {
+        let place = |setup: &str, rows: u32| {
+            let wire = format!("{setup}\x1b_Ga=T,f=24,s=1,v=1,c=2,r={rows};AAAA\x1b\\X");
+            let screen = graphics_emu(Graphics::Kitty, 20, 24, wire.as_bytes()).snapshot();
+            (screen.find("X"), screen.find("MARK"), screen.find("LOW"))
+        };
+        // Region rows 0-9, `MARK` on row 2, `LOW` on row 12 below it.
+        let region = "\x1b[1;10r\x1b[3;1HMARK\x1b[13;1HLOW";
+        // From row 7, 5 rows: the last is row 11, 2 past the margin. The
+        // region scrolls by 2 and the cursor stays on row 11; below the
+        // region nothing moves.
+        assert_eq!(
+            place(&format!("{region}\x1b[8;1H"), 5),
+            (Some((11, 2)), Some((0, 0)), Some((12, 0)))
+        );
+        // Under origin mode too: the last row is outside the region, so
+        // kitty clamps to the screen. `CSI 8;1H` is row 7 there as well.
+        assert_eq!(
+            place(&format!("{region}\x1b[?6h\x1b[8;1H"), 5),
+            (Some((11, 2)), Some((0, 0)), Some((12, 0)))
+        );
+        // Past the screen's bottom: clamped to the last row, the region
+        // scrolled by the whole overshoot (row 7 + 14 is 12 past row 9).
+        assert_eq!(
+            place(&format!("{region}\x1b[8;1H"), 15),
+            (Some((19, 2)), None, Some((12, 0)))
+        );
+        // Inside the region it is as before.
+        assert_eq!(
+            place(&format!("{region}\x1b[3;1H"), 5),
+            (Some((6, 2)), Some((2, 0)), Some((12, 0)))
+        );
+        // From above a region, as from inside it.
+        // Region rows 4-9: from row 1, 12 rows end on row 12, 3 past it.
+        let lower = "\x1b[5;10r\x1b[9;1HMARK\x1b[15;1HLOW";
+        assert_eq!(
+            place(&format!("{lower}\x1b[2;1H"), 12),
+            (Some((12, 2)), Some((5, 0)), Some((14, 0)))
+        );
+        // From below the region, the line feeds' position, which is kitty's
+        // too — but the region does not scroll. kitty scrolls it then,
+        // which termlens does not copy.
+        assert_eq!(
+            place(&format!("{region}\x1b[16;1H"), 3),
+            (Some((17, 2)), Some((2, 0)), Some((12, 0)))
+        );
+        // Without a region, the screen scrolls and the cursor is on its
+        // last row, as before.
+        assert_eq!(
+            place("\x1b[3;1HMARK\x1b[13;1HLOW\x1b[18;1H", 5),
+            (Some((19, 2)), Some((0, 0)), Some((10, 0)))
+        );
+    }
+
+    /// A wrap to the next row past the margin, as kitty does it: the last
+    /// row is the margin, the cursor wraps to the row below it, and the
+    /// region scrolls by one. kitty then clamps the cursor to the screen,
+    /// leaving it below the margin — unless origin mode is set, where the
+    /// last row was inside the region and the cursor is clamped to it.
+    #[test]
+    fn a_kitty_placement_that_wraps_past_a_scroll_region_moves_as_kitty_does() {
+        let place = |modes: &str| {
+            let wire = format!(
+                "\x1b[1;10r{modes}\x1b[3;1HMARK\x1b[10;23H\
+                 \x1b_Ga=T,f=24,s=1,v=1,c=2,r=1;AAAA\x1b\\X"
+            );
+            let screen = graphics_emu(Graphics::Kitty, 20, 24, wire.as_bytes()).snapshot();
+            (screen.find("X"), screen.find("MARK"))
+        };
+        assert_eq!(place(""), (Some((10, 0)), Some((1, 0))));
+        assert_eq!(place("\x1b[?6h"), (Some((9, 0)), Some((1, 0))));
     }
 
     #[test]

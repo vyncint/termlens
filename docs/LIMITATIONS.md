@@ -123,7 +123,16 @@ CHANGELOG entry.
   PNG (`f=100`) placed without `c=` and `r=`, a placement of an image whose
   transmission has left the payload log, or one that names neither an id
   nor a number, does not move it. Whether kitty would have loaded the
-  image at all is not knowable here, so a placement is taken to succeed. A
+  image at all is not knowable here, so a placement is taken to succeed.
+  Past the bottom of a scroll region the protocol leaves the cursor's
+  position open ("undefined, and up to implementations"), and termlens
+  follows kitty 0.49: the region scrolls by as many rows as the image's
+  last row is past the margin, and the cursor stays on that row, below the
+  margin, clamped to the screen — or to the region, under origin mode, when
+  only the wrap to the next row took it past the margin. It does not follow
+  kitty for a cursor that starts below the region: kitty scrolls the
+  region then too, and termlens moves the cursor as line feeds would there,
+  scrolling nothing. A
   `Graphics::Sixel` terminal with a `cell_size()` moves it to the image's
   last text row, as xterm does with sixel scrolling on. Sixel display mode
   (`CSI ? 80 h`), xterm's extra scroll for a trailing `-` on the bottom row,

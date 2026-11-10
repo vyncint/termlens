@@ -1009,6 +1009,11 @@ impl SeqTracker {
         }
     }
 
+    /// Whether origin mode (`DECOM`) is set on the screen on display.
+    pub(crate) fn origin_mode(&self) -> bool {
+        self.frame().origin
+    }
+
     /// Save the character sets into the slot of the screen on display.
     fn save_charsets(&mut self) {
         let saved = SavedCharsets {
