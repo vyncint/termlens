@@ -535,8 +535,8 @@ pub(crate) enum Query {
     },
     /// Recognized as a question, but one termlens has no answer for
     /// (XTGETTCAP, kitty `CSI ? u`, DECRQSS, `OSC 4`/`OSC 52`, other
-    /// DSR/DA/XTWINOPS reports, …). Carries a printable rendering for
-    /// diagnostics.
+    /// DSR/DA/XTWINOPS reports, a kitty transmission or placement kitty
+    /// would answer, …). Carries a printable rendering for diagnostics.
     Unanswerable(String),
 }
 
@@ -614,6 +614,82 @@ impl MidUpload {
             Some(b"d") => MidUpload::Aborts,
             Some(_) => MidUpload::Beside,
         }
+    }
+}
+
+/// The reply kitty owes a transmission or a placement, which termlens does
+/// not send (#680).
+///
+/// kitty answers one that names an image — `i=…;OK`, or an error — through
+/// `finish_command_response` in its `graphics.c`: only when the command
+/// carries `i=` or `I=`, an `OK` only once the image's data has loaded (the
+/// last chunk of an upload), `q=1` suppressing the `OK` and `q=2` every
+/// reply. That `OK` says the image loaded, which termlens cannot know: it
+/// opens no file the program under test points at and decodes nothing
+/// without the `decode` feature. So the reply is not invented. The command
+/// is named in the next timeout instead, as an unanswered query is, since an
+/// application that waits for the reply waits for ever — unless it asked
+/// for quiet, when kitty would have sent nothing either. A command naming
+/// both `i=` and `I=` is refused with an error, which only `q=2` silences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KittyAsk {
+    /// The `i=` and `I=` of the command that started the load, nonzero.
+    id: bool,
+    number: bool,
+    /// Its `q=`, 0 when absent.
+    quiet: u32,
+    /// Its printable rendering, for the timeout note.
+    shape: String,
+}
+
+impl KittyAsk {
+    /// What a transmission (`a=t`, `a=T`, no action) or a placement (`a=p`)
+    /// asks for; `None` for any other action. Frames (`a=f`) and composes
+    /// (`a=c`), which kitty answers too, are not covered.
+    fn of(keys: &[u8], shape: String) -> Option<Self> {
+        let action = keys
+            .split(|&b| b == b',')
+            .find_map(|pair| pair.strip_prefix(b"a="));
+        if !matches!(action, None | Some(b"t" | b"T" | b"p")) {
+            return None;
+        }
+        let nonzero = |name: &[u8]| kitty_key(keys, name).is_some_and(|value| value != 0);
+        Some(Self {
+            id: nonzero(b"i="),
+            number: nonzero(b"I="),
+            quiet: kitty_key(keys, b"q=").unwrap_or(0),
+            shape,
+        })
+    }
+
+    /// kitty's refusal of a command naming both an image id and an image
+    /// number, sent at once — on the escape itself, before any load.
+    fn refused(&self) -> bool {
+        self.id && self.number && self.quiet < 2
+    }
+
+    /// The `OK` kitty sends once the data has loaded. `quiet` is the last
+    /// escape's `q=`: a nonzero one overrides the first's, as kitty's `if
+    /// (g->quiet) lg->quiet = g->quiet` does for a continuation chunk.
+    fn answered(&self, quiet: u32) -> bool {
+        let quiet = if quiet != 0 { quiet } else { self.quiet };
+        !(self.id && self.number) && (self.id || self.number) && quiet == 0
+    }
+}
+
+/// The escape completing `payload`, and the reply kitty owes it if any —
+/// named in the next timeout rather than sent (#680).
+fn kitty_completed(
+    completed: Option<(GraphicsPayload, Placement)>,
+    unanswered: Option<String>,
+) -> SeqEvent {
+    match (completed, unanswered) {
+        (Some((payload, placement)), Some(shape)) => {
+            SeqEvent::GraphicsQuery(Box::new(payload), placement, Query::Unanswerable(shape))
+        }
+        (Some((payload, placement)), None) => SeqEvent::Graphics(Box::new(payload), placement),
+        (None, Some(shape)) => SeqEvent::Query(Query::Unanswerable(shape)),
+        (None, None) => SeqEvent::None,
     }
 }
 
@@ -782,6 +858,10 @@ pub(crate) struct SeqTracker {
     /// which removes the very image being loaded, while the loader still
     /// points at it. Never set while `building` is in progress.
     orphaned_load: bool,
+    /// The reply the command that started `building` asks kitty for, owed
+    /// once its last chunk arrives (#680). Read only while `building` is in
+    /// progress, and set by every escape that starts it.
+    upload_ask: Option<KittyAsk>,
     /// How many payload bytes may be kept for inspection. Counting is
     /// unaffected by it; only the data is dropped.
     capture: usize,
@@ -939,6 +1019,7 @@ impl SeqTracker {
             counts: GraphicsCounts::default(),
             building: GraphicsBuilder::default(),
             orphaned_load: false,
+            upload_ask: None,
             capture,
             frame_printable: 0,
             focus_events: false,
@@ -1238,6 +1319,8 @@ impl SeqTracker {
     fn abandon_upload(&mut self) {
         self.counts.bytes += self.building.abandon();
         self.orphaned_load = false;
+        // Nothing of it completes here, so no reply to it is named (#680).
+        self.upload_ask = None;
     }
 
     /// True while the application has focus reporting (mode 1004) enabled.
@@ -1938,15 +2021,28 @@ impl SeqTracker {
                                 self.dcs_body_full,
                                 self.capture,
                             );
-                            return match beside.finish_placed() {
-                                Some((payload, placement)) => {
-                                    self.counts.record(&payload);
-                                    SeqEvent::Graphics(Box::new(payload), placement)
-                                }
-                                None => SeqEvent::None,
-                            };
+                            let completed = beside.finish_placed();
+                            if let Some((payload, _)) = &completed {
+                                self.counts.record(payload);
+                            }
+                            let unanswered = KittyAsk::of(keys, self.seq_printable())
+                                .filter(|ask| ask.refused() || ask.answered(0))
+                                .map(|ask| ask.shape);
+                            return kitty_completed(completed, unanswered);
                         }
                     }
+                }
+                // The reply kitty owes this escape at once, and the one it
+                // owes the load this escape starts once the load completes
+                // (#680): see `KittyAsk`. A continuation asks nothing of its
+                // own; it only finishes what the first chunk asked.
+                let mut unanswered = None;
+                if !self.building.in_progress() {
+                    let ask = KittyAsk::of(keys, self.seq_printable());
+                    if let Some(ask) = ask.as_ref().filter(|ask| ask.refused()) {
+                        unanswered = Some(ask.shape.clone());
+                    }
+                    self.upload_ask = ask.filter(|ask| !ask.refused());
                 }
                 // One image, however many escapes it took. `m=1` says
                 // another follows; the transmission is not an image until
@@ -1960,15 +2056,17 @@ impl SeqTracker {
                     self.capture,
                 );
                 if key_is(keys, b"m", b"1") {
-                    return SeqEvent::None;
+                    return kitty_completed(None, unanswered);
                 }
-                return match self.building.finish_placed() {
-                    Some((payload, placement)) => {
-                        self.counts.record(&payload);
-                        SeqEvent::Graphics(Box::new(payload), placement)
-                    }
-                    None => SeqEvent::None,
-                };
+                let quiet = kitty_key(keys, b"q=").unwrap_or(0);
+                if let Some(ask) = self.upload_ask.take().filter(|ask| ask.answered(quiet)) {
+                    unanswered = Some(ask.shape);
+                }
+                let completed = self.building.finish_placed();
+                if let Some((payload, _)) = &completed {
+                    self.counts.record(payload);
+                }
+                return kitty_completed(completed, unanswered);
             }
             return self.kitty_query(keys);
         }
@@ -2025,7 +2123,9 @@ impl SeqTracker {
     /// Only an explicit `a=q` is a question. A transmission is an
     /// instruction, and classifying one as a query would put "the
     /// application queried the terminal" into the next timeout of every
-    /// application that draws — a false diagnosis, and a loud one.
+    /// application that draws — a false diagnosis, and a loud one. Only one
+    /// that names an image and does not ask for quiet is named, since kitty
+    /// owes it a reply termlens does not send (#680): see `KittyAsk`.
     ///
     /// A command naming both an image id and an image number is refused
     /// before anything else is looked at, and a query without an id right
@@ -2816,6 +2916,120 @@ mod tests {
         assert_eq!(seen[0].data(), Some(&b"AAAABBBB"[..]));
     }
 
+    /// An upload cut by a sixel or a hard reset is left undefined by the
+    /// protocol: "the client **must** finish sending all chunks for a single
+    /// image before sending any other graphics related escape codes" (its
+    /// "Remote client" section). termlens drops the upload on either, so the
+    /// chunk that would have been its last is a transmission of its own,
+    /// with none of the upload's facts, and nothing is owed a reply for it
+    /// (#680). kitty 0.49 does otherwise, and neither is a promise: it
+    /// ignores the sixel and completes the upload, and after a reset it
+    /// refuses the chunk (`EILSEQ`). Pinned so a change is a decision.
+    #[test]
+    fn the_last_chunk_after_a_sixel_or_reset_is_no_part_of_the_upload() {
+        let last: &[u8] = b"\x1b_Gm=0;BBBB\x1b\\";
+        for between in [RED_SIXEL, b"\x1bc"] {
+            let shown = String::from_utf8_lossy(between);
+            let (seen, queries, tracker) = kitty_events(&[UPLOAD_OF_5, between, last].concat());
+            let kitty: Vec<_> = seen
+                .iter()
+                .filter(|payload| payload.protocol() == GraphicsProtocol::Kitty)
+                .collect();
+            assert_eq!(kitty.len(), 1, "{shown}: {seen:?}");
+            assert_eq!(kitty[0].id(), None, "{shown}: not the upload's: {seen:?}");
+            assert_eq!(kitty[0].size(), None, "{shown}: {seen:?}");
+            assert_eq!(kitty[0].chunks(), 1, "{shown}: {seen:?}");
+            assert_eq!(kitty[0].data(), Some(&b"BBBB"[..]), "{shown}");
+            assert_eq!(queries, [], "{shown}: the upload's reply is not owed");
+            assert_eq!(tracker.graphics().kitty, 1, "{shown}");
+        }
+    }
+
+    /// kitty answers a transmission or a placement that names an image
+    /// (`finish_command_response` in its `graphics.c`) unless `q=` asks for
+    /// quiet. termlens sends no reply, since it cannot know whether the
+    /// image loaded, and names the command instead (#680): the payload
+    /// comes with an unanswerable query carrying the shape of the escape
+    /// that asked — for an upload, its first chunk, named at its last.
+    #[test]
+    fn a_kitty_command_kitty_would_answer_is_named_unanswered() {
+        fn named(wire: &[u8]) -> Vec<String> {
+            let (seen, queries, _) = kitty_events(wire);
+            assert!(!seen.is_empty(), "still captured: {wire:?}");
+            queries
+                .into_iter()
+                .map(|query| match query {
+                    Query::Unanswerable(shape) => shape,
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        }
+        let named_as = |wire: &[u8], shape: &str| {
+            assert_eq!(named(wire), [shape], "{}", String::from_utf8_lossy(wire));
+        };
+        let unnamed = |wire: &[u8]| {
+            assert_eq!(
+                named(wire),
+                [] as [String; 0],
+                "{}",
+                String::from_utf8_lossy(wire)
+            );
+        };
+
+        // Transmissions, by id and by number, with and without an action.
+        named_as(
+            b"\x1b_Gi=7,a=T,f=24,s=1,v=1;QUJD\x1b\\",
+            "^[_Gi=7,a=T,f=24,s=1,v=1;",
+        );
+        named_as(
+            b"\x1b_Gi=7,f=24,s=1,v=1;QUJD\x1b\\",
+            "^[_Gi=7,f=24,s=1,v=1;QUJD",
+        );
+        named_as(
+            b"\x1b_GI=3,a=t,f=24,s=1,v=1;QUJD\x1b\\",
+            "^[_GI=3,a=t,f=24,s=1,v=1;",
+        );
+        // A file transmission: kitty would read the file and say.
+        named_as(b"\x1b_Gi=7,t=f;L3RtcC94\x1b\\", "^[_Gi=7,t=f;L3RtcC94^[\\");
+        // A placement.
+        named_as(b"\x1b_Ga=p,i=7\x1b\\", "^[_Ga=p,i=7^[\\");
+        // Quiet: `q=1` silences the `OK`, `q=2` everything.
+        for quiet in [b"q=1", b"q=2"] {
+            let quiet = String::from_utf8_lossy(quiet);
+            unnamed(format!("\x1b_Gi=7,{quiet},a=T,f=24,s=1,v=1;QUJD\x1b\\").as_bytes());
+            unnamed(format!("\x1b_Ga=p,i=7,{quiet}\x1b\\").as_bytes());
+        }
+        // Nothing to address a reply to, and actions kitty does not answer.
+        unnamed(b"\x1b_Ga=T,f=24,s=1,v=1;QUJD\x1b\\");
+        unnamed(b"\x1b_Gi=0,a=T,f=24,s=1,v=1;QUJD\x1b\\");
+        unnamed(b"\x1b_Ga=d,d=I,i=7\x1b\\");
+        // Both an id and a number: refused with an error, which `q=1` does
+        // not silence.
+        named_as(b"\x1b_Ga=p,i=7,I=3,q=1\x1b\\", "^[_Ga=p,i=7,I=3,q=1^[\\");
+        unnamed(b"\x1b_Ga=p,i=7,I=3,q=2\x1b\\");
+
+        // An upload is answered once, at its last chunk, and the first
+        // chunk's quiet holds unless a later one sets its own.
+        let first = UPLOAD_OF_5;
+        let last: &[u8] = b"\x1b_Gm=0;BBBB\x1b\\";
+        let (_, queries, _) = kitty_events(first);
+        assert_eq!(queries, [], "nothing owed before the last chunk");
+        named_as(&[first, last].concat(), "^[_Ga=T,f=32,s=2,v=1,i=5,");
+        unnamed(&[first, b"\x1b_Gm=0,q=1;BBBB\x1b\\"].concat());
+        unnamed(
+            &[
+                b"\x1b_Ga=T,f=32,s=2,v=1,i=5,q=2,m=1;AAAA\x1b\\".as_slice(),
+                last,
+            ]
+            .concat(),
+        );
+        // A placement in the middle of an upload is answered for itself.
+        let (_, queries, _) = kitty_events(&[first, b"\x1b_Ga=p,i=9\x1b\\"].concat());
+        assert_eq!(queries, [Query::Unanswerable("^[_Ga=p,i=9^[\\".into())]);
+        // And one dropped by a delete owes nothing.
+        unnamed(&[first, b"\x1b_Ga=d,d=i,i=5\x1b\\", last].concat());
+    }
+
     /// Only an APC opening with `G` is kitty's, continuation chunks
     /// included. Any other APC used to be taken as the upload's next chunk —
     /// and, carrying no `m=1`, as its last. kitty ignores one, and so the
@@ -3032,7 +3246,14 @@ mod tests {
             let shown = String::from_utf8_lossy(query);
             assert_eq!(seen.len(), 1, "{shown}: {seen:?}");
             assert_eq!(seen[0].data(), Some(&b"AAAACCCC"[..]), "{shown}");
-            assert_eq!(loads(&queries)[0].1, KittyLoad::Loaded, "{shown}");
+            assert_eq!(loads(&queries[..1])[0].1, KittyLoad::Loaded, "{shown}");
+            // And the upload, `i=5` without `q=`, is owed kitty's `OK` at
+            // its last chunk, which is named rather than sent (#680).
+            assert_eq!(
+                queries[1..],
+                [Query::Unanswerable("^[_Ga=T,f=32,s=2,v=1,i=5,".into())],
+                "{shown}"
+            );
         }
     }
 
@@ -3234,7 +3455,8 @@ mod tests {
 
     /// A transmission is an instruction, not a question. Classifying one as
     /// a query would put "the application queried the terminal" into the
-    /// next timeout of every application that draws.
+    /// next timeout of every application that draws. (One that names an
+    /// image is owed kitty's reply, and is named for that: #680.)
     #[test]
     fn a_kitty_transmission_is_not_treated_as_a_query() {
         let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);

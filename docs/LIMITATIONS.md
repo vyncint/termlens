@@ -149,15 +149,25 @@ CHANGELOG entry.
   not modelled, since termlens does not track placements: an `a=p` after
   one is still sized from the payload log. A query is answered `OK` without
   kitty's test load, so one whose data kitty could not load gets an error
-  from kitty and `OK` here. kitty answers a transmission or a placement
-  that names `i=` (`i=…;OK`, unless `q=` silences it); termlens answers only
-  queries. A command naming both `i=` and `I=` is refused by kitty whatever
-  its action; termlens answers a query so, but still captures, counts and
-  places a transmission or placement that does. termlens starts kitty's
-  loader over on a sixel and on a hard reset: kitty ignores the sixel and
-  goes on with the upload, and after a reset its loader still names the
-  image the reset removed, so it refuses the next transmission that carries
-  its data. And chunks that break the protocol's rule that every chunk but
+  from kitty and `OK` here. kitty also answers a transmission or a
+  placement that names an image (`i=` or `I=`) with `i=…;OK`, unless `q=`
+  asks for quiet; termlens answers only queries, because that `OK` reports
+  that the image loaded, which it cannot know: it opens no file the program
+  under test points at, and decodes only with the `decode` feature. Such a
+  command is **named in the next timeout** instead, as an unanswered query
+  is — an upload at its last chunk, by its first — unless it asked for
+  quiet (#680). Frames (`a=f`) and composes (`a=c`), which kitty answers
+  too, are neither answered nor named. A command naming both `i=` and `I=`
+  is refused by kitty whatever its action; termlens answers a query so, but
+  still captures, counts and places a transmission or placement that does,
+  and names it unless `q=2` silenced kitty's error. An upload interrupted
+  by a sixel or a hard reset is undefined — "the client **must** finish
+  sending all chunks for a single image before sending any other graphics
+  related escape codes" — and termlens drops it: the chunks still to come
+  are a transmission of their own, and no reply to the upload is named.
+  kitty 0.49 ignores the sixel and goes on with the upload, and after a
+  reset its loader still names the image the reset removed, so it refuses
+  the next transmission that carries its data. And chunks that break the protocol's rule that every chunk but
   the last is a multiple of four base64 characters are decoded joined, not
   one escape at a time as kitty decodes them (#637); a stream that keeps
   the rule decodes exactly as kitty decodes it.

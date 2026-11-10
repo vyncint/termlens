@@ -51,6 +51,18 @@ reads that marker.
   test that placed an image past a scroll region's bottom and asserted
   where the next text lands should expect it that many rows lower, below
   the margin, and no lower than the screen's last row. (#697)
+- A kitty transmission or placement that names an image (`i=` or `I=`)
+  and does not ask for quiet is named in the next timeout, as an
+  unanswered query is: kitty answers it `i=…;OK`, and termlens, which
+  cannot know whether the image loaded, sends nothing, so an application
+  waiting for that reply timed out with no note at all. A chunked upload is
+  named at its last chunk, by its first, and `q=1` or `q=2` keeps one out of
+  the note. Nothing is sent on the wire either way, and an upload cut by a
+  sixel or a hard reset is still dropped, as `docs/LIMITATIONS.md` now says
+  of both. A test that matches a timeout's text after its application
+  drew a kitty image with `i=` or `I=` should expect
+  `the application queried the terminal (^[_G…)`, or have the application
+  send `q=2`. (#680)
 
 ### Fixed
 

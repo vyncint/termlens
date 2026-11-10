@@ -349,6 +349,42 @@ fn a_sixel_geometry_query_is_named_when_it_goes_unanswered() {
     assert!(t.screen().unsupported().is_empty(), "{}", t.screen());
 }
 
+/// kitty answers a transmission that names an image (`i=9;OK`) unless
+/// `q=` asks for quiet. That `OK` says the image loaded, which termlens
+/// cannot know, so it sends nothing — and an application waiting for the
+/// reply is named, as one blocked on an unanswered query is (#680). The one
+/// that asked for quiet is not: kitty would have sent it nothing either.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
+fn a_kitty_transmission_waiting_for_its_reply_is_named() {
+    let mut t = alive_then_blocked(
+        Terminal::builder()
+            .graphics(termlens::Graphics::Kitty)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw",
+            r"\e_Gi=8,q=2,a=T,f=24,s=1,v=1;QUJD\e\\\e_Gi=9,a=T,f=24,s=1,v=1;QUJD\e\\",
+            "--wait",
+            "never",
+        ],
+    );
+    let msg = expire_until_named(&["^[_Gi=9"], || {
+        t.wait_until_for(|s| s.contains("never"), Duration::from_millis(400))
+            .unwrap_err()
+            .to_string()
+    });
+    assert!(
+        msg.contains("queried the terminal (^[_Gi=9,a=T,f=24,s=1,v=1;)"),
+        "the transmission waiting for its reply is not named: {msg}"
+    );
+    assert!(!msg.contains("^[_Gi=8"), "the quiet one is named: {msg}");
+    // Both still captured.
+    assert_eq!(t.screen().graphics().kitty(), 2, "{}", t.screen());
+}
+
 /// Every unanswered query is named, not just the most recent one.
 #[test]
 fn all_unanswered_queries_are_named() {
