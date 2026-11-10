@@ -115,6 +115,44 @@ reads that marker.
   drew a kitty image with `i=` or `I=` should expect
   `the application queried the terminal (^[_G…)`, or have the application
   send `q=2`. (#680)
+- A spawned program no longer inherits `COLUMNS` or `LINES` from the test
+  process, and `termlens inspect --inherit-env` no longer passes the
+  caller's (#709). curses and `tput` take both over the terminal's own
+  size, so a suite run from a shell that exported them had its program
+  lay out at that shell's size rather than at `size()` or `--size`, and
+  keep it after a resize. Without them the program asks the PTY. Set with
+  `.env()` or `--env`, either still reaches the program as given. A test
+  that relied on an inherited `COLUMNS` or `LINES` should set it with
+  `.env()`, or size the terminal with `size()` instead.
+- `Screen::diff` and `termlens diff` take a cell that holds only
+  whitespace for the blank a terminal shows, whichever whitespace it is.
+  The text format strips a row's trailing whitespace by Unicode's
+  definition, so a no-break space (U+00A0) or an ideographic space
+  (U+3000) an application drew there parses back as blank cells, and the
+  diff of a screen against its own snapshot, or of a text save against its
+  JSON twin, marked a blank against a blank and `termlens diff` exited 1.
+  A no-break space is now the same as a space or an erased cell in the
+  same style, at the end of a row or inside one, and U+3000 with the
+  second column it takes is the same as two. `==` on `Screen`, the text
+  and the JSON are unchanged, and DESIGN §3 lists the case with what else
+  the text does not carry. A test that used `diff` to tell a no-break
+  space from a space should compare `cell(row, col).contents()` instead.
+  (#724)
+- `Screen::to_svg` draws its text on the 9×18 px grid its backgrounds are
+  on. Each run was one `<text>` laid out at the font's own advance, about
+  8.4 px where a cell is 9 and 14 px where a wide character takes 18, so
+  text drifted left of its highlights along a row, ten CJK characters
+  covered fifteen columns, and in an 80-column box the right border sat
+  near column 74 on rows drawn as one run and at column 79 on a row where
+  a highlight started a new one. Every `<text>` now says how long it is,
+  `textLength` at 9 px a cell with `lengthAdjust="spacingAndGlyphs"`, and
+  a run is split where narrow cells meet wide ones, so a viewer that
+  honours it (browsers, Inkscape) fits each glyph to its cells; a CJK
+  glyph is stretched to its two columns. A test holding a `to_svg`
+  snapshot should re-accept it after checking that each `<text>` gained
+  those two attributes and that a run which opens with blanks before wide
+  characters now starts at the first wide one, its leading blanks left
+  out as its trailing ones were. (#725)
 - A `wait_frame` timeout after a `resize` names the resize as what the
   application has not repainted since: "…has not completed a repaint since
   the resize to 30x6…", or "1 complete frame since the resize to 30x6, 2
@@ -266,6 +304,71 @@ reads that marker.
   `graphics().kitty` counted an image the application never sent, and in
   an upload it was taken as the last chunk. Whether an APC is kitty's was
   read off a buffer slot the previous escape had left its `G` in. (#735)
+- `termlens diff - missing.snap` reports the missing file at once, as
+  `diff missing.snap -` has since #651. With `-` on the left, standard
+  input was read to its end before the right operand was opened, which at
+  a terminal meant Ctrl-D. The operand that is not `-` is now opened and
+  measured first, so one that is missing, is a directory or is past the
+  1 GiB bound is refused before standard input is read. The two screens
+  are still read in argument order. (#715)
+- `termlens render` and `termlens diff` read a saved screen behind a
+  byte-order mark, and in UTF-16 (#716). Windows PowerShell 5.1's `>`
+  writes what `termlens inspect` prints as UTF-16LE behind a mark, and
+  `Out-File -Encoding utf8` puts a UTF-8 mark in front, so the CLI could
+  not read back its own output saved in the default Windows shell: the
+  first was refused as not UTF-8 and the second as a bad header, JSON
+  included. A UTF-8 mark is now dropped, and UTF-16 in either byte order is
+  decoded behind its mark; without one the input is UTF-8 as before. The
+  1 GiB bound holds for the decoded text too, and UTF-16 that is cut short
+  or holds a lone surrogate is refused as not valid UTF-16.
+- A screen written to `TERMLENS_ARTIFACT_DIR` never replaces a file
+  already there (#711). The `<n>` in `<test>-<n>.screen.*` counts per
+  process, and `<test>` is the test's path inside its binary, so two test
+  binaries with a failing test of the same name, or a test that
+  cargo-nextest retried, both wrote `<test>-1`, and the report showed only
+  the second screen. The file is now created exclusively, and a taken
+  name moves `<n>` on. Names are unchanged when nothing collides.
+- The report action escapes a carriage return in a file name as `&#13;`,
+  as it has escaped a newline since #648 (#708). It wrote the CR raw, and
+  CommonMark ends a line at a lone CR, so `\r\r` in a snapshot's path
+  ended the HTML block the name sits in and the rest of the name rendered
+  as Markdown: a heading, emphasis or a link in the step summary. The name
+  now renders as one line of text.
+- The report action warns when its artifact directory is relative, and the
+  docs say `TERMLENS_ARTIFACT_DIR` must be absolute (#712). `cargo test`
+  runs each test binary in its own package's directory, so a relative value
+  put each crate's screens in that crate's directory; the action looked
+  for the value from the workspace root and said the failures left no
+  screen behind. It now prints a warning annotation naming the value, and
+  its summary says the path is relative instead of that no screen was
+  left. The value is still searched as before, so a workflow that works
+  today is unchanged.
+- The report action keeps its step summary under GitHub's 1 MiB limit
+  (#710). It appended every screen whole and never counted, and past the
+  limit GitHub replaces the step's whole summary with an error, small
+  entries included: three failing 250x80 coloured snapshots came to
+  720 KB, so five lost the report. The action now stops adding screens
+  before the next would pass about 900 KiB and ends the summary with a
+  line saying how many more there are. Every screen is still rendered into
+  the artifact.
+- DESIGN §3, `Screen::parse` and LIMITATIONS say what a text screen saved
+  by 0.11.6 or earlier reads as when a row holds an emoji with a
+  presentation selector (`⚠️`) and has room after it. Those releases drew
+  the emoji one column wide, the text does not say so, and the reader lays
+  it out two columns wide, as 0.11.7 writes it: every cell after it moves
+  a column right, while the `styles:` spans and the cursor keep their
+  columns and land a character left of what they marked. The 0.11.7 entry
+  said such a row "still reads", which is true of parsing and not of the
+  picture. The corpus now holds a pair 0.11.6 wrote, with tests pinning
+  that reading and its difference from the JSON twin. (#723)
+- `Screen::contains` and `Screen::find` describe their matching as it is:
+  NFC on both sides, then a substring search. They called it
+  "grapheme-shaped", but NFC joins a mark to its base only where Unicode
+  has a precomposed character, so a needle matches a base character under
+  any other mark (`contains("q")` on a screen showing `q` with U+0353
+  under it), and a multi-row needle must include the mark on a row that
+  ends in one. Which needles match is unchanged; a doctest, a unit test
+  and LIMITATIONS now say so. (#726)
 - Query replies queued behind a blocked send stay under the 1 MiB reply
   bound until they are written themselves. The writer thread took every
   byte it wrote off the count of queued reply bytes, typed input included,

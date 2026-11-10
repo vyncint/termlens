@@ -25,7 +25,10 @@ inputs:
       The directory the tests were run with as TERMLENS_ARTIFACT_DIR. Defaults
       to that variable when set for the job or the workflow, else
       $RUNNER_TEMP/termlens. A test step's own env: does not reach this
-      action, so pass the value here when it is set there.
+      action, so pass the value here when it is set there. It must be an
+      absolute path: cargo test runs each test binary in its own package's
+      directory, so a relative one puts each crate's screens in that
+      crate's directory. The action warns when it is relative.
     required: false
     default: ""
   cli:
@@ -82,6 +85,23 @@ runs:
         mkdir -p "$out" "$work"
         termlens() { "${RUNNER_TEMP}/termlens-cli/bin/termlens" "$@"; }
 
+        # `cargo test` runs each test binary in its package's directory, so
+        # a relative TERMLENS_ARTIFACT_DIR puts the screens under each crate,
+        # and this step, which reads it from the workspace root, found none
+        # there and said the failures left none (#712). Only a warning: the
+        # value is still searched, and a single-package repository finds its
+        # screens there. A drive or UNC path is absolute on Windows runners.
+        relative=""
+        case "$dir" in
+          /* | [A-Za-z]:[\\/]* | '\\'*) ;;
+          *)
+            relative=1
+            # A workflow command ends at a newline; %, CR and LF are encoded.
+            cr=$'\r'; lf=$'\n'
+            shown="${dir//[%]/%25}"; shown="${shown//$cr/%0D}"; shown="${shown//$lf/%0A}"
+            echo "::warning title=termlens report::The artifact directory '${shown}' is a relative path. cargo test runs each test binary in its own package's directory, so a relative TERMLENS_ARTIFACT_DIR puts the screens under each crate's directory, where this step does not look. Give TERMLENS_ARTIFACT_DIR and artifact-dir an absolute path, one under runner.temp (here ${RUNNER_TEMP})." ;;
+        esac
+
         # What to show: every .snap.new outside target/, then every file the
         # artifact hook wrote. Sorted, so the summary is stable run to run.
         # `find` exits 1 on any directory it cannot read, a root-owned cache
@@ -99,17 +119,24 @@ runs:
           echo "## termlens: screens from the failing tests"
           echo
           if [ ! -s "${work}/files.z" ]; then
-            echo "No \`.snap.new\` files and nothing under \`${dir}\`: the failures left no screen behind."
+            if [ -n "$relative" ]; then
+              echo "No \`.snap.new\` files, and nothing under \`${dir}\` in the workspace. \`${dir}\` is a relative path, and \`cargo test\` runs each test binary in its own package's directory, so any screens are in each package's own \`${dir}\`. Give \`TERMLENS_ARTIFACT_DIR\` and \`artifact-dir\` an absolute path, such as \`\$RUNNER_TEMP/termlens\`."
+            else
+              echo "No \`.snap.new\` files and nothing under \`${dir}\`: the failures left no screen behind."
+            fi
             echo "On CI, insta writes a \`.snap.new\` only when the test step sets \`INSTA_UPDATE: new\`; inline snapshots (\`.pending-snap\`) are not rendered here."
           fi
         } >> "$GITHUB_STEP_SUMMARY"
 
         # A file name goes into HTML, so its markup is escaped, and a newline
         # becomes a character reference: a blank line would end the HTML block
-        # it sits in and turn the rest of the entry into Markdown.
+        # it sits in and turn the rest of the entry into Markdown. So does a
+        # carriage return, which awk passes through but CommonMark ends a
+        # line at as it does at a newline (#708).
         html() {
           printf '%s' "$1" | awk 'BEGIN { ORS = "" } {
             gsub(/&/, "\\&amp;"); gsub(/</, "\\&lt;"); gsub(/>/, "\\&gt;"); gsub(/"/, "\\&quot;")
+            gsub(/\r/, "\\&#13;")
             if (NR > 1) print "&#10;"
             print
           }'
@@ -130,7 +157,15 @@ runs:
           echo "$fence"
         }
 
+        # GitHub drops a step's whole summary, small entries included, once
+        # more than 1 MiB is written to it, and nothing here counted (#710).
+        # Each entry is built aside and appended only while the summary
+        # stays within this budget, which leaves room for the closing lines.
+        # From the first entry that would pass it, every screen still goes
+        # to the artifact, and the summary says how many it does not show.
+        budget=921600
         n=0
+        unshown=0
         while IFS= read -r -d '' file; do
           n=$((n + 1))
           # upload-artifact refuses a path holding any of these, and then the
@@ -143,6 +178,7 @@ runs:
           # used to leave an empty .svg in the artifact. Now it leaves none.
           termlens render --svg  --out "${out}/${stem}.svg"  "$file" || true
           termlens render --html --out "${out}/${stem}.html" "$file" || true
+          if [ "$unshown" -gt 0 ]; then unshown=$((unshown + 1)); continue; fi
           termlens render --text "$file" > "${work}/screen.txt" \
             || echo "(termlens could not read this file)" >> "${work}/screen.txt"
           {
@@ -162,12 +198,23 @@ runs:
             esac
             echo "</details>"
             echo
-          } >> "$GITHUB_STEP_SUMMARY"
+          } > "${work}/entry.md"
+          # `wc -c` pads its count with spaces on macOS; $(( )) drops them.
+          if [ $(($(wc -c < "$GITHUB_STEP_SUMMARY") + $(wc -c < "${work}/entry.md"))) -gt "$budget" ]; then
+            unshown=1
+            continue
+          fi
+          cat "${work}/entry.md" >> "$GITHUB_STEP_SUMMARY"
         done < "${work}/files.z"
+        if [ "$unshown" -gt 0 ]; then
+          if [ "$unshown" -eq 1 ]; then more="1 more screen is"; else more="${unshown} more screens are"; fi
+          echo "${more} not shown here, to keep this summary under GitHub's 1 MiB limit for a step; the artifact holds every screen." >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+        fi
         if [ "$n" -gt 0 ]; then
           echo "SVG and HTML renderings of each are in the \`${ARTIFACT_NAME:-termlens-report}\` artifact." >> "$GITHUB_STEP_SUMMARY"
         fi
-        echo "rendered ${n} screen(s) into the step summary"
+        echo "rendered ${n} screen(s), $((n - unshown)) of them into the step summary"
 
     - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:

@@ -59,6 +59,24 @@ impl Screen {
     /// a PTY be held against one built cell by cell, where every blank was
     /// written.
     ///
+    /// A cell holding any other whitespace is that same blank: a no-break
+    /// space (U+00A0) does not differ from a space, nor an ideographic
+    /// space (U+3000) and the second column it takes from two of them. The
+    /// text format trims such a character from the end of a row with the
+    /// padding, so this is also what lets a screen be held against its own
+    /// snapshot read back, or a text save against a JSON one. To tell one
+    /// blank from another, compare [`Cell::contents`]:
+    ///
+    /// ```
+    /// use termlens::Screen;
+    ///
+    /// let nbsp = Screen::parse("size: 4x1  cursor: 0,0\na\u{a0}b")?;
+    /// let space = Screen::parse("size: 4x1  cursor: 0,0\na b")?;
+    /// assert!(nbsp.diff(&space).is_empty());
+    /// assert_ne!(nbsp.cell(0, 1), space.cell(0, 1));
+    /// # Ok::<(), termlens::Error>(())
+    /// ```
+    ///
     /// Sizes that differ diff what overlaps, and the rendering says what was
     /// clipped and prints each row clipped to the overlap's columns. The rendering is plain text — no colour, so CI logs stay
     /// readable — and shows only the rows that changed, with a marker line
@@ -77,7 +95,8 @@ impl Screen {
                 let (Some(a), Some(b)) = (self.cell(row, col), other.cell(row, col)) else {
                     continue;
                 };
-                if !same_picture(a, b) {
+                let both_blank = || draws_nothing(self, row, col) && draws_nothing(other, row, col);
+                if !same_picture(a, b, both_blank) {
                     changed_cols.push(col);
                     cells.push((row, col, a.clone(), b.clone()));
                 }
@@ -140,14 +159,42 @@ fn overlap_text(screen: &Screen, row: u16, cols: u16) -> String {
 }
 
 /// Whether two cells draw the same thing: equal, or both blank in the same
-/// style — an erased cell (`""`) and a written space (`" "`) are the one
-/// picture a terminal can show for either.
-fn same_picture(a: &Cell, b: &Cell) -> bool {
-    let blank = |cell: &Cell| matches!(cell.contents(), "" | " ");
+/// style. `both_blank` is [`draws_nothing`] for each of them; it needs the
+/// cell before as well as the cell, and is asked only of two cells that
+/// are not equal, which on most screens is none.
+fn same_picture(a: &Cell, b: &Cell, both_blank: impl FnOnce() -> bool) -> bool {
     a.style() == b.style()
-        && a.is_wide() == b.is_wide()
-        && a.is_wide_continuation() == b.is_wide_continuation()
-        && (a.contents() == b.contents() || (blank(a) && blank(b)))
+        && ((a.contents() == b.contents()
+            && a.is_wide() == b.is_wide()
+            && a.is_wide_continuation() == b.is_wide_continuation())
+            || both_blank())
+}
+
+/// Whether the cell at `(row, col)` is a blank on a terminal: it holds no
+/// text, or only whitespace, or it is the second column of a wide character
+/// that is itself whitespace (U+3000, the one there is).
+///
+/// An erased cell (`""`) and a written space (`" "`) were the two blanks
+/// here. A no-break space or an ideographic space is a third and a fourth,
+/// and the text form cannot keep one at a row's end: it trims trailing
+/// whitespace by this same test, `char::is_whitespace`, so the cell parses
+/// back erased, and the diff of a screen against its own snapshot marked
+/// a blank against a blank (#724). The wide flags are not compared between
+/// two blanks for the same reason: U+3000 comes back as two narrow ones.
+///
+/// The second column of a wide character that draws something is not a
+/// blank: it is half of that glyph.
+fn draws_nothing(screen: &Screen, row: u16, col: u16) -> bool {
+    let whitespace = |cell: &Cell| cell.contents().chars().all(char::is_whitespace);
+    let Some(cell) = screen.cell(row, col) else {
+        return false;
+    };
+    if !cell.is_wide_continuation() {
+        return whitespace(cell);
+    }
+    col.checked_sub(1)
+        .and_then(|before| screen.cell(row, before))
+        .is_some_and(|lead| lead.is_wide() && whitespace(lead))
 }
 
 /// One row's `styles:` runs, `(none)` for an all-default row — the same
@@ -189,7 +236,8 @@ pub(super) fn row_styles(screen: &Screen, row: u16) -> String {
 
 impl ScreenDiff {
     /// True when the two screens show the same picture: same size, same
-    /// cursor, every cell equal.
+    /// cursor, every cell drawing the same thing ([`Screen::diff`] says
+    /// what that is for a blank).
     ///
     /// A *hidden* cursor's coordinates are not part of the picture — it
     /// draws nothing, and the snapshot text format does not record where it
@@ -490,6 +538,96 @@ mod tests {
             .diff(&screen(&["ab", "cX", "ef"]))
             .to_string();
         assert!(two.ends_with("\n… 2 rows unchanged\n"), "{two}");
+    }
+
+    /// The text form trims a row's trailing whitespace whichever whitespace
+    /// it is (`str::trim_end`), so a no-break space or an ideographic space
+    /// the application drew there comes back from `Screen::parse` as a
+    /// blank cell. Both are one blank on a terminal, so the parsed screen
+    /// is the picture that was saved, and the diff used to say otherwise
+    /// with a `^` under a cell no reader could tell apart (#724).
+    #[test]
+    fn a_cell_holding_only_whitespace_is_a_blank_whichever_it_holds() {
+        for ch in [
+            '\u{a0}', '\u{1680}', '\u{2003}', '\u{2028}', '\u{202f}', '\u{205f}', '\u{3000}',
+        ] {
+            let drawn = Screen::parse(&format!("size: 4x1  cursor: 0,0\na{ch}")).unwrap();
+            assert_eq!(drawn.cell(0, 1).unwrap().contents(), ch.to_string());
+            let saved = drawn.with_styles().to_string();
+            assert_eq!(
+                saved, "size: 4x1  cursor: 0,0\na\n\nstyles:\n(none)",
+                "{ch:?} is trimmed with the padding"
+            );
+            let parsed = Screen::parse(&saved).unwrap();
+            assert_eq!(parsed.cell(0, 1).unwrap().contents(), "");
+            for (before, after) in [(&drawn, &parsed), (&parsed, &drawn)] {
+                let diff = before.diff(after);
+                assert!(diff.is_empty(), "{ch:?}:\n{diff}");
+                assert_eq!(diff.cells().count(), 0, "{ch:?}");
+            }
+            // `==` is the same observation, not the same picture, and still
+            // tells the two apart.
+            assert_ne!(drawn, parsed, "{ch:?}");
+        }
+
+        // U+3000 is two columns: the wide cell and its second column are
+        // two blanks, at a row's end and inside one, erased or written.
+        let wide = Screen::parse("size: 5x1  cursor: 0,0\na\u{3000}b").unwrap();
+        assert!(wide.cell(0, 1).unwrap().is_wide());
+        assert!(wide.cell(0, 2).unwrap().is_wide_continuation());
+        let spaces = Screen::parse("size: 5x1  cursor: 0,0\na  b").unwrap();
+        assert!(!spaces.cell(0, 1).unwrap().is_wide());
+        assert!(wide.diff(&spaces).is_empty(), "{}", wide.diff(&spaces));
+        assert!(spaces.diff(&wide).is_empty(), "{}", spaces.diff(&wide));
+
+        // The style of a blank is still part of the picture.
+        let red = "size: 4x1  cursor: 0,0\na\u{a0}\n\nstyles:\n0: 1 bg=1";
+        let red = Screen::parse(red).unwrap();
+        let back = Screen::parse(&red.with_styles().to_string()).unwrap();
+        assert_eq!(back.cell(0, 1).unwrap().contents(), "");
+        assert!(red.diff(&back).is_empty(), "{}", red.diff(&back));
+        let plain = Screen::parse("size: 4x1  cursor: 0,0\na\u{a0}").unwrap();
+        assert_eq!(
+            red.diff(&plain)
+                .cells()
+                .map(|(_, col, ..)| col)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+    }
+
+    /// What a blank is not (#724): a glyph, a mark drawn over a space, or
+    /// the second column of a wide character that draws something. The last
+    /// is the shape vt100 0.16 left when a resize cut a wide character and
+    /// the screen widened again — the character wide, the cell after it an
+    /// ordinary blank — and it is still told apart from the character whole.
+    #[test]
+    fn a_cell_that_draws_something_is_not_a_blank() {
+        let cell = |contents: &str, wide: bool, continuation: bool| {
+            Cell::new(contents.into(), Style::default(), wide, continuation)
+        };
+        let row = |cells: Vec<Cell>| {
+            let cols = u16::try_from(cells.len()).unwrap();
+            Screen::from_parts(cols, 1, 0, 0, true, cells, TermState::default())
+        };
+        let changed = |a: &Screen, b: &Screen| -> Vec<u16> {
+            a.diff(b).cells().map(|(_, col, ..)| col).collect()
+        };
+        let blank = row(vec![cell("a", false, false), cell("", false, false)]);
+        let glyph = row(vec![cell("a", false, false), cell("b", false, false)]);
+        let nbsp = row(vec![cell("a", false, false), cell("\u{a0}", false, false)]);
+        let marked = row(vec![
+            cell("a", false, false),
+            cell(" \u{301}", false, false),
+        ]);
+        assert_eq!(changed(&nbsp, &glyph), [1]);
+        assert_eq!(changed(&blank, &marked), [1]);
+        assert_eq!(changed(&nbsp, &marked), [1]);
+
+        let whole = row(vec![cell("\u{6771}", true, false), cell("", false, true)]);
+        let stranded = row(vec![cell("\u{6771}", true, false), cell("", false, false)]);
+        assert_eq!(changed(&whole, &stranded), [1]);
+        assert_eq!(changed(&stranded, &whole), [1]);
     }
 
     /// The pad measured a row as a string, where a ZWJ family is one

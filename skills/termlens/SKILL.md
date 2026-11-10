@@ -579,7 +579,10 @@ directory (see §9b).
   when `CI` is set, and GitHub sets it on every runner. Inline snapshots are
   not rendered; insta keeps their new values in `.pending-snap` files.
   Give the action `with: artifact-dir:` set to the same directory, because
-  a step's `env:` does not reach the next step, and in a matrix a
+  a step's `env:` does not reach the next step. Keep the directory
+  absolute: `cargo test` runs each test binary in its own package's
+  directory, so a relative one scatters the screens across the crates and
+  the action finds none (it warns). In a matrix, give it a
   `name: termlens-report-${{ matrix.os }}` of its own per leg, because
   upload-artifact refuses a second artifact of one name in a run:
 
