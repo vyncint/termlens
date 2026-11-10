@@ -127,6 +127,13 @@ reads that marker.
   listed four. The last was a note on rule 1 under `wait_frame` and is now
   written as one, and the two rustdoc sentences that cited "rule 4" name
   the note. (#721)
+- `AGENTS.md` lists the two commit rules CI enforces, the DCO sign-off and
+  no AI attribution. It listed Conventional Commits with a subject under 72
+  characters as a third that "will fail CI", and no job checks either. The
+  commit style stays, as a convention review holds, and `CONTRIBUTING.md`
+  §4 says so too. Both files now say which subject lands on `main`: a pull
+  request of one commit lands under that commit's subject and one of
+  several under its title, where they said the title always did. (#720)
 
 ## [0.11.8] - 2026-11-03
 
