@@ -2,9 +2,15 @@
 # Proves tools/preflight.sh accounts for every gate it runs, failures
 # included (#368), before a green preflight is trusted:
 #
-#   failing/   one gate fails, one passes — both are asserted to be
-#              reported, and the runner to exit non-zero
-#   passing/   both pass — the runner is asserted to exit zero
+#   failing/      one gate fails, one passes — both are asserted to be
+#                 reported, and the runner to exit non-zero
+#   passing/      both pass — the runner is asserted to exit zero
+#   reads-stdin/  the first gate reads its standard input to the end, the
+#                 second passes and the third fails — all three are
+#                 asserted to be reported and counted, and the runner to
+#                 exit non-zero. The gates ran with the rest of the list as
+#                 their input, so the first one consumed the other two and
+#                 the run passed with one gate of one (#719)
 #
 # and that `-h` and `--help` print the usage to stdout alone and exit zero
 # (#518).
@@ -81,11 +87,14 @@ expect failing/CONTRIBUTING.md nonzero "a failing gate is reported and the run c
   '^  FAIL  false' '^  ok    true'
 expect passing/CONTRIBUTING.md zero "an all-passing fixture exits zero" \
   '^  ok    true'
+expect reads-stdin/CONTRIBUTING.md nonzero "a gate that reads stdin does not hide the gates after it" \
+  '^  ok    cat > /dev/null' '^  ok    true' '^  FAIL  false' \
+  '^preflight: 2 ok, 0 skipped, 1 failed of 3 gate\(s\)'
 expect_help -h "-h prints usage to stdout and exits zero"
 expect_help --help "--help prints usage to stdout and exits zero"
 
 rm -f out.log err.log
 if [ "$status" -eq 0 ]; then
-  echo "preflight selftest: 4 expectation(s), the runner accounts for failures and help"
+  echo "preflight selftest: 5 expectation(s), the runner accounts for failures, a gate that reads stdin, and help"
 fi
 exit "$status"

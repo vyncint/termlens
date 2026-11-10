@@ -72,8 +72,12 @@ on every run. The sequence tracker now keeps the requested set, beside
 the focus flag and the window title that live there for the same reason
 (the backend does not model them), so `DECRQM` answers each tracking
 mode on its own evidence and `Screen::mouse_modes` reports the set,
-while `Screen::mouse_mode` and the input path keep the backend's
-one-protocol answer. Both are facts; each is reported where it belongs.
+while `Screen::mouse_mode` and the input path report the one protocol.
+Both are facts; each is reported where it belongs. The one protocol is
+the tracker's as well (#693): the backend turns its value off only on a
+reset of the mode it holds, so after `?1002h ?1000l` it went on
+reporting, where xterm — for which a reset of any of the four ends
+reporting — sends nothing.
 With no tracking mode active — the state every application probes from
 at startup — every tracking mode reports reset, which is what lets
 capability detection succeed: answering "not recognized" there would
@@ -207,7 +211,10 @@ application decide instead of wait.
 Whatever remains unanswered (DECRQSS, the `CSI t` reports other than the
 text-area and pixel sizes, …) is recorded, and the next wait timeout names
 it: "the application queried the terminal (`^[[14t`) and received no
-answer" — a hang becomes a diagnosis. `answer_queries(false)` mutes the
+answer" — a hang becomes a diagnosis. The record keeps eight distinct
+shapes and counts the rest, each once; the most recent query is named
+whatever came before it, and the note claims a cause only when no output
+arrived in a later read than that query. `answer_queries(false)` mutes the
 responder for tests that need a silent terminal; the diagnosis still
 works.
 
@@ -503,15 +510,16 @@ the PTY. Three rules make such waits deterministic:
    for the job. `snapshot_after(pred)` is rules 1–3 as one call: the
    predicate, the settle, and the screen it settled on.
 
-4. **`wait_frame` removes the torn-frame race, not rule 1.** An
-   application that brackets its repaints in DEC 2026 synchronized updates
-   lets `wait_frame` evaluate predicates only on complete frames, so half a
-   row can never match — but a predicate true of frames you did not mean
-   returns one of them. `send(key)` then `wait_frame(|s| s.contains("MENU"))`
-   hands back the oldest not-yet-returned frame showing a menu, which can
-   be the one painted *before* the key. Name what the key changes, exactly
-   as rule 1 asks. The frame you get carries its own `repaints()`, so how
-   far behind the live screen it is can be checked rather than assumed.
+**A note on `wait_frame`: it removes the torn-frame race, not rule 1.**
+This is not a fourth rule, since it asks for nothing the three do not. An
+application that brackets its repaints in DEC 2026 synchronized updates
+lets `wait_frame` evaluate predicates only on complete frames, so half a
+row can never match — but a predicate true of frames you did not mean
+returns one of them. `send(key)` then `wait_frame(|s| s.contains("MENU"))`
+hands back the oldest not-yet-returned frame showing a menu, which can be
+the one painted *before* the key. Name what the key changes, exactly as
+rule 1 asks. The frame you get carries its own `repaints()`, so how far
+behind the live screen it is can be checked rather than assumed.
 
 ### The resize stale-frame trap
 
@@ -819,7 +827,10 @@ Rules:
    column. A terminal declared without the protocol ignores the escape and
    moves nothing, which is the default. The cursor is moved with line feeds
    and a cursor-forward fed to the grid, so a scroll it causes reaches
-   history like any other.
+   history like any other. Past a scroll region's bottom margin, where line
+   feeds stop on the margin, kitty leaves the cursor below it, on the
+   image's last row (#697): a `VPA` fed after the line feeds puts it there,
+   vt100 taking that row as absolute whatever the margins say.
 
    Decoding sits behind the `decode` feature and runs on demand, never as the
    bytes arrive: a suite that only asks whether an image went out should pay
@@ -1170,7 +1181,10 @@ on the button code the same way for a button and a wheel notch (`+4` shift,
 `+8` alt, `+16` ctrl), so `MouseButton::Left.ctrl()` and `Scroll::Up.ctrl()`
 are one idiom; the wheel gets a chord type of its own (`ScrollChord`) so
 that a wheel direction cannot be handed to `click_with`, since a notch has
-no release and the two are different gestures on the wire.
+no release and the two are different gestures on the wire. A button's
+release carries the modifiers as its press does: SGR repeats the button
+code with a final `m`, and the legacy, UTF-8 and urxvt forms send button
+`3` plus the modifier bits, as xterm's `BtnCode` does (#701).
 
 A **drag reports one motion per cell crossed**, interpolated on a straight
 line and on both axes for a diagonal. A single report at the destination is

@@ -67,7 +67,9 @@ would survive any swap unchanged:
    the PTY round trip.
 4. **The three limits have been answered in front of the backend, or
    accepted.** Mouse modes: `Screen::mouse_modes` reports the set the
-   application enabled from the tracker (#151). Graphemes: the
+   application enabled from the tracker (#151), and the one protocol in
+   force is the tracker's too, since vt100 keeps reporting after a reset
+   of a mode other than the one it holds (#693). Graphemes: the
    unicode-torture fixture pins vt100's rendering rather than promising
    one, and no candidate promises Unicode-correct segmentation *and* the
    rest of this table.

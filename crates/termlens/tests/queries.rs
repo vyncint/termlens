@@ -320,6 +320,47 @@ fn a_query_the_app_moved_past_is_context_not_a_cause() {
     );
 }
 
+/// Eight unanswered DSRs, output, then `CSI > q`, which the application
+/// blocks on. The record keeps eight shapes, so the ninth was "and 1 more"
+/// and the verdict came from the eight the application had moved past:
+/// the query blocking it was hidden, and the note said the queries were
+/// probably not the cause (#690). The most recent is named, and decides.
+///
+/// Deterministic however the reads fall: if the DSRs and `READY` share a
+/// read with `CSI > q`, all nine are the cause, and `^[[>q` is still named.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
+fn the_query_after_the_last_output_is_named_as_the_cause() {
+    let mut steps = Vec::new();
+    for n in [
+        "?15n", "?25n", "?26n", "?53n", "?55n", "?56n", "?62n", "?63n",
+    ] {
+        steps.extend(["--csi", n]);
+    }
+    // The pause puts `READY` in a later read than the DSRs, as in the
+    // issue's program; the test does not depend on it (see above).
+    steps.extend([
+        "--sleep", "200ms", "READY", "--csi", ">q", "--wait", "never",
+    ]);
+    let mut t = emit(Duration::from_secs(30), &steps).unwrap();
+    t.wait_until(|s| s.contains("READY")).unwrap();
+    let msg = expire_until_named(&["^[[>q"], || {
+        t.wait_until_for(|s| s.contains("never"), Duration::from_millis(400))
+            .unwrap_err()
+            .to_string()
+    });
+    assert!(msg.contains("^[[>q"), "the blocking query is named: {msg}");
+    assert!(msg.contains("this is the cause"), "{msg}");
+    assert!(!msg.contains("probably not"), "{msg}");
+    assert!(
+        !msg.contains("more)"),
+        "no shape is hidden in a count: {msg}"
+    );
+}
+
 /// XTSMGRAPHICS is a question, and one a sixel program asks right after
 /// DA1 claims sixel — so with `Graphics::Sixel` declared, a program blocked
 /// on its answer must be named, as LIMITATIONS promises. It was not
@@ -347,6 +388,42 @@ fn a_sixel_geometry_query_is_named_when_it_goes_unanswered() {
     );
     // Named as a question, not listed as a sequence nobody honoured.
     assert!(t.screen().unsupported().is_empty(), "{}", t.screen());
+}
+
+/// kitty answers a transmission that names an image (`i=9;OK`) unless
+/// `q=` asks for quiet. That `OK` says the image loaded, which termlens
+/// cannot know, so it sends nothing — and an application waiting for the
+/// reply is named, as one blocked on an unanswered query is (#680). The one
+/// that asked for quiet is not: kitty would have sent it nothing either.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
+fn a_kitty_transmission_waiting_for_its_reply_is_named() {
+    let mut t = alive_then_blocked(
+        Terminal::builder()
+            .graphics(termlens::Graphics::Kitty)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw",
+            r"\e_Gi=8,q=2,a=T,f=24,s=1,v=1;QUJD\e\\\e_Gi=9,a=T,f=24,s=1,v=1;QUJD\e\\",
+            "--wait",
+            "never",
+        ],
+    );
+    let msg = expire_until_named(&["^[_Gi=9"], || {
+        t.wait_until_for(|s| s.contains("never"), Duration::from_millis(400))
+            .unwrap_err()
+            .to_string()
+    });
+    assert!(
+        msg.contains("queried the terminal (^[_Gi=9,a=T,f=24,s=1,v=1;)"),
+        "the transmission waiting for its reply is not named: {msg}"
+    );
+    assert!(!msg.contains("^[_Gi=8"), "the quiet one is named: {msg}");
+    // Both still captured.
+    assert_eq!(t.screen().graphics().kitty(), 2, "{}", t.screen());
 }
 
 /// Every unanswered query is named, not just the most recent one.
