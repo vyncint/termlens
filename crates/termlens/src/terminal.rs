@@ -732,10 +732,17 @@ impl MouseChord {
 
 /// The error every mouse action shares: bytes the application never
 /// asked for would be misparsed as keys.
+///
+/// It names both ways of getting here. A reset of any tracking mode ends
+/// reporting, whichever one was set (#693), so "no `h` was seen" is false
+/// of an application that set one mode and reset another, and that is the
+/// application whose author needs telling.
 fn no_mouse_tracking() -> Error {
     Error::Input(
         "the application has not enabled mouse tracking \
-         (no CSI ?9/?1000/?1002/?1003 h was seen)"
+         (no CSI ?9/?1000/?1002/?1003 h is in force: none was seen, or \
+         reporting was turned off after it, as a CSI ? … l of any of the \
+         four does)"
             .into(),
     )
 }
@@ -3544,7 +3551,7 @@ impl Terminal {
     /// **It gives the mouse path the right diagnosis.** Called before the
     /// mouse-tracking check, because a child that is gone never enabled
     /// tracking either: checking the mode first answers "no `CSI ?1000 h`
-    /// was seen", which is true and is not the reason.
+    /// is in force", which is true and is not the reason.
     ///
     /// The signal is **EOF, not "did we reap something"**. EOF means every
     /// slave descriptor is closed, which is exactly the condition under

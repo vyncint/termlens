@@ -550,8 +550,9 @@ pub(crate) struct TermState {
     pub(crate) alternate_screen: bool,
     pub(crate) bracketed_paste: bool,
     pub(crate) application_cursor: bool,
-    /// The one protocol the terminal reports in — the backend's collapsed
-    /// value, which is also what `click` and `scroll` encode for.
+    /// The one protocol the terminal reports in — the tracking mode set
+    /// last, and none once any of them is reset (#693) — which is also
+    /// what `click` and `scroll` encode for.
     pub(crate) mouse: MouseMode,
     /// The tracking modes the application has asked for and not yet
     /// released, kept by the sequence tracker (#151).

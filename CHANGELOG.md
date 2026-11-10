@@ -31,6 +31,21 @@ reads that marker.
   bracketed-paste reporting or to restore the tab stops should expect them
   kept, as a real xterm keeps them, and have the application reset each
   mode itself or send `RIS`. (#687)
+- A reset of any mouse tracking mode turns mouse reporting off, whichever
+  mode is in force, as xterm does and as `Screen::mouse_mode` says. After
+  `CSI ? 1002 h` and then `CSI ? 1000 l`, or `CSI ? 9 h` and then
+  `CSI ? 1000 l`, `mouse_mode()` still named the mode that was set, and
+  `click`, `drag` and `scroll` typed reports at an application a terminal
+  would have sent none: the backend ends reporting only on a reset of the
+  mode it holds. The protocol is now the tracking mode set last, and none
+  after a reset of `?9`, `?1000`, `?1002` or `?1003`. `mouse_modes()` and
+  the `DECRQM` replies are unchanged: they report each mode the
+  application set and has not itself reset. The refusal now says that a
+  reset turns reporting off, where it said that no `h` was seen. A test
+  that read `mouse_mode()` or clicked after such a reset should expect
+  `MouseMode::None` and `Error::Input`, and an application that means to
+  go on receiving reports has to set its mode again after the reset, as
+  it must on xterm. (#693)
 
 ### Fixed
 

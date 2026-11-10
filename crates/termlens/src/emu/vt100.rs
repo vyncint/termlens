@@ -957,7 +957,7 @@ impl Emulator for Vt100Emulator {
             alternate_screen: screen.alternate_screen(),
             bracketed_paste: screen.bracketed_paste(),
             application_cursor: screen.application_cursor(),
-            mouse: convert_mouse(screen.mouse_protocol_mode()),
+            mouse: self.tracker.mouse_protocol(),
             mouse_modes: self.tracker.mouse_tracking(),
             clipboard: self.tracker.clipboard(),
             bells: self.tracker.bells(),
@@ -1015,10 +1015,12 @@ impl Emulator for Vt100Emulator {
     fn input_modes(&self) -> InputModes {
         let screen = self.parser.screen();
         InputModes {
-            mouse: convert_mouse(screen.mouse_protocol_mode()),
-            // The tracker's, not vt100's: vt100 does not implement 1015,
-            // and so cannot say when it replaced or cleared the others
-            // (#640).
+            // The tracker's, not vt100's: vt100 goes on reporting after a
+            // reset of a tracking mode other than the one in force, where
+            // xterm stops (#693).
+            mouse: self.tracker.mouse_protocol(),
+            // The tracker's too: vt100 does not implement 1015, and so
+            // cannot say when it replaced or cleared the others (#640).
             mouse_encoding: self.tracker.mouse_encoding(),
             bracketed_paste: screen.bracketed_paste(),
             application_cursor: screen.application_cursor(),
@@ -1101,16 +1103,6 @@ impl Emulator for Vt100Emulator {
 /// `Screen` reads it and a replay nothing can check is a claim nothing can
 /// catch.
 const SOFT_RESET_REPLAY: &[u8] = b"\x1b[?1l\x1b[?25h\x1b[0m\x1b[r\x1b[?6l\x1b7";
-
-fn convert_mouse(mode: ::vt100::MouseProtocolMode) -> MouseMode {
-    match mode {
-        ::vt100::MouseProtocolMode::None => MouseMode::None,
-        ::vt100::MouseProtocolMode::Press => MouseMode::Press,
-        ::vt100::MouseProtocolMode::PressRelease => MouseMode::PressRelease,
-        ::vt100::MouseProtocolMode::ButtonMotion => MouseMode::ButtonMotion,
-        ::vt100::MouseProtocolMode::AnyMotion => MouseMode::AnyMotion,
-    }
-}
 
 /// Build a [`Cell`] from the primary grid cell and its shadow counterpart,
 /// whose bold/italic/underline flags are this cell's
@@ -2814,7 +2806,7 @@ mod tests {
             assert_eq!(emu.mode_state(mode), ModeState::Set, "mode {mode}");
         }
         assert_eq!(emu.mode_state(9), ModeState::Reset, "never asked for");
-        // The set is what was asked for; the protocol is vt100's collapse.
+        // The set is what was asked for; the protocol is the one set last.
         let screen = emu.snapshot();
         assert_eq!(screen.mouse_mode(), MouseMode::AnyMotion);
         assert_eq!(
@@ -2827,9 +2819,8 @@ mod tests {
         );
 
         // Releasing one member releases that member alone in the set, while
-        // vt100 — like xterm — turns reporting off, since the protocol it
-        // was reporting in is gone. Both facts are true; each is reported
-        // where it belongs.
+        // reporting turns off, as in xterm, where a reset of any member
+        // ends it. Both facts are true; each is reported where it belongs.
         let emu = emu_with(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1003l");
         assert_eq!(emu.mode_state(1003), ModeState::Reset);
         assert_eq!(emu.mode_state(1002), ModeState::Set);
@@ -2855,6 +2846,52 @@ mod tests {
         let emu = emu_with(b"\x1b[?1002h\x1b[?1002l");
         for mode in [9, 1000, 1002, 1003] {
             assert_eq!(emu.mode_state(mode), ModeState::Reset, "mode {mode}");
+        }
+    }
+
+    /// A reset of any tracking mode turns reporting off, whichever mode is
+    /// in force: xterm's `really_set_mousemode` sets `MOUSE_OFF` on a reset
+    /// of 9, 1000, 1002 or 1003 alike, and `Screen::mouse_mode` says so.
+    /// vt100 clears its mode only when the reset names the one it holds, so
+    /// after `?1002h ?1000l` the input path went on reporting (#693). The
+    /// set is a different fact and keeps what was asked for and not
+    /// disabled, as `DECRQM` reads it.
+    #[test]
+    fn a_reset_of_another_tracking_mode_turns_reporting_off() {
+        for (stream, asked) in [
+            (&b"\x1b[?1002h\x1b[?1000l"[..], MouseMode::ButtonMotion),
+            (b"\x1b[?9h\x1b[?1000l", MouseMode::Press),
+            (b"\x1b[?1000h\x1b[?1003h\x1b[?1000l", MouseMode::AnyMotion),
+            // In a list with a mode that is not a tracking mode.
+            (b"\x1b[?1003h\x1b[?25;1002l", MouseMode::AnyMotion),
+        ] {
+            let emu = emu_with(stream);
+            let at = String::from_utf8_lossy(stream).replace('\x1b', "^[");
+            assert_eq!(emu.input_modes().mouse, MouseMode::None, "{at}");
+            let screen = emu.snapshot();
+            assert_eq!(screen.mouse_mode(), MouseMode::None, "{at}");
+            assert_eq!(
+                screen.mouse_modes().iter().collect::<Vec<_>>(),
+                [asked],
+                "{at}: asked for, and not disabled"
+            );
+        }
+        // The last mode set is the one in force, in one list as across
+        // sequences, and setting one again after a reset turns it back on.
+        for (stream, in_force) in [
+            (&b"\x1b[?1003h\x1b[?1000h"[..], MouseMode::PressRelease),
+            (b"\x1b[?1003;9h", MouseMode::Press),
+            (
+                b"\x1b[?1002h\x1b[?1000l\x1b[?1002h",
+                MouseMode::ButtonMotion,
+            ),
+            // A reset naming no tracking mode leaves reporting alone.
+            (b"\x1b[?1002h\x1b[?1006l\x1b[?25l", MouseMode::ButtonMotion),
+        ] {
+            let emu = emu_with(stream);
+            let at = String::from_utf8_lossy(stream).replace('\x1b', "^[");
+            assert_eq!(emu.input_modes().mouse, in_force, "{at}");
+            assert_eq!(emu.snapshot().mouse_mode(), in_force, "{at}");
         }
     }
 
