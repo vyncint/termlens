@@ -5149,9 +5149,7 @@ impl Drop for Terminal {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
-    #[cfg(unix)]
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use super::{
