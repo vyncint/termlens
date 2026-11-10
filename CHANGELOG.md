@@ -141,6 +141,31 @@ reads that marker.
   Dependabot's own commit: Dependabot signs off as
   `dependabot[bot] <support@github.com>`, never as its author address, so it
   is let through when its author and its sign-off are both Dependabot's.
+- `tools/preflight.sh` runs each gate with an empty standard input. Each
+  gate was given the rest of the gate list as its input, so a gate that
+  read it took every later gate with it: they never ran, the totals counted
+  only the gates before them, and the run passed. No gate in CONTRIBUTING
+  §1 reads its input today. (#719)
+- A GitHub Release's notes keep a wrapped line that starts with a link
+  label and a colon, a regression in 0.11.8. `extract-changelog.sh` read
+  every such line as a link definition, so the line went missing from its
+  section's notes and stood in for the real definition in the notes of
+  every other section linking that label. A definition is now taken only
+  where CommonMark lets one start, and under a line of text the line is
+  text. No line of this file has the shape, and every released section
+  extracts byte for byte as before. (#717)
+- `docs/DESIGN.md` §2 lists three rules for race-free waits, the number
+  its heading, the README, `docs/LIMITATIONS.md` and the rustdoc give. It
+  listed four. The last was a note on rule 1 under `wait_frame` and is now
+  written as one, and the two rustdoc sentences that cited "rule 4" name
+  the note. (#721)
+- `AGENTS.md` lists the two commit rules CI enforces, the DCO sign-off and
+  no AI attribution. It listed Conventional Commits with a subject under 72
+  characters as a third that "will fail CI", and no job checks either. The
+  commit style stays, as a convention review holds, and `CONTRIBUTING.md`
+  §4 says so too. Both files now say which subject lands on `main`: a pull
+  request of one commit lands under that commit's subject and one of
+  several under its title, where they said the title always did. (#720)
 - A sixel repeat with a count of zero or with none (`!0~`, `!~`) repeats
   its sixel once, as xterm and Windows Terminal read it. It painted nothing
   and did not advance, so `~!0~~` decoded two pixels wide where it is

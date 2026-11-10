@@ -485,15 +485,16 @@ the PTY. Three rules make such waits deterministic:
    for the job. `snapshot_after(pred)` is rules 1–3 as one call: the
    predicate, the settle, and the screen it settled on.
 
-4. **`wait_frame` removes the torn-frame race, not rule 1.** An
-   application that brackets its repaints in DEC 2026 synchronized updates
-   lets `wait_frame` evaluate predicates only on complete frames, so half a
-   row can never match — but a predicate true of frames you did not mean
-   returns one of them. `send(key)` then `wait_frame(|s| s.contains("MENU"))`
-   hands back the oldest not-yet-returned frame showing a menu, which can
-   be the one painted *before* the key. Name what the key changes, exactly
-   as rule 1 asks. The frame you get carries its own `repaints()`, so how
-   far behind the live screen it is can be checked rather than assumed.
+**A note on `wait_frame`: it removes the torn-frame race, not rule 1.**
+This is not a fourth rule, since it asks for nothing the three do not. An
+application that brackets its repaints in DEC 2026 synchronized updates
+lets `wait_frame` evaluate predicates only on complete frames, so half a
+row can never match — but a predicate true of frames you did not mean
+returns one of them. `send(key)` then `wait_frame(|s| s.contains("MENU"))`
+hands back the oldest not-yet-returned frame showing a menu, which can be
+the one painted *before* the key. Name what the key changes, exactly as
+rule 1 asks. The frame you get carries its own `repaints()`, so how far
+behind the live screen it is can be checked rather than assumed.
 
 ### The resize stale-frame trap
 

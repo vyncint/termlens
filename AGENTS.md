@@ -47,15 +47,13 @@ Stable toolchain, MSRV 1.85 (checked in CI against the committed lockfile).
 
 ## The rules that will fail CI
 
-Three, and they are the same in every one of these repositories.
+Two, and they are the same in every one of these repositories.
+`commit-policy.yml` checks both on every commit of a pull request.
 
-1. **Conventional Commits.** `feat:`, `fix:`, `docs:`, `test:`, `ci:`,
-   `chore:`, `refactor:`, `perf:` — imperative mood, subject line under 72
-   characters, scope optional (`fix(screen): …`).
-2. **DCO sign-off.** `git commit -s`, and the `Signed-off-by:` email must
+1. **DCO sign-off.** `git commit -s`, and the `Signed-off-by:` email must
    match the commit author's. Forgot? `git commit --amend -s --no-edit`, or
    `git rebase --signoff main` for a branch.
-3. **No AI attribution.** See below — this one is about you, and it is the
+2. **No AI attribution.** See below — this one is about you, and it is the
    rule most likely to catch an agent out.
 
 Run them yourself before pushing; both scripts take a commit range:
@@ -64,6 +62,13 @@ Run them yourself before pushing; both scripts take a commit range:
 .github/scripts/check-dco.sh main..HEAD
 .github/scripts/check-no-ai-attribution.sh main..HEAD
 ```
+
+The commit style is a convention, not a gate. No CI job checks the type
+or the length of a commit subject, so review is what holds it:
+
+- **Conventional Commits.** `feat:`, `fix:`, `docs:`, `test:`, `ci:`,
+  `chore:`, `refactor:`, `perf:` — imperative mood, subject line of 72
+  characters or fewer, scope optional (`fix(screen): …`).
 
 ## Using AI here
 
@@ -115,9 +120,10 @@ These repositories share a house style, and it is stricter than most:
 ## Pull requests
 
 Branch from `main` (`feat/…`, `fix/…`, `docs/…`, `ci/…`). PRs are
-**squash-merged**, so the PR title becomes the commit subject on `main` —
-write it as a Conventional Commit. Update `CHANGELOG.md` under
-`[Unreleased]` for anything user-facing.
+**squash-merged**. A PR of one commit lands on `main` under that commit's
+subject, and a PR of several under the PR title, unless the maintainer sets
+another at merge — so write both as Conventional Commits. Update
+`CHANGELOG.md` under `[Unreleased]` for anything user-facing.
 
 Direct pushes to `main` are blocked by a ruleset; everything goes through a
 pull request, including releases.

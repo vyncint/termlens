@@ -4,7 +4,8 @@
 #
 # Each gate runs in the order §1 lists it; one line per gate says ok, FAIL
 # or skip. A failure does not stop the run, so one broken gate cannot hide
-# the rest, and the exit status is non-zero if any gate failed.
+# the rest, and the exit status is non-zero if any gate failed. A gate's
+# standard input is empty, so one that reads it cannot hide the rest either.
 #
 # The list is read from CONTRIBUTING §1 through .github/scripts/
 # extract-gates.sh — the same extraction check-ci-gates-listed.sh compares
@@ -126,7 +127,10 @@ while IFS= read -r cmd; do
     continue
   fi
   code=0
-  sh -c "$cmd" || code=$?
+  # Not the loop's standard input, which is the rest of the gate list: a
+  # gate that read it took every later gate with it, uncounted, and the run
+  # still passed (#719).
+  sh -c "$cmd" </dev/null || code=$?
   if [ "$code" -eq 0 ]; then
     ok=$((ok + 1))
     printf '  ok    %-58s exit %s\n' "$cmd" "$code"
