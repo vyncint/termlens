@@ -148,6 +148,15 @@ reads that marker.
   ended the HTML block the name sits in and the rest of the name rendered
   as Markdown: a heading, emphasis or a link in the step summary. The name
   now renders as one line of text.
+- The report action warns when its artifact directory is relative, and the
+  docs say `TERMLENS_ARTIFACT_DIR` must be absolute (#712). `cargo test`
+  runs each test binary in its own package's directory, so a relative value
+  put each crate's screens in that crate's directory; the action looked
+  for the value from the workspace root and said the failures left no
+  screen behind. It now prints a warning annotation naming the value, and
+  its summary says the path is relative instead of that no screen was
+  left. The value is still searched as before, so a workflow that works
+  today is unchanged.
 
 ## [0.11.8] - 2026-11-03
 

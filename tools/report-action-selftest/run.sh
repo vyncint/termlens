@@ -22,6 +22,10 @@
 #     name escaped, and an artifact file name upload-artifact accepts (#648)
 #   - a file name holding carriage returns around a `# heading`: one line,
 #     each CR a character reference, none left raw (#708)
+#   - a relative artifact directory, as `artifact-dir` or as
+#     TERMLENS_ARTIFACT_DIR: cargo put the screens in a crate's directory,
+#     so the step warns and its summary says why it found none (#712); an
+#     absolute one, Windows drive paths included, draws no warning
 #
 # Root reads a chmod 000 directory anyway, so as root the first two cases
 # cannot fail and are skipped by name rather than passed.
@@ -52,10 +56,16 @@ trap 'for d in $locked; do chmod 755 "$d"; done; rm -rf "$scratch"' EXIT
 
 # `workspace <case>`: a fresh workspace, artifact directory and RUNNER_TEMP
 # for one case, with the stub CLI where the install step puts the real one.
+# The step is given that directory as `artifact-dir` (`input`), with
+# TERMLENS_ARTIFACT_DIR unset (`env_dir`), and must not warn (`warns`); a
+# case may change any of the three before it runs the step.
 workspace() {
   ws="$scratch/$1/workspace"
   artifacts="$scratch/$1/artifacts"
   rt="$scratch/$1/runner-temp"
+  input="$artifacts"
+  env_dir=""
+  warns=0
   mkdir -p "$ws" "$artifacts" "$rt/termlens-cli/bin"
   cat > "$rt/termlens-cli/bin/termlens" <<'STUB'
 #!/bin/sh
@@ -75,18 +85,25 @@ unreadable() {
 }
 
 # `expect <label> <grep pattern …>`: the step, run in the current case's
-# workspace, exits 0 and its summary holds every pattern.
+# workspace, exits 0, prints as many `::warning` commands as `warns` says,
+# and its summary holds every pattern.
 expect() {
   label=$1
   shift
   : > "$rt/summary.md"
   got=0
   (cd "$ws" && RUNNER_TEMP="$rt" GITHUB_STEP_SUMMARY="$rt/summary.md" \
-    TERMLENS_ARTIFACT_DIR="" ARTIFACT_DIR_INPUT="$artifacts" \
+    TERMLENS_ARTIFACT_DIR="$env_dir" ARTIFACT_DIR_INPUT="$input" \
     ARTIFACT_NAME=termlens-report bash -c "$body") > "$rt/out.log" 2>&1 || got=$?
   if [ "$got" -ne 0 ]; then
     printf '  FAIL  %-58s exit %s, expected 0\n' "$label" "$got" >&2
     sed 's/^/        /' "$rt/out.log" "$rt/summary.md" >&2
+    status=1
+    return
+  fi
+  if [ "$(grep -c '^::warning' "$rt/out.log")" -ne "$warns" ]; then
+    printf '  FAIL  %-58s %s warning(s), expected %s\n' "$label" "$(grep -c '^::warning' "$rt/out.log")" "$warns" >&2
+    sed 's/^/        /' "$rt/out.log" >&2
     status=1
     return
   fi
@@ -223,6 +240,35 @@ if LC_ALL=C grep -q "$cr" "$rt/summary.md"; then
 else
   printf '  ok    %-58s\n' "$label"
 fi
+
+# cargo runs each test binary in its package's directory, so a relative
+# TERMLENS_ARTIFACT_DIR puts the screens under each crate, and the step,
+# which reads it from the workspace root, found none and said the failures
+# left none (#712). It warns, and the summary says the directory is relative.
+workspace relative
+mkdir -p "$ws/crates/app/rel-art"
+printf 'a screen\n' > "$ws/crates/app/rel-art/smoke-1.screen.txt"
+input=rel-art
+warns=1
+expect "a relative artifact-dir warns, and the summary says why" \
+  "\`rel-art\` is a relative path" "each package's own \`rel-art\`" "INSTA_UPDATE: new"
+label="  and no longer says the failures left no screen"
+if grep -Fq "left no screen behind" "$rt/summary.md"; then
+  printf '  FAIL  %-58s\n' "$label" >&2
+  sed 's/^/        /' "$rt/summary.md" >&2
+  status=1
+else
+  printf '  ok    %-58s\n' "$label"
+fi
+input=""
+env_dir=rel-art
+expect "  and so does a relative TERMLENS_ARTIFACT_DIR" \
+  "\`rel-art\` is a relative path"
+for abs in 'D:\a\_temp\termlens' 'D:/a/_temp/termlens' '\\server\share\termlens'; do
+  workspace "absolute-$(printf '%s' "$abs" | tr -c 'A-Za-z0-9' _)"
+  input="$abs"
+  expect "  and ${abs} is absolute, with no warning"
+done
 
 if [ "$status" -eq 0 ]; then
   echo "report action selftest: the render step writes its summary in every case"

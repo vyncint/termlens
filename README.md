@@ -225,7 +225,10 @@ termlens render --svg --out shot.svg -   # …to a file, from a screen on stdin
 ```
 
 In CI, set `TERMLENS_ARTIFACT_DIR` on the test step and every screen a
-failing wait embeds is also written there. Set `INSTA_UPDATE: new` beside
+failing wait embeds is also written there. Make it an absolute path:
+`cargo test` runs each test binary in its own package's directory, so a
+relative one lands in each crate's directory, and the report finds none
+of them (it warns when given one). Set `INSTA_UPDATE: new` beside
 it: insta's default writes no `.snap.new` when `CI` is set, and GitHub sets
 `CI` on every runner. The report action then puts those screens, and every
 `.snap.new` with its diff, into the pull request's step summary (inline

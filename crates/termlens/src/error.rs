@@ -26,7 +26,11 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// current thread's name — under `cargo test`, the test's path — and `<n>`
 /// counts this process's screens from 1, stepping past any name already in
 /// the directory: a file there is never replaced, so two test binaries
-/// with a test of the same name each leave their own. Every such
+/// with a test of the same name each leave their own. Give it an absolute
+/// path: a relative one is taken against the test process's working
+/// directory, and `cargo test` runs each test binary in its own package's
+/// directory, so in a workspace each crate's screens land in that crate's
+/// directory rather than in one place (#712). Every such
 /// error is recorded, an expected one included: a test that asserts a
 /// timeout or EOF leaves that screen in the directory too, so set the
 /// variable for the steps whose failures you want to see (#596). Unset, the
