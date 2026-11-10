@@ -64,8 +64,8 @@ picture, and the extra shapes are held to showing one:
 as the two above. It is `printf '⚠️\033[31mERR\033[0m ok'` on 10x2:
 0.11.6 drew the emoji one column wide, which its JSON twin records; the
 text is the same bytes in either layout, and the reader takes it two
-columns wide because the row has room (DESIGN §3, rule 4; #723). Its own two tests in
-`tests/compat.rs` (`VS16_BEFORE_0_11_7`) pin that reading: the text
+columns wide because the row has room (DESIGN §3, rule 4; #723). Its own
+two tests in `tests/compat.rs` (`VS16_BEFORE_0_11_7`) pin that reading: the text
 renders back byte for byte, every cell after the emoji sits a column
 right, the `styles:` span and the cursor keep their columns, and the
 diff against the JSON twin is that row and nothing else.
