@@ -377,6 +377,181 @@ fn a_decorated_run_of_blanks_is_drawn_in_the_svg() -> termlens::Result<()> {
     Ok(())
 }
 
+/// Every `<text>` of an SVG rendering of a `cols`-column screen, in
+/// document order, as `(x, y, textLength, text)` — after holding each to
+/// the grid: it says how its length is fitted, it starts on a cell boundary
+/// and is a whole number of cells long, and it ends inside the picture and
+/// no later than the next one on its row starts.
+fn svg_texts(svg: &str, cols: u32) -> Vec<(u32, u32, u32, String)> {
+    let number = |line: &str, name: &str| -> u32 {
+        let key = format!(" {name}=\"");
+        let from = line
+            .find(&key)
+            .unwrap_or_else(|| panic!("no {name} on {line}"))
+            + key.len();
+        let digits = line[from..].split('"').next().unwrap_or_default();
+        digits
+            .parse()
+            .unwrap_or_else(|_| panic!("{name}={digits:?} on {line}"))
+    };
+    let mut texts: Vec<(u32, u32, u32, String)> = Vec::new();
+    for line in svg.lines().filter(|line| line.starts_with("<text ")) {
+        assert!(
+            line.contains(" lengthAdjust=\"spacingAndGlyphs\""),
+            "the glyphs are not fitted to the length: {line}"
+        );
+        let (x, y, length) = (
+            number(line, "x"),
+            number(line, "y"),
+            number(line, "textLength"),
+        );
+        assert_eq!((x % 9, length % 9), (0, 0), "off the 9 px grid: {line}");
+        assert!(
+            length > 0 && x + length <= cols * 9,
+            "past the edge: {line}"
+        );
+        if let Some((last_x, last_y, last_length, _)) = texts.last() {
+            assert!(
+                *last_y != y || last_x + last_length <= x,
+                "overlaps the text before it: {line}"
+            );
+        }
+        let open = line.find('>').expect("the tag closes") + 1;
+        let close = line.rfind("</text>").expect("the element closes");
+        texts.push((x, y, length, line[open..close].to_owned()));
+    }
+    texts
+}
+
+/// A viewer lays a `<text>` out at its font's own advance, and no font in
+/// the stack advances 9 px at 14 px: they advance 8.4 or less, and a CJK
+/// fallback 14 where two cells are 18. With nothing in the element saying
+/// how long it is, text drifted left of the `<rect>`s along a run, ten `東`
+/// took fifteen columns, and the right border of an 80-column box was drawn
+/// near column 74 on the rows it shared a run with and at column 79 on the
+/// row where a highlight started a new one (#725). Every `<text>` now
+/// carries its length in cells, with the glyphs fitted to it.
+#[test]
+fn the_svg_fits_every_run_of_text_to_the_cell_grid() -> termlens::Result<()> {
+    let owned = |texts: &[(u32, u32, u32, &str)]| -> Vec<(u32, u32, u32, String)> {
+        texts
+            .iter()
+            .map(|&(x, y, length, text)| (x, y, length, text.to_owned()))
+            .collect()
+    };
+
+    // The box of the issue: the border rows are one run each, 80 cells
+    // long, and the middle row's right border is a run of its own after the
+    // highlighted cell. Both now end at the right edge.
+    let border = "\u{2500}".repeat(78);
+    let (top, bottom) = (
+        format!("\u{256d}{border}\u{256e}"),
+        format!("\u{2570}{border}\u{256f}"),
+    );
+    let boxed = Screen::parse(&format!(
+        "size: 80x3  cursor: hidden\n{top}\n\u{2502}{}x\u{2502}\n{bottom}\n\nstyles:\n1: 78 reverse",
+        " ".repeat(77)
+    ))?;
+    let svg = boxed.to_svg();
+    assert_eq!(
+        svg_texts(&svg, 80),
+        owned(&[
+            (0, 14, 720, &top),
+            (0, 32, 9, "\u{2502}"),
+            (702, 32, 9, "x"),
+            (711, 32, 9, "\u{2502}"),
+            (0, 50, 720, &bottom),
+        ]),
+        "{svg}"
+    );
+    assert_well_formed_xml(&svg);
+
+    // Its other two: sixty dots up to a highlight at column 60, ten wide
+    // characters up to a marker at column 20, and an 80-column ruler.
+    let (dots, wide, ruler) = (
+        ".".repeat(60),
+        "\u{6771}".repeat(10),
+        "0123456789".repeat(8),
+    );
+    let drift = Screen::parse(&format!(
+        "size: 80x3  cursor: hidden\n{dots}HERE\n{wide}|col20\n{ruler}\n\nstyles:\n\
+         0: 60-63 reverse\n1: 20-24 bg=1"
+    ))?;
+    let svg = drift.to_svg();
+    assert_eq!(
+        svg_texts(&svg, 80),
+        owned(&[
+            (0, 14, 540, &dots),
+            (540, 14, 36, "HERE"),
+            (0, 32, 180, &wide),
+            (180, 32, 45, "|col2"),
+            (225, 32, 9, "0"),
+            (0, 50, 720, &ruler),
+        ]),
+        "{svg}"
+    );
+
+    // One stretch fits glyphs of one width, so a run is split where narrow
+    // cells meet wide ones, and each piece is as long as its own cells. A
+    // piece of blanks draws nothing and is left out; blanks inside a piece
+    // are cells like any other.
+    for (size, row, expected) in [
+        (
+            "10x1",
+            "ab\u{6771}\u{4eac}cd",
+            vec![
+                (0, 14, 18, "ab"),
+                (18, 14, 36, "\u{6771}\u{4eac}"),
+                (54, 14, 18, "cd"),
+            ],
+        ),
+        (
+            "10x1",
+            "\u{6771} \u{4eac}",
+            vec![(0, 14, 18, "\u{6771}"), (27, 14, 18, "\u{4eac}")],
+        ),
+        ("10x1", "  ab  cd", vec![(0, 14, 72, "  ab  cd")]),
+        // A mark is in its character's cell, and a selector makes its
+        // emoji two cells.
+        ("10x1", "e\u{301}x", vec![(0, 14, 18, "e\u{301}x")]),
+        (
+            "10x1",
+            "\u{26a0}\u{fe0f}X",
+            vec![(0, 14, 18, "\u{26a0}\u{fe0f}"), (18, 14, 9, "X")],
+        ),
+        // A wide character a resize left in the last column has one cell,
+        // and is fitted to it rather than drawn past the edge.
+        (
+            "3x1",
+            "ab\u{6771}",
+            vec![(0, 14, 18, "ab"), (18, 14, 9, "\u{6771}")],
+        ),
+    ] {
+        let screen = Screen::parse(&format!("size: {size}  cursor: hidden\n{row}"))?;
+        let cols = u32::from(screen.cols());
+        let svg = screen.to_svg();
+        assert_eq!(svg_texts(&svg, cols), owned(&expected), "{row:?}:\n{svg}");
+    }
+
+    // A decorated run keeps its blanks (#586), and they are cells too.
+    let form = Screen::parse(
+        "size: 12x1  cursor: hidden\nName:   |  |\n\nstyles:\n0: 5-7 underline\n0: 9-10 strikethrough",
+    )?;
+    let svg = form.to_svg();
+    assert_eq!(
+        svg_texts(&svg, 12),
+        owned(&[
+            (0, 14, 45, "Name:"),
+            (45, 14, 27, "   "),
+            (72, 14, 9, "|"),
+            (81, 14, 18, "  "),
+            (99, 14, 9, "|"),
+        ]),
+        "{svg}"
+    );
+    Ok(())
+}
+
 /// U+FFFF in a cell went into the SVG as itself, and XML forbids it: no
 /// parser opened the file (#586). It is drawn as U+FFFD instead.
 #[test]

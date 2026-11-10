@@ -45,6 +45,21 @@ reads that marker.
   the text does not carry. A test that used `diff` to tell a no-break
   space from a space should compare `cell(row, col).contents()` instead.
   (#724)
+- `Screen::to_svg` draws its text on the 9×18 px grid its backgrounds are
+  on. Each run was one `<text>` laid out at the font's own advance, about
+  8.4 px where a cell is 9 and 14 px where a wide character takes 18, so
+  text drifted left of its highlights along a row, ten CJK characters
+  covered fifteen columns, and in an 80-column box the right border sat
+  near column 74 on rows drawn as one run and at column 79 on a row where
+  a highlight started a new one. Every `<text>` now says how long it is,
+  `textLength` at 9 px a cell with `lengthAdjust="spacingAndGlyphs"`, and
+  a run is split where narrow cells meet wide ones, so a viewer that
+  honours it (browsers, Inkscape) fits each glyph to its cells; a CJK
+  glyph is stretched to its two columns. A test holding a `to_svg`
+  snapshot should re-accept it after checking that each `<text>` gained
+  those two attributes and that a run which opens with blanks before wide
+  characters now starts at the first wide one, its leading blanks left
+  out as its trailing ones were. (#725)
 
 ### Fixed
 
