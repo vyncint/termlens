@@ -129,16 +129,16 @@ reads that marker.
   the program alone, and so does `termlens inspect` when it kills a
   program still running at the end of its wait. A member that ignores
   SIGHUP, a `nohup`ed helper or a background job that traps it, kept
-  running after the drop, attached to a PTY nobody held: the
-  hang-up went to the child's pid, and the kernel's own, as the session
-  leader exits, the member ignores. The group is now hung up, then killed
-  once the child has exited or has outlived the hang-up's grace, and the
-  child is reaped last, so the group's id is still the child's when it is
-  signalled. Once the child is reaped, by `wait_exit` or by the kernel
-  where SIGCHLD is ignored, nothing is signalled, as before; `signal`
-  still reaches the child alone. A test whose program leaves a helper
-  running on purpose must have the helper leave the program's process
-  group (`setsid`), or the drop now kills it. (#714)
+  running after the drop, attached to a PTY nobody held: the hang-up went
+  to the child's pid, and the kernel's own, as the session leader exits,
+  the member ignores. The group is now hung up, then killed once the child
+  has exited or has outlived the hang-up's grace, and the child is reaped
+  last, so the group's id is still the child's when it is signalled. Once
+  the child is reaped, by `wait_exit` or by the kernel where SIGCHLD is
+  ignored, nothing is signalled, as before; `signal` still reaches the
+  child alone. A test whose program leaves a helper running on purpose
+  must have the helper leave the program's process group (`setsid`), or
+  the drop now kills it. (#714)
 
 ### Fixed
 
