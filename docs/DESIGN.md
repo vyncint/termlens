@@ -72,8 +72,12 @@ on every run. The sequence tracker now keeps the requested set, beside
 the focus flag and the window title that live there for the same reason
 (the backend does not model them), so `DECRQM` answers each tracking
 mode on its own evidence and `Screen::mouse_modes` reports the set,
-while `Screen::mouse_mode` and the input path keep the backend's
-one-protocol answer. Both are facts; each is reported where it belongs.
+while `Screen::mouse_mode` and the input path report the one protocol.
+Both are facts; each is reported where it belongs. The one protocol is
+the tracker's as well (#693): the backend turns its value off only on a
+reset of the mode it holds, so after `?1002h ?1000l` it went on
+reporting, where xterm — for which a reset of any of the four ends
+reporting — sends nothing.
 With no tracking mode active — the state every application probes from
 at startup — every tracking mode reports reset, which is what lets
 capability detection succeed: answering "not recognized" there would
@@ -202,7 +206,10 @@ application decide instead of wait.
 Whatever remains unanswered (DECRQSS, the `CSI t` reports other than the
 text-area and pixel sizes, …) is recorded, and the next wait timeout names
 it: "the application queried the terminal (`^[[14t`) and received no
-answer" — a hang becomes a diagnosis. `answer_queries(false)` mutes the
+answer" — a hang becomes a diagnosis. The record keeps eight distinct
+shapes and counts the rest, each once; the most recent query is named
+whatever came before it, and the note claims a cause only when no output
+arrived in a later read than that query. `answer_queries(false)` mutes the
 responder for tests that need a silent terminal; the diagnosis still
 works.
 
