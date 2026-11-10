@@ -235,8 +235,9 @@ it with `std::process::Command`:
   directory. `argv[0]` is the name as given. A working directory that is
   not a directory gives way to the child's `HOME`, as in portable-pty.
 - **The environment** is the same: the inherited one unless `env_clear`,
-  plus the `SHELL` that portable-pty fills in from the login shell when the
-  process has none, then termlens's pins and the test's own variables.
+  less `COLUMNS` and `LINES` (§5), plus the `SHELL` that portable-pty fills
+  in from the login shell when the process has none, then termlens's pins
+  and the test's own variables.
 - **The session** gets the same `pre_exec` steps. Six signals go back to
   their defaults and the mask is emptied. `setsid` gives the child a
   session of its own, and `TIOCSCTTY` makes the PTY its controlling
@@ -1149,6 +1150,12 @@ call order is a trap. `env_clear()` also pins `SHELL=/bin/sh` unless the
 test sets `SHELL` itself: the PTY layer fills `SHELL` from the host's login
 shell when it is absent, which put one machine-shaped value inside an
 environment `env_clear` promises is hermetic (#221).
+
+Without `env_clear` the child inherits the test process's environment, but
+never `COLUMNS` or `LINES`: curses and `tput` take them over the size the
+PTY reports, so a pair exported by the shell that ran the tests laid the
+program out at that shell's size and kept it there across a resize (#709).
+Set on the builder, either reaches the child like any other variable.
 
 ## 6. Input encoding
 

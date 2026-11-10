@@ -33,9 +33,16 @@ use portable_pty::{Child, CommandBuilder, PtyPair};
 /// A child running in the PTY, as the PTY layer hands one back.
 pub(crate) type PtyChild = Box<dyn Child + Send + Sync>;
 
+/// The variables a child never inherits, though `env` may set them. Each
+/// states the terminal's size, and curses and `tput` take it over the size
+/// the PTY reports, so one exported by the shell that ran the tests laid
+/// the program out at that shell's size, not at the builder's, and kept it
+/// there across a resize (#709). Without them the child asks the PTY.
+pub(crate) const NOT_INHERITED: [&str; 2] = ["COLUMNS", "LINES"];
+
 /// Start `cmd` on the slave side of `pair`, with `env` set on top of the
-/// inherited environment, or on top of nothing when `env_clear` is set.
-/// Later entries in `env` win.
+/// inherited environment less [`NOT_INHERITED`], or on top of nothing when
+/// `env_clear` is set. Later entries in `env` win.
 pub(crate) fn spawn_child(
     pair: &PtyPair,
     mut cmd: CommandBuilder,
@@ -44,6 +51,10 @@ pub(crate) fn spawn_child(
 ) -> Result<PtyChild, String> {
     if env_clear {
         cmd.env_clear();
+    } else {
+        for key in NOT_INHERITED {
+            cmd.env_remove(key);
+        }
     }
     for (key, value) in env {
         cmd.env(key, value);
@@ -125,6 +136,10 @@ mod unix {
             .stderr(slave);
         if env_clear {
             command.env_clear();
+        } else {
+            for key in super::NOT_INHERITED {
+                command.env_remove(key);
+            }
         }
         // When the test process has no SHELL, the PTY layer fills one in
         // from the login shell, and the builder holds the value it chose.

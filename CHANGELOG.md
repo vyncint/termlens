@@ -115,6 +115,15 @@ reads that marker.
   drew a kitty image with `i=` or `I=` should expect
   `the application queried the terminal (^[_G…)`, or have the application
   send `q=2`. (#680)
+- A spawned program no longer inherits `COLUMNS` or `LINES` from the test
+  process, and `termlens inspect --inherit-env` no longer passes the
+  caller's (#709). curses and `tput` take both over the terminal's own
+  size, so a suite run from a shell that exported them had its program
+  lay out at that shell's size rather than at `size()` or `--size`, and
+  keep it after a resize. Without them the program asks the PTY. Set with
+  `.env()` or `--env`, either still reaches the program as given. A test
+  that relied on an inherited `COLUMNS` or `LINES` should set it with
+  `.env()`, or size the terminal with `size()` instead.
 
 ### Fixed
 
@@ -242,6 +251,53 @@ reads that marker.
   `graphics().kitty` counted an image the application never sent, and in
   an upload it was taken as the last chunk. Whether an APC is kitty's was
   read off a buffer slot the previous escape had left its `G` in. (#735)
+- `termlens diff - missing.snap` reports the missing file at once, as
+  `diff missing.snap -` has since #651. With `-` on the left, standard
+  input was read to its end before the right operand was opened, which at
+  a terminal meant Ctrl-D. The operand that is not `-` is now opened and
+  measured first, so one that is missing, is a directory or is past the
+  1 GiB bound is refused before standard input is read. The two screens
+  are still read in argument order. (#715)
+- `termlens render` and `termlens diff` read a saved screen behind a
+  byte-order mark, and in UTF-16 (#716). Windows PowerShell 5.1's `>`
+  writes what `termlens inspect` prints as UTF-16LE behind a mark, and
+  `Out-File -Encoding utf8` puts a UTF-8 mark in front, so the CLI could
+  not read back its own output saved in the default Windows shell: the
+  first was refused as not UTF-8 and the second as a bad header, JSON
+  included. A UTF-8 mark is now dropped, and UTF-16 in either byte order is
+  decoded behind its mark; without one the input is UTF-8 as before. The
+  1 GiB bound holds for the decoded text too, and UTF-16 that is cut short
+  or holds a lone surrogate is refused as not valid UTF-16.
+- A screen written to `TERMLENS_ARTIFACT_DIR` never replaces a file
+  already there (#711). The `<n>` in `<test>-<n>.screen.*` counts per
+  process, and `<test>` is the test's path inside its binary, so two test
+  binaries with a failing test of the same name, or a test that
+  cargo-nextest retried, both wrote `<test>-1`, and the report showed only
+  the second screen. The file is now created exclusively, and a taken
+  name moves `<n>` on. Names are unchanged when nothing collides.
+- The report action escapes a carriage return in a file name as `&#13;`,
+  as it has escaped a newline since #648 (#708). It wrote the CR raw, and
+  CommonMark ends a line at a lone CR, so `\r\r` in a snapshot's path
+  ended the HTML block the name sits in and the rest of the name rendered
+  as Markdown: a heading, emphasis or a link in the step summary. The name
+  now renders as one line of text.
+- The report action warns when its artifact directory is relative, and the
+  docs say `TERMLENS_ARTIFACT_DIR` must be absolute (#712). `cargo test`
+  runs each test binary in its own package's directory, so a relative value
+  put each crate's screens in that crate's directory; the action looked
+  for the value from the workspace root and said the failures left no
+  screen behind. It now prints a warning annotation naming the value, and
+  its summary says the path is relative instead of that no screen was
+  left. The value is still searched as before, so a workflow that works
+  today is unchanged.
+- The report action keeps its step summary under GitHub's 1 MiB limit
+  (#710). It appended every screen whole and never counted, and past the
+  limit GitHub replaces the step's whole summary with an error, small
+  entries included: three failing 250x80 coloured snapshots came to
+  720 KB, so five lost the report. The action now stops adding screens
+  before the next would pass about 900 KiB and ends the summary with a
+  line saying how many more there are. Every screen is still rendered into
+  the artifact.
 
 ## [0.11.8] - 2026-11-03
 
