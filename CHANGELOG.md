@@ -54,6 +54,17 @@ reads that marker.
   which the rustdoc of `Screen::unsupported` says it is not. A test that pinned `unsupported()`
   exactly after one of these should drop that entry; the query is in the
   timeout note, where it always was. (#691)
+- The timeout note names xterm's window reports it did not:
+  `CSI 15 t` (the screen's size in pixels), `CSI 13 ; 2 t` and
+  `CSI 14 ; 2 t`. They are questions termlens does not answer, and an
+  application blocked on one timed out with nothing naming it, while
+  `unsupported()` listed it as a sequence nobody honoured. And the note
+  no longer names `CSI > Ps n`, XTMODKEYS's "disable", which is a setting
+  with no reply: it said the application was blocked waiting for an
+  answer to it. A test that matched `^[[15t`, `^[[13;2t` or `^[[14;2t` in
+  `unsupported()` should find it in the timeout's note instead, and one
+  that expected `^[[>4n` in the note should find it in `unsupported()`,
+  where it was listed already. (#692)
 
 ### Fixed
 

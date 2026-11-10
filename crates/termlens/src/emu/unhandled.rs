@@ -210,11 +210,17 @@ impl Callbacks for Unhandled {
             // names, and the window reports it answers or names.
             (None, None, 'g' | 'I' | 'Z' | 'c' | 'n') => true,
             // The window reports the responder answers (14, 16, 18) and the
-            // ones it names in a timeout (11, 13, 19, 20, 21) — `seq.rs`'s
-            // table, single-parameter like it. Everything else in the family,
-            // the title stack included, nobody honoured.
+            // ones it names in a timeout — `seq.rs`'s own predicate, which
+            // reads no sub-parameter. Everything else in the family, the
+            // title stack included, nobody honoured.
             (None, None, 't') => {
-                params.len() == 1 && matches!(first, Some(11 | 13 | 14 | 16 | 18 | 19 | 20 | 21))
+                let second = params.get(1).and_then(|p| p.first()).copied();
+                params.iter().all(|p| p.len() == 1)
+                    && super::seq::is_window_report(
+                        params.len(),
+                        first.map_or(0, u32::from),
+                        second.map_or(0, u32::from),
+                    )
             }
             // Insert mode is the one ANSI mode honoured, so a list is
             // handled only when it names nothing else: `CSI 4;20 h` sets
@@ -393,6 +399,15 @@ mod tests {
         assert!(shapes(b"\x1b[11t\x1b[13t\x1b[19t\x1b[20t\x1b[21t").is_empty());
         // Multi-parameter forms the responder does not claim.
         assert_eq!(shapes(b"\x1b[18;0t"), ["^[[18;0t"]);
+        // The screen's pixel size and the `; 2` reports, named since #692.
+        assert!(shapes(b"\x1b[15t\x1b[14;2t\x1b[13;2t").is_empty());
+    }
+
+    /// XTMODKEYS's "disable" (`CSI > Ps n`) is a setting nobody honours,
+    /// not a question, so it belongs here (#692).
+    #[test]
+    fn xtmodkeys_disable_is_unsupported() {
+        assert_eq!(shapes(b"\x1b[>4n\x1b[>n"), ["^[[>4n", "^[[>n"]);
     }
 
     /// The title is the tracker's in every form it reads one from, `;` in

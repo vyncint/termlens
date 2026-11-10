@@ -618,6 +618,26 @@ fn key_is(control: &[u8], key: &[u8], value: &[u8]) -> bool {
     })
 }
 
+/// Whether `CSI Ps ; Ps t` with `count` parameters, the first two `first`
+/// and `second`, is one of xterm's window reports: a question, whose
+/// reply the responder gives (`14`, `16` and `18`, alone) or names in a
+/// timeout. Every report ctlseqs documents: the window state (11), its
+/// position (13) and pixel size (14), each also with `; 2`, the screen's
+/// size in pixels (15), the cell size (16), the text area's and the
+/// screen's size in characters (18, 19) and the icon label and title (20,
+/// 21). `15` and the `; 2` forms were missing, so a program blocked on one
+/// was never named (#692).
+///
+/// `unhandled.rs` reads this too, so what is named here is never also
+/// listed in `Screen::unsupported`.
+pub(super) fn is_window_report(count: usize, first: u32, second: u32) -> bool {
+    match count {
+        1 => matches!(first, 11 | 13 | 14 | 15 | 16 | 18 | 19 | 20 | 21),
+        2 => matches!(first, 13 | 14) && second == 2,
+        _ => false,
+    }
+}
+
 /// Render a captured escape sequence printably (`ESC` becomes `^[`).
 fn printable(bytes: &[u8]) -> String {
     let mut out = String::new();
@@ -1773,8 +1793,12 @@ impl SeqTracker {
             // graphics either way.
             (0, b't') if single(14) => Some(Query::WindowSizePixels),
             (0, b't') if single(16) => Some(Query::CellSizePixels),
-            // Questions we can recognize but not answer.
-            (_, b'n') | (b'=', b'c') => Some(Query::Unanswerable(self.seq_printable())),
+            // Questions we can recognize but not answer: the DSR family,
+            // and DA3. Not `CSI > Ps n`, which is XTMODKEYS's "disable", a
+            // setting with no reply (#692).
+            (0 | b'?' | b'=', b'n') | (b'=', b'c') => {
+                Some(Query::Unanswerable(self.seq_printable()))
+            }
             // XTSMGRAPHICS (`CSI ? Pi ; Pa ; Pv S`): sixel programs ask it
             // for the colour registers and the geometry right after DA1
             // claims sixel. Every form gets a reply from xterm, a set
@@ -1788,9 +1812,14 @@ impl SeqTracker {
                 // terminal, but the probe itself is still unanswered.
                 Some(Query::Unanswerable(self.seq_printable()))
             }
+            // The other window reports; `14`, `16` and `18` alone are
+            // classified above.
             (0, b't')
-                if matches!(self.csi_first_param, 11 | 13 | 19 | 20 | 21)
-                    && self.csi_param_count == 1 =>
+                if is_window_report(
+                    usize::from(self.csi_param_count),
+                    self.csi_first_param,
+                    self.csi_second_param,
+                ) =>
             {
                 Some(Query::Unanswerable(self.seq_printable()))
             }
@@ -4346,6 +4375,42 @@ mod tests {
         // Any CSI …n is a DSR-family status request by definition.
         let q = queries_of(b"\x1b[6;1n");
         assert_eq!(q, vec![Query::Unanswerable("^[[6;1n".into())]);
+    }
+
+    /// `CSI > Ps n` is XTMODKEYS's "disable", a setting with no reply,
+    /// and naming it in a timeout pointed the reader at a question nobody
+    /// asked (#692).
+    #[test]
+    fn xtmodkeys_disable_is_not_a_question() {
+        for wire in [&b"\x1b[>4n"[..], b"\x1b[>n", b"\x1b[>0n", b"\x1b[>1n"] {
+            assert_eq!(queries_of(wire), Vec::<Query>::new(), "{}", printable(wire));
+        }
+        // The other prefixes are still the DSR family's.
+        assert_eq!(
+            queries_of(b"\x1b[?996n"),
+            vec![Query::Unanswerable("^[[?996n".into())]
+        );
+    }
+
+    /// xterm's window reports, every one documented in ctlseqs: the screen
+    /// size in pixels (`15 t`) and the `; 2` forms of the position and the
+    /// pixel size (`13 ; 2 t`, `14 ; 2 t`) are questions termlens does not
+    /// answer, and were never named (#692).
+    #[test]
+    fn every_xterm_window_report_is_a_question() {
+        for wire in [&b"\x1b[15t"[..], b"\x1b[14;2t", b"\x1b[13;2t"] {
+            assert_eq!(
+                queries_of(wire),
+                vec![Query::Unanswerable(printable(wire))],
+                "{}",
+                printable(wire)
+            );
+        }
+        // Not reports: a resize, the title stack, and a second parameter
+        // xterm gives no meaning to.
+        for wire in [&b"\x1b[8;24;80t"[..], b"\x1b[22;0t", b"\x1b[11;2t"] {
+            assert_eq!(queries_of(wire), Vec::<Query>::new(), "{}", printable(wire));
+        }
     }
 
     #[test]
