@@ -127,6 +127,13 @@ reads that marker.
   bound let in as many bytes over 1 MiB as the test had typed. Each write
   now carries how many of its bytes are replies, and only those come off
   the count. (#704)
+- The comment in `Terminal`'s drop on the order it closes its handles in
+  states the constraint the code has. It said the writer had to close
+  before the master because the reader thread polled the master while
+  holding the PTY lifecycle lock. The reader reads with no lock held and
+  takes that one only to close its own duplicate of the master, which a
+  test now pins; the order that matters is that teardown is unblocked
+  before the writer, whose drop writes, is closed. (#707)
 
 ## [0.11.8] - 2026-11-03
 

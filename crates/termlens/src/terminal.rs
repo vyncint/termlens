@@ -4940,11 +4940,27 @@ impl Drop for Terminal {
             unblock_teardown(master.as_ref());
         }
         let _lifecycle = pty_lifecycle_guard();
-        // Close the PTY fds while holding the lock. Taking the writer
-        // out of the shared cell closes its fd even though the reader
-        // thread keeps the (now empty) cell alive — and it must happen
-        // before the master is dropped, since the reader polls the
-        // master's descriptor while holding this lock.
+        // Both closes below are lifecycle edges, so both happen under the
+        // lock (#589). Taking the PTY layer's writer out of the shared cell
+        // closes its descriptor even though the reader thread keeps the
+        // (now empty) cell alive.
+        //
+        // What orders them is `unblock_teardown` above, not each other. It
+        // needs the master open, and it must come before the writer goes:
+        // the PTY layer's writer writes an EOT as it is dropped, and that
+        // write must not wait while this lock is held (#628). Between the
+        // two closes themselves no order is needed. The writer, the master
+        // and the reader and writer threads' handles are duplicates of one
+        // open file description, so the device sees one close, whichever of
+        // them goes last, and that is usually a thread's.
+        //
+        // Nothing here waits on those threads. The lock is taken by
+        // `open_pty`, for an open and the spawn after it; by this drop; and
+        // by `MasterDup::drop`, as the reader or the writer thread ends and
+        // closes its duplicate. While it reads, the reader holds no lock at
+        // all: this comment used to say the writer had to go first because
+        // the reader polled the master under this lock, which it never did
+        // (#707).
         drop(
             self.writer
                 .lock()
@@ -6018,6 +6034,85 @@ mod tests {
                 .recv_timeout(Duration::from_secs(30))
                 .expect("the drop deadlocked on the lock its own thread held");
             assert_eq!(*log.lock().unwrap(), [("duplicate", true)]);
+        }
+
+        /// The reader takes the lifecycle lock to close its duplicate of the
+        /// master and at no other time. It reads with the lock released, so
+        /// a teardown holding the lock never waits on a read, and the order
+        /// `Drop` closes its own handles in owes nothing to the reader
+        /// (#707).
+        #[test]
+        fn the_reader_takes_the_lock_to_close_its_duplicate_and_not_to_read() {
+            use std::sync::atomic::AtomicUsize;
+
+            use super::super::{
+                reader_loop, EmuState, Graphics, Monitor, Responder, SharedWriter, Vt100Emulator,
+            };
+
+            /// As many one-byte reads as it is given, then end of stream.
+            struct Reads(u8, Log);
+
+            impl io::Read for Reads {
+                fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                    self.1.lock().unwrap().push(("read", HOLDS_LIFECYCLE.get()));
+                    if self.0 == 0 {
+                        return Ok(0);
+                    }
+                    self.0 -= 1;
+                    buf[0] = b'x';
+                    Ok(1)
+                }
+            }
+
+            impl Drop for Reads {
+                fn drop(&mut self) {
+                    self.1
+                        .lock()
+                        .unwrap()
+                        .push(("close", HOLDS_LIFECYCLE.get()));
+                }
+            }
+
+            let log = Log::default();
+            let shared = Monitor::new(EmuState::new(
+                Box::new(Vt100Emulator::new(
+                    4,
+                    20,
+                    0,
+                    crate::graphics::DEFAULT_CAPTURE,
+                    false,
+                )),
+                Responder {
+                    respond: true,
+                    background: (0, 0, 0),
+                    foreground: (255, 255, 255),
+                    cell_size: None,
+                    graphics: Graphics::default(),
+                    term_name: "xterm-256color".into(),
+                },
+                Arc::new(AtomicUsize::new(0)),
+            ));
+            let writer: SharedWriter = Arc::new(Mutex::new(None));
+            // On this thread, as the reader thread runs it: the duplicate
+            // is the loop's, and closes as the loop returns.
+            reader_loop(
+                Box::new(MasterDup(Some(Reads(2, Arc::clone(&log))))),
+                &shared,
+                &writer,
+                None,
+                &AtomicUsize::new(0),
+                &AtomicUsize::new(0),
+            );
+            assert_eq!(
+                *log.lock().unwrap(),
+                [
+                    ("read", false),
+                    ("read", false),
+                    ("read", false),
+                    ("close", true)
+                ]
+            );
+            assert!(!HOLDS_LIFECYCLE.get(), "the lock outlived the reader");
         }
     }
 }
