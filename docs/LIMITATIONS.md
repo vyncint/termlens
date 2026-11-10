@@ -187,11 +187,15 @@ CHANGELOG entry.
 
 - **A reply the terminal's own input queue cannot hold may not arrive.**
   termlens no longer drops answers of its own accord, but the tty input
-  queue is small (~1 KB on macOS, ~4 KB on Linux), so an application that
-  asks thousands of questions without reading has to read as it asks — as
-  it would against a real terminal. On Linux the kernel discards silently,
-  so that loss is undetectable and goes unreported; macOS blocks instead,
-  where it is counted and named.
+  queue is small (~1 KB on macOS; on Linux, about 13.8 KB in raw mode and
+  4 KB in canonical mode), so an application that asks thousands of
+  questions without reading has to read as it asks — as it would against a
+  real terminal. In raw mode, the mode of an application that reads its
+  replies, a full queue blocks the write on both platforms, and the replies
+  stuck behind it are counted and named in the next wait's error. Only a
+  canonical-mode application on Linux loses replies silently: there the
+  kernel discards what does not fit, so that loss is undetectable and goes
+  unreported.
 
 ## Windows
 

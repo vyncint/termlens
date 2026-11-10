@@ -179,16 +179,21 @@ than dropped, so both are counted — a lock-free pending count the writer
 clears only once bytes are actually out — and the next wait's error names the
 total.
 
-**How much of that is knowable differs by platform, and the honest answer is
-that Linux hides it.** A write into a full terminal input queue blocks on
-macOS, so the stuck replies are visible to us and the count is exact. Linux's
-`n_tty` driver instead *discards* input once its buffer (`N_TTY_BUF_SIZE`, 4
-KB) is full: the write succeeds, the kernel throws the bytes away, and nothing
-distinguishes that from delivery. We cannot report what we were never told, so
-on Linux an application that never reads produces a timeout carrying the
-screen and no reply count. The same kernel limit caps a legitimate batch too —
-past roughly 680 replies the application has to read as it asks, exactly as it
-would against a real terminal.
+**How much of that is knowable depends on the terminal mode, and one mode
+on Linux hides it.** In raw (non-canonical) mode, which is the mode of every
+application that reads its replies, a write into a full terminal input queue
+blocks, on Linux as on macOS: the stuck replies stay in our writer, so they
+are counted, and the next wait's error names them. Measured on Linux 7.0, a
+raw-mode application that never read took about 2,300 six-byte replies
+(13.8 KB) before the write blocked, and once it did read, every reply
+arrived. In canonical mode Linux's `n_tty` driver instead *discards* input
+once its buffer (`N_TTY_BUF_SIZE`, 4 KB) is full: the write succeeds, the
+kernel throws the bytes away, and nothing distinguishes that from delivery.
+We cannot report what we were never told, so on Linux a canonical-mode
+application that never reads produces a timeout carrying the screen and no
+reply count; it can later read 4,095 bytes, about 680 replies, and the rest
+are gone. Past either limit the application has to read as it asks, exactly
+as it would against a real terminal.
 
 `XTGETTCAP` is answered from a table of capabilities the crate actually
 implements, and every entry was checked against the code that implements it

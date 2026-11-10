@@ -134,6 +134,13 @@ reads that marker.
   takes that one only to close its own duplicate of the master, which a
   test now pins; the order that matters is that teardown is unblocked
   before the writer, whose drop writes, is closed. (#707)
+- `docs/DESIGN.md` §1 and `docs/LIMITATIONS.md` no longer say that on
+  Linux the replies an application never reads are lost without a count.
+  That is canonical mode's behaviour, where `n_tty` keeps 4,095 bytes,
+  about 680 replies, and discards the rest. In raw mode, the mode of an
+  application that reads its replies, Linux blocks the write once about
+  2,300 replies (13.8 KB) are queued, as macOS blocks, and the next wait's
+  error counts the replies stuck behind it, on Linux too. (#703)
 
 ## [0.11.8] - 2026-11-03
 

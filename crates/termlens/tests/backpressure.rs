@@ -82,10 +82,10 @@ fn a_batch_of_probes_is_answered_in_full() -> termlens::Result<()> {
     // bytes — see `fine_grained_arrival_is_answered_in_full` for why.
     //
     // The ceiling here is the terminal's own input queue, not ours: 400 DSR
-    // replies are ~2.4 KB, inside Linux's 4 KB `N_TTY_BUF_SIZE`, while 1000
-    // would be ~6 KB and could not be delivered before the application read
-    // — a real terminal blocks there too. What this pins is that nothing is
-    // lost while the answers still fit, which is the bug.
+    // replies are ~2.4 KB, inside the ~13.8 KB Linux takes in raw mode, and
+    // past what fits the write blocks until the application reads — a real
+    // terminal blocks there too. What this pins is that nothing is lost
+    // while the answers still fit, which is the bug.
     for n in [50usize, 200, 400] {
         assert_eq!(answered(n)?, n, "asked {n} probes back to back");
     }
