@@ -487,57 +487,120 @@ fn every_search_costs_a_small_multiple_of_the_work_it_cannot_avoid() {
     let late = grid(Some('\u{e9}'));
     assert!(ascii.find("zzz").is_none() && !late.contains("zzz"));
 
-    let pass = fastest(3, || ascii.contains("zzz"));
-    let build = fastest(3, || ascii.mask_cells(|_| false));
-    let within = |name: &str, took: Duration, reference: Duration| {
-        assert!(
-            took < reference * BOUND,
-            "{name} took {took:?}, {:.0} times its reference ({reference:?})",
-            took.as_secs_f64() / reference.as_secs_f64()
+    let pass = || {
+        std::hint::black_box(ascii.contains("zzz"));
+    };
+    let build = || {
+        std::hint::black_box(ascii.mask_cells(|_| false));
+    };
+    // A search and its reference are timed side by side, and the pair is
+    // timed again, up to three times, before the bound is called broken. A
+    // scheduler that parks the search on a loaded runner can stretch two
+    // runs of one side and none of the other (a Windows stress shard at 16
+    // threads saw `find_all` at 10.2 times), while the regression this test
+    // exists for (#584) was hundreds of times, every time.
+    let within = |name: &str, search: &dyn Fn(), reference: &dyn Fn()| {
+        let mut worst = (Duration::ZERO, Duration::ZERO);
+        for _ in 0..3 {
+            let base = fastest(3, reference);
+            let took = fastest(3, search);
+            if took < base * BOUND {
+                return;
+            }
+            worst = (took, base);
+        }
+        let (took, base) = worst;
+        panic!(
+            "{name} took {took:?}, {:.0} times its reference ({base:?}), three times over",
+            took.as_secs_f64() / base.as_secs_f64()
         );
     };
-    within("find", fastest(2, || ascii.find("zzz")), pass);
-    within("find_all", fastest(2, || ascii.find_all("zzz")), pass);
+    within(
+        "find",
+        &|| {
+            std::hint::black_box(ascii.find("zzz"));
+        },
+        &pass,
+    );
+    within(
+        "find_all",
+        &|| {
+            std::hint::black_box(ascii.find_all("zzz"));
+        },
+        &pass,
+    );
     within(
         "find across rows",
-        fastest(2, || ascii.find("a\nzzz")),
-        pass,
+        &|| {
+            std::hint::black_box(ascii.find("a\nzzz"));
+        },
+        &pass,
     );
-    within("locate", fastest(2, || ascii.locate("zzz")), pass);
+    within(
+        "locate",
+        &|| {
+            std::hint::black_box(ascii.locate("zzz"));
+        },
+        &pass,
+    );
     within(
         "contains, a non-ASCII needle",
-        fastest(2, || ascii.contains("z\u{e9}")),
-        pass,
+        &|| {
+            std::hint::black_box(ascii.contains("z\u{e9}"));
+        },
+        &pass,
     );
     within(
         "contains, the last cell non-ASCII",
-        fastest(2, || late.contains("zzz")),
-        pass,
+        &|| {
+            std::hint::black_box(late.contains("zzz"));
+        },
+        &pass,
     );
     within(
         "find, the last cell non-ASCII",
-        fastest(2, || late.find("zzz")),
-        pass,
+        &|| {
+            std::hint::black_box(late.find("zzz"));
+        },
+        &pass,
     );
     within(
         "mask_matching",
-        fastest(2, || ascii.mask_matching("zzz", '#')),
-        build,
+        &|| {
+            std::hint::black_box(ascii.mask_matching("zzz", '#'));
+        },
+        &build,
     );
     #[cfg(feature = "regex")]
     {
         let re = regex::Regex::new("zzz").unwrap();
-        within("matches", fastest(2, || ascii.matches(&re)), pass);
-        within("find_match", fastest(2, || ascii.find_match(&re)), pass);
+        within(
+            "matches",
+            &|| {
+                std::hint::black_box(ascii.matches(&re));
+            },
+            &pass,
+        );
+        within(
+            "find_match",
+            &|| {
+                std::hint::black_box(ascii.find_match(&re));
+            },
+            &pass,
+        );
         within(
             "find_all_matches",
-            fastest(2, || ascii.find_all_matches(&re)),
-            pass,
+            &|| {
+                std::hint::black_box(ascii.find_all_matches(&re));
+            },
+            &pass,
         );
         within(
             "mask_matches",
-            fastest(2, || ascii.mask_matches(&re, '#')),
-            build,
+            &|| {
+                std::hint::black_box(ascii.mask_matches(&re, '#'));
+            },
+            &build,
         );
     }
 }

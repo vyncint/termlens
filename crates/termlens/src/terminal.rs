@@ -6,7 +6,7 @@
 //! the test thread. Screens are immutable snapshots taken under that lock,
 //! so no output is ever lost between two waits.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 // The asciicast header is assembled key by key because two of its keys
@@ -101,6 +101,11 @@ impl ExitWatch {
 /// distinct `CSI … n` is its own shape — so it is bounded; anything
 /// beyond this is counted rather than kept.
 const MAX_UNANSWERED: usize = 8;
+
+/// How many distinct unanswered shapes past [`MAX_UNANSWERED`] a terminal
+/// counts, each by a hash, so that a shape asked again is not counted
+/// again (#690). Past this the note says "at least" this many.
+const MAX_UNANSWERED_COUNTED: usize = 4096;
 
 /// How many completed frames a terminal retains for [`wait_frame`].
 ///
@@ -732,10 +737,17 @@ impl MouseChord {
 
 /// The error every mouse action shares: bytes the application never
 /// asked for would be misparsed as keys.
+///
+/// It names both ways of getting here. A reset of any tracking mode ends
+/// reporting, whichever one was set (#693), so "no `h` was seen" is false
+/// of an application that set one mode and reset another, and that is the
+/// application whose author needs telling.
 fn no_mouse_tracking() -> Error {
     Error::Input(
         "the application has not enabled mouse tracking \
-         (no CSI ?9/?1000/?1002/?1003 h was seen)"
+         (no CSI ?9/?1000/?1002/?1003 h is in force: none was seen, or \
+         reporting was turned off after it, as a CSI ? … l of any of the \
+         four does)"
             .into(),
     )
 }
@@ -1278,8 +1290,18 @@ struct EmuState {
     /// with the read it most recently arrived in — timeout errors surface
     /// these so a blocked probe is diagnosable.
     unanswered: Vec<(String, u64)>,
-    /// Distinct unanswered shapes beyond `MAX_UNANSWERED`, counted only.
-    unanswered_overflow: usize,
+    /// Distinct unanswered shapes beyond `MAX_UNANSWERED`, counted only:
+    /// a hash of each, at most `MAX_UNANSWERED_COUNTED`, so a shape asked
+    /// again is counted once (#690).
+    unanswered_overflow: HashSet<u64>,
+    /// Whether a shape arrived past the bound when the count was full.
+    unanswered_overflow_saturated: bool,
+    /// The most recent unanswered query and the read it arrived in, kept
+    /// whether or not the list had room for it: it is the one an
+    /// application blocked on a reply is waiting for, so it is named
+    /// whatever came before it and decides whether the note claims a cause
+    /// (#690).
+    latest_unanswered: Option<(String, u64)>,
     /// Query replies the reader could not deliver because the child was
     /// not reading its input — evidence for the diagnosis, not an error.
     replies_dropped: usize,
@@ -1343,7 +1365,9 @@ impl EmuState {
             graphics,
             term_name,
             unanswered: Vec::new(),
-            unanswered_overflow: 0,
+            unanswered_overflow: HashSet::new(),
+            unanswered_overflow_saturated: false,
+            latest_unanswered: None,
             replies_dropped: 0,
             replies_pending,
             reads: 0,
@@ -1362,10 +1386,16 @@ impl EmuState {
             // Asked again: judge it by the most recent occurrence.
             entry.1 = reads;
         } else if self.unanswered.len() < MAX_UNANSWERED {
-            self.unanswered.push((shape, reads));
+            self.unanswered.push((shape.clone(), reads));
         } else {
-            self.unanswered_overflow += 1;
+            let hash = shape_hash(&shape);
+            if self.unanswered_overflow.len() < MAX_UNANSWERED_COUNTED {
+                self.unanswered_overflow.insert(hash);
+            } else if !self.unanswered_overflow.contains(&hash) {
+                self.unanswered_overflow_saturated = true;
+            }
         }
+        self.latest_unanswered = Some((shape, reads));
     }
 
     /// Build the reply for a query, or record it as unanswered. Pure
@@ -1626,6 +1656,12 @@ impl EmuState {
     /// deliberate: the emulator stops at the query byte and processes the
     /// rest of the same chunk, so output the application batched into the
     /// same `write` as its probe is not evidence of progress.
+    ///
+    /// The most recent query is always named, first when it is the cause,
+    /// and it alone decides the verdict: it is the one asked after the last
+    /// output, so if the application moved past it, it moved past them
+    /// all. The bounded list could leave it out, and the note then blamed
+    /// none of the eight it named, and none at all (#690).
     fn query_note(&self) -> String {
         let stuck = self.replies_pending.load(Ordering::Relaxed);
         let undelivered = self.replies_dropped + stuck;
@@ -1649,10 +1685,25 @@ impl EmuState {
                 moved_past.push(shape);
             }
         }
-        let more = if self.unanswered_overflow > 0 {
-            format!(", and {} more", self.unanswered_overflow)
-        } else {
-            String::new()
+        // The most recent query, when the list had no room for it: named
+        // with the rest, and so not one of the "more".
+        let mut overflow = self.unanswered_overflow.len();
+        if let Some((latest, seen_at)) = &self.latest_unanswered {
+            if !self.unanswered.iter().any(|(shape, _)| shape == latest) {
+                if self.unanswered_overflow.contains(&shape_hash(latest)) {
+                    overflow -= 1;
+                }
+                if *seen_at == self.reads {
+                    blocking.insert(0, latest);
+                } else {
+                    moved_past.push(latest);
+                }
+            }
+        }
+        let more = match (overflow, self.unanswered_overflow_saturated) {
+            (_, true) => format!(", and at least {overflow} more"),
+            (0, false) => String::new(),
+            (n, false) => format!(", and {n} more"),
         };
         if blocking.is_empty() {
             format!(
@@ -2636,6 +2687,15 @@ fn history_note(screen: &Screen) -> String {
     }
 }
 
+/// A query shape's hash, which is all that is kept of a shape past
+/// [`MAX_UNANSWERED`].
+fn shape_hash(shape: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    shape.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn query_shape(query: &Query) -> String {
     match query {
         Query::CursorPosition { private: false } => "^[[6n".into(),
@@ -3295,6 +3355,9 @@ impl Terminal {
     /// # }
     /// ```
     ///
+    /// The modifiers are reported on the release as well as on the press,
+    /// in every encoding, as xterm reports them.
+    ///
     /// # Errors
     ///
     /// Same conditions as [`click`](Self::click).
@@ -3505,7 +3568,17 @@ impl Terminal {
         // The remaining forms all report a release as button 3 and keep
         // the `+ 32` on the button; the legacy and UTF-8 ones differ only
         // in how a coordinate byte above 127 is written.
-        let button = if press { button } else { 3 };
+        //
+        // The modifier bits stay on a release. xterm's `BtnCode` starts
+        // from `32 + (KeyState << 2)` and adds 3 for a release, and Windows
+        // Terminal sets the same bits on its release code. A bare 3 here
+        // told the application the keys went down with the button and came
+        // up without it (#701).
+        let button = if press {
+            button
+        } else {
+            3 + (button & 0b1_1100)
+        };
         Ok(match modes.mouse_encoding {
             MouseEncoding::Utf8 => mouse_utf8(button, col, row),
             MouseEncoding::Urxvt => mouse_urxvt(button, col, row),
@@ -3544,7 +3617,7 @@ impl Terminal {
     /// **It gives the mouse path the right diagnosis.** Called before the
     /// mouse-tracking check, because a child that is gone never enabled
     /// tracking either: checking the mode first answers "no `CSI ?1000 h`
-    /// was seen", which is true and is not the reason.
+    /// is in force", which is true and is not the reason.
     ///
     /// The signal is **EOF, not "did we reap something"**. EOF means every
     /// slave descriptor is closed, which is exactly the condition under
@@ -3679,8 +3752,9 @@ impl Terminal {
     /// free from [`wait_frame`](Self::wait_frame), which sees only complete
     /// frames and hands back the one it matched — but not rule 1: a
     /// predicate true of a frame you did not mean returns that frame
-    /// (`docs/DESIGN.md` §2, rule 4). After a [`resize`](Self::resize),
-    /// also see the stale-frame trap documented there.
+    /// (`docs/DESIGN.md` §2, the note on `wait_frame` under the rules).
+    /// After a [`resize`](Self::resize), also see the stale-frame trap
+    /// documented there.
     ///
     /// # Errors
     ///
@@ -3835,8 +3909,9 @@ impl Terminal {
     /// A complete frame is not necessarily the frame that answers your
     /// input. The cursor sits at the last frame *returned*, so after
     /// `send(key)` a predicate that is also true of the pre-key screen gets
-    /// the pre-key frame, if that one was never returned — rule 4 of
-    /// `docs/DESIGN.md` §2. Name what the key changes:
+    /// the pre-key frame, if that one was never returned — the note on
+    /// `wait_frame` under the three rules of `docs/DESIGN.md` §2. Name what
+    /// the key changes:
     ///
     /// ```
     /// # fn main() -> termlens::Result<()> {
@@ -5215,6 +5290,56 @@ mod tests {
 
     fn kitty_query(id: Option<u32>, quiet: u32) -> crate::emu::Query {
         kitty_query_of(id, None, None, quiet, KittyLoad::Loaded)
+    }
+
+    /// The issue's program, as the responder sees it: eight unanswered
+    /// DSRs in one read, output in the next, and `CSI > q` there, which it
+    /// blocks on. The ninth shape was past the bound, so the note named the
+    /// eight it had moved past, hid `^[[>q` in "and 1 more" and said the
+    /// queries were probably not the cause (#690).
+    #[test]
+    fn the_query_after_the_last_output_is_named_as_the_cause() {
+        let mut state = kitty_responder();
+        state.respond = false;
+        state.reads = 1;
+        for n in [15, 25, 26, 53, 55, 56, 62, 63] {
+            state.note_unanswered(format!("^[[?{n}n"));
+        }
+        state.reads = 2;
+        state.note_unanswered("^[[>q".into());
+        let note = state.query_note();
+        assert!(
+            note.contains("queried the terminal (^[[>q) and received no answer; if it is blocked"),
+            "{note}"
+        );
+        assert!(note.contains("this is the cause"), "{note}");
+        assert!(!note.contains("more"), "{note}");
+    }
+
+    /// "and N more" counts shapes, not queries: the ninth sent five times
+    /// made it "and 5 more" (#690). Two shapes past the bound, one asked
+    /// three times, are one named (the most recent) and one more.
+    #[test]
+    fn past_the_bound_distinct_shapes_are_counted_once() {
+        let mut state = kitty_responder();
+        state.respond = false;
+        state.reads = 1;
+        for n in 1..=8 {
+            state.note_unanswered(format!("^[[?{n}0n"));
+        }
+        for _ in 0..3 {
+            state.note_unanswered("^[[>q".into());
+            state.note_unanswered("^[[14t".into());
+        }
+        let note = state.query_note();
+        assert!(note.contains("^[[14t, ^[[?10n,"), "{note}");
+        assert!(note.contains("^[[?80n, and 1 more)"), "{note}");
+        assert!(!note.contains("^[[>q"), "{note}");
+        // The application moved past all of them, and the most recent too.
+        state.reads = 2;
+        let note = state.query_note();
+        assert!(note.contains("^[[?80n, ^[[14t, and 1 more)"), "{note}");
+        assert!(note.contains("probably not why"), "{note}");
     }
 
     /// A kitty query with `i=`, `I=`, `p=` and `q=` as given, whose data

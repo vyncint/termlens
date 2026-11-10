@@ -31,6 +31,90 @@ reads that marker.
   bracketed-paste reporting or to restore the tab stops should expect them
   kept, as a real xterm keeps them, and have the application reset each
   mode itself or send `RIS`. (#687)
+- A reset of any mouse tracking mode turns mouse reporting off, whichever
+  mode is in force, as xterm does and as `Screen::mouse_mode` says. After
+  `CSI ? 1002 h` and then `CSI ? 1000 l`, or `CSI ? 9 h` and then
+  `CSI ? 1000 l`, `mouse_mode()` still named the mode that was set, and
+  `click`, `drag` and `scroll` typed reports at an application a terminal
+  would have sent none: the backend ends reporting only on a reset of the
+  mode it holds. The protocol is now the tracking mode set last, and none
+  after a reset of `?9`, `?1000`, `?1002` or `?1003`. `mouse_modes()` and
+  the `DECRQM` replies are unchanged: they report each mode the
+  application set and has not itself reset. The refusal now says that a
+  reset turns reporting off, where it said that no `h` was seen. A test
+  that read `mouse_mode()` or clicked after such a reset should expect
+  `MouseMode::None` and `Error::Input`, and an application that means to
+  go on receiving reports has to set its mode again after the reset, as
+  it must on xterm. (#693)
+- `unsupported()` no longer lists the prefixed queries the responder
+  answers or names in the timeout: `CSI ? 6 n` (answered), every other
+  `CSI ? Ps n` and `CSI = Ps n`, `CSI = c` (DA3), `CSI > q` (XTVERSION)
+  and `OSC 12 ; ?`. They were listed beside the note that named them, so
+  a sequence termlens handled was reported twice, once as one it did not,
+  which the rustdoc of `Screen::unsupported` says it is not. A test that
+  pinned `unsupported()` exactly after one of these should drop that
+  entry; the query is in the timeout note, where it always was. (#691)
+- The timeout note names xterm's window reports it did not:
+  `CSI 15 t` (the screen's size in pixels), `CSI 13 ; 2 t` and
+  `CSI 14 ; 2 t`. They are questions termlens does not answer, and an
+  application blocked on one timed out with nothing naming it, while
+  `unsupported()` listed it as a sequence nobody honoured. And the note
+  no longer names `CSI > Ps n`, XTMODKEYS's "disable", which is a setting
+  with no reply: it said the application was blocked waiting for an
+  answer to it. A test that matched `^[[15t`, `^[[13;2t` or `^[[14;2t` in
+  `unsupported()` should find it in the timeout's note instead, and one
+  that expected `^[[>4n` in the note should find it in `unsupported()`,
+  where it was listed already. (#692)
+- `unsupported()` keeps an `OSC` to the first 64 bytes of its content,
+  ending the entry in `…` where it was cut. Each unhandled `OSC` was kept
+  whole, so an iTerm2 inline image (`OSC 1337 ; File=… : <base64>`) left
+  its payload in the list, as far as the 64 KiB the tracker lets through,
+  once per image up to 32, in every snapshot. Two `OSC`s that agree in
+  their first 64 bytes are now one entry. A test that pinned a longer
+  `OSC` entry exactly should expect `^[]`, the first 64 bytes of its
+  content and a `…`, or match the entry's start with `starts_with`. (#695)
+- The timeout's note names the most recent unanswered query, and says it
+  may be the cause unless output arrived after it. Past the eight shapes
+  the record keeps, a program that sent eight unanswered queries, printed,
+  then blocked on a ninth had the ninth hidden in "and 1 more", and the
+  verdict came from the eight it had moved past: "probably not why this
+  wait failed". And "and N more" counted queries, so a ninth sent five
+  times was "and 5 more"; it counts distinct shapes now. A test that
+  matched the note after more than eight distinct unanswered queries
+  should expect the most recent named, first when it is the cause, and a
+  smaller count. (#690)
+- A mouse release keeps the modifier keys in the legacy, UTF-8 (`?1005`)
+  and urxvt (`?1015`) encodings, as xterm and Windows Terminal send it:
+  button `3` plus the modifier bits. `click_with` and `drag` sent a bare
+  `3`, so a ctrl+click under `?1000` was released as `CSI M` and the byte
+  0x23 where xterm sends 0x33. SGR (`?1006`) always kept them. A test that
+  reads the release bytes of a modified click or drag in one of those
+  three encodings should expect the modifier bits on the release too: `+4`
+  for shift, `+8` for alt, `+16` for ctrl. (#701)
+- A kitty placement that runs past the bottom of a scroll region leaves
+  the cursor where kitty 0.49 leaves it: on the image's last row, below the
+  margin, clamped to the screen, with the region scrolled by as many rows
+  as that row is past the margin. termlens moved it a line feed at a time,
+  so the region scrolled the same but the cursor stopped on the margin:
+  `CSI 1;10 r`, the cursor on row 7 and `a=T,c=2,r=5` left it on row 9
+  where kitty leaves it on row 11. The protocol leaves this position open;
+  `docs/LIMITATIONS.md` now says termlens follows kitty, and that it does
+  not where the cursor starts below the region, which kitty scrolls too. A
+  test that placed an image past a scroll region's bottom and asserted
+  where the next text lands should expect it that many rows lower, below
+  the margin, and no lower than the screen's last row. (#697)
+- A kitty transmission or placement that names an image (`i=` or `I=`)
+  and does not ask for quiet is named in the next timeout, as an
+  unanswered query is: kitty answers it `i=…;OK`, and termlens, which
+  cannot know whether the image loaded, sends nothing, so an application
+  waiting for that reply timed out with no note at all. A chunked upload is
+  named at its last chunk, by its first, and `q=1` or `q=2` keeps one out of
+  the note. Nothing is sent on the wire either way, and an upload cut by a
+  sixel or a hard reset is still dropped, as `docs/LIMITATIONS.md` now says
+  of both. A test that matches a timeout's text after its application
+  drew a kitty image with `i=` or `I=` should expect
+  `the application queried the terminal (^[_G…)`, or have the application
+  send `q=2`. (#680)
 - Insert Line and Delete Line (`CSI L`, `CSI M`) with the cursor inside
   the scroll region move the cursor to the start of its row and cancel a
   pending wrap, as xterm does (#686). The cursor kept its column, so text
@@ -138,6 +222,55 @@ reads that marker.
   Dependabot's own commit: Dependabot signs off as
   `dependabot[bot] <support@github.com>`, never as its author address, so it
   is let through when its author and its sign-off are both Dependabot's.
+- `tools/preflight.sh` runs each gate with an empty standard input. Each
+  gate was given the rest of the gate list as its input, so a gate that
+  read it took every later gate with it: they never ran, the totals counted
+  only the gates before them, and the run passed. No gate in CONTRIBUTING
+  §1 reads its input today. (#719)
+- A GitHub Release's notes keep a wrapped line that starts with a link
+  label and a colon, a regression in 0.11.8. `extract-changelog.sh` read
+  every such line as a link definition, so the line went missing from its
+  section's notes and stood in for the real definition in the notes of
+  every other section linking that label. A definition is now taken only
+  where CommonMark lets one start, and under a line of text the line is
+  text. No line of this file has the shape, and every released section
+  extracts byte for byte as before. (#717)
+- `docs/DESIGN.md` §2 lists three rules for race-free waits, the number
+  its heading, the README, `docs/LIMITATIONS.md` and the rustdoc give. It
+  listed four. The last was a note on rule 1 under `wait_frame` and is now
+  written as one, and the two rustdoc sentences that cited "rule 4" name
+  the note. (#721)
+- `AGENTS.md` lists the two commit rules CI enforces, the DCO sign-off and
+  no AI attribution. It listed Conventional Commits with a subject under 72
+  characters as a third that "will fail CI", and no job checks either. The
+  commit style stays, as a convention review holds, and `CONTRIBUTING.md`
+  §4 says so too. Both files now say which subject lands on `main`: a pull
+  request of one commit lands under that commit's subject and one of
+  several under its title, where they said the title always did. (#720)
+- A sixel repeat with a count of zero or with none (`!0~`, `!~`) repeats
+  its sixel once, as xterm and Windows Terminal read it. It painted nothing
+  and did not advance, so `~!0~~` decoded two pixels wide where it is
+  three. (#698)
+- A kitty control block is read whole, however long it is. Its keys were
+  read from the first 128 bytes of the escape, so in a longer block a value
+  that straddled byte 127 was cut short and every key after it was lost: a
+  first chunk whose `m=1` sat there ended the upload at once, and one image
+  sent in two chunks was counted as two. A block that names every key of a
+  transmission and its placement at long values is about 140 bytes. The
+  block is now kept up to 256 KiB, the length at which kitty itself gives
+  up on an escape that is still arriving. (#700)
+- A kitty placement that names its image by number (`a=p,I=7`) moves the
+  cursor under `Graphics::Kitty`, as kitty moves it: by `c=` and `r=`, or
+  sized from the newest transmission with that number. It never moved,
+  since termlens looked only for an image id. An `i=0` is no id, as in
+  kitty: with a number beside it the number decides, and without one
+  kitty places nothing, so `a=p,i=0,c=2,r=3` no longer moves the cursor
+  by its `c=` and `r=`. (#696)
+- An empty APC (`ESC _ ESC \`) after a kitty escape is not a kitty
+  escape. It was counted as a kitty transmission of 0 bytes, so
+  `graphics().kitty` counted an image the application never sent, and in
+  an upload it was taken as the last chunk. Whether an APC is kitty's was
+  read off a buffer slot the previous escape had left its `G` in. (#735)
 - An SGR parameter written with a sub-parameter no longer sets or clears
   blink, conceal or strikethrough (#688). `CSI 9:1 m` struck the cell
   through, and `5:1` and `8:0` made it blink or concealed it, while

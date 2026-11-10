@@ -28,6 +28,18 @@ use vt100::Callbacks;
 /// Distinct shapes kept before the record only counts.
 pub(super) const MAX_UNSUPPORTED: usize = 32;
 
+/// Bytes of an OSC string's content an entry keeps: enough for the command
+/// number and its first parameters, which is what names the sequence, and
+/// an entry ends in `…` where it was cut.
+///
+/// The content is the application's, and the list kept every unhandled
+/// OSC whole — an iTerm2 inline image (`OSC 1337 ; File=… : <base64>`) is
+/// one, so its whole payload, up to the 64 KiB the tracker lets through,
+/// sat in every snapshot's list, once per distinct image up to 32 (#695).
+/// No other string sequence reaches the list: vt100 has no callback for a
+/// DCS, APC, PM or SOS it declines.
+pub(super) const MAX_STRING_SHAPE: usize = 64;
+
 /// The callback set the primary parser is built with.
 #[derive(Debug)]
 pub(super) struct Unhandled {
@@ -41,6 +53,11 @@ pub(super) struct Unhandled {
     /// Rows dropped off the front of the main screen's history since the
     /// emulator last took the count — see [`take_evicted`](Self::take_evicted).
     evicted: usize,
+    /// The content length of the last OSC recorded, before its entry was
+    /// cut: how much of a body reached vt100, which the capture-bound
+    /// tests read now that the entry no longer shows it (#694, #695).
+    #[cfg(test)]
+    pub(super) last_osc_len: usize,
 }
 
 impl Default for Unhandled {
@@ -51,6 +68,8 @@ impl Default for Unhandled {
             overflow: 0,
             visual_bells: 0,
             evicted: 0,
+            #[cfg(test)]
+            last_osc_len: 0,
         }
     }
 }
@@ -113,6 +132,41 @@ fn params_text(params: &[&[u16]]) -> String {
         .map(|p| p.iter().map(u16::to_string).collect::<Vec<_>>().join(":"))
         .collect::<Vec<_>>()
         .join(";")
+}
+
+/// An OSC's entry: `^[]` and the parameters as written, `;` between them,
+/// kept to [`MAX_STRING_SHAPE`] bytes of content and ending in `…` when
+/// cut. A cut falls on a character boundary of the rendering, so it never
+/// leaves half a character.
+fn osc_shape(params: &[&[u8]]) -> String {
+    // Join no more than the bound and a character's worth past it: a
+    // byte the rendering cannot decode only grows (to U+FFFD), so the
+    // first `MAX_STRING_SHAPE` bytes of the rendering come from at most
+    // that many bytes of the content.
+    let take = MAX_STRING_SHAPE + 4;
+    let mut content = Vec::with_capacity(take);
+    let mut total = 0;
+    for (i, p) in params.iter().enumerate() {
+        let sep: &[u8] = if i > 0 { b";" } else { b"" };
+        for part in [sep, p] {
+            total += part.len();
+            let room = take.saturating_sub(content.len());
+            content.extend_from_slice(&part[..part.len().min(room)]);
+        }
+    }
+    let text = String::from_utf8_lossy(&content);
+    let mut shape = String::from("^[]");
+    if total == content.len() && text.len() <= MAX_STRING_SHAPE {
+        shape.push_str(&text);
+    } else {
+        let mut end = MAX_STRING_SHAPE;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        shape.push_str(&text[..end]);
+        shape.push('…');
+    }
+    shape
 }
 
 /// DEC private modes the sequence tracker keeps itself, so a set or reset
@@ -210,11 +264,17 @@ impl Callbacks for Unhandled {
             // names, and the window reports it answers or names.
             (None, None, 'g' | 'I' | 'Z' | 'c' | 'n') => true,
             // The window reports the responder answers (14, 16, 18) and the
-            // ones it names in a timeout (11, 13, 19, 20, 21) — `seq.rs`'s
-            // table, single-parameter like it. Everything else in the family,
-            // the title stack included, nobody honoured.
+            // ones it names in a timeout — `seq.rs`'s own predicate, which
+            // reads no sub-parameter. Everything else in the family, the
+            // title stack included, nobody honoured.
             (None, None, 't') => {
-                params.len() == 1 && matches!(first, Some(11 | 13 | 14 | 16 | 18 | 19 | 20 | 21))
+                let second = params.get(1).and_then(|p| p.first()).copied();
+                params.iter().all(|p| p.len() == 1)
+                    && super::seq::is_window_report(
+                        params.len(),
+                        first.map_or(0, u32::from),
+                        second.map_or(0, u32::from),
+                    )
             }
             // Insert mode is the one ANSI mode honoured, so a list is
             // handled only when it names nothing else: `CSI 4;20 h` sets
@@ -228,6 +288,13 @@ impl Callbacks for Unhandled {
             // DA2, the kitty keyboard probe and XTSMGRAPHICS, all of which
             // the responder names in a timeout (#641).
             (Some(b'>'), None, 'c') | (Some(b'?'), None, 'u' | 'S') => true,
+            // The prefixed queries `seq.rs` answers or names, in the shapes
+            // it claims them in: DECXCPR (`CSI ? 6 n`, answered) and every
+            // other `CSI ? Ps n` or `CSI = Ps n`, DA3 (`CSI = c`), and
+            // XTVERSION (`CSI > q`, whose only parameter is 0). These were
+            // listed here while the responder handled them (#691).
+            (Some(b'?' | b'='), None, 'n') | (Some(b'='), None, 'c') => true,
+            (Some(b'>'), None, 'q') => params == [&[0][..]],
             // The private modes the tracker keeps; any other private mode
             // vt100 declined is one nobody honoured.
             (Some(b'?'), None, 'h' | 'l') => params
@@ -277,7 +344,9 @@ impl Callbacks for Unhandled {
         // not answer *that*, it belongs here. A palette query is any
         // `4;…?`, which is the rule `seq.rs` applies to it.
         let colour_query = match params.first() {
-            Some(&b"10" | &b"11") => params.len() == 2 && params[1] == b"?",
+            // `12;?`, the cursor colour, is named rather than answered, and
+            // in the same one shape (#691).
+            Some(&b"10" | &b"11" | &b"12") => params.len() == 2 && params[1] == b"?",
             Some(&b"4") => matches!(params.last(), Some(&b"?")),
             _ => false,
         };
@@ -289,14 +358,12 @@ impl Callbacks for Unhandled {
         if matches!(params.first(), Some(&b"8" | &b"52")) || colour_query || title {
             return;
         }
-        let mut shape = String::from("^[]");
-        for (i, p) in params.iter().enumerate() {
-            if i > 0 {
-                shape.push(';');
-            }
-            shape.push_str(&String::from_utf8_lossy(p));
+        #[cfg(test)]
+        {
+            self.last_osc_len =
+                params.iter().map(|p| p.len()).sum::<usize>() + params.len().saturating_sub(1);
         }
-        self.record(shape);
+        self.record(osc_shape(params));
     }
 }
 
@@ -385,6 +452,15 @@ mod tests {
         assert!(shapes(b"\x1b[11t\x1b[13t\x1b[19t\x1b[20t\x1b[21t").is_empty());
         // Multi-parameter forms the responder does not claim.
         assert_eq!(shapes(b"\x1b[18;0t"), ["^[[18;0t"]);
+        // The screen's pixel size and the `; 2` reports, named since #692.
+        assert!(shapes(b"\x1b[15t\x1b[14;2t\x1b[13;2t").is_empty());
+    }
+
+    /// XTMODKEYS's "disable" (`CSI > Ps n`) is a setting nobody honours,
+    /// not a question, so it belongs here (#692).
+    #[test]
+    fn xtmodkeys_disable_is_unsupported() {
+        assert_eq!(shapes(b"\x1b[>4n\x1b[>n"), ["^[[>4n", "^[[>n"]);
     }
 
     /// The title is the tracker's in every form it reads one from, `;` in
@@ -432,9 +508,12 @@ mod tests {
 
     #[test]
     fn parameterless_sequences_are_recorded_without_a_synthetic_zero() {
+        // The `>`-prefixed shape is XTMODKEYS's reset (`CSI > m`): this
+        // used `CSI > q`, which is XTVERSION, a question the responder
+        // names and so not unsupported (#691).
         assert_eq!(
-            shapes(b"\x1b[s\x1b[>q\x1b[?h\x1b[20h\x1b[?69h\x1b[58;5;1m"),
-            ["^[[s", "^[[>q", "^[[?h", "^[[20h", "^[[?69h", "^[[58;5;1m",]
+            shapes(b"\x1b[s\x1b[>m\x1b[?h\x1b[20h\x1b[?69h\x1b[58;5;1m"),
+            ["^[[s", "^[[>m", "^[[?h", "^[[20h", "^[[?69h", "^[[58;5;1m",]
         );
     }
 
@@ -471,6 +550,67 @@ mod tests {
                 String::from_utf8_lossy(bytes)
             );
         }
+    }
+
+    /// The prefixed queries the responder answers or names are accounted
+    /// for there, like their unprefixed kin, and `OSC 12 ; ?` with the
+    /// other colour queries. Each row here was listed (#691).
+    #[test]
+    fn the_prefixed_queries_the_responder_answers_or_names_are_not_reported() {
+        let mut listed = Vec::new();
+        for (label, bytes) in [
+            ("DECXCPR, answered", &b"\x1b[?6n"[..]),
+            ("XTVERSION, named", b"\x1b[>q"),
+            ("XTVERSION with its 0, named", b"\x1b[>0q"),
+            ("DA3, named", b"\x1b[=c"),
+            ("a private DSR, named", b"\x1b[?996n"),
+            ("another private DSR, named", b"\x1b[?5n"),
+            ("the cursor colour query, named", b"\x1b]12;?\x07"),
+        ] {
+            listed.extend(shapes(bytes).into_iter().map(|shape| (label, shape)));
+        }
+        assert!(listed.is_empty(), "{listed:?}");
+        // What the responder does not claim stays on record: XTVERSION
+        // takes no parameter but 0, and `OSC 12` sets as well as asks.
+        assert_eq!(shapes(b"\x1b[>1q"), ["^[[>1q"]);
+        assert_eq!(shapes(b"\x1b]12;#ff0000\x07"), ["^[]12;#ff0000"]);
+    }
+
+    /// An unhandled OSC is kept to a prefix that names it, not whole: an
+    /// iTerm2 inline image is an OSC, and its whole payload sat in the
+    /// list, up to 32 of them (#695).
+    #[test]
+    fn a_long_osc_is_kept_to_a_prefix_that_names_it() {
+        let head = "1337;File=name=aW1hZ2UucG5n;size=1048576;inline=1:";
+        let mut image = format!("\x1b]{head}").into_bytes();
+        image.resize(image.len() + (1 << 20), b'A');
+        image.push(0x07);
+        let kept = shapes(&image);
+        let expected = format!("^[]{head}{}…", "A".repeat(MAX_STRING_SHAPE - head.len()));
+        assert_eq!(
+            kept.iter().map(String::len).collect::<Vec<_>>(),
+            [expected.len()]
+        );
+        assert_eq!(kept, [expected]);
+        // At the bound, nothing is cut and nothing is added.
+        let whole = format!("777;{}", "b".repeat(MAX_STRING_SHAPE - 4));
+        assert_eq!(
+            shapes(format!("\x1b]{whole}\x07").as_bytes()),
+            [format!("^[]{whole}")]
+        );
+        // One byte past it, the cut shows.
+        let over = format!("{whole}b");
+        assert_eq!(
+            shapes(format!("\x1b]{over}\x07").as_bytes()),
+            [format!("^[]{whole}…")]
+        );
+        // A cut never splits a character: `é` is two bytes, and the one
+        // that would straddle the bound is left out whole.
+        let wide = format!("1337;{}", "é".repeat(MAX_STRING_SHAPE));
+        let kept = shapes(format!("\x1b]{wide}\x07").as_bytes());
+        let prefix = format!("1337;{}", "é".repeat((MAX_STRING_SHAPE - 5) / 2));
+        assert_eq!(prefix.len(), MAX_STRING_SHAPE - 1);
+        assert_eq!(kept, [format!("^[]{prefix}…")]);
     }
 
     #[test]

@@ -63,7 +63,9 @@ CHANGELOG entry.
   Other ANSI modes the backend drops (`LNM` and the rest) are not
   modelled — and *say so*: `Screen::unsupported()` lists every sequence the emulator did
   not implement, in the form `^[[20h`, so a test can tell a
-  plausible-looking wrong grid from a right one.
+  plausible-looking wrong grid from a right one. An `OSC` is listed by the
+  first 64 bytes of its content, ending in `…` where it was cut, so an
+  iTerm2 inline image (`OSC 1337 ; File=…`) is named there, not kept.
 - **A soft-wrapped line is two rows.** `contains` and `find` read the grid
   row by row and do not span the wrap; `Screen::row_wrapped(row)` reports
   the backend's record of where a line wrapped, and
@@ -126,10 +128,21 @@ CHANGELOG entry.
   and only as far as the escape says. A `Graphics::Kitty` terminal moves
   it for a placement whose size in cells is known: from `c=` and `r=`, or
   from the pixel size and `cell_size()` — for `a=p`, the pixel size of the
-  newest transmission of that image id. A PNG (`f=100`) placed without
-  `c=` and `r=`, or a placement of an image whose transmission has left
-  the payload log, does not move it. Whether kitty would have loaded the
-  image at all is not knowable here, so a placement is taken to succeed. A
+  newest transmission of that image id, or, for one that names its image
+  by number (`I=`) alone, of the newest transmission with that number. A
+  PNG (`f=100`) placed without `c=` and `r=`, a placement of an image whose
+  transmission has left the payload log, or one that names neither an id
+  nor a number, does not move it. Whether kitty would have loaded the
+  image at all is not knowable here, so a placement is taken to succeed.
+  Past the bottom of a scroll region the protocol leaves the cursor's
+  position open ("undefined, and up to implementations"), and termlens
+  follows kitty 0.49: the region scrolls by as many rows as the image's
+  last row is past the margin, and the cursor stays on that row, below the
+  margin, clamped to the screen — or to the region, under origin mode, when
+  only the wrap to the next row took it past the margin. It does not follow
+  kitty for a cursor that starts below the region: kitty scrolls the
+  region then too, and termlens moves the cursor as line feeds would there,
+  scrolling nothing. A
   `Graphics::Sixel` terminal with a `cell_size()` moves it to the image's
   last text row, as xterm does with sixel scrolling on. Sixel display mode
   (`CSI ? 80 h`), xterm's extra scroll for a trailing `-` on the bottom row,
@@ -146,15 +159,25 @@ CHANGELOG entry.
   not modelled, since termlens does not track placements: an `a=p` after
   one is still sized from the payload log. A query is answered `OK` without
   kitty's test load, so one whose data kitty could not load gets an error
-  from kitty and `OK` here. kitty answers a transmission or a placement
-  that names `i=` (`i=…;OK`, unless `q=` silences it); termlens answers only
-  queries. A command naming both `i=` and `I=` is refused by kitty whatever
-  its action; termlens answers a query so, but still captures, counts and
-  places a transmission or placement that does. termlens starts kitty's
-  loader over on a sixel and on a hard reset: kitty ignores the sixel and
-  goes on with the upload, and after a reset its loader still names the
-  image the reset removed, so it refuses the next transmission that carries
-  its data. And chunks that break the protocol's rule that every chunk but
+  from kitty and `OK` here. kitty also answers a transmission or a
+  placement that names an image (`i=` or `I=`) with `i=…;OK`, unless `q=`
+  asks for quiet; termlens answers only queries, because that `OK` reports
+  that the image loaded, which it cannot know: it opens no file the program
+  under test points at, and decodes only with the `decode` feature. Such a
+  command is **named in the next timeout** instead, as an unanswered query
+  is — an upload at its last chunk, by its first — unless it asked for
+  quiet (#680). Frames (`a=f`) and composes (`a=c`), which kitty answers
+  too, are neither answered nor named. A command naming both `i=` and `I=`
+  is refused by kitty whatever its action; termlens answers a query so, but
+  still captures, counts and places a transmission or placement that does,
+  and names it unless `q=2` silenced kitty's error. An upload interrupted
+  by a sixel or a hard reset is undefined — "the client **must** finish
+  sending all chunks for a single image before sending any other graphics
+  related escape codes" — and termlens drops it: the chunks still to come
+  are a transmission of their own, and no reply to the upload is named.
+  kitty 0.49 ignores the sixel and goes on with the upload, and after a
+  reset its loader still names the image the reset removed, so it refuses
+  the next transmission that carries its data. And chunks that break the protocol's rule that every chunk but
   the last is a multiple of four base64 characters are decoded joined, not
   one escape at a time as kitty decodes them (#637); a stream that keeps
   the rule decodes exactly as kitty decodes it.
