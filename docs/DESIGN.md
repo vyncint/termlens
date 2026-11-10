@@ -1152,7 +1152,10 @@ on the button code the same way for a button and a wheel notch (`+4` shift,
 `+8` alt, `+16` ctrl), so `MouseButton::Left.ctrl()` and `Scroll::Up.ctrl()`
 are one idiom; the wheel gets a chord type of its own (`ScrollChord`) so
 that a wheel direction cannot be handed to `click_with`, since a notch has
-no release and the two are different gestures on the wire.
+no release and the two are different gestures on the wire. A button's
+release carries the modifiers as its press does: SGR repeats the button
+code with a final `m`, and the legacy, UTF-8 and urxvt forms send button
+`3` plus the modifier bits, as xterm's `BtnCode` does (#701).
 
 A **drag reports one motion per cell crossed**, interpolated on a straight
 line and on both axes for a diagonal. A single report at the destination is

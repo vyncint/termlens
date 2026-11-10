@@ -3295,6 +3295,9 @@ impl Terminal {
     /// # }
     /// ```
     ///
+    /// The modifiers are reported on the release as well as on the press,
+    /// in every encoding, as xterm reports them.
+    ///
     /// # Errors
     ///
     /// Same conditions as [`click`](Self::click).
@@ -3505,7 +3508,17 @@ impl Terminal {
         // The remaining forms all report a release as button 3 and keep
         // the `+ 32` on the button; the legacy and UTF-8 ones differ only
         // in how a coordinate byte above 127 is written.
-        let button = if press { button } else { 3 };
+        //
+        // The modifier bits stay on a release. xterm's `BtnCode` starts
+        // from `32 + (KeyState << 2)` and adds 3 for a release, and Windows
+        // Terminal sets the same bits on its release code. A bare 3 here
+        // told the application the keys went down with the button and came
+        // up without it (#701).
+        let button = if press {
+            button
+        } else {
+            3 + (button & 0b1_1100)
+        };
         Ok(match modes.mouse_encoding {
             MouseEncoding::Utf8 => mouse_utf8(button, col, row),
             MouseEncoding::Urxvt => mouse_urxvt(button, col, row),

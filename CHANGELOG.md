@@ -31,6 +31,14 @@ reads that marker.
   bracketed-paste reporting or to restore the tab stops should expect them
   kept, as a real xterm keeps them, and have the application reset each
   mode itself or send `RIS`. (#687)
+- A mouse release keeps the modifier keys in the legacy, UTF-8 (`?1005`)
+  and urxvt (`?1015`) encodings, as xterm and Windows Terminal send it:
+  button `3` plus the modifier bits. `click_with` and `drag` sent a bare
+  `3`, so a ctrl+click under `?1000` was released as `CSI M` and the byte
+  0x23 where xterm sends 0x33. SGR (`?1006`) always kept them. A test that
+  reads the release bytes of a modified click or drag in one of those
+  three encodings should expect the modifier bits on the release too: `+4`
+  for shift, `+8` for alt, `+16` for ctrl. (#701)
 
 ### Fixed
 
