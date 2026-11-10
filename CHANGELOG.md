@@ -109,6 +109,15 @@ reads that marker.
   Dependabot's own commit: Dependabot signs off as
   `dependabot[bot] <support@github.com>`, never as its author address, so it
   is let through when its author and its sign-off are both Dependabot's.
+- An SGR parameter written with a sub-parameter no longer sets or clears
+  blink, conceal or strikethrough (#688). `CSI 9:1 m` struck the cell
+  through, and `5:1` and `8:0` made it blink or concealed it, while
+  `unsupported()` listed the same sequence as dropped; `25:1`, `28:0`,
+  `29:1` and `0:1` cleared an attribute the same way. xterm reads
+  sub-parameters only on SGR 38 and 48, and the backend ignores such a
+  group too, so the style is now left as it was. `unsupported()` also
+  lists the sequences it had missed because every value in them was one
+  of those parameters, such as `^[[5:6m`.
 
 ## [0.11.8] - 2026-11-03
 

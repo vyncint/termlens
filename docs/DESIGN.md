@@ -1092,7 +1092,10 @@ recovered from **a second `vt100::Parser` fed the same byte stream with
 only SGR sequences rewritten**, so that three attributes vt100 does keep
 act as carriers for the three it drops (`5`/`6`→`1`, `8`→`3`, `9`→`4`, with
 `25`/`28`/`29` mapped to the matching resets and every other parameter
-dropped from the shadow stream).
+dropped from the shadow stream). A parameter written with a sub-parameter
+(`9:1`) is one of the dropped: xterm reads sub-parameters only on `38` and
+`48`, vt100 matches no such group, and carrying its first value put an
+attribute on the cell that no terminal shows (#688).
 
 This is sound for a reason that can be checked rather than hoped for: **in
 vt100, attributes never influence geometry.** `Attrs` is read in exactly

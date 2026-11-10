@@ -370,6 +370,14 @@ fn rewrite_sgr(seq: &[u8]) -> Option<Vec<u8>> {
                     };
                 }
             }
+            // A group with a sub-parameter (`9:1`, `0:1`) carries nothing,
+            // not even a reset. xterm reads sub-parameters only on 38 and
+            // 48 and skips any other group that has one, and vt100 matches
+            // no such group, so the primary does nothing either: carrying
+            // the first value put an attribute on the cell that no terminal
+            // shows, beside the record saying the sequence was dropped
+            // (#688).
+            _ if group.contains(&b':') => i += 1,
             _ => {
                 if let Some(carrier) = carrier(v) {
                     out.push(carrier);
@@ -564,6 +572,23 @@ mod tests {
         assert_eq!(shadowed(b"\x1b[4:3mX"), "E[39mX"); // curly underline, not strike
                                                        // A carrier still survives alongside one.
         assert_eq!(shadowed(b"\x1b[38;5;196;9mX"), "E[4mX");
+    }
+
+    #[test]
+    fn a_group_with_a_sub_parameter_carries_nothing() {
+        // xterm skips a group that has a sub-parameter unless it is 38 or
+        // 48, and vt100 matches none; the first value used to be carried
+        // as if the group were plain (#688).
+        assert_eq!(shadowed(b"\x1b[5:1mX"), "E[39mX");
+        assert_eq!(shadowed(b"\x1b[6:1mX"), "E[39mX");
+        assert_eq!(shadowed(b"\x1b[8:0mX"), "E[39mX");
+        assert_eq!(shadowed(b"\x1b[9:1mX"), "E[39mX");
+        // Not a reset either: vt100 carries none out for `0:1`, and the
+        // "off" forms would clear a carrier the primary still shows.
+        assert_eq!(shadowed(b"\x1b[0:1mX"), "E[39mX");
+        assert_eq!(shadowed(b"\x1b[25:1;28:0;29:1mX"), "E[39mX");
+        // A plain parameter beside one is still carried, in order.
+        assert_eq!(shadowed(b"\x1b[9;5:1;8mX"), "E[4;3mX");
     }
 
     #[test]

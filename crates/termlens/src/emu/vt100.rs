@@ -2428,6 +2428,36 @@ mod tests {
     }
 
     #[test]
+    fn an_sgr_sub_parameter_carries_no_attribute_and_is_on_record() {
+        // xterm reads a sub-parameter only on SGR 38 and 48 and skips any
+        // other group that has one, and vt100 matches no such group. The
+        // shadow read the group's first value, so `9:1` struck the cell
+        // through while `unsupported()` said the sequence was dropped
+        // (#688).
+        for group in ["5:1", "6:1", "8:0", "9:1", "5:6", "9:9:9"] {
+            let s = emu_with(format!("\x1b[{group}mX").as_bytes()).snapshot();
+            assert_eq!(*s.cell(0, 0).unwrap().style(), Style::default(), "{group}");
+            assert_eq!(
+                s.unsupported(),
+                [format!("^[[{group}m").as_str()],
+                "{group}"
+            );
+        }
+        // Nor does one reset: the attribute set before it stays, in a list
+        // with a parameter that is carried, too.
+        for (seq, shape) in [
+            ("\x1b[9m\x1b[29:1mX", "^[[29:1m"),
+            ("\x1b[9m\x1b[0:1mX", "^[[0:1m"),
+            ("\x1b[9;5:1mX", "^[[9;5:1m"),
+        ] {
+            let s = emu_with(seq.as_bytes()).snapshot();
+            let style = *s.cell(0, 0).unwrap().style();
+            assert!(style.strikethrough && !style.blink, "{seq:?}: {style:?}");
+            assert_eq!(s.unsupported(), [shape], "{seq:?}");
+        }
+    }
+
+    #[test]
     fn insert_mode_reserves_the_columns_the_grid_gives_the_run() {
         // The reservation was the run's string width, and the grid lays a
         // ZWJ family out as two wide cells and lam-alef as two letters:
