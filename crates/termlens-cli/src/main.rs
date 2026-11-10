@@ -17,6 +17,7 @@
 //! not propagated — and the screen alone goes to stdout, so `inspect … >
 //! file` is a saved screen `diff` and `render` read back (#340).
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal, Read, Write};
@@ -293,23 +294,97 @@ fn read(source: Source<'_>) -> Result<Screen, String> {
     let Some(raw) = raw.map_err(|e| format!("{name}: {e}"))? else {
         return Err(too_large(name));
     };
-    // The words `read_to_string` used, which this read replaced.
-    let raw = String::from_utf8(raw)
-        .map_err(|_| format!("{name}: stream did not contain valid UTF-8"))?;
+    let text = decode(raw, MAX_INPUT).map_err(|e| match e {
+        // The words `read_to_string` used, which this read replaced.
+        NotText::Utf8 => format!("{name}: stream did not contain valid UTF-8"),
+        NotText::Utf16 => format!("{name}: stream did not contain valid UTF-16"),
+        NotText::TooLarge => format!(
+            "{name}: larger than {} GiB as UTF-8, which no saved screen is",
+            MAX_INPUT >> 30
+        ),
+        // As a refused reservation reads when the bytes are read.
+        NotText::Memory => format!("{name}: {}", io::Error::from(io::ErrorKind::OutOfMemory)),
+    })?;
+    // A byte-order mark says how the file was encoded and is no part of the
+    // screen. Left in, it made the header's first word `\u{feff}size:` and
+    // hid the `{` that tells JSON from the text format (#716).
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     // A checkout on Windows may have given the file CRLF endings; the
     // formats are line-based and neither cares. Only copied when there is
     // one, since the input may be hundreds of megabytes.
-    let raw = if raw.contains("\r\n") {
-        raw.replace("\r\n", "\n")
+    let text = if text.contains("\r\n") {
+        Cow::Owned(text.replace("\r\n", "\n"))
     } else {
-        raw
+        Cow::Borrowed(text)
     };
-    let body = strip_insta_header(&raw).trim_start_matches('\n');
+    let body = strip_insta_header(&text).trim_start_matches('\n');
     if body.starts_with('{') {
         return serde_json::from_str(body)
             .map_err(|e| format!("{name}: not a termlens Screen: {e}"));
     }
     Screen::parse(strip_inspect_trailer(body)).map_err(|e| format!("{name}: {e}"))
+}
+
+/// Why an input's bytes are not text.
+#[derive(Debug, PartialEq, Eq)]
+enum NotText {
+    /// Not UTF-8, with no UTF-16 byte-order mark in front.
+    Utf8,
+    /// A UTF-16 byte-order mark, then half a code unit or a lone surrogate.
+    Utf16,
+    /// UTF-16 inside the bound as bytes and past it as UTF-8.
+    TooLarge,
+    /// The allocator refused the room the text needs.
+    Memory,
+}
+
+/// The text of an input's bytes: UTF-8, or UTF-16 behind its byte-order
+/// mark, in either byte order (#716). Windows PowerShell 5.1 re-encodes
+/// what a program prints, so `termlens inspect app > a.snap` there writes
+/// UTF-16LE with a mark, and the CLI could not read back its own output
+/// from the default Windows shell. The mark stays at the head of the text
+/// for the caller to strip, as a UTF-8 file's own mark does.
+///
+/// Nothing is read as UTF-16 without the mark: `FF` is in no UTF-8 text,
+/// so the mark cannot be mistaken, and anything else would be a guess.
+///
+/// UTF-16 grows by half when its characters are three bytes of UTF-8, so
+/// the bound on the bytes read is not a bound on the text. The text is
+/// measured before any room is reserved for it and refused past `limit`
+/// ([`MAX_INPUT`] outside the tests), and the room is the measured size,
+/// reserved fallibly: a refusal is an error to report, as in
+/// [`read_bounded`].
+fn decode(raw: Vec<u8>, limit: usize) -> Result<String, NotText> {
+    let big_endian = match raw.get(..2) {
+        Some([0xff, 0xfe]) => false,
+        Some([0xfe, 0xff]) => true,
+        _ => return String::from_utf8(raw).map_err(|_| NotText::Utf8),
+    };
+    if raw.len() % 2 != 0 {
+        return Err(NotText::Utf16);
+    }
+    let units = || {
+        raw.chunks_exact(2).map(|unit| {
+            let unit = [unit[0], unit[1]];
+            if big_endian {
+                u16::from_be_bytes(unit)
+            } else {
+                u16::from_le_bytes(unit)
+            }
+        })
+    };
+    let mut len = 0;
+    for decoded in char::decode_utf16(units()) {
+        len += decoded.map_err(|_| NotText::Utf16)?.len_utf8();
+        if len > limit {
+            return Err(NotText::TooLarge);
+        }
+    }
+    let mut text = String::new();
+    text.try_reserve_exact(len).map_err(|_| NotText::Memory)?;
+    // Every unit decoded in the pass above, so nothing is replaced here.
+    text.extend(char::decode_utf16(units()).map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)));
+    Ok(text)
 }
 
 /// The dash operand: standard input where a screen is read, standard
@@ -1035,7 +1110,86 @@ fn inspect(args: Vec<OsString>) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::read_bounded;
+    use super::{decode, read_bounded, NotText};
+
+    /// `text` as UTF-16 behind its byte-order mark.
+    fn utf16(text: &str, big_endian: bool) -> Vec<u8> {
+        std::iter::once(0xfeff)
+            .chain(text.encode_utf16())
+            .flat_map(|unit| {
+                if big_endian {
+                    unit.to_be_bytes()
+                } else {
+                    unit.to_le_bytes()
+                }
+            })
+            .collect()
+    }
+
+    /// UTF-16 is read behind its mark in either byte order, surrogate pairs
+    /// included, and comes back with the mark for the caller to strip, as
+    /// marked UTF-8 does. Without a mark the bytes are UTF-8 or nothing
+    /// (#716).
+    #[test]
+    fn decode_reads_utf8_and_utf16_behind_its_mark() {
+        let text = "size: 4x1  cursor: 0,0\n汉字 \u{1f600}";
+        assert_eq!(
+            decode(text.as_bytes().to_vec(), 1 << 20).as_deref(),
+            Ok(text)
+        );
+        let marked = format!("\u{feff}{text}");
+        assert_eq!(
+            decode(marked.as_bytes().to_vec(), 1 << 20).as_deref(),
+            Ok(marked.as_str())
+        );
+        for big_endian in [false, true] {
+            assert_eq!(
+                decode(utf16(text, big_endian), 1 << 20).as_deref(),
+                Ok(marked.as_str()),
+                "big-endian: {big_endian}"
+            );
+        }
+        // The same units without the mark are not UTF-8, and are not guessed at.
+        assert_eq!(
+            decode(utf16(text, false)[2..].to_vec(), 1 << 20),
+            Err(NotText::Utf8)
+        );
+        assert_eq!(decode(vec![b'a', 0xff], 1 << 20), Err(NotText::Utf8));
+        assert_eq!(decode(Vec::new(), 1 << 20).as_deref(), Ok(""));
+        assert_eq!(decode(vec![0xff, 0xfe], 1 << 20).as_deref(), Ok("\u{feff}"));
+    }
+
+    /// Half a code unit, or a surrogate without its other half, is not
+    /// UTF-16, and is refused rather than read as U+FFFD (#716).
+    #[test]
+    fn decode_refuses_broken_utf16() {
+        let mut odd = utf16("ok", false);
+        odd.push(b'!');
+        assert_eq!(decode(odd, 1 << 20), Err(NotText::Utf16));
+        for lone in [[0x3d, 0xd8], [0x00, 0xde]] {
+            let mut bytes = utf16("ok", false);
+            bytes.extend(lone);
+            bytes.extend(utf16("ok", false).split_off(2));
+            assert_eq!(decode(bytes, 1 << 20), Err(NotText::Utf16), "{lone:02x?}");
+        }
+    }
+
+    /// The bound is on the text as UTF-8, not only on the bytes read: ten
+    /// Han characters are 22 bytes of UTF-16 with the mark and 33 of UTF-8,
+    /// so a limit between the two refuses them, and one byte more reads
+    /// them (#716).
+    #[test]
+    fn decode_bounds_utf16_by_its_utf8_length() {
+        let bytes = utf16(&"汉".repeat(10), false);
+        assert_eq!(bytes.len(), 22);
+        assert_eq!(decode(bytes.clone(), 32), Err(NotText::TooLarge));
+        let text = decode(bytes, 33).expect("exactly the limit is read");
+        assert_eq!(text.len(), 33);
+        // The room is what the text measured, not the half again that the
+        // bytes could have come to: 18 bytes of ASCII need 11, not 27.
+        let ascii = decode(utf16("abcdefgh", false), 1 << 20).expect("ASCII");
+        assert!(ascii.capacity() <= 11, "{}", ascii.capacity());
+    }
 
     /// A reader that hands out at most `chunk` bytes per call, so the
     /// bounded read is exercised across many short reads, as a pipe gives.

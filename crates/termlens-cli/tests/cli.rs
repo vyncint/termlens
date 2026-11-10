@@ -569,6 +569,94 @@ fn a_crlf_checkout_of_a_snap_still_parses() -> termlens::Result<()> {
     Ok(())
 }
 
+/// A saved screen that a Windows shell wrote still reads (#716). Windows
+/// PowerShell 5.1's `>` re-encodes a program's output as UTF-16LE behind a
+/// byte-order mark, with CRLF line endings, and `Out-File -Encoding utf8`
+/// puts a UTF-8 mark in front. `render` and `diff` refused each of them, and
+/// reported marked JSON as a text snapshot with a bad header. Every one now
+/// reads as the screen it was saved from, as a file and on a pipe; the
+/// screen has an insta header, two wide characters and a styles block.
+#[test]
+fn render_and_diff_read_a_screen_behind_a_byte_order_mark() {
+    use std::process::Command;
+    let bin = env!("CARGO_BIN_EXE_termlens");
+    let dir = std::env::temp_dir().join(format!("termlens-bom-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let before = data("before.snap");
+    let run = |args: &[&str]| {
+        Command::new(bin)
+            .args(args)
+            .output()
+            .expect("termlens runs")
+    };
+    let expected = run(&["render", "--text", &before]);
+    assert_eq!(expected.status.code(), Some(0), "{expected:?}");
+    // (Normalized first: on Windows the checkout may already be CRLF.)
+    let text = std::fs::read_to_string(&before)
+        .unwrap()
+        .replace("\r\n", "\n");
+    let json = String::from_utf8(run(&["render", "--json", &before]).stdout).unwrap();
+
+    let marked = |text: &str| [&[0xef, 0xbb, 0xbf], text.as_bytes()].concat();
+    // What PowerShell's `>` writes: the mark, CRLF, two bytes a unit.
+    let utf16 = |text: &str, big_endian: bool| -> Vec<u8> {
+        std::iter::once(0xfeff)
+            .chain(text.replace('\n', "\r\n").encode_utf16())
+            .flat_map(|unit| {
+                if big_endian {
+                    unit.to_be_bytes()
+                } else {
+                    unit.to_le_bytes()
+                }
+            })
+            .collect()
+    };
+    for (name, bytes) in [
+        ("utf8-mark.snap", marked(&text)),
+        ("utf8-mark.json", marked(&json)),
+        ("utf16le.snap", utf16(&text, false)),
+        ("utf16be.snap", utf16(&text, true)),
+        ("utf16le.json", utf16(&json, false)),
+    ] {
+        let path = dir.join(name);
+        std::fs::write(&path, &bytes).expect("the file is written");
+        let path = path.to_str().unwrap();
+
+        let rendered = run(&["render", "--text", path]);
+        assert_eq!(rendered.status.code(), Some(0), "{name}: {rendered:?}");
+        assert_eq!(rendered.stdout, expected.stdout, "{name}");
+        let piped = with_stdin(&["render", "--text", "-"], &bytes);
+        assert_eq!(piped.status.code(), Some(0), "{name} on a pipe: {piped:?}");
+        assert_eq!(piped.stdout, expected.stdout, "{name} on a pipe");
+
+        for args in [["diff", &before, path], ["diff", path, &before]] {
+            let same = run(&args);
+            assert_eq!(same.status.code(), Some(0), "{args:?}: {same:?}");
+            assert_eq!(same.stdout, b"no difference\n", "{args:?}");
+        }
+    }
+
+    // Behind a UTF-16 mark the bytes are UTF-16 or nothing: half a code unit
+    // and a surrogate without its pair are refused, and named as what they
+    // are rather than as bad UTF-8.
+    for (name, tail) in [
+        ("odd.snap", &b"s\0i"[..]),
+        ("lone.snap", &[0x3d, 0xd8, b'!', 0][..]),
+    ] {
+        let path = dir.join(name);
+        std::fs::write(&path, [&[0xff, 0xfe], tail].concat()).expect("the file is written");
+        let path = path.to_str().unwrap();
+        let out = run(&["render", "--text", path]);
+        assert_eq!(out.status.code(), Some(2), "{name}: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!("termlens: {path}: stream did not contain valid UTF-16\n"),
+            "{name}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 #[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
 fn inspect_prints_the_screen_and_the_exit_trailer() -> termlens::Result<()> {
@@ -1204,7 +1292,7 @@ fn every_corpus_file_renders() -> termlens::Result<()> {
 
 /// Run the CLI with `input` on standard input, and without a PTY: a pipe is
 /// the whole point of `-`, and through a PTY there is no EOF to read to.
-fn with_stdin(args: &[&str], input: &str) -> std::process::Output {
+fn with_stdin(args: &[&str], input: impl AsRef<[u8]>) -> std::process::Output {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let mut child = Command::new(env!("CARGO_BIN_EXE_termlens"))
@@ -1222,7 +1310,7 @@ fn with_stdin(args: &[&str], input: &str) -> std::process::Output {
     // pipe buffer first. The child's exit code and stderr are what the
     // callers assert; whether it read the input is the child's business.
     let mut pipe = child.stdin.take().expect("a stdin pipe");
-    match pipe.write_all(input.as_bytes()) {
+    match pipe.write_all(input.as_ref()) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
         Err(e) => panic!("write to the child's stdin: {e}"),

@@ -116,6 +116,16 @@ reads that marker.
   measured first, so one that is missing, is a directory or is past the
   1 GiB bound is refused before standard input is read. The two screens
   are still read in argument order. (#715)
+- `termlens render` and `termlens diff` read a saved screen behind a
+  byte-order mark, and in UTF-16 (#716). Windows PowerShell 5.1's `>`
+  writes what `termlens inspect` prints as UTF-16LE behind a mark, and
+  `Out-File -Encoding utf8` puts a UTF-8 mark in front, so the CLI could
+  not read back its own output saved in the default Windows shell: the
+  first was refused as not UTF-8 and the second as a bad header, JSON
+  included. A UTF-8 mark is now dropped, and UTF-16 in either byte order is
+  decoded behind its mark; without one the input is UTF-8 as before. The
+  1 GiB bound holds for the decoded text too, and UTF-16 that is cut short
+  or holds a lone surrogate is refused as not valid UTF-16.
 
 ## [0.11.8] - 2026-11-03
 
