@@ -64,6 +64,15 @@ use crate::screen::{Clipboard, Link, MouseMode, MouseModes};
 /// title comes anywhere near this.
 pub(super) const OSC_CAPTURE_MAX: usize = 64 * 1024;
 
+/// How much of a kitty control block is kept: 256 KiB, the length past
+/// which kitty drops an escape that is still arriving
+/// (`MAX_ESCAPE_CODE_LENGTH` in its `vt-parser.c`, a quarter of its 1 MiB
+/// read buffer; it reads a longer one only when the whole of it is already
+/// in that buffer). A block that names every key of the protocol once,
+/// each at its longest value, is under 400 bytes: the bound is there for
+/// the stream that never ends one.
+const KITTY_CONTROL_MAX: usize = 256 * 1024;
+
 /// How many `OSC 8` spans to keep, oldest evicted.
 ///
 /// Bounded rather than unbounded because a TUI redraws: an application that
@@ -527,8 +536,8 @@ pub(crate) enum Query {
     },
     /// Recognized as a question, but one termlens has no answer for
     /// (XTGETTCAP, kitty `CSI ? u`, DECRQSS, `OSC 4`/`OSC 52`, other
-    /// DSR/DA/XTWINOPS reports, …). Carries a printable rendering for
-    /// diagnostics.
+    /// DSR/DA/XTWINOPS reports, a kitty transmission or placement kitty
+    /// would answer, …). Carries a printable rendering for diagnostics.
     Unanswerable(String),
 }
 
@@ -606,6 +615,82 @@ impl MidUpload {
             Some(b"d") => MidUpload::Aborts,
             Some(_) => MidUpload::Beside,
         }
+    }
+}
+
+/// The reply kitty owes a transmission or a placement, which termlens does
+/// not send (#680).
+///
+/// kitty answers one that names an image — `i=…;OK`, or an error — through
+/// `finish_command_response` in its `graphics.c`: only when the command
+/// carries `i=` or `I=`, an `OK` only once the image's data has loaded (the
+/// last chunk of an upload), `q=1` suppressing the `OK` and `q=2` every
+/// reply. That `OK` says the image loaded, which termlens cannot know: it
+/// opens no file the program under test points at and decodes nothing
+/// without the `decode` feature. So the reply is not invented. The command
+/// is named in the next timeout instead, as an unanswered query is, since an
+/// application that waits for the reply waits for ever — unless it asked
+/// for quiet, when kitty would have sent nothing either. A command naming
+/// both `i=` and `I=` is refused with an error, which only `q=2` silences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KittyAsk {
+    /// The `i=` and `I=` of the command that started the load, nonzero.
+    id: bool,
+    number: bool,
+    /// Its `q=`, 0 when absent.
+    quiet: u32,
+    /// Its printable rendering, for the timeout note.
+    shape: String,
+}
+
+impl KittyAsk {
+    /// What a transmission (`a=t`, `a=T`, no action) or a placement (`a=p`)
+    /// asks for; `None` for any other action. Frames (`a=f`) and composes
+    /// (`a=c`), which kitty answers too, are not covered.
+    fn of(keys: &[u8], shape: String) -> Option<Self> {
+        let action = keys
+            .split(|&b| b == b',')
+            .find_map(|pair| pair.strip_prefix(b"a="));
+        if !matches!(action, None | Some(b"t" | b"T" | b"p")) {
+            return None;
+        }
+        let nonzero = |name: &[u8]| kitty_key(keys, name).is_some_and(|value| value != 0);
+        Some(Self {
+            id: nonzero(b"i="),
+            number: nonzero(b"I="),
+            quiet: kitty_key(keys, b"q=").unwrap_or(0),
+            shape,
+        })
+    }
+
+    /// kitty's refusal of a command naming both an image id and an image
+    /// number, sent at once — on the escape itself, before any load.
+    fn refused(&self) -> bool {
+        self.id && self.number && self.quiet < 2
+    }
+
+    /// The `OK` kitty sends once the data has loaded. `quiet` is the last
+    /// escape's `q=`: a nonzero one overrides the first's, as kitty's `if
+    /// (g->quiet) lg->quiet = g->quiet` does for a continuation chunk.
+    fn answered(&self, quiet: u32) -> bool {
+        let quiet = if quiet != 0 { quiet } else { self.quiet };
+        !(self.id && self.number) && (self.id || self.number) && quiet == 0
+    }
+}
+
+/// The escape completing `payload`, and the reply kitty owes it if any —
+/// named in the next timeout rather than sent (#680).
+fn kitty_completed(
+    completed: Option<(GraphicsPayload, Placement)>,
+    unanswered: Option<String>,
+) -> SeqEvent {
+    match (completed, unanswered) {
+        (Some((payload, placement)), Some(shape)) => {
+            SeqEvent::GraphicsQuery(Box::new(payload), placement, Query::Unanswerable(shape))
+        }
+        (Some((payload, placement)), None) => SeqEvent::Graphics(Box::new(payload), placement),
+        (None, Some(shape)) => SeqEvent::Query(Query::Unanswerable(shape)),
+        (None, None) => SeqEvent::None,
     }
 }
 
@@ -808,6 +893,10 @@ pub(crate) struct SeqTracker {
     /// which removes the very image being loaded, while the loader still
     /// points at it. Never set while `building` is in progress.
     orphaned_load: bool,
+    /// The reply the command that started `building` asks kitty for, owed
+    /// once its last chunk arrives (#680). Read only while `building` is in
+    /// progress, and set by every escape that starts it.
+    upload_ask: Option<KittyAsk>,
     /// How many payload bytes may be kept for inspection. Counting is
     /// unaffected by it; only the data is dropped.
     capture: usize,
@@ -896,14 +985,25 @@ pub(crate) struct SeqTracker {
     /// Payload bytes after the header, so a payload's size is reportable
     /// without keeping the payload.
     dcs_data_len: u64,
-    /// The opening bytes of a DCS-class payload: enough for a kitty control
-    /// block (`G` plus `key=value` pairs up to the first `;`) and for an
-    /// XTGETTCAP name list, whose hex names run about six bytes each. A
-    /// longer list truncates, and the names that survive are still answered
-    /// — a partial answer beats none, and the ones we drop get no reply,
-    /// which is what an application already has to handle.
+    /// The opening bytes of a DCS-class payload: enough to tell a kitty
+    /// escape by its `G`, and for an XTGETTCAP name list, whose hex names
+    /// run about six bytes each. A longer list truncates, and the names
+    /// that survive are still answered — a partial answer beats none, and
+    /// the ones we drop get no reply, which is what an application already
+    /// has to handle.
     dcs_head: [u8; 128],
     dcs_head_len: u8,
+    /// A kitty escape's control block: the `G` and the `key=value` pairs
+    /// after it, up to the first `;`. Kept apart from the 128-byte head,
+    /// which cut a long block short: a value that straddled byte 127 was
+    /// read wrong and every key past it was lost, `m=1` among them (#700).
+    /// Bounded by [`KITTY_CONTROL_MAX`], and by nothing the capture bound
+    /// says: the keys describe the image, whatever is kept of its data.
+    kitty_control: Vec<u8>,
+    /// True while the bytes arriving belong to that control block: from the
+    /// introducer of an APC to its first `;`, or to a first byte other than
+    /// `G`, which makes it no kitty escape at all.
+    kitty_control_open: bool,
     /// Every byte of the current DCS-class string, up to the capture bound —
     /// the image data itself, which the 128-byte head deliberately is not.
     /// Kept only while the bound allows; `dcs_body_full` says whether it is
@@ -964,6 +1064,7 @@ impl SeqTracker {
             counts: GraphicsCounts::default(),
             building: GraphicsBuilder::default(),
             orphaned_load: false,
+            upload_ask: None,
             capture,
             frame_printable: 0,
             focus_events: false,
@@ -988,6 +1089,8 @@ impl SeqTracker {
             dcs_data_len: 0,
             dcs_head: [0; 128],
             dcs_head_len: 0,
+            kitty_control: Vec::new(),
+            kitty_control_open: false,
             dcs_body: Vec::new(),
             dcs_body_full: true,
             sixel_meter: SixelMeter::default(),
@@ -1031,6 +1134,11 @@ impl SeqTracker {
         } else {
             0
         }
+    }
+
+    /// Whether origin mode (`DECOM`) is set on the screen on display.
+    pub(crate) fn origin_mode(&self) -> bool {
+        self.frame().origin
     }
 
     /// Save the character sets into the slot of the screen on display.
@@ -1257,6 +1365,8 @@ impl SeqTracker {
     fn abandon_upload(&mut self) {
         self.counts.bytes += self.building.abandon();
         self.orphaned_load = false;
+        // Nothing of it completes here, so no reply to it is named (#680).
+        self.upload_ask = None;
     }
 
     /// True while the application has focus reporting (mode 1004) enabled.
@@ -1424,6 +1534,8 @@ impl SeqTracker {
         self.dcs_intermediate = 0;
         self.dcs_data_len = 0;
         self.dcs_head_len = 0;
+        self.kitty_control.clear();
+        self.kitty_control_open = introducer == b'_';
         self.dcs_body.clear();
         self.dcs_body_full = true;
         self.sixel_meter = SixelMeter::default();
@@ -1932,8 +2044,12 @@ impl SeqTracker {
         // continuation chunk too, which is `G` with `m=` and nothing else.
         // Any other APC is not graphics and leaves an upload where it was,
         // as kitty does; it used to be taken as the upload's next chunk.
-        if self.dcs_introducer == b'_' && self.dcs_head.first() == Some(&b'G') {
-            let control = self.dcs_control_block().to_vec();
+        // The first byte captured, not slot 0: a reset zeroes only the
+        // length, so an empty APC found the last escape's `G` there (#735).
+        if self.dcs_introducer == b'_'
+            && self.dcs_head[..usize::from(self.dcs_head_len)].first() == Some(&b'G')
+        {
+            let control = self.kitty_control.clone();
             // The control block is `G` followed by the comma-separated keys.
             let keys = control.strip_prefix(b"G").unwrap_or(&control);
             let is_query = keys.split(|&b| b == b',').any(|pair| pair == b"a=q");
@@ -1980,15 +2096,28 @@ impl SeqTracker {
                                 self.dcs_body_full,
                                 self.capture,
                             );
-                            return match beside.finish_placed() {
-                                Some((payload, placement)) => {
-                                    self.counts.record(&payload);
-                                    SeqEvent::Graphics(Box::new(payload), placement)
-                                }
-                                None => SeqEvent::None,
-                            };
+                            let completed = beside.finish_placed();
+                            if let Some((payload, _)) = &completed {
+                                self.counts.record(payload);
+                            }
+                            let unanswered = KittyAsk::of(keys, self.seq_printable())
+                                .filter(|ask| ask.refused() || ask.answered(0))
+                                .map(|ask| ask.shape);
+                            return kitty_completed(completed, unanswered);
                         }
                     }
+                }
+                // The reply kitty owes this escape at once, and the one it
+                // owes the load this escape starts once the load completes
+                // (#680): see `KittyAsk`. A continuation asks nothing of its
+                // own; it only finishes what the first chunk asked.
+                let mut unanswered = None;
+                if !self.building.in_progress() {
+                    let ask = KittyAsk::of(keys, self.seq_printable());
+                    if let Some(ask) = ask.as_ref().filter(|ask| ask.refused()) {
+                        unanswered = Some(ask.shape.clone());
+                    }
+                    self.upload_ask = ask.filter(|ask| !ask.refused());
                 }
                 // One image, however many escapes it took. `m=1` says
                 // another follows; the transmission is not an image until
@@ -2002,15 +2131,17 @@ impl SeqTracker {
                     self.capture,
                 );
                 if key_is(keys, b"m", b"1") {
-                    return SeqEvent::None;
+                    return kitty_completed(None, unanswered);
                 }
-                return match self.building.finish_placed() {
-                    Some((payload, placement)) => {
-                        self.counts.record(&payload);
-                        SeqEvent::Graphics(Box::new(payload), placement)
-                    }
-                    None => SeqEvent::None,
-                };
+                let quiet = kitty_key(keys, b"q=").unwrap_or(0);
+                if let Some(ask) = self.upload_ask.take().filter(|ask| ask.answered(quiet)) {
+                    unanswered = Some(ask.shape);
+                }
+                let completed = self.building.finish_placed();
+                if let Some((payload, _)) = &completed {
+                    self.counts.record(payload);
+                }
+                return kitty_completed(completed, unanswered);
             }
             return self.kitty_query(keys);
         }
@@ -2067,7 +2198,9 @@ impl SeqTracker {
     /// Only an explicit `a=q` is a question. A transmission is an
     /// instruction, and classifying one as a query would put "the
     /// application queried the terminal" into the next timeout of every
-    /// application that draws — a false diagnosis, and a loud one.
+    /// application that draws — a false diagnosis, and a loud one. Only one
+    /// that names an image and does not ask for quiet is named, since kitty
+    /// owes it a reply termlens does not send (#680): see `KittyAsk`.
     ///
     /// A command naming both an image id and an image number is refused
     /// before anything else is looked at, and a query without an id right
@@ -2165,16 +2298,29 @@ impl SeqTracker {
         )
     }
 
-    /// The captured head of a DCS-class payload, cut at the first `;`.
+    /// Take one byte of an APC into the kitty control block, if it is part
+    /// of one.
     ///
     /// A kitty payload is `G <key=value>,… ; <base64>`; only the control
     /// block before the `;` is worth reading, and stopping there keeps a
     /// base64 blob from being scanned for keys it cannot contain.
-    fn dcs_control_block(&self) -> &[u8] {
-        let head = &self.dcs_head[..usize::from(self.dcs_head_len)];
-        match head.iter().position(|&b| b == b';') {
-            Some(sep) => &head[..sep],
-            None => head,
+    fn push_kitty_control(&mut self, b: u8) {
+        if !self.kitty_control_open {
+            return;
+        }
+        if b == b';' || (self.kitty_control.is_empty() && b != b'G') {
+            self.kitty_control_open = false;
+        } else if self.kitty_control.len() < KITTY_CONTROL_MAX {
+            self.kitty_control.push(b);
+        } else {
+            // The bound: nothing past it is read. A pair it cuts in two is
+            // dropped whole, so that a value is never read as its own first
+            // digits, which is what the 128-byte head did to one.
+            if b != b',' {
+                let whole = self.kitty_control.iter().rposition(|&b| b == b',');
+                self.kitty_control.truncate(whole.unwrap_or(1));
+            }
+            self.kitty_control_open = false;
         }
     }
 
@@ -2205,8 +2351,9 @@ impl SeqTracker {
             self.dcs_head[usize::from(self.dcs_head_len)] = b;
             self.dcs_head_len += 1;
         }
+        self.push_kitty_control(b);
         // The body is what a decoder needs and the head is not: 128 bytes
-        // holds a control block, never an image. Bounded, and the flag says
+        // holds a name list, never an image. Bounded, and the flag says
         // which of the two this is, so a truncated payload is reported as
         // uncaptured rather than decoded into a plausible wrong picture.
         if self.dcs_body.len() < self.capture {
@@ -2845,6 +2992,120 @@ mod tests {
         assert_eq!(seen[0].data(), Some(&b"AAAABBBB"[..]));
     }
 
+    /// An upload cut by a sixel or a hard reset is left undefined by the
+    /// protocol: "the client **must** finish sending all chunks for a single
+    /// image before sending any other graphics related escape codes" (its
+    /// "Remote client" section). termlens drops the upload on either, so the
+    /// chunk that would have been its last is a transmission of its own,
+    /// with none of the upload's facts, and nothing is owed a reply for it
+    /// (#680). kitty 0.49 does otherwise, and neither is a promise: it
+    /// ignores the sixel and completes the upload, and after a reset it
+    /// refuses the chunk (`EILSEQ`). Pinned so a change is a decision.
+    #[test]
+    fn the_last_chunk_after_a_sixel_or_reset_is_no_part_of_the_upload() {
+        let last: &[u8] = b"\x1b_Gm=0;BBBB\x1b\\";
+        for between in [RED_SIXEL, b"\x1bc"] {
+            let shown = String::from_utf8_lossy(between);
+            let (seen, queries, tracker) = kitty_events(&[UPLOAD_OF_5, between, last].concat());
+            let kitty: Vec<_> = seen
+                .iter()
+                .filter(|payload| payload.protocol() == GraphicsProtocol::Kitty)
+                .collect();
+            assert_eq!(kitty.len(), 1, "{shown}: {seen:?}");
+            assert_eq!(kitty[0].id(), None, "{shown}: not the upload's: {seen:?}");
+            assert_eq!(kitty[0].size(), None, "{shown}: {seen:?}");
+            assert_eq!(kitty[0].chunks(), 1, "{shown}: {seen:?}");
+            assert_eq!(kitty[0].data(), Some(&b"BBBB"[..]), "{shown}");
+            assert_eq!(queries, [], "{shown}: the upload's reply is not owed");
+            assert_eq!(tracker.graphics().kitty, 1, "{shown}");
+        }
+    }
+
+    /// kitty answers a transmission or a placement that names an image
+    /// (`finish_command_response` in its `graphics.c`) unless `q=` asks for
+    /// quiet. termlens sends no reply, since it cannot know whether the
+    /// image loaded, and names the command instead (#680): the payload
+    /// comes with an unanswerable query carrying the shape of the escape
+    /// that asked — for an upload, its first chunk, named at its last.
+    #[test]
+    fn a_kitty_command_kitty_would_answer_is_named_unanswered() {
+        fn named(wire: &[u8]) -> Vec<String> {
+            let (seen, queries, _) = kitty_events(wire);
+            assert!(!seen.is_empty(), "still captured: {wire:?}");
+            queries
+                .into_iter()
+                .map(|query| match query {
+                    Query::Unanswerable(shape) => shape,
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        }
+        let named_as = |wire: &[u8], shape: &str| {
+            assert_eq!(named(wire), [shape], "{}", String::from_utf8_lossy(wire));
+        };
+        let unnamed = |wire: &[u8]| {
+            assert_eq!(
+                named(wire),
+                [] as [String; 0],
+                "{}",
+                String::from_utf8_lossy(wire)
+            );
+        };
+
+        // Transmissions, by id and by number, with and without an action.
+        named_as(
+            b"\x1b_Gi=7,a=T,f=24,s=1,v=1;QUJD\x1b\\",
+            "^[_Gi=7,a=T,f=24,s=1,v=1;",
+        );
+        named_as(
+            b"\x1b_Gi=7,f=24,s=1,v=1;QUJD\x1b\\",
+            "^[_Gi=7,f=24,s=1,v=1;QUJD",
+        );
+        named_as(
+            b"\x1b_GI=3,a=t,f=24,s=1,v=1;QUJD\x1b\\",
+            "^[_GI=3,a=t,f=24,s=1,v=1;",
+        );
+        // A file transmission: kitty would read the file and say.
+        named_as(b"\x1b_Gi=7,t=f;L3RtcC94\x1b\\", "^[_Gi=7,t=f;L3RtcC94^[\\");
+        // A placement.
+        named_as(b"\x1b_Ga=p,i=7\x1b\\", "^[_Ga=p,i=7^[\\");
+        // Quiet: `q=1` silences the `OK`, `q=2` everything.
+        for quiet in [b"q=1", b"q=2"] {
+            let quiet = String::from_utf8_lossy(quiet);
+            unnamed(format!("\x1b_Gi=7,{quiet},a=T,f=24,s=1,v=1;QUJD\x1b\\").as_bytes());
+            unnamed(format!("\x1b_Ga=p,i=7,{quiet}\x1b\\").as_bytes());
+        }
+        // Nothing to address a reply to, and actions kitty does not answer.
+        unnamed(b"\x1b_Ga=T,f=24,s=1,v=1;QUJD\x1b\\");
+        unnamed(b"\x1b_Gi=0,a=T,f=24,s=1,v=1;QUJD\x1b\\");
+        unnamed(b"\x1b_Ga=d,d=I,i=7\x1b\\");
+        // Both an id and a number: refused with an error, which `q=1` does
+        // not silence.
+        named_as(b"\x1b_Ga=p,i=7,I=3,q=1\x1b\\", "^[_Ga=p,i=7,I=3,q=1^[\\");
+        unnamed(b"\x1b_Ga=p,i=7,I=3,q=2\x1b\\");
+
+        // An upload is answered once, at its last chunk, and the first
+        // chunk's quiet holds unless a later one sets its own.
+        let first = UPLOAD_OF_5;
+        let last: &[u8] = b"\x1b_Gm=0;BBBB\x1b\\";
+        let (_, queries, _) = kitty_events(first);
+        assert_eq!(queries, [], "nothing owed before the last chunk");
+        named_as(&[first, last].concat(), "^[_Ga=T,f=32,s=2,v=1,i=5,");
+        unnamed(&[first, b"\x1b_Gm=0,q=1;BBBB\x1b\\"].concat());
+        unnamed(
+            &[
+                b"\x1b_Ga=T,f=32,s=2,v=1,i=5,q=2,m=1;AAAA\x1b\\".as_slice(),
+                last,
+            ]
+            .concat(),
+        );
+        // A placement in the middle of an upload is answered for itself.
+        let (_, queries, _) = kitty_events(&[first, b"\x1b_Ga=p,i=9\x1b\\"].concat());
+        assert_eq!(queries, [Query::Unanswerable("^[_Ga=p,i=9^[\\".into())]);
+        // And one dropped by a delete owes nothing.
+        unnamed(&[first, b"\x1b_Ga=d,d=i,i=5\x1b\\", last].concat());
+    }
+
     /// Only an APC opening with `G` is kitty's, continuation chunks
     /// included. Any other APC used to be taken as the upload's next chunk —
     /// and, carrying no `m=1`, as its last. kitty ignores one, and so the
@@ -2861,6 +3122,110 @@ mod tests {
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert_eq!(seen[0].chunks(), 2);
         assert_eq!(seen[0].data(), Some(&b"AAAACCCC"[..]));
+    }
+
+    /// Whether an APC is kitty's is read off its own first byte. The gate
+    /// read slot 0 of the head buffer whatever the head's length, and a
+    /// reset only zeroes the length, so an empty APC (`ESC _ ESC \`) after
+    /// a kitty escape found that escape's `G` there and was counted as a
+    /// kitty transmission of 0 bytes (#735). An APC with a first byte of
+    /// its own overwrote the slot, and is pinned here beside it.
+    #[test]
+    fn an_apc_is_kittys_only_by_its_own_first_byte() {
+        for apc in [&b"\x1b_\x1b\\"[..], b"\x1b_X\x1b\\", b"\x1b_XG;AAAA\x1b\\"] {
+            let shown = String::from_utf8_lossy(apc);
+            let wire = [&b"\x1b_Ga=d\x1b\\"[..], apc].concat();
+            let (seen, _, tracker) = kitty_events(&wire);
+            assert_eq!(seen.len(), 1, "{shown}: {seen:?}");
+            assert_eq!(tracker.graphics().kitty, 0, "{shown}");
+            // Nor is one taken as the next chunk of an upload.
+            let wire = [UPLOAD_OF_5, apc, b"\x1b_Gm=0;CCCC\x1b\\"].concat();
+            let (seen, _, tracker) = kitty_events(&wire);
+            assert_eq!(seen.len(), 1, "{shown}: {seen:?}");
+            assert_eq!(seen[0].chunks(), 2, "{shown}");
+            assert_eq!(seen[0].data(), Some(&b"AAAACCCC"[..]), "{shown}");
+            assert_eq!(tracker.graphics().kitty, 1, "{shown}");
+        }
+    }
+
+    /// A control block naming every key a transmission and its placement
+    /// take, each at a long value, as a client may send it: 142 bytes after
+    /// the `G`. Byte 127 falls inside `r=1000`.
+    const LONG_CONTROL: &str = "a=T,f=24,t=d,o=z,i=4294967295,p=4294967295,s=10000,v=10000,\
+        x=10000,y=10000,w=10000,h=10000,X=100,Y=100,z=-1073741824,c=1000,r=1000,C=1,q=2,m=1";
+
+    /// kitty reads a control block off its escape buffer, however long it
+    /// is (`parse_graphics_code`). termlens read it from the first 128
+    /// bytes of the escape: a value that straddled byte 127 was cut short
+    /// (`r=1000` read as `r=1`) and every key past it was dropped — and
+    /// when one of those was the `m=1` of a first chunk, the upload ended
+    /// at once and its second chunk was counted as an image of its own
+    /// (#700).
+    #[test]
+    fn a_kitty_control_block_is_read_past_its_first_128_bytes() {
+        let head = &format!("G{LONG_CONTROL}")[..128];
+        assert!(head.ends_with(",r=1"), "byte 127 must fall in `r=`: {head}");
+        let first = format!("\x1b_G{LONG_CONTROL};AAAA\x1b\\");
+        let wire = [first.as_bytes(), b"\x1b_Gm=0;BBBB\x1b\\"].concat();
+        // At every capture bound: the keys are not read off the retained
+        // body, which a bound of zero does not keep.
+        for capture in [crate::graphics::DEFAULT_CAPTURE, 0] {
+            let mut tracker = SeqTracker::new(capture, TEST_ROWS, TEST_COLS);
+            let mut seen = Vec::new();
+            for &byte in &wire {
+                if let SeqEvent::Graphics(payload, placement) = tracker.step(byte) {
+                    seen.push((*payload, placement));
+                }
+            }
+            assert_eq!(seen.len(), 1, "one image in two chunks: {seen:?}");
+            let (image, placement) = &seen[0];
+            assert_eq!(image.chunks(), 2, "capture {capture}");
+            assert_eq!(image.id(), Some(u32::MAX));
+            assert_eq!(image.cells(), Some((1000, 1000)), "`r=` whole");
+            assert!(!placement.moves, "`C=1` sits past byte 127");
+            assert_eq!(tracker.graphics().kitty, 1, "capture {capture}");
+            assert_eq!(
+                image.data(),
+                (capture > 0).then_some(&b"AAAABBBB"[..]),
+                "capture {capture}"
+            );
+        }
+        // The reviewer's shape: keys kitty accepts repeated pad the block,
+        // and every fact of the image sits past byte 127.
+        let pad = "z=-1073741824,".repeat(9);
+        let first = format!("\x1b_Ga=t,{pad}i=9,f=24,s=1,v=2,m=1;AAAA\x1b\\");
+        let seen = payloads(&[first.as_bytes(), b"\x1b_Gm=0;AAAA\x1b\\"].concat());
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(
+            (seen[0].id(), seen[0].format(), seen[0].size()),
+            (Some(9), GraphicsFormat::Rgb, Some((1, 2)))
+        );
+    }
+
+    /// The control block is kept up to the length at which kitty gives up on
+    /// an escape that is still arriving, and no further. A key that ends on
+    /// the near side of [`KITTY_CONTROL_MAX`] is read; one the bound cuts in
+    /// two is dropped whole rather than read as its first digits, which is
+    /// what the old head did to `r=1000`; and one past it is not read.
+    #[test]
+    fn a_kitty_control_block_is_cut_where_kitty_stops_reading() {
+        // `Ga=t,`, then `pad` bytes of pairs kitty accepts, then `key`.
+        let id_after = |pad: usize, key: &str| {
+            let full = pad / 5 - 1;
+            let last = "1".repeat(pad - 5 * full - 3);
+            let wire = format!(
+                "\x1b_Ga=t,{}z={last},{key};AAAA\x1b\\",
+                "z=-1,".repeat(full)
+            );
+            let seen = payloads(wire.as_bytes());
+            assert_eq!(seen.len(), 1, "{pad} bytes, then {key}");
+            seen[0].id()
+        };
+        let room = KITTY_CONTROL_MAX - "Ga=t,".len();
+        assert_eq!(id_after(room - 3, "i=9"), Some(9), "ends on the bound");
+        assert_eq!(id_after(room - 3, "i=91"), None, "not read as `i=9`");
+        assert_eq!(id_after(room - 2, "i=9"), None, "cut after its `=`");
+        assert_eq!(id_after(room, "i=9"), None, "starts past the bound");
     }
 
     /// A placement in the middle of an upload is kitty's `case 'p'`, which
@@ -2957,7 +3322,14 @@ mod tests {
             let shown = String::from_utf8_lossy(query);
             assert_eq!(seen.len(), 1, "{shown}: {seen:?}");
             assert_eq!(seen[0].data(), Some(&b"AAAACCCC"[..]), "{shown}");
-            assert_eq!(loads(&queries)[0].1, KittyLoad::Loaded, "{shown}");
+            assert_eq!(loads(&queries[..1])[0].1, KittyLoad::Loaded, "{shown}");
+            // And the upload, `i=5` without `q=`, is owed kitty's `OK` at
+            // its last chunk, which is named rather than sent (#680).
+            assert_eq!(
+                queries[1..],
+                [Query::Unanswerable("^[_Ga=T,f=32,s=2,v=1,i=5,".into())],
+                "{shown}"
+            );
         }
     }
 
@@ -3159,7 +3531,8 @@ mod tests {
 
     /// A transmission is an instruction, not a question. Classifying one as
     /// a query would put "the application queried the terminal" into the
-    /// next timeout of every application that draws.
+    /// next timeout of every application that draws. (One that names an
+    /// image is owed kitty's reply, and is named for that: #680.)
     #[test]
     fn a_kitty_transmission_is_not_treated_as_a_query() {
         let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
@@ -3482,20 +3855,26 @@ mod tests {
     fn hostile_input_cannot_panic_or_grow_a_buffer_past_its_bound() {
         let capture = crate::graphics::DEFAULT_CAPTURE;
         let mut tracker = SeqTracker::new(capture, TEST_ROWS, TEST_COLS);
-        // (links, label, osc, dcs_body) high-water marks.
-        let mut peak = (0usize, 0usize, 0usize, 0usize);
+        // (links, label, osc, dcs_body, kitty_control) high-water marks.
+        type Peak = (usize, usize, usize, usize, usize);
+        let mut peak: Peak = (0, 0, 0, 0, 0);
 
-        fn observe(t: &SeqTracker, capture: usize, peak: &mut (usize, usize, usize, usize)) {
+        fn observe(t: &SeqTracker, capture: usize, peak: &mut Peak) {
             assert!(t.links.len() <= LINK_HISTORY, "link log overran");
             assert!(t.link_label.len() <= LINK_LABEL_MAX, "label overran");
             assert!(t.osc_buf.len() <= OSC_CAPTURE_MAX, "osc buffer overran");
             assert!(t.dcs_body.len() <= capture, "dcs body overran");
             assert!(usize::from(t.seq_len) <= t.seq_buf.len());
             assert!(usize::from(t.dcs_head_len) <= t.dcs_head.len());
+            assert!(
+                t.kitty_control.len() <= KITTY_CONTROL_MAX,
+                "kitty control block overran"
+            );
             peak.0 = peak.0.max(t.links.len());
             peak.1 = peak.1.max(t.link_label.len());
             peak.2 = peak.2.max(t.osc_buf.len());
             peak.3 = peak.3.max(t.dcs_body.len());
+            peak.4 = peak.4.max(t.kitty_control.len());
         }
 
         // Phase 1 — the panic net. xorshift64: a few lines, no dependency,
@@ -3539,12 +3918,24 @@ mod tests {
         feed(b"\x1b]0;", &mut tracker, &mut peak);
         feed(&vec![b'T'; OSC_CAPTURE_MAX * 2], &mut tracker, &mut peak);
         feed(b"\x07", &mut tracker, &mut peak);
+        // (d) one kitty control block that never reaches its `;`.
+        feed(b"\x1b_G", &mut tracker, &mut peak);
+        feed(
+            &b"z=-1,".repeat(KITTY_CONTROL_MAX / 5 * 2),
+            &mut tracker,
+            &mut peak,
+        );
+        feed(b"\x1b\\", &mut tracker, &mut peak);
 
         // The corpus must actually have reached each bound, or every check
         // above was inert.
         assert_eq!(peak.0, LINK_HISTORY, "the link log was never filled");
         assert_eq!(peak.1, LINK_LABEL_MAX, "the label bound was never reached");
         assert_eq!(peak.2, OSC_CAPTURE_MAX, "the osc bound was never reached");
+        assert_eq!(
+            peak.4, KITTY_CONTROL_MAX,
+            "the kitty control bound was never reached"
+        );
 
         // And the accessors stay total on whatever state that left behind.
         let _ = tracker.title();

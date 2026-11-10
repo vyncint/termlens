@@ -809,7 +809,10 @@ Rules:
    column. A terminal declared without the protocol ignores the escape and
    moves nothing, which is the default. The cursor is moved with line feeds
    and a cursor-forward fed to the grid, so a scroll it causes reaches
-   history like any other.
+   history like any other. Past a scroll region's bottom margin, where line
+   feeds stop on the margin, kitty leaves the cursor below it, on the
+   image's last row (#697): a `VPA` fed after the line feeds puts it there,
+   vt100 taking that row as absolute whatever the margins say.
 
    Decoding sits behind the `decode` feature and runs on demand, never as the
    bytes arrive: a suite that only asks whether an image went out should pay
@@ -1160,7 +1163,10 @@ on the button code the same way for a button and a wheel notch (`+4` shift,
 `+8` alt, `+16` ctrl), so `MouseButton::Left.ctrl()` and `Scroll::Up.ctrl()`
 are one idiom; the wheel gets a chord type of its own (`ScrollChord`) so
 that a wheel direction cannot be handed to `click_with`, since a notch has
-no release and the two are different gestures on the wire.
+no release and the two are different gestures on the wire. A button's
+release carries the modifiers as its press does: SGR repeats the button
+code with a final `m`, and the legacy, UTF-8 and urxvt forms send button
+`3` plus the modifier bits, as xterm's `BtnCode` does (#701).
 
 A **drag reports one motion per cell crossed**, interpolated on a straight
 line and on both axes for a diagonal. A single report at the destination is

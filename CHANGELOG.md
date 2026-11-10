@@ -83,6 +83,38 @@ reads that marker.
   matched the note after more than eight distinct unanswered queries
   should expect the most recent named, first when it is the cause, and a
   smaller count. (#690)
+- A mouse release keeps the modifier keys in the legacy, UTF-8 (`?1005`)
+  and urxvt (`?1015`) encodings, as xterm and Windows Terminal send it:
+  button `3` plus the modifier bits. `click_with` and `drag` sent a bare
+  `3`, so a ctrl+click under `?1000` was released as `CSI M` and the byte
+  0x23 where xterm sends 0x33. SGR (`?1006`) always kept them. A test that
+  reads the release bytes of a modified click or drag in one of those
+  three encodings should expect the modifier bits on the release too: `+4`
+  for shift, `+8` for alt, `+16` for ctrl. (#701)
+- A kitty placement that runs past the bottom of a scroll region leaves
+  the cursor where kitty 0.49 leaves it: on the image's last row, below the
+  margin, clamped to the screen, with the region scrolled by as many rows
+  as that row is past the margin. termlens moved it a line feed at a time,
+  so the region scrolled the same but the cursor stopped on the margin:
+  `CSI 1;10 r`, the cursor on row 7 and `a=T,c=2,r=5` left it on row 9
+  where kitty leaves it on row 11. The protocol leaves this position open;
+  `docs/LIMITATIONS.md` now says termlens follows kitty, and that it does
+  not where the cursor starts below the region, which kitty scrolls too. A
+  test that placed an image past a scroll region's bottom and asserted
+  where the next text lands should expect it that many rows lower, below
+  the margin, and no lower than the screen's last row. (#697)
+- A kitty transmission or placement that names an image (`i=` or `I=`)
+  and does not ask for quiet is named in the next timeout, as an
+  unanswered query is: kitty answers it `i=…;OK`, and termlens, which
+  cannot know whether the image loaded, sends nothing, so an application
+  waiting for that reply timed out with no note at all. A chunked upload is
+  named at its last chunk, by its first, and `q=1` or `q=2` keeps one out of
+  the note. Nothing is sent on the wire either way, and an upload cut by a
+  sixel or a hard reset is still dropped, as `docs/LIMITATIONS.md` now says
+  of both. A test that matches a timeout's text after its application
+  drew a kitty image with `i=` or `I=` should expect
+  `the application queried the terminal (^[_G…)`, or have the application
+  send `q=2`. (#680)
 
 ### Fixed
 
@@ -186,6 +218,30 @@ reads that marker.
   §4 says so too. Both files now say which subject lands on `main`: a pull
   request of one commit lands under that commit's subject and one of
   several under its title, where they said the title always did. (#720)
+- A sixel repeat with a count of zero or with none (`!0~`, `!~`) repeats
+  its sixel once, as xterm and Windows Terminal read it. It painted nothing
+  and did not advance, so `~!0~~` decoded two pixels wide where it is
+  three. (#698)
+- A kitty control block is read whole, however long it is. Its keys were
+  read from the first 128 bytes of the escape, so in a longer block a value
+  that straddled byte 127 was cut short and every key after it was lost: a
+  first chunk whose `m=1` sat there ended the upload at once, and one image
+  sent in two chunks was counted as two. A block that names every key of a
+  transmission and its placement at long values is about 140 bytes. The
+  block is now kept up to 256 KiB, the length at which kitty itself gives
+  up on an escape that is still arriving. (#700)
+- A kitty placement that names its image by number (`a=p,I=7`) moves the
+  cursor under `Graphics::Kitty`, as kitty moves it: by `c=` and `r=`, or
+  sized from the newest transmission with that number. It never moved,
+  since termlens looked only for an image id. An `i=0` is no id, as in
+  kitty: with a number beside it the number decides, and without one
+  kitty places nothing, so `a=p,i=0,c=2,r=3` no longer moves the cursor
+  by its `c=` and `r=`. (#696)
+- An empty APC (`ESC _ ESC \`) after a kitty escape is not a kitty
+  escape. It was counted as a kitty transmission of 0 bytes, so
+  `graphics().kitty` counted an image the application never sent, and in
+  an upload it was taken as the last chunk. Whether an APC is kitty's was
+  read off a buffer slot the previous escape had left its `G` in. (#735)
 
 ## [0.11.8] - 2026-11-03
 

@@ -59,7 +59,9 @@ captured `OSC 52` payload is dropped past 64 KiB; an OSC string is kept to
 its first 64 KiB, and the rest of its body never reaches the emulator, which
 otherwise holds an unterminated one whole; **undelivered query replies
 are capped at 1 MiB** and discarded past it, counted and named in the next
-wait's error; the capture of a DCS-class header is fixed at 128 bytes; `OSC 8`
+wait's error; the capture of a DCS-class header is fixed at 128 bytes, and a
+kitty control block is kept to its first 256 KiB, the length at which kitty
+itself gives up on an escape that is still arriving; `OSC 8`
 hyperlinks are held to the most recent 64 spans with a 4 KiB label each; and
 the set of distinct unanswered queries kept for diagnostics is capped, with
 the remainder counted.
