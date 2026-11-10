@@ -122,6 +122,11 @@ reads that marker.
   where CommonMark lets one start, and under a line of text the line is
   text. No line of this file has the shape, and every released section
   extracts byte for byte as before. (#717)
+- `docs/DESIGN.md` §2 lists three rules for race-free waits, the number
+  its heading, the README, `docs/LIMITATIONS.md` and the rustdoc give. It
+  listed four. The last was a note on rule 1 under `wait_frame` and is now
+  written as one, and the two rustdoc sentences that cited "rule 4" name
+  the note. (#721)
 
 ## [0.11.8] - 2026-11-03
 
