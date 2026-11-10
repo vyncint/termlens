@@ -117,7 +117,9 @@ your test ── send(Key) · click · paste · resize ──▶ PTY     └─�
    assert on the `ExitStatus` (`success()`, `code()`, `signal()`), then
    assert `!t.screen().alternate_screen()` so an application that leaves
    the user's terminal in the alternate screen fails the test. `Drop` kills
-   and reaps whatever is left, so a failing test never leaks a process.
+   and reaps whatever is left, so a failing test never leaks a process: on
+   Unix the program's whole process group, unless `wait_exit` reaped the
+   program first. A helper that must outlive the terminal uses `setsid`.
 
 8. **`wait_frame` only works for applications that emit DEC 2026
    synchronized updates.** Stock ratatui 0.30 with crossterm does **not**

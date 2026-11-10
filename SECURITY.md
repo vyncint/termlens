@@ -14,10 +14,12 @@ What the project does continuously, enforced by required CI on every change:
   are single lines. `BorrowedFd::borrow_raw` borrows the PTY master's
   descriptor, which std then duplicates, close-on-exec, into the responder
   thread's second writer. `access(2)` resolves the program the way the PTY
-  layer does. `kill(2)` sits behind `Terminal::signal`. The fourth asks
-  `sigaction(2)` whether the kernel reaps this process's children. The
-  fifth asks `waitid(2)` with `WNOWAIT` whether a child has already been
-  reaped (#630). The sixth and seventh unblock teardown (#628): `fcntl(2)`
+  layer does. `kill(2)` sits behind `Terminal::signal` and `Drop`'s teardown,
+  which signals the child and the process group it leads, and only while
+  the child is unreaped (#714). The fourth asks `sigaction(2)` whether the
+  kernel reaps this process's children. The fifth asks `waitid(2)` with
+  `WNOWAIT` whether a child has exited, or has already been reaped (#630),
+  without reaping it. The sixth and seventh unblock teardown (#628): `fcntl(2)`
   sets the master descriptor non-blocking, and `tcflush(2)` flushes unread
   slave input. The eighth is the `pre_exec` hook in `src/spawn.rs`, which
   runs in the forked child before exec. It repeats portable-pty's own hook

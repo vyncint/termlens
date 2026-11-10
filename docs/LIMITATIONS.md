@@ -243,5 +243,12 @@ CHANGELOG entry.
   unaffected; for run-and-exit programs, end the script with a `read` and
   release it after asserting — see the "instant-exit caveat" in
   [DESIGN.md](DESIGN.md).
+- **After `wait_exit`, `Drop` signals nothing** (Unix). `Drop` stops the
+  program's whole process group, a helper that ignores SIGHUP included,
+  but only while the program is unreaped: once a wait has reaped it, or
+  the kernel has (SIGCHLD ignored), the group's id may be another
+  process's. A helper still running in the group then runs on. Stop it
+  before the program exits, or have it leave the group with `setsid` if it
+  is meant to outlive the terminal (#714).
 - Exotic grapheme clusters render as the vt100 crate renders them; the
   unicode-torture fixture pins the current behaviour.

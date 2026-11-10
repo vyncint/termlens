@@ -2903,7 +2903,8 @@ fn queue_replies(
 /// A program running inside a real PTY, observed through an emulated screen.
 ///
 /// See the crate-level docs for a full example. Dropping a `Terminal` kills
-/// and reaps the child — tests never leak zombies, even on panic.
+/// and reaps the child — tests never leak zombies, even on panic — and on
+/// Unix kills what is left of the child's process group.
 pub struct Terminal {
     child: PtyChild,
     // Option only so Drop can close it under the PTY lifecycle lock;
@@ -4742,26 +4743,62 @@ fn reaped_now(child: &mut PtyChild) -> bool {
     }
 }
 
-/// Whether `pid`, our own child that no wait of ours has reaped, is gone all
-/// the same: asked with `WNOWAIT`, which leaves a child that has exited
-/// for the wait that will report it, rather than taking its status here.
+/// Where our own child, which no wait of ours has reaped, stands, as a wait
+/// that reaps nothing sees it.
 #[cfg(unix)]
-fn gone_unwaited(pid: u32) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChildState {
+    /// Not exited yet.
+    Running,
+    /// Exited and not reaped: a zombie, which holds its pid, and with it the
+    /// id of the process group it leads, until it is reaped.
+    Exited,
+    /// Reaped by someone else (`ECHILD`): its pid, and the group id, may be
+    /// another process's now.
+    Gone,
+}
+
+/// Ask where `pid`, our own child that no wait of ours has reaped, stands:
+/// with `WNOWAIT`, which leaves a child that has exited for the wait that
+/// will report it, rather than taking its status here.
+#[cfg(unix)]
+fn child_state(pid: u32) -> ChildState {
     // SAFETY: waitid only writes the zeroed siginfo_t it is handed, which
-    // outlives the call.
+    // outlives the call, and si_pid reads a field of that same value.
     #[allow(unsafe_code)]
     // `id_t` is `u32` on Linux and macOS, and may be wider elsewhere.
     #[allow(clippy::useless_conversion)]
-    let rc = unsafe {
+    let (rc, exited) = unsafe {
         let mut info: libc::siginfo_t = std::mem::zeroed();
-        libc::waitid(
+        let rc = libc::waitid(
             libc::P_PID,
             pid.into(),
             &mut info,
             libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
+        );
+        // With WNOHANG and nothing to report, waitid returns 0 and leaves
+        // si_pid as it was, zero; a child that has exited fills it in.
+        (rc, info.si_pid() != 0)
     };
-    rc == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+    if rc == 0 {
+        if exited {
+            ChildState::Exited
+        } else {
+            ChildState::Running
+        }
+    } else if io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+        ChildState::Gone
+    } else {
+        // Nothing says it is gone, so it is taken as running, as before.
+        ChildState::Running
+    }
+}
+
+/// Whether `pid`, our own child that no wait of ours has reaped, is gone all
+/// the same.
+#[cfg(unix)]
+fn gone_unwaited(pid: u32) -> bool {
+    child_state(pid) == ChildState::Gone
 }
 
 /// Who took the child's status, as best this process can tell.
@@ -4785,29 +4822,81 @@ fn reaped_elsewhere_cause() -> &'static str {
 #[cfg(unix)]
 const HANGUP_GRACE: Duration = Duration::from_millis(200);
 
-/// Hang the child up, give it [`HANGUP_GRACE`] to go, then kill it — the
-/// sequence portable-pty's `kill` runs, with the reap polled from 1 ms where
-/// portable-pty slept in fixed 50 ms steps, so a child that dies on SIGHUP
-/// at once is reaped in about a millisecond rather than fifty (#589).
-/// Gives up at `deadline`, as `Drop` must terminate.
+/// Stop the child, and on Unix the process group it leads, and reap it.
+/// Gives up at `deadline`, as `Drop` must terminate. Off Unix, and where
+/// the platform reports no pid, the PTY layer's own `kill` stops the child
+/// alone.
 fn stop_child(child: &mut PtyChild, deadline: Instant) {
     #[cfg(unix)]
-    if let Some(pid) = child
-        .process_id()
-        .and_then(|pid| libc::pid_t::try_from(pid).ok())
-    {
-        // The child is not reaped: `Drop` asked just before, and only this
-        // thread reaps it.
-        let _ = send_signal(pid, libc::SIGHUP);
-        if reaped_by(child, (Instant::now() + HANGUP_GRACE).min(deadline)) {
+    if let Some(id) = child.process_id() {
+        if let Ok(pid) = libc::pid_t::try_from(id) {
+            stop_group(child, id, pid, deadline);
             return;
         }
-        let _ = send_signal(pid, libc::SIGKILL);
+    }
+    if !reaped_now(child) {
+        let _ = child.kill();
         reaped_by(child, deadline);
+    }
+}
+
+/// Hang up the process group the child leads, give the child
+/// [`HANGUP_GRACE`] to go, then kill the group, and reap the child (#714).
+///
+/// The child is a session and group leader (`setsid` in `spawn`), so its
+/// pid is its group's id. Signalling the group reaches what the program
+/// started in it and that ignores a hangup, a `nohup`ed helper or a
+/// background job that traps `SIGHUP`, which would otherwise keep running
+/// on a PTY nobody holds. The kernel's own hangup, as the session leader
+/// exits, goes to the same group and such a member ignores it.
+///
+/// The group id is safe to signal only while the child is unreaped: once
+/// it is reaped, the id may be reused by an unrelated process. So the child
+/// is never reaped before the last signal: its exit is polled with
+/// `WNOWAIT`, and an exited child is a zombie that holds the id. A child
+/// found reaped elsewhere, where the kernel reaps children itself, ends it:
+/// nothing more is signalled (#630).
+///
+/// This is portable-pty's `kill` sequence, aimed at the group, with the
+/// exit polled from 1 ms where portable-pty slept in fixed 50 ms steps, so a
+/// child that dies on SIGHUP at once is dealt with in about a millisecond
+/// rather than fifty (#589).
+#[cfg(unix)]
+fn stop_group(child: &mut PtyChild, id: u32, pid: libc::pid_t, deadline: Instant) {
+    let group = -pid;
+    // `Drop` has not reaped the child, and only this thread reaps it.
+    let mut state = child_state(id);
+    if state == ChildState::Running {
+        let _ = send_signal(group, libc::SIGHUP);
+        state = settled_by(id, (Instant::now() + HANGUP_GRACE).min(deadline));
+    }
+    if state == ChildState::Gone {
         return;
     }
-    let _ = child.kill();
+    // Exited and unreaped, or still running after the grace: either way the
+    // group id is still the child's. Whatever in the group ignored the
+    // hangup, the child's or the kernel's, is killed, and the child reaped.
+    let _ = send_signal(group, libc::SIGKILL);
     reaped_by(child, deadline);
+}
+
+/// Poll `id`, our own unreaped child, until it is no longer running or
+/// `deadline` passes, reaping nothing; where it stands then.
+#[cfg(unix)]
+fn settled_by(id: u32, deadline: Instant) -> ChildState {
+    let mut backoff = INITIAL_BACKOFF;
+    loop {
+        let state = child_state(id);
+        if state != ChildState::Running {
+            return state;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return state;
+        }
+        thread::sleep(backoff.min(deadline - now));
+        backoff = next_backoff(backoff);
+    }
 }
 
 /// Poll for the child's exit until `deadline`; whether it was reaped.
@@ -4827,16 +4916,18 @@ fn reaped_by(child: &mut PtyChild, deadline: Instant) -> bool {
 }
 
 /// `kill(2)`, the one call site. Every caller passes its own child, not yet
-/// reaped.
+/// reaped, or the negated pid of that child to signal the process group it
+/// leads.
 #[cfg(unix)]
 fn send_signal(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
     // SAFETY: kill(2) touches no memory. The pid is the caller's own child,
-    // which no wait of ours has reaped: worst case a zombie, for which kill
-    // is defined and harmless. Where the kernel reaps children itself
-    // (SIGCHLD ignored) there is no zombie to hold the pid, so callers first
-    // ask whether the child is gone (#630); one that exits between that
-    // question and this call frees its pid in a window no portable call
-    // closes.
+    // or the group that child leads, and no wait of ours has reaped the
+    // child: worst case a zombie, for which kill is defined and harmless,
+    // and which holds its pid, and so the group id, from reuse. Where the
+    // kernel reaps children itself (SIGCHLD ignored) there is no zombie to
+    // hold either, so callers first ask whether the child is gone (#630);
+    // one that exits between that question and this call frees its pid in a
+    // window no portable call closes.
     #[allow(unsafe_code)]
     let rc = unsafe { libc::kill(pid, signal) };
     if rc == 0 {
@@ -4914,6 +5005,14 @@ impl Drop for Terminal {
     /// `wait_exit`. The reader thread ends on its own at EOF and is never
     /// joined here — a grandchild holding the PTY open must not hang Drop.
     ///
+    /// On Unix the whole process group the child leads is stopped: it is
+    /// hung up, and whatever in it outlives the hangup is killed, a helper
+    /// that ignores `SIGHUP` included (#714). That takes the child unreaped,
+    /// so after `wait_exit`, or where the kernel reaped the child itself
+    /// (SIGCHLD ignored), nothing is signalled: the group's id may be
+    /// another process's by then. A helper meant to outlive the terminal
+    /// has to leave the group, with `setsid`.
+    ///
     /// Closing the master and writer descriptors runs under the
     /// process-wide PTY lifecycle lock: on macOS, letting a master close
     /// overlap a concurrent `openpty()` can revoke the *other* terminal's
@@ -4932,7 +5031,9 @@ impl Drop for Terminal {
     /// unbounded `wait` here produced whenever the child was wedged — is a
     /// worse one, and unlike the first it cannot even be diagnosed.
     fn drop(&mut self) {
-        if self.exit_status.is_none() && !self.reaped_elsewhere && !reaped_now(&mut self.child) {
+        // Not reaped first, even when the child has exited: on Unix its
+        // zombie is what keeps its process group's id safe to signal.
+        if self.exit_status.is_none() && !self.reaped_elsewhere {
             stop_child(&mut self.child, Instant::now() + DROP_REAP_GRACE);
         }
         #[cfg(unix)]

@@ -417,6 +417,19 @@ where the test process ignores SIGCHLD, counts as reaped: nothing is
 signalled, `wait_exit` says why there is no status, and `signal` refuses
 (#630).
 
+On Unix `Drop` stops the child's process group, not the child alone
+(#714). The child is a session and group leader (`setsid`), so its pid is
+the group's id, and a member that ignores SIGHUP, a `nohup`ed helper or a
+background job that traps it, ignores the kernel's hang-up as the session
+leader exits too and would run on, on a PTY nobody holds. The group is
+hung up; a child that has exited, or that outlives `HANGUP_GRACE`, is
+followed by SIGKILL to the group; then the child is reaped. A group id is
+safe to signal only while the child is unreaped, since its zombie holds
+the id, so `Drop` reaps nothing before the last signal (it polls the exit
+with `waitid(WNOWAIT)`), and signals nothing once the child is reaped:
+after `wait_exit`, or where the kernel reaped it. `signal` still reaches
+the child alone.
+
 ### `screen()` is the live grid, frames or no frames
 
 `wait_frame` is the only frame-gated observation in the crate. `screen()`
