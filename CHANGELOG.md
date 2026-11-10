@@ -49,6 +49,17 @@ reads that marker.
   that expected blank rows above the text after a taller resize, or a
   cursor row counted from them, should expect the text to stay where it
   was, moved down only by the rows that came back out of history.
+- A resize while the alternate screen is up is settled in the history at
+  once, as if the main screen were on display (#678). It was settled only
+  when the main screen came back: a row the resize pushed into history was
+  read at the width the screen had by then, a row pulled back and pushed
+  again cut to a narrower screen kept the text it was first copied with,
+  and a row the terminal's bounded history dropped meanwhile stayed in
+  `scrollback_text()`. A resize that arrives while a read has left an
+  escape sequence open is still settled on the way back, as
+  `docs/LIMITATIONS.md` says. A test that read the history after resizing
+  behind a full-screen application should expect what the same resizes
+  give with the main screen up.
 
 ### Fixed
 

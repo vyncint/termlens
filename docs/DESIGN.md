@@ -582,6 +582,14 @@ of reach until it is back (#622). The exit splits it just after its final
 byte, so the main screen is read back before anything scrolls it: a taller
 resize while it was hidden pulled rows back out of its history, and new
 rows scrolling off in the same feed would cancel that in the length (#682).
+A resize while the alternate screen is up reaches the main grid too, out of
+sight, so the emulator puts the main grid on display for it (`CSI ? 47 l`
+to both parsers, which in vt100 switches grids and nothing else, and
+`CSI ? 47 h` after) and copies and captures as if the main screen were up:
+a row the resize pushes is read at its own width, and a row it pulls back
+and pushes again is read again (#678). Bytes cannot be fed inside a
+sequence, so a resize that arrives while a read has left one open is still
+settled on the exit.
 At the length, vt100
 evicts from the front and its length stops changing, so growth is no
 longer visible there — and the rows cannot say it either, since
