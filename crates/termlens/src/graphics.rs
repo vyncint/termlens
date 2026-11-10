@@ -792,7 +792,11 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
             b'!' => {
                 at += 1;
                 let counts = params(data, &mut at);
-                let count = counts.first().copied().unwrap_or(0) as usize;
+                // A count of zero, or none, is one: "If the repeat count
+                // is zero or omitted, it is treated as 1" (xterm's
+                // `graphics_sixel.c`). Read as zero, the sixel was neither
+                // painted nor advanced past (#698).
+                let count = counts.first().copied().unwrap_or(0).max(1) as usize;
                 if at < data.len() && (0x3f..=0x7e).contains(&data[at]) {
                     let bits = data[at] - 0x3f;
                     at += 1;
@@ -2167,6 +2171,38 @@ mod tests {
         assert_eq!(bitmap.pixel(0, 0), Some([0, 0, 0, 255]));
         assert_eq!(bitmap.pixel(1, 0), Some([0, 0, 0, 255]));
         assert_eq!(bitmap.pixel(2, 0), Some([0, 255, 0, 255]));
+    }
+
+    /// A repeat with a count of zero, or with none, repeats its sixel once:
+    /// "If the repeat count is zero or omitted, it is treated as 1" (xterm's
+    /// `graphics_sixel.c`), and Windows Terminal's parser reads a numeric
+    /// parameter the same way (`VTParameter`, "both 0 and omitted values
+    /// will default to 1"). Here the sixel was neither painted nor advanced
+    /// past, so each of these decoded a column narrow, 2x6 (#698).
+    #[cfg(feature = "decode")]
+    #[test]
+    fn a_sixel_repeat_of_zero_or_of_no_count_repeats_once() {
+        for body in [&b"#1;2;100;0;0#1~!0~~"[..], b"#1;2;100;0;0#1~!~~"] {
+            let bitmap = sixel_payload(body).decode().expect("decodes");
+            let body = String::from_utf8_lossy(body);
+            assert_eq!((bitmap.width(), bitmap.height()), (3, 6), "{body}");
+            assert_eq!(bitmap.pixel(1, 0), Some([255, 0, 0, 255]), "{body}");
+            assert_eq!(bitmap.colours(), vec![([255, 0, 0, 255], 18)], "{body}");
+        }
+        // A sixel that sets no pixel still advances by its one repeat, as
+        // `?` alone does: the column it skips is left unpainted.
+        for body in [&b"#1;2;100;0;0!0?~"[..], b"#1;2;100;0;0!?~"] {
+            let bitmap = sixel_payload(body).decode().expect("decodes");
+            let body = String::from_utf8_lossy(body);
+            assert_eq!((bitmap.width(), bitmap.height()), (2, 6), "{body}");
+            assert_eq!(bitmap.pixel(0, 0), Some([0, 0, 0, 0]), "{body}");
+            assert_eq!(bitmap.pixel(1, 0), Some([255, 0, 0, 255]), "{body}");
+        }
+        // A count that is given is still the count.
+        let bitmap = sixel_payload(b"#1;2;100;0;0!1~!2~")
+            .decode()
+            .expect("decodes");
+        assert_eq!((bitmap.width(), bitmap.height()), (3, 6));
     }
 
     #[cfg(feature = "decode")]

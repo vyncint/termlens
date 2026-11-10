@@ -109,6 +109,10 @@ reads that marker.
   Dependabot's own commit: Dependabot signs off as
   `dependabot[bot] <support@github.com>`, never as its author address, so it
   is let through when its author and its sign-off are both Dependabot's.
+- A sixel repeat with a count of zero or with none (`!0~`, `!~`) repeats
+  its sixel once, as xterm and Windows Terminal read it. It painted nothing
+  and did not advance, so `~!0~~` decoded two pixels wide where it is
+  three. (#698)
 
 ## [0.11.8] - 2026-11-03
 
