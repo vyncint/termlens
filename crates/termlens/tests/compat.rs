@@ -268,6 +268,68 @@ fn a_stranded_wide_character_redrawn_after_in_0_11_6_round_trips() {
     );
 }
 
+/// `printf '⚠️\033[31mERR\033[0m ok'` on 10x2, written by the published
+/// 0.11.6 (a scratch crate on `termlens = "=0.11.6"`, vt100 0.16), which
+/// drew `⚠️` one column wide. It is not in [`EXTRA_SHAPES`]: that list
+/// holds a text file to the picture its JSON twin shows, and this pair
+/// cannot show one picture (#723).
+const VS16_BEFORE_0_11_7: (&str, &str) = ("0.11.6", "vs16-styled-after");
+
+/// A row an earlier release wrote with a one-column VS16 emoji, and room
+/// after it, reads with the two-column layout 0.11.7 writes: the text is
+/// the same either way, and the reader widens the emoji whenever the row
+/// then fits (DESIGN §3 rule 4). So every cell after it, the `styles:`
+/// span's columns and the header's cursor are one column right of where
+/// 0.11.6 had them. This pins that reading, as a known limit rather than
+/// a promise; the JSON half is in
+/// `json::a_vs16_emoji_written_by_0_11_6_differs_from_its_json_twin`.
+#[test]
+fn a_vs16_emoji_written_by_0_11_6_with_room_reads_two_columns_wide() {
+    let (version, shape) = VS16_BEFORE_0_11_7;
+    let path = extra(version, shape, "txt");
+    let text = read(&path);
+    assert_eq!(
+        text, "size: 10x2  cursor: 0,7\n⚠\u{fe0f}ERR ok\n\n\nstyles:\n0: 1-3 fg=1\n",
+        "the frozen file really carries the row"
+    );
+    let (screen, rendered) = round_trip(&text);
+    assert_eq!(rendered, text, "it still renders back byte for byte");
+
+    let emoji = screen.cell(0, 0).expect("column 0");
+    assert_eq!(emoji.contents(), "⚠\u{fe0f}");
+    assert!(emoji.is_wide(), "widened, though 0.11.6 drew one column");
+    let red = termlens::Color::Indexed(1);
+    // The span `1-3` now covers the emoji's second half and `ER`; the
+    // second `R`, which 0.11.6 painted red, reads default.
+    let half = screen.cell(0, 1).expect("column 1");
+    assert!(half.is_wide_continuation());
+    assert_eq!(half.style().fg, red, "the continuation takes the span");
+    for (col, ch) in [(2, "E"), (3, "R")] {
+        let cell = screen.cell(0, col).expect("in the row");
+        assert_eq!(
+            (cell.contents(), cell.style().fg),
+            (ch, red),
+            "column {col}"
+        );
+    }
+    let last_r = screen.cell(0, 4).expect("column 4");
+    assert_eq!(last_r.contents(), "R");
+    assert_eq!(last_r.style().fg, termlens::Color::Default, "lost its red");
+    assert_eq!(screen.find("ok"), Some((0, 6)), "0.11.6 had it at 0,5");
+    assert_eq!(screen.cursor(), (0, 7, true));
+    assert_eq!(
+        screen.cell(0, 7).expect("column 7").contents(),
+        "k",
+        "the cursor 0.11.6 parked after `ok` now sits on its `k`"
+    );
+
+    // A full row cannot take the wide layout, so it reads the earlier
+    // way: only a row with room is read differently.
+    let full = Screen::parse("size: 7x2  cursor: 0,6\n⚠\u{fe0f}ERR ok\n").expect("parses");
+    assert!(!full.cell(0, 0).expect("column 0").is_wide());
+    assert_eq!(full.find("ok"), Some((0, 5)));
+}
+
 #[cfg(feature = "serde")]
 mod json {
     use super::*;
@@ -399,6 +461,48 @@ mod json {
             assert!(from_json.diff(&again).is_empty(), "{shape}");
             assert_eq!(again.cursor(), from_json.cursor(), "{shape}");
         }
+    }
+
+    /// [`VS16_BEFORE_0_11_7`]'s JSON twin holds what 0.11.6 drew: `⚠️` in
+    /// one column and `ERR` red in columns 1-3. It renders to exactly the
+    /// text file, `styles:` span included, so the text cannot tell the
+    /// two layouts apart, and the text file reads as a different picture
+    /// (#723). The test the other extra shapes pass, an empty diff
+    /// between the twins, is the one this pair fails by construction, so
+    /// what it pins instead is the difference itself.
+    #[test]
+    fn a_vs16_emoji_written_by_0_11_6_differs_from_its_json_twin() {
+        let (version, shape) = VS16_BEFORE_0_11_7;
+        let json_path = extra(version, shape, "json");
+        let text = read(&extra(version, shape, "txt"));
+        let from_json: Screen = serde_json::from_str(&read(&json_path))
+            .unwrap_or_else(|e| panic!("{}: {e}", json_path.display()));
+        let emoji = from_json.cell(0, 0).expect("column 0");
+        assert_eq!(emoji.contents(), "⚠\u{fe0f}");
+        assert!(!emoji.is_wide(), "0.11.6 drew it one column wide");
+        assert_eq!(from_json.cell(0, 1).expect("column 1").contents(), "E");
+        assert_eq!(from_json.find("ok"), Some((0, 5)));
+        assert_eq!(from_json.cursor(), (0, 7, true));
+        assert_eq!(
+            format!("{}\n", from_json.with_styles()),
+            text,
+            "the twins are the same bytes as text"
+        );
+
+        let (from_text, _) = round_trip(&text);
+        let diff = from_text.diff(&from_json);
+        assert!(!diff.is_empty(), "the reader cannot recover the layout");
+        assert_eq!(diff.changed_rows().collect::<Vec<_>>(), [0], "{diff}");
+        // Every cell from the emoji to the `k` moved but column 3, which
+        // holds a red `R` in both. The span reads `1-3 fg=1` either way,
+        // over different cells.
+        let moved: Vec<u16> = diff.cells().map(|(_, col, ..)| col).collect();
+        assert_eq!(moved, [0, 1, 2, 4, 5, 6, 7], "{diff}");
+        assert_eq!(diff.style_changes().count(), 0, "{diff}");
+        // The JSON -> text -> parse path the extra shapes survive lands
+        // on the text file's reading, not the JSON's.
+        let again = Screen::parse(&from_json.with_styles().to_string()).expect("parses");
+        assert!(from_text.diff(&again).is_empty());
     }
 
     #[test]

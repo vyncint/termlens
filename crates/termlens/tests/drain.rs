@@ -16,8 +16,9 @@ use termlens::{Error, Terminal};
 
 mod common;
 
-/// ~1000 cursor-position queries generate ~8 KB of replies — past the
-/// noncanonical tty buffer — from a child that never reads its input.
+/// ~1000 cursor-position queries generate ~6 KB of replies from a child
+/// that never reads its input: past macOS's tty input queue, though within
+/// the ~13.8 KB Linux takes in raw mode (see `docs/DESIGN.md` §1).
 fn flood() -> termlens::Result<Terminal> {
     let queries = r"\e[6n".repeat(1000);
     common::spawn_emit(
@@ -56,12 +57,14 @@ fn a_child_that_never_reads_its_replies_cannot_wedge_the_drain() {
 /// well-behaved application was losing answers too), and it moved where the
 /// truth lives.
 ///
-/// Now the replies reach the kernel, and the platforms diverge. A write into
-/// a full terminal input queue **blocks** on macOS, so they are visibly stuck
-/// in our writer and the count is exact. Linux's `n_tty` **discards** input
-/// once its 4 KB buffer is full: the write succeeds, the bytes are gone, and
-/// nothing distinguishes that from delivery. We cannot report what we were
-/// never told, so the assertion is scoped to where it can be true.
+/// Now the replies reach the kernel. In raw mode a write into a full
+/// terminal input queue **blocks**, on Linux as on macOS, so the replies are
+/// visibly stuck in our writer and counted. But how much the queue holds
+/// differs: this flood's ~6 KB overflows macOS's, while Linux's raw-mode
+/// queue takes about 13.8 KB, so there nothing is stuck and nothing is
+/// named. (In canonical mode Linux's `n_tty` **discards** what does not fit
+/// its 4 KB buffer, and that loss is invisible.) The assertion is scoped to
+/// where this flood overflows the queue.
 ///
 /// The trade is deliberate: a diagnosis for a pathological application, in
 /// exchange for a well-behaved one actually getting its answers.
@@ -89,7 +92,7 @@ fn undelivered_replies_are_named_where_the_kernel_makes_them_visible() {
         "{message}"
     );
 
-    // True only where a blocked write makes the backlog knowable.
+    // True only where this flood fills the queue and blocks the write.
     #[cfg(target_os = "macos")]
     assert!(
         message.contains("not reading its input"),

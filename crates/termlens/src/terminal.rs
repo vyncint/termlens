@@ -237,6 +237,12 @@ struct WriteRequest {
     /// them from the pending count once they are genuinely out. Zero for
     /// typed input, which reports through `ack` instead.
     replies: usize,
+    /// How many of `bytes` are those replies: all of them or none. The
+    /// writer takes exactly these off the reply budget
+    /// ([`REPLY_QUEUE_BYTES`]) once they are out. It took off every byte it
+    /// wrote, so a send the application read at last cleared the budget of
+    /// replies still queued behind it (#704).
+    reply_bytes: usize,
 }
 
 /// The least time a send waits for the writer to acknowledge its bytes,
@@ -1869,7 +1875,9 @@ impl TerminalBuilder {
     /// Set an environment variable for the child.
     ///
     /// Variables set here always reach the child, regardless of call order
-    /// relative to [`env_clear`](Self::env_clear).
+    /// relative to [`env_clear`](Self::env_clear). That includes `COLUMNS`
+    /// and `LINES`, the two the child never inherits (see
+    /// [`spawn`](Self::spawn)).
     #[must_use]
     pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         self.envs
@@ -2185,6 +2193,15 @@ impl TerminalBuilder {
     /// `SHELL` was set explicitly, so its environment is a function of the
     /// builder alone rather than of the machine's login shell.
     ///
+    /// Otherwise the child inherits the test process's environment, but for
+    /// `COLUMNS` and `LINES`. curses and `tput` prefer those to the
+    /// terminal's own size, so an inherited pair, exported by the shell
+    /// that ran the tests, laid the program out at that shell's size rather
+    /// than at [`size`](Self::size), and kept it there after a
+    /// [`resize`](Terminal::resize). Without them the program asks the PTY.
+    /// Set either with [`env`](Self::env) and it reaches the child as given
+    /// (before 0.11.9 both were inherited: #709).
+    ///
     /// # Errors
     ///
     /// [`Error::Spawn`] when the configuration cannot produce a runnable
@@ -2346,52 +2363,7 @@ impl TerminalBuilder {
                 let busy = Arc::clone(&writer_busy);
                 thread::Builder::new()
                     .name("termlens-pty-writer".into())
-                    .spawn(move || {
-                        while let Ok(request) = rx.recv() {
-                            // Take everything already queued behind this one
-                            // and write it as a single `write(2)`. One
-                            // syscall per burst instead of one per entry is
-                            // what keeps the writer from becoming the
-                            // bottleneck the reader outruns.
-                            let mut bytes = request.bytes;
-                            let mut acks: Vec<_> = request.ack.into_iter().collect();
-                            let mut replies = request.replies;
-                            while let Ok(next) = rx.try_recv() {
-                                bytes.extend_from_slice(&next.bytes);
-                                acks.extend(next.ack);
-                                replies += next.replies;
-                            }
-                            let queued = bytes.len();
-                            busy.store(true, Ordering::Relaxed);
-                            let result = pty_writer
-                                .write_all(&bytes)
-                                .and_then(|()| pty_writer.flush());
-                            busy.store(false, Ordering::Relaxed);
-                            // Only after the bytes are actually out: while
-                            // this write is blocked, those replies are
-                            // undelivered, and that is precisely what the
-                            // next wait's error needs to be able to say.
-                            written.fetch_sub(replies, Ordering::Relaxed);
-                            drained.fetch_sub(
-                                queued.min(drained.load(Ordering::Relaxed)),
-                                Ordering::Relaxed,
-                            );
-                            let failed = result.is_err();
-                            for ack in acks {
-                                // Every waiter in the batch learns the same
-                                // outcome, which is the truth: their bytes
-                                // went out together. Callers may have given
-                                // up already.
-                                let _ = ack.send(match &result {
-                                    Ok(()) => Ok(()),
-                                    Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
-                                });
-                            }
-                            if failed {
-                                break; // terminal gone; nothing left to write
-                            }
-                        }
-                    })
+                    .spawn(move || writer_loop(&mut pty_writer, &rx, &written, &drained, &busy))
                     .map_err(Error::Io)?;
                 Some(tx)
             }
@@ -2439,6 +2411,7 @@ impl TerminalBuilder {
             exit_watch: ExitWatch::default(),
             command_desc,
             frame_cursor: 0,
+            frame_cursor_resize: None,
             last_frame: None,
             record_budget: self.record_budget,
             cell_size: self.cell_size,
@@ -2729,6 +2702,58 @@ fn panic_detail(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// Write what the test types and the reader answers into the PTY, until
+/// the queue closes or a write fails. Runs on a dedicated thread.
+fn writer_loop(
+    pty_writer: &mut dyn Write,
+    requests: &mpsc::Receiver<WriteRequest>,
+    pending: &AtomicUsize,
+    queued_bytes: &AtomicUsize,
+    busy: &AtomicBool,
+) {
+    while let Ok(request) = requests.recv() {
+        // Take everything already queued behind this one and write it as a
+        // single `write(2)`. One syscall per burst instead of one per entry
+        // is what keeps the writer from becoming the bottleneck the reader
+        // outruns.
+        let mut bytes = request.bytes;
+        let mut acks: Vec<_> = request.ack.into_iter().collect();
+        let mut replies = request.replies;
+        let mut reply_bytes = request.reply_bytes;
+        while let Ok(next) = requests.try_recv() {
+            bytes.extend_from_slice(&next.bytes);
+            acks.extend(next.ack);
+            replies += next.replies;
+            reply_bytes += next.reply_bytes;
+        }
+        busy.store(true, Ordering::Relaxed);
+        let result = pty_writer
+            .write_all(&bytes)
+            .and_then(|()| pty_writer.flush());
+        busy.store(false, Ordering::Relaxed);
+        // Only after the bytes are actually out: while this write is
+        // blocked, those replies are undelivered, and that is precisely what
+        // the next wait's error needs to be able to say. Only the replies in
+        // this write come off either count, and `queue_replies` added each
+        // of them before it queued them, so neither can go below zero.
+        pending.fetch_sub(replies, Ordering::Relaxed);
+        queued_bytes.fetch_sub(reply_bytes, Ordering::Relaxed);
+        let failed = result.is_err();
+        for ack in acks {
+            // Every waiter in the batch learns the same outcome, which is
+            // the truth: their bytes went out together. Callers may have
+            // given up already.
+            let _ = ack.send(match &result {
+                Ok(()) => Ok(()),
+                Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
+            });
+        }
+        if failed {
+            break; // terminal gone; nothing left to write
+        }
+    }
+}
+
 /// Drain the PTY into the emulator until EOF. Runs on a dedicated thread.
 fn reader_loop(
     mut reader: Box<dyn Read + Send>,
@@ -2938,6 +2963,7 @@ fn queue_replies(
         bytes: batch,
         ack: None, // fire and forget: never wait
         replies: count,
+        reply_bytes: size,
     };
     if tx.send(request).is_err() {
         pending.fetch_sub(count, Ordering::Relaxed);
@@ -2948,7 +2974,8 @@ fn queue_replies(
 /// A program running inside a real PTY, observed through an emulated screen.
 ///
 /// See the crate-level docs for a full example. Dropping a `Terminal` kills
-/// and reaps the child — tests never leak zombies, even on panic.
+/// and reaps the child — tests never leak zombies, even on panic — and on
+/// Unix kills what is left of the child's process group.
 pub struct Terminal {
     child: PtyChild,
     // Option only so Drop can close it under the PTY lifecycle lock;
@@ -2978,6 +3005,11 @@ pub struct Terminal {
     /// satisfy two waits. Advanced by a resize too: a frame drawn at the
     /// old size is not the repaint that answers the new one.
     frame_cursor: u64,
+    /// The size (cols, rows) of the resize that last moved `frame_cursor`,
+    /// while no frame has been returned since. A `wait_frame` timeout says
+    /// what the application has not repainted since, and that is the resize
+    /// then, not a frame this terminal returned (#705).
+    frame_cursor_resize: Option<(u16, u16)>,
     /// The frame `wait_frame` last returned, so a timeout can show what
     /// changed since rather than the live grid alone (#246).
     last_frame: Option<Screen>,
@@ -3678,6 +3710,7 @@ impl Terminal {
             ack: Some(ack_tx),
             // Typed input, not a reply: it reports through `ack`.
             replies: 0,
+            reply_bytes: 0,
         };
         // The queue is unbounded, so handing off cannot block and there is
         // no full-queue case to retry. The deadline that matters is the
@@ -4004,6 +4037,7 @@ impl Terminal {
         match outcome {
             Ok(Ok((index, frame))) => {
                 self.frame_cursor = index;
+                self.frame_cursor_resize = None;
                 self.last_frame = Some(frame.clone());
                 Ok(frame)
             }
@@ -4023,18 +4057,32 @@ impl Terminal {
                     let note = format!("{}{}", guard.query_note(), history_note(&screen));
                     (guard.frames_seen, screen, note)
                 };
+                // What put the cursor where it is: the resize that moved it
+                // last, or else a frame an earlier wait returned. The message
+                // names that one, since the other never happened (#705).
+                let resized = self.frame_cursor_resize;
                 let waiting_for = if frames > 0 && frames == cursor {
-                    // Every frame the application drew has already been
-                    // handed to an earlier wait, so it has not repainted
-                    // since. Naming that is the difference between "your
-                    // predicate is wrong" and "the app never redrew".
-                    format!(
-                        "{WHAT} — the application has not completed a repaint since the \
-                         frame this terminal last returned ({} in total). If it does not \
-                         repaint in response to this input, assert on the screen with \
-                         wait_until instead{note}",
-                        frames_phrase(frames)
-                    )
+                    // Every frame the application drew is behind the cursor,
+                    // handed to an earlier wait or drawn before a resize, so
+                    // it has not repainted since. Naming that is the
+                    // difference between "your predicate is wrong" and "the
+                    // app never redrew".
+                    match resized {
+                        Some((cols, rows)) => format!(
+                            "{WHAT} — the application has not completed a repaint since the \
+                             resize to {cols}x{rows} ({} in total), and a frame drawn at \
+                             the old size is not offered. If it does not repaint when \
+                             resized, assert on the screen with wait_until instead{note}",
+                            frames_phrase(frames)
+                        ),
+                        None => format!(
+                            "{WHAT} — the application has not completed a repaint since the \
+                             frame this terminal last returned ({} in total). If it does not \
+                             repaint in response to this input, assert on the screen with \
+                             wait_until instead{note}",
+                            frames_phrase(frames)
+                        ),
+                    }
                 } else if frames == 0 {
                     // An application blocked on an unanswered probe never
                     // reaches its first repaint, so this is exactly where
@@ -4048,6 +4096,11 @@ impl Terminal {
                     )
                 } else if cursor == 0 {
                     format!("{WHAT} ({} observed){note}", frames_phrase(frames))
+                } else if let Some((cols, rows)) = resized {
+                    format!(
+                        "{WHAT} ({} since the resize to {cols}x{rows}, {frames} in total){note}",
+                        frames_phrase(frames - cursor)
+                    )
                 } else {
                     format!(
                         "{WHAT} ({} since the last one returned, {frames} in total){note}",
@@ -4690,6 +4743,7 @@ impl Terminal {
         })?;
         if let Some(cursor) = cursor {
             self.frame_cursor = cursor;
+            self.frame_cursor_resize = Some((cols, rows));
         }
         Ok(())
     }
@@ -4779,26 +4833,62 @@ fn reaped_now(child: &mut PtyChild) -> bool {
     }
 }
 
-/// Whether `pid`, our own child that no wait of ours has reaped, is gone all
-/// the same: asked with `WNOWAIT`, which leaves a child that has exited
-/// for the wait that will report it, rather than taking its status here.
+/// Where our own child, which no wait of ours has reaped, stands, as a wait
+/// that reaps nothing sees it.
 #[cfg(unix)]
-fn gone_unwaited(pid: u32) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChildState {
+    /// Not exited yet.
+    Running,
+    /// Exited and not reaped: a zombie, which holds its pid, and with it the
+    /// id of the process group it leads, until it is reaped.
+    Exited,
+    /// Reaped by someone else (`ECHILD`): its pid, and the group id, may be
+    /// another process's now.
+    Gone,
+}
+
+/// Ask where `pid`, our own child that no wait of ours has reaped, stands:
+/// with `WNOWAIT`, which leaves a child that has exited for the wait that
+/// will report it, rather than taking its status here.
+#[cfg(unix)]
+fn child_state(pid: u32) -> ChildState {
     // SAFETY: waitid only writes the zeroed siginfo_t it is handed, which
-    // outlives the call.
+    // outlives the call, and si_pid reads a field of that same value.
     #[allow(unsafe_code)]
     // `id_t` is `u32` on Linux and macOS, and may be wider elsewhere.
     #[allow(clippy::useless_conversion)]
-    let rc = unsafe {
+    let (rc, exited) = unsafe {
         let mut info: libc::siginfo_t = std::mem::zeroed();
-        libc::waitid(
+        let rc = libc::waitid(
             libc::P_PID,
             pid.into(),
             &mut info,
             libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
+        );
+        // With WNOHANG and nothing to report, waitid returns 0 and leaves
+        // si_pid as it was, zero; a child that has exited fills it in.
+        (rc, info.si_pid() != 0)
     };
-    rc == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
+    if rc == 0 {
+        if exited {
+            ChildState::Exited
+        } else {
+            ChildState::Running
+        }
+    } else if io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+        ChildState::Gone
+    } else {
+        // Nothing says it is gone, so it is taken as running, as before.
+        ChildState::Running
+    }
+}
+
+/// Whether `pid`, our own child that no wait of ours has reaped, is gone all
+/// the same.
+#[cfg(unix)]
+fn gone_unwaited(pid: u32) -> bool {
+    child_state(pid) == ChildState::Gone
 }
 
 /// Who took the child's status, as best this process can tell.
@@ -4822,29 +4912,81 @@ fn reaped_elsewhere_cause() -> &'static str {
 #[cfg(unix)]
 const HANGUP_GRACE: Duration = Duration::from_millis(200);
 
-/// Hang the child up, give it [`HANGUP_GRACE`] to go, then kill it — the
-/// sequence portable-pty's `kill` runs, with the reap polled from 1 ms where
-/// portable-pty slept in fixed 50 ms steps, so a child that dies on SIGHUP
-/// at once is reaped in about a millisecond rather than fifty (#589).
-/// Gives up at `deadline`, as `Drop` must terminate.
+/// Stop the child, and on Unix the process group it leads, and reap it.
+/// Gives up at `deadline`, as `Drop` must terminate. Off Unix, and where
+/// the platform reports no pid, the PTY layer's own `kill` stops the child
+/// alone.
 fn stop_child(child: &mut PtyChild, deadline: Instant) {
     #[cfg(unix)]
-    if let Some(pid) = child
-        .process_id()
-        .and_then(|pid| libc::pid_t::try_from(pid).ok())
-    {
-        // The child is not reaped: `Drop` asked just before, and only this
-        // thread reaps it.
-        let _ = send_signal(pid, libc::SIGHUP);
-        if reaped_by(child, (Instant::now() + HANGUP_GRACE).min(deadline)) {
+    if let Some(id) = child.process_id() {
+        if let Ok(pid) = libc::pid_t::try_from(id) {
+            stop_group(child, id, pid, deadline);
             return;
         }
-        let _ = send_signal(pid, libc::SIGKILL);
+    }
+    if !reaped_now(child) {
+        let _ = child.kill();
         reaped_by(child, deadline);
+    }
+}
+
+/// Hang up the process group the child leads, give the child
+/// [`HANGUP_GRACE`] to go, then kill the group, and reap the child (#714).
+///
+/// The child is a session and group leader (`setsid` in `spawn`), so its
+/// pid is its group's id. Signalling the group reaches what the program
+/// started in it and that ignores a hangup, a `nohup`ed helper or a
+/// background job that traps `SIGHUP`, which would otherwise keep running
+/// on a PTY nobody holds. The kernel's own hangup, as the session leader
+/// exits, goes to the same group and such a member ignores it.
+///
+/// The group id is safe to signal only while the child is unreaped: once
+/// it is reaped, the id may be reused by an unrelated process. So the child
+/// is never reaped before the last signal: its exit is polled with
+/// `WNOWAIT`, and an exited child is a zombie that holds the id. A child
+/// found reaped elsewhere, where the kernel reaps children itself, ends it:
+/// nothing more is signalled (#630).
+///
+/// This is portable-pty's `kill` sequence, aimed at the group, with the
+/// exit polled from 1 ms where portable-pty slept in fixed 50 ms steps, so a
+/// child that dies on SIGHUP at once is dealt with in about a millisecond
+/// rather than fifty (#589).
+#[cfg(unix)]
+fn stop_group(child: &mut PtyChild, id: u32, pid: libc::pid_t, deadline: Instant) {
+    let group = -pid;
+    // `Drop` has not reaped the child, and only this thread reaps it.
+    let mut state = child_state(id);
+    if state == ChildState::Running {
+        let _ = send_signal(group, libc::SIGHUP);
+        state = settled_by(id, (Instant::now() + HANGUP_GRACE).min(deadline));
+    }
+    if state == ChildState::Gone {
         return;
     }
-    let _ = child.kill();
+    // Exited and unreaped, or still running after the grace: either way the
+    // group id is still the child's. Whatever in the group ignored the
+    // hangup, the child's or the kernel's, is killed, and the child reaped.
+    let _ = send_signal(group, libc::SIGKILL);
     reaped_by(child, deadline);
+}
+
+/// Poll `id`, our own unreaped child, until it is no longer running or
+/// `deadline` passes, reaping nothing; where it stands then.
+#[cfg(unix)]
+fn settled_by(id: u32, deadline: Instant) -> ChildState {
+    let mut backoff = INITIAL_BACKOFF;
+    loop {
+        let state = child_state(id);
+        if state != ChildState::Running {
+            return state;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return state;
+        }
+        thread::sleep(backoff.min(deadline - now));
+        backoff = next_backoff(backoff);
+    }
 }
 
 /// Poll for the child's exit until `deadline`; whether it was reaped.
@@ -4864,16 +5006,18 @@ fn reaped_by(child: &mut PtyChild, deadline: Instant) -> bool {
 }
 
 /// `kill(2)`, the one call site. Every caller passes its own child, not yet
-/// reaped.
+/// reaped, or the negated pid of that child to signal the process group it
+/// leads.
 #[cfg(unix)]
 fn send_signal(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
     // SAFETY: kill(2) touches no memory. The pid is the caller's own child,
-    // which no wait of ours has reaped: worst case a zombie, for which kill
-    // is defined and harmless. Where the kernel reaps children itself
-    // (SIGCHLD ignored) there is no zombie to hold the pid, so callers first
-    // ask whether the child is gone (#630); one that exits between that
-    // question and this call frees its pid in a window no portable call
-    // closes.
+    // or the group that child leads, and no wait of ours has reaped the
+    // child: worst case a zombie, for which kill is defined and harmless,
+    // and which holds its pid, and so the group id, from reuse. Where the
+    // kernel reaps children itself (SIGCHLD ignored) there is no zombie to
+    // hold either, so callers first ask whether the child is gone (#630);
+    // one that exits between that question and this call frees its pid in a
+    // window no portable call closes.
     #[allow(unsafe_code)]
     let rc = unsafe { libc::kill(pid, signal) };
     if rc == 0 {
@@ -4951,6 +5095,14 @@ impl Drop for Terminal {
     /// `wait_exit`. The reader thread ends on its own at EOF and is never
     /// joined here — a grandchild holding the PTY open must not hang Drop.
     ///
+    /// On Unix the whole process group the child leads is stopped: it is
+    /// hung up, and whatever in it outlives the hangup is killed, a helper
+    /// that ignores `SIGHUP` included (#714). That takes the child unreaped,
+    /// so after `wait_exit`, or where the kernel reaped the child itself
+    /// (SIGCHLD ignored), nothing is signalled: the group's id may be
+    /// another process's by then. A helper meant to outlive the terminal
+    /// has to leave the group, with `setsid`.
+    ///
     /// Closing the master and writer descriptors runs under the
     /// process-wide PTY lifecycle lock: on macOS, letting a master close
     /// overlap a concurrent `openpty()` can revoke the *other* terminal's
@@ -4969,7 +5121,9 @@ impl Drop for Terminal {
     /// unbounded `wait` here produced whenever the child was wedged — is a
     /// worse one, and unlike the first it cannot even be diagnosed.
     fn drop(&mut self) {
-        if self.exit_status.is_none() && !self.reaped_elsewhere && !reaped_now(&mut self.child) {
+        // Not reaped first, even when the child has exited: on Unix its
+        // zombie is what keeps its process group's id safe to signal.
+        if self.exit_status.is_none() && !self.reaped_elsewhere {
             stop_child(&mut self.child, Instant::now() + DROP_REAP_GRACE);
         }
         #[cfg(unix)]
@@ -4977,11 +5131,27 @@ impl Drop for Terminal {
             unblock_teardown(master.as_ref());
         }
         let _lifecycle = pty_lifecycle_guard();
-        // Close the PTY fds while holding the lock. Taking the writer
-        // out of the shared cell closes its fd even though the reader
-        // thread keeps the (now empty) cell alive — and it must happen
-        // before the master is dropped, since the reader polls the
-        // master's descriptor while holding this lock.
+        // Both closes below are lifecycle edges, so both happen under the
+        // lock (#589). Taking the PTY layer's writer out of the shared cell
+        // closes its descriptor even though the reader thread keeps the
+        // (now empty) cell alive.
+        //
+        // What orders them is `unblock_teardown` above, not each other. It
+        // needs the master open, and it must come before the writer goes:
+        // the PTY layer's writer writes an EOT as it is dropped, and that
+        // write must not wait while this lock is held (#628). Between the
+        // two closes themselves no order is needed. The writer, the master
+        // and the reader and writer threads' handles are duplicates of one
+        // open file description, so the device sees one close, whichever of
+        // them goes last, and that is usually a thread's.
+        //
+        // Nothing here waits on those threads. The lock is taken by
+        // `open_pty`, for an open and the spawn after it; by this drop; and
+        // by `MasterDup::drop`, as the reader or the writer thread ends and
+        // closes its duplicate. While it reads, the reader holds no lock at
+        // all: this comment used to say the writer had to go first because
+        // the reader polled the master under this lock, which it never did
+        // (#707).
         drop(
             self.writer
                 .lock()
@@ -4994,9 +5164,7 @@ impl Drop for Terminal {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
-    #[cfg(unix)]
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use super::{
@@ -5522,6 +5690,161 @@ mod tests {
         reader.join().expect("the reader ends at EOF");
     }
 
+    /// A writer that takes a write only when the test lets it, as a PTY
+    /// takes none while its application is not reading, and reports the
+    /// size of each write as it begins.
+    struct GatedWriter {
+        began: std::sync::mpsc::Sender<usize>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl std::io::Write for GatedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let _ = self.began.send(buf.len());
+            self.release
+                .recv()
+                .map_err(|_| std::io::ErrorKind::BrokenPipe)?;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Replies queued behind a blocked send stay on the reply budget until
+    /// they are written themselves (#704). The writer took every byte it
+    /// wrote off `queued_bytes`, typed input included, though only replies
+    /// are ever added to it: once the application read a 200,000-byte send,
+    /// the counter said 0 with 120,000 reply bytes still waiting, and the
+    /// 1 MiB bound admitted that much again on top.
+    #[test]
+    fn typed_input_is_not_taken_off_the_reply_budget() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        use super::{queue_replies, writer_loop, WriteRequest, REPLY_QUEUE_BYTES};
+
+        // Nothing here waits on a clock: every step is a hand-off, and this
+        // only bounds a writer thread that has stopped handing off.
+        const WATCHDOG: Duration = Duration::from_secs(30);
+        const TYPED: usize = 200_000;
+        const REPLY: &[u8] = b"\x1b[1;1R";
+        const REPLIES: usize = 20_000;
+
+        let (tx, rx) = mpsc::channel::<WriteRequest>();
+        let (began_tx, began) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let queued = Arc::new(AtomicUsize::new(0));
+        let writer = {
+            let (pending, queued) = (Arc::clone(&pending), Arc::clone(&queued));
+            std::thread::spawn(move || {
+                let mut pty = GatedWriter {
+                    began: began_tx,
+                    release: release_rx,
+                };
+                writer_loop(&mut pty, &rx, &pending, &queued, &AtomicBool::new(false));
+            })
+        };
+        let typed = |bytes: usize| {
+            let (ack, acked) = mpsc::sync_channel(1);
+            let request = WriteRequest {
+                bytes: vec![b'x'; bytes],
+                ack: Some(ack),
+                replies: 0,
+                reply_bytes: 0,
+            };
+            (request, acked)
+        };
+        let counters = || {
+            (
+                pending.load(Ordering::Relaxed),
+                queued.load(Ordering::Relaxed),
+            )
+        };
+        let mut state = EmuState::new(
+            Box::new(super::Vt100Emulator::new(
+                4,
+                20,
+                0,
+                crate::graphics::DEFAULT_CAPTURE,
+                false,
+            )),
+            Responder {
+                respond: true,
+                background: (0, 0, 0),
+                foreground: (255, 255, 255),
+                cell_size: None,
+                graphics: Graphics::default(),
+                term_name: "xterm-256color".into(),
+            },
+            Arc::clone(&pending),
+        );
+
+        // The test types, and the write blocks: nothing is reading.
+        let (request, typed_acked) = typed(TYPED);
+        tx.send(request).expect("the writer is running");
+        assert_eq!(began.recv_timeout(WATCHDOG), Ok(TYPED));
+        // The application asks 20,000 questions; the answers queue behind.
+        let mut replies = vec![REPLY.to_vec(); REPLIES];
+        queue_replies(&tx, &mut replies, &mut state, &pending, &queued);
+        assert_eq!(counters(), (REPLIES, REPLIES * REPLY.len()));
+
+        // The application reads what was typed, and no more. The writer is
+        // then blocked in the replies' write, with none of them delivered.
+        release.send(()).expect("the writer is running");
+        assert!(matches!(typed_acked.recv_timeout(WATCHDOG), Ok(Ok(()))));
+        assert_eq!(began.recv_timeout(WATCHDOG), Ok(REPLIES * REPLY.len()));
+        assert_eq!(
+            counters(),
+            (REPLIES, REPLIES * REPLY.len()),
+            "replies still queued must stay on the budget once typed input is written"
+        );
+
+        // So the bound holds: what is left of it fits, and nothing more.
+        let room = REPLY_QUEUE_BYTES - REPLIES * REPLY.len();
+        queue_replies(
+            &tx,
+            &mut vec![vec![b'r'; room]],
+            &mut state,
+            &pending,
+            &queued,
+        );
+        assert_eq!(state.replies_dropped, 0, "the budget has room for these");
+        assert_eq!(counters(), (REPLIES + 1, REPLY_QUEUE_BYTES));
+        queue_replies(
+            &tx,
+            &mut vec![REPLY.to_vec()],
+            &mut state,
+            &pending,
+            &queued,
+        );
+        assert_eq!(
+            state.replies_dropped, 1,
+            "a reply past the bound is dropped"
+        );
+        assert_eq!(counters(), (REPLIES + 1, REPLY_QUEUE_BYTES));
+
+        // The application reads everything: both reply writes go out, and a
+        // last send behind them is acknowledged once they are accounted for.
+        release.send(()).expect("the writer is running");
+        assert_eq!(began.recv_timeout(WATCHDOG), Ok(room));
+        let (request, last_acked) = typed(1);
+        tx.send(request).expect("the writer is running");
+        release.send(()).expect("the writer is running");
+        assert_eq!(began.recv_timeout(WATCHDOG), Ok(1));
+        release.send(()).expect("the writer is running");
+        assert!(matches!(last_acked.recv_timeout(WATCHDOG), Ok(Ok(()))));
+        assert_eq!(counters(), (0, 0), "everything queued was written");
+
+        drop(tx);
+        writer
+            .join()
+            .expect("the writer ends when its queue closes");
+    }
+
     /// A reply to a cursor or size query costs the same on any grid. Each
     /// used to snapshot the whole screen to read two numbers, so 2000
     /// cursor-position queries at 200x50 took ten seconds in a debug build
@@ -5950,6 +6273,85 @@ mod tests {
                 .recv_timeout(Duration::from_secs(30))
                 .expect("the drop deadlocked on the lock its own thread held");
             assert_eq!(*log.lock().unwrap(), [("duplicate", true)]);
+        }
+
+        /// The reader takes the lifecycle lock to close its duplicate of the
+        /// master and at no other time. It reads with the lock released, so
+        /// a teardown holding the lock never waits on a read, and the order
+        /// `Drop` closes its own handles in owes nothing to the reader
+        /// (#707).
+        #[test]
+        fn the_reader_takes_the_lock_to_close_its_duplicate_and_not_to_read() {
+            use std::sync::atomic::AtomicUsize;
+
+            use super::super::{
+                reader_loop, EmuState, Graphics, Monitor, Responder, SharedWriter, Vt100Emulator,
+            };
+
+            /// As many one-byte reads as it is given, then end of stream.
+            struct Reads(u8, Log);
+
+            impl io::Read for Reads {
+                fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                    self.1.lock().unwrap().push(("read", HOLDS_LIFECYCLE.get()));
+                    if self.0 == 0 {
+                        return Ok(0);
+                    }
+                    self.0 -= 1;
+                    buf[0] = b'x';
+                    Ok(1)
+                }
+            }
+
+            impl Drop for Reads {
+                fn drop(&mut self) {
+                    self.1
+                        .lock()
+                        .unwrap()
+                        .push(("close", HOLDS_LIFECYCLE.get()));
+                }
+            }
+
+            let log = Log::default();
+            let shared = Monitor::new(EmuState::new(
+                Box::new(Vt100Emulator::new(
+                    4,
+                    20,
+                    0,
+                    crate::graphics::DEFAULT_CAPTURE,
+                    false,
+                )),
+                Responder {
+                    respond: true,
+                    background: (0, 0, 0),
+                    foreground: (255, 255, 255),
+                    cell_size: None,
+                    graphics: Graphics::default(),
+                    term_name: "xterm-256color".into(),
+                },
+                Arc::new(AtomicUsize::new(0)),
+            ));
+            let writer: SharedWriter = Arc::new(Mutex::new(None));
+            // On this thread, as the reader thread runs it: the duplicate
+            // is the loop's, and closes as the loop returns.
+            reader_loop(
+                Box::new(MasterDup(Some(Reads(2, Arc::clone(&log))))),
+                &shared,
+                &writer,
+                None,
+                &AtomicUsize::new(0),
+                &AtomicUsize::new(0),
+            );
+            assert_eq!(
+                *log.lock().unwrap(),
+                [
+                    ("read", false),
+                    ("read", false),
+                    ("read", false),
+                    ("close", true)
+                ]
+            );
+            assert!(!HOLDS_LIFECYCLE.get(), "the lock outlived the reader");
         }
     }
 }

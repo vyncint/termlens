@@ -520,6 +520,83 @@ fn a_resize_stops_offering_frames_drawn_at_the_old_size() -> termlens::Result<()
     Ok(())
 }
 
+/// A `wait_frame` timeout names what the application has not repainted
+/// since, and after a resize that is the resize. The cursor a resize moves
+/// was reported as "the frame this terminal last returned", with advice
+/// about "this input", when no frame had been returned and nothing typed:
+/// the reader went looking for a call that never happened, where the
+/// diagnosis is an application that ignored SIGWINCH (#705). Once a frame
+/// is returned again, the message is about that frame again.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
+fn a_wait_frame_timeout_after_a_resize_names_the_resize() -> termlens::Result<()> {
+    // Each wait below must expire, so each names its own short deadline.
+    const EXPIRES: Duration = Duration::from_millis(300);
+    let mut t = emit(
+        Terminal::builder()
+            .size(40, 6)
+            .timeout(Duration::from_secs(30)),
+        // Two frames, each drawn once and held: SIGWINCH is ignored, so
+        // nothing repaints in answer to the resize.
+        &[
+            "--raw",
+            r"\e[?2026h\e[2J\e[HFRAME ONE\e[?2026l",
+            "--wait",
+            "--raw",
+            r"\e[?2026h\e[2J\e[HFRAME TWO\e[?2026l",
+            "--wait",
+        ],
+    )?;
+    let timeout = |t: &mut Terminal, needle: &'static str| -> String {
+        match t.wait_frame_for(|s| s.contains(needle), EXPIRES) {
+            Err(err @ Error::Timeout { .. }) => err.to_string(),
+            other => panic!("nothing can match {needle:?}, so the wait expires: {other:?}"),
+        }
+    };
+
+    // Seen on the grid, not returned by `wait_frame`: the resize is the
+    // only thing that moves the cursor here.
+    t.wait_until(|s| s.repaints() == 1 && s.contains("FRAME ONE"))?;
+    t.resize(30, 6)?;
+    let msg = timeout(&mut t, "FRAME ONE");
+    assert!(
+        msg.contains("has not completed a repaint since the resize to 30x6")
+            && msg.contains("1 complete frame in total"),
+        "the resize is what the application has not repainted since: {msg}"
+    );
+    assert!(
+        !msg.contains("last returned") && !msg.contains("this input"),
+        "no frame was returned and nothing was typed: {msg}"
+    );
+
+    // A repaint after the resize that the predicate does not match is
+    // counted from the resize too.
+    t.send(Key::Enter)?;
+    t.wait_until(|s| s.repaints() == 2 && s.contains("FRAME TWO"))?;
+    let msg = timeout(&mut t, "never painted");
+    assert!(
+        msg.contains("1 complete frame since the resize to 30x6, 2 in total"),
+        "{msg}"
+    );
+
+    // Returned now, so the cursor is at a frame this terminal handed out.
+    t.wait_frame(|s| s.contains("FRAME TWO"))?;
+    let msg = timeout(&mut t, "never painted");
+    assert!(
+        msg.contains("since the frame this terminal last returned")
+            && msg.contains("2 complete frames in total")
+            && !msg.contains("resize"),
+        "{msg}"
+    );
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// The counterpart of the case above, and the one the suite missed because
 /// every resize test changed a dimension: a resize to the size the terminal
 /// already has sends no `SIGWINCH` — the kernel raises it only on an actual

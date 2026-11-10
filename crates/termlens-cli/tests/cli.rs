@@ -192,6 +192,47 @@ fn diff_across_sizes_keeps_every_separator_in_one_column() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A text save and a JSON save of one screen are the same picture, a row
+/// ending in a no-break space or an ideographic space included (#724). The
+/// text form trims both with the padding and the JSON keeps them, so the
+/// diff of the two exited 1 over a blank against a blank. The screen is the
+/// one an `a`, a U+00A0, a new line and a U+3000 on a red background leave
+/// on 6x2.
+#[test]
+fn diff_of_a_text_save_and_its_json_twin_is_empty_over_trailing_whitespace() {
+    use std::process::Command;
+    let screen = Screen::parse("size: 6x2  cursor: 1,2\na\u{a0}\n\u{3000}\n\nstyles:\n1: 0-1 bg=1")
+        .expect("a 6x2 screen");
+    assert!(screen.cell(1, 0).expect("the wide cell").is_wide());
+    let text = screen.with_styles().to_string();
+    assert_eq!(
+        text, "size: 6x2  cursor: 1,2\na\n\n\nstyles:\n1: 0-1 bg=1",
+        "the text keeps neither character"
+    );
+    let dir = std::env::temp_dir().join(format!("termlens-diff-twins-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let (text_file, json_file) = (dir.join("screen.txt"), dir.join("screen.json"));
+    std::fs::write(&text_file, text).expect("write the text save");
+    let json = serde_json::to_string_pretty(&screen).expect("serialize");
+    assert!(
+        json.contains('\u{a0}') && json.contains('\u{3000}'),
+        "{json}"
+    );
+    std::fs::write(&json_file, json).expect("write the JSON save");
+    for (first, second) in [(&text_file, &json_file), (&json_file, &text_file)] {
+        let out = Command::new(env!("CARGO_BIN_EXE_termlens"))
+            .arg("diff")
+            .arg(first)
+            .arg(second)
+            .output()
+            .expect("run termlens");
+        let printed = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{printed}");
+        assert_eq!(printed, "no difference\n");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Two 1000x1000 screens that differ in every cell. Painting used to ask
 /// the diff about each cell in turn, which took 8 s at 80,000 changed cells
 /// and would not finish here (#595).
@@ -567,6 +608,94 @@ fn a_crlf_checkout_of_a_snap_still_parses() -> termlens::Result<()> {
     assert!(t.screen().contains("myapp  > Alpha"), "{}", t.screen());
     let _ = std::fs::remove_file(&path);
     Ok(())
+}
+
+/// A saved screen that a Windows shell wrote still reads (#716). Windows
+/// PowerShell 5.1's `>` re-encodes a program's output as UTF-16LE behind a
+/// byte-order mark, with CRLF line endings, and `Out-File -Encoding utf8`
+/// puts a UTF-8 mark in front. `render` and `diff` refused each of them, and
+/// reported marked JSON as a text snapshot with a bad header. Every one now
+/// reads as the screen it was saved from, as a file and on a pipe; the
+/// screen has an insta header, two wide characters and a styles block.
+#[test]
+fn render_and_diff_read_a_screen_behind_a_byte_order_mark() {
+    use std::process::Command;
+    let bin = env!("CARGO_BIN_EXE_termlens");
+    let dir = std::env::temp_dir().join(format!("termlens-bom-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let before = data("before.snap");
+    let run = |args: &[&str]| {
+        Command::new(bin)
+            .args(args)
+            .output()
+            .expect("termlens runs")
+    };
+    let expected = run(&["render", "--text", &before]);
+    assert_eq!(expected.status.code(), Some(0), "{expected:?}");
+    // (Normalized first: on Windows the checkout may already be CRLF.)
+    let text = std::fs::read_to_string(&before)
+        .unwrap()
+        .replace("\r\n", "\n");
+    let json = String::from_utf8(run(&["render", "--json", &before]).stdout).unwrap();
+
+    let marked = |text: &str| [&[0xef, 0xbb, 0xbf], text.as_bytes()].concat();
+    // What PowerShell's `>` writes: the mark, CRLF, two bytes a unit.
+    let utf16 = |text: &str, big_endian: bool| -> Vec<u8> {
+        std::iter::once(0xfeff)
+            .chain(text.replace('\n', "\r\n").encode_utf16())
+            .flat_map(|unit| {
+                if big_endian {
+                    unit.to_be_bytes()
+                } else {
+                    unit.to_le_bytes()
+                }
+            })
+            .collect()
+    };
+    for (name, bytes) in [
+        ("utf8-mark.snap", marked(&text)),
+        ("utf8-mark.json", marked(&json)),
+        ("utf16le.snap", utf16(&text, false)),
+        ("utf16be.snap", utf16(&text, true)),
+        ("utf16le.json", utf16(&json, false)),
+    ] {
+        let path = dir.join(name);
+        std::fs::write(&path, &bytes).expect("the file is written");
+        let path = path.to_str().unwrap();
+
+        let rendered = run(&["render", "--text", path]);
+        assert_eq!(rendered.status.code(), Some(0), "{name}: {rendered:?}");
+        assert_eq!(rendered.stdout, expected.stdout, "{name}");
+        let piped = with_stdin(&["render", "--text", "-"], &bytes);
+        assert_eq!(piped.status.code(), Some(0), "{name} on a pipe: {piped:?}");
+        assert_eq!(piped.stdout, expected.stdout, "{name} on a pipe");
+
+        for args in [["diff", &before, path], ["diff", path, &before]] {
+            let same = run(&args);
+            assert_eq!(same.status.code(), Some(0), "{args:?}: {same:?}");
+            assert_eq!(same.stdout, b"no difference\n", "{args:?}");
+        }
+    }
+
+    // Behind a UTF-16 mark the bytes are UTF-16 or nothing: half a code unit
+    // and a surrogate without its pair are refused, and named as what they
+    // are rather than as bad UTF-8.
+    for (name, tail) in [
+        ("odd.snap", &b"s\0i"[..]),
+        ("lone.snap", &[0x3d, 0xd8, b'!', 0][..]),
+    ] {
+        let path = dir.join(name);
+        std::fs::write(&path, [&[0xff, 0xfe], tail].concat()).expect("the file is written");
+        let path = path.to_str().unwrap();
+        let out = run(&["render", "--text", path]);
+        assert_eq!(out.status.code(), Some(2), "{name}: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!("termlens: {path}: stream did not contain valid UTF-16\n"),
+            "{name}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1204,7 +1333,7 @@ fn every_corpus_file_renders() -> termlens::Result<()> {
 
 /// Run the CLI with `input` on standard input, and without a PTY: a pipe is
 /// the whole point of `-`, and through a PTY there is no EOF to read to.
-fn with_stdin(args: &[&str], input: &str) -> std::process::Output {
+fn with_stdin(args: &[&str], input: impl AsRef<[u8]>) -> std::process::Output {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let mut child = Command::new(env!("CARGO_BIN_EXE_termlens"))
@@ -1222,7 +1351,7 @@ fn with_stdin(args: &[&str], input: &str) -> std::process::Output {
     // pipe buffer first. The child's exit code and stderr are what the
     // callers assert; whether it read the input is the child's business.
     let mut pipe = child.stdin.take().expect("a stdin pipe");
-    match pipe.write_all(input.as_bytes()) {
+    match pipe.write_all(input.as_ref()) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
         Err(e) => panic!("write to the child's stdin: {e}"),
@@ -1734,6 +1863,41 @@ fn inspect_clears_the_caller_env_unless_inherit_env_is_passed() -> termlens::Res
     )?;
     assert_eq!(t.wait_exit()?.code(), Some(0), "{}", t.screen());
     assert!(t.screen().contains("[zzz]"), "{}", t.screen());
+    Ok(())
+}
+
+/// `--inherit-env` leaves out the caller's `COLUMNS` and `LINES`, which
+/// curses and `tput` prefer to the terminal's size (#709): from a shell
+/// that exported them, the program laid out at the shell's size, not at
+/// `--size`. Given with `--env` they still reach it.
+#[test]
+#[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
+fn inspect_inherit_env_leaves_out_the_callers_columns_and_lines() -> termlens::Result<()> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let probe = "echo \"[${COLUMNS-unset} ${LINES-unset}]\"; stty size";
+    let run = |extra: &[&str]| -> termlens::Result<String> {
+        let mut args = vec!["inspect", "--size", "40x10", "--inherit-env"];
+        args.extend(extra);
+        args.extend(["sh", "-c", probe]);
+        let mut t = termlens::bin!(
+            "termlens",
+            size(60, 14),
+            env("PATH", &path),
+            env("COLUMNS", "200"),
+            env("LINES", "50"),
+            args(args)
+        )?;
+        assert_eq!(t.wait_exit()?.code(), Some(0), "{}", t.screen());
+        Ok(t.screen().text())
+    };
+    let s = run(&[])?;
+    assert!(
+        s.contains("[unset unset]"),
+        "the caller's size leaked in: {s}"
+    );
+    assert!(s.contains("10 40"), "{s}");
+    let s = run(&["--env", "COLUMNS=40"])?;
+    assert!(s.contains("[40 unset]"), "--env is not passed: {s}");
     Ok(())
 }
 
@@ -2337,6 +2501,41 @@ fn diff_reports_an_unreadable_left_operand_before_reading_stdin() -> termlens::R
         "{}",
         t.screen()
     );
+    Ok(())
+}
+
+/// The mirror of #651: `diff - missing.snap` reports the right operand
+/// without reading standard input first (#715). With `-` on the left, stdin
+/// was read to its end before the right operand was opened. Under a PTY
+/// stdin never ends, so each wait below would time out.
+///
+/// Opening the operand is not enough. A directory opens and then fails its
+/// first read, and a file past the size bound is refused by its length, so
+/// each is found only once the operand is measured as well.
+#[test]
+fn diff_reports_an_unreadable_right_operand_before_reading_stdin() -> termlens::Result<()> {
+    let dir = std::env::temp_dir().join(format!("termlens-diff-right-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let big = dir.join("big.snap");
+    std::fs::File::create(&big)
+        .and_then(|file| file.set_len((1 << 30) + 1))
+        .expect("a sparse file one byte past the bound");
+    let name = dir.file_name().unwrap().to_str().unwrap();
+    for (operand, named) in [
+        (data("missing.snap"), "missing.snap"),
+        (dir.to_str().unwrap().to_owned(), name),
+        (big.to_str().unwrap().to_owned(), "larger than 1 GiB"),
+    ] {
+        // Wide, so the path in the diagnostic is not wrapped across two rows.
+        let mut t = termlens::bin!("termlens", size(200, 10), args(["diff", "-", &operand]))?;
+        assert_eq!(t.wait_exit()?.code(), Some(2), "{operand}: {}", t.screen());
+        assert!(
+            t.screen().contains("termlens: ") && t.screen().contains(named),
+            "{operand}: {}",
+            t.screen()
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 

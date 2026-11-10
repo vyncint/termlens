@@ -117,7 +117,9 @@ your test ── send(Key) · click · paste · resize ──▶ PTY     └─�
    assert on the `ExitStatus` (`success()`, `code()`, `signal()`), then
    assert `!t.screen().alternate_screen()` so an application that leaves
    the user's terminal in the alternate screen fails the test. `Drop` kills
-   and reaps whatever is left, so a failing test never leaks a process.
+   and reaps whatever is left, so a failing test never leaks a process: on
+   Unix the program's whole process group, unless `wait_exit` reaped the
+   program first. A helper that must outlive the terminal uses `setsid`.
 
 8. **`wait_frame` only works for applications that emit DEC 2026
    synchronized updates.** Stock ratatui 0.30 with crossterm does **not**
@@ -577,7 +579,10 @@ directory (see §9b).
   when `CI` is set, and GitHub sets it on every runner. Inline snapshots are
   not rendered; insta keeps their new values in `.pending-snap` files.
   Give the action `with: artifact-dir:` set to the same directory, because
-  a step's `env:` does not reach the next step, and in a matrix a
+  a step's `env:` does not reach the next step. Keep the directory
+  absolute: `cargo test` runs each test binary in its own package's
+  directory, so a relative one scatters the screens across the crates and
+  the action finds none (it warns). In a matrix, give it a
   `name: termlens-report-${{ matrix.os }}` of its own per leg, because
   upload-artifact refuses a second artifact of one name in a run:
 

@@ -288,6 +288,224 @@ fn drop_stops_a_child_that_ignores_the_hangup() -> termlens::Result<()> {
     Ok(())
 }
 
+/// Start, in the background of a `sh` script, a helper that stays in the
+/// child's process group and ignores the hang-up, as a `nohup`ed one does.
+/// It prints `helper:<pid>;` once it ignores it, then waits for a file
+/// named `go` in the working directory, makes one named `seen`, and sleeps.
+#[cfg(unix)]
+const HUP_PROOF_HELPER: &str = "sh -c 'trap \"\" HUP; echo \"helper:$$;\"; \
+     while [ ! -e go ]; do sleep 0.02; done; : > seen; exec sleep 120' &";
+
+/// A helper started with [`HUP_PROOF_HELPER`], killed when this goes out of
+/// scope if it is still running, so a failing test leaves nothing behind.
+#[cfg(unix)]
+struct Helper {
+    pid: String,
+    dir: std::path::PathBuf,
+}
+
+/// The pid a [`HUP_PROOF_HELPER`] printed, once it has printed all of it.
+#[cfg(unix)]
+fn helper_pid(text: &str) -> Option<&str> {
+    text.split("helper:")
+        .nth(1)?
+        .split_once(';')
+        .map(|(pid, _)| pid)
+}
+
+#[cfg(unix)]
+impl Helper {
+    /// Wait for the helper `t` started, in `dir`, to say it ignores the
+    /// hang-up, and read its pid off the screen.
+    fn armed(t: &mut Terminal, dir: &std::path::Path) -> termlens::Result<Helper> {
+        t.wait_until(|s| helper_pid(&s.text()).is_some())?;
+        let pid = helper_pid(&t.screen().text())
+            .expect("the helper printed its pid")
+            .to_owned();
+        assert!(pid.parse::<u32>().is_ok(), "pid {pid:?}");
+        Ok(Helper {
+            pid,
+            dir: dir.to_owned(),
+        })
+    }
+
+    /// Whether the helper runs: its pid names a process that is no zombie
+    /// and is still `sh` or the `sleep` it becomes, not whatever reused it.
+    fn running(&self) -> bool {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=,comm=", "-p", &self.pid])
+            .output()
+            .expect("ps runs");
+        let line = String::from_utf8_lossy(&out.stdout);
+        let mut fields = line.split_whitespace();
+        let (Some(stat), Some(comm)) = (fields.next(), fields.next()) else {
+            return false;
+        };
+        !stat.starts_with('Z') && (comm.ends_with("sleep") || comm.ends_with("sh"))
+    }
+
+    /// Wait until the helper is gone, or [`GROUP_DEADLINE`] passes:
+    /// whether it went. The kill is sent before `drop` returns, but the
+    /// helper dies, and is reaped by whoever adopted it, in its own time.
+    fn gone(&self) -> bool {
+        let deadline = Instant::now() + GROUP_DEADLINE;
+        while self.running() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::yield_now();
+        }
+        true
+    }
+
+    /// Whether the helper still runs code: told to go on, it answers within
+    /// [`GROUP_DEADLINE`]. A process with a SIGKILL pending runs no more of
+    /// its own code, so an answer after `drop` returned shows that `drop`
+    /// sent it none.
+    fn answers(&self) -> termlens::Result<bool> {
+        std::fs::write(self.dir.join("go"), b"")?;
+        let deadline = Instant::now() + GROUP_DEADLINE;
+        while !self.dir.join("seen").exists() {
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::yield_now();
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Helper {
+    fn drop(&mut self) {
+        if self.running() {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &self.pid])
+                .status();
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// How long a helper gets to die after `drop`, or to answer.
+#[cfg(unix)]
+const GROUP_DEADLINE: Duration = Duration::from_secs(10);
+
+/// A directory of the test's own for a helper's files.
+#[cfg(unix)]
+fn helper_dir(name: &str) -> termlens::Result<std::path::PathBuf> {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// `sh -c script`, with `dir` as its working directory.
+#[cfg(unix)]
+fn sh_in(dir: &std::path::Path, script: &str) -> termlens::Result<Terminal> {
+    Terminal::builder()
+        .timeout(Duration::from_secs(10))
+        .current_dir(dir)
+        .args(["-c", script])
+        .spawn("sh")
+}
+
+/// A member of the child's process group that ignores the hang-up is gone
+/// once `drop` returns, as the child is (#714). It kept running, on a PTY
+/// nobody held, because teardown signalled the child alone: the hang-up,
+/// and the kernel's own as the session leader exits, reach the group, and
+/// the helper ignores both. Both ways the child can still be running at
+/// the drop: it dies of the hang-up, which the group is sent, and then the
+/// group is killed; or it ignores the hang-up too, outlives the grace, and
+/// the group is killed with it.
+#[cfg(unix)]
+#[test]
+fn drop_stops_a_hangup_ignoring_helper_in_the_child_s_group() -> termlens::Result<()> {
+    for (case, child) in [("dies", "read _"), ("ignores", "trap '' HUP; read _")] {
+        let dir = helper_dir(&format!("group-running-{case}"))?;
+        let mut t = sh_in(&dir, &format!("{HUP_PROOF_HELPER} {child}"))?;
+        let helper = Helper::armed(&mut t, &dir)?;
+        drop(t);
+        assert!(
+            helper.gone(),
+            "helper {} outlived the drop of a child that {case} on the hang-up",
+            helper.pid
+        );
+    }
+    Ok(())
+}
+
+/// The same once the child has exited, and no wait has reaped it: it is a
+/// zombie, which holds the group's id, so the group is killed and the
+/// child reaped. Teardown used to reap such a child first and then signal
+/// nothing at all.
+#[cfg(unix)]
+#[test]
+fn drop_stops_a_hangup_ignoring_helper_after_the_child_exited_unreaped() -> termlens::Result<()> {
+    let dir = helper_dir("group-exited")?;
+    let mut t = sh_in(&dir, &format!("{HUP_PROOF_HELPER} read _"))?;
+    let helper = Helper::armed(&mut t, &dir)?;
+    let pid = t.pid().expect("a pid");
+    t.send(Key::Enter)?;
+    let deadline = Instant::now() + GROUP_DEADLINE;
+    while !exited_unreaped(pid) {
+        assert!(Instant::now() < deadline, "the child did not exit");
+        std::thread::yield_now();
+    }
+    drop(t);
+    assert!(
+        helper.gone(),
+        "helper {} outlived the drop of an exited child",
+        helper.pid
+    );
+    Ok(())
+}
+
+/// Whether `pid`, this process's own unreaped child, has exited, asked so
+/// that it stays unreaped.
+#[cfg(unix)]
+fn exited_unreaped(pid: u32) -> bool {
+    // SAFETY: waitid only writes the zeroed siginfo_t it is handed, which
+    // outlives the call, and si_pid reads a field of that same value.
+    #[allow(unsafe_code)]
+    // `id_t` is `u32` on Linux and macOS, and may be wider elsewhere.
+    #[allow(clippy::useless_conversion)]
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        let rc = libc::waitid(
+            libc::P_PID,
+            pid.into(),
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        );
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+        info.si_pid() != 0
+    }
+}
+
+/// After `wait_exit` the child is reaped, and its pid, and the group's id,
+/// may be another process's: `drop` signals nothing, and the helper runs
+/// on. A helper meant to outlive the terminal leaves the group with
+/// `setsid`; one that does not lives only as long as `wait_exit` is not
+/// called.
+#[cfg(unix)]
+#[test]
+fn drop_after_wait_exit_signals_nothing() -> termlens::Result<()> {
+    let dir = helper_dir("group-reaped")?;
+    let mut t = sh_in(&dir, &format!("{HUP_PROOF_HELPER} read _"))?;
+    let helper = Helper::armed(&mut t, &dir)?;
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    drop(t);
+    assert!(
+        helper.answers()?,
+        "helper {} was signalled after the reap",
+        helper.pid
+    );
+    Ok(())
+}
+
 /// A failure before the exec reads as std reports it, and does not blame a
 /// program that is fine. A NUL in a variable is refused before anything is
 /// forked. A working directory that cannot be entered fails in the child,

@@ -218,11 +218,15 @@ CHANGELOG entry.
 
 - **A reply the terminal's own input queue cannot hold may not arrive.**
   termlens no longer drops answers of its own accord, but the tty input
-  queue is small (~1 KB on macOS, ~4 KB on Linux), so an application that
-  asks thousands of questions without reading has to read as it asks — as
-  it would against a real terminal. On Linux the kernel discards silently,
-  so that loss is undetectable and goes unreported; macOS blocks instead,
-  where it is counted and named.
+  queue is small (~1 KB on macOS; on Linux, about 13.8 KB in raw mode and
+  4 KB in canonical mode), so an application that asks thousands of
+  questions without reading has to read as it asks — as it would against a
+  real terminal. In raw mode, the mode of an application that reads its
+  replies, a full queue blocks the write on both platforms, and the replies
+  stuck behind it are counted and named in the next wait's error. Only a
+  canonical-mode application on Linux loses replies silently: there the
+  kernel discards what does not fit, so that loss is undetectable and goes
+  unreported.
 
 ## Windows
 
@@ -270,5 +274,32 @@ CHANGELOG entry.
   unaffected; for run-and-exit programs, end the script with a `read` and
   release it after asserting — see the "instant-exit caveat" in
   [DESIGN.md](DESIGN.md).
+- **After `wait_exit`, `Drop` signals nothing** (Unix). `Drop` stops the
+  program's whole process group, a helper that ignores SIGHUP included,
+  but only while the program is unreaped: once a wait has reaped it, or
+  the kernel has (SIGCHLD ignored), the group's id may be another
+  process's. A helper still running in the group then runs on. Stop it
+  before the program exits, or have it leave the group with `setsid` if it
+  is meant to outlive the terminal (#714).
 - Exotic grapheme clusters render as the vt100 crate renders them; the
   unicode-torture fixture pins the current behaviour.
+- **Needle matching is NFC, then substring, not grapheme matching.**
+  `contains`, `find` and `mask_matching` fold both sides to NFC, which
+  joins a base and a mark only where Unicode has a precomposed character
+  (`e` + U+0301 is `é`, so `contains("e")` misses it). Any other mark —
+  U+0353, Thai and Devanagari vowel signs — stays a character of its
+  own, so `contains("q")` is true on a screen showing only `q` with
+  U+0353 under it, and a mask covers that cell. A multi-row needle has to
+  include such a mark wherever its row ends in one, so `"q\nq"` is not
+  found over two of those rows (#726). Making the match grapheme-shaped
+  would change which needles match, so it is left for a 0.12 candidate.
+- **A saved text screen from before 0.11.7 can read a VS16 emoji a column
+  too wide.** Releases up to 0.11.6 drew `⚠️` and other emoji with a
+  presentation selector (U+FE0F) one column wide; later ones draw two,
+  and the text format does not say which wrote a file. `Screen::parse`
+  reads a row two columns wide whenever it fits, so on an old row with
+  room after the emoji every cell after it is one column right of where
+  it was drawn, and the `styles:` spans and the cursor, which keep their
+  columns, land one character left of what they marked (#723). The file
+  still parses and renders back as written. The JSON twin (`serde`)
+  holds the columns its writer drew; keep that where they matter.

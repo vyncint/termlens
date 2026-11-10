@@ -17,6 +17,7 @@
 //! not propagated — and the screen alone goes to stdout, so `inspect … >
 //! file` is a saved screen `diff` and `render` read back (#340).
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal, Read, Write};
@@ -60,8 +61,8 @@ exits, or, once it has drawn something, its output has been silent for
 both, and a program still running when the wait ends is killed.
 The child environment is cleared except for PATH, and gets
 TERM=xterm-256color and SHELL=/bin/sh; --inherit-env keeps the caller's
-environment instead, but for TERM, and repeatable --env sets selected
-values, TERM included.
+environment instead, but for TERM, COLUMNS and LINES, and repeatable
+--env sets selected values, those three included.
 --cwd runs the program in DIR, which must be an existing directory. A
 relative DIR is taken from where inspect runs, and a relative program
 path such as ./myapp is then found inside DIR.
@@ -225,51 +226,165 @@ fn main() -> ExitCode {
 /// it a moment earlier. Only the reading changes; the parser already took a
 /// `&str` rather than a path.
 fn load(path: &str) -> Result<Screen, String> {
-    let name = name_of(path);
-    let too_large = || {
-        format!(
-            "{name}: larger than {} GiB, which no saved screen is",
-            MAX_INPUT >> 30
-        )
-    };
-    let raw = if path == STDIN {
-        read_bounded(io::stdin().lock(), 0, MAX_INPUT)
-    } else {
-        let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
-        // A regular file says how long it is, so one past the bound is
-        // refused before a byte is read, and one inside it is read into a
-        // buffer of its own size. A pipe or a device (`/dev/zero`) says 0
-        // and is bounded by the read itself.
-        let len = match file.metadata() {
-            Ok(meta) if meta.is_file() => meta.len(),
-            _ => 0,
-        };
-        if len > MAX_INPUT as u64 {
-            return Err(too_large());
-        }
-        read_bounded(file, len as usize, MAX_INPUT)
+    read(open(path)?)
+}
+
+/// An operand that has been opened and measured and not yet read: the
+/// first half of [`load`]. The halves are apart so that `diff` can learn
+/// that one operand will never be read before it waits on the other (#715).
+enum Source<'a> {
+    /// `-`: standard input, which has nothing to open.
+    Stdin,
+    /// A file, with its length when it is a regular one. A pipe or a
+    /// device (`/dev/zero`) says 0 and is bounded by the read itself.
+    File {
+        path: &'a str,
+        file: std::fs::File,
+        len: usize,
+    },
+}
+
+/// The refusal of an input past [`MAX_INPUT`], for an operand named `name`.
+fn too_large(name: &str) -> String {
+    format!(
+        "{name}: larger than {} GiB, which no saved screen is",
+        MAX_INPUT >> 30
+    )
+}
+
+/// Open the operand at `path` and find what can be known of it without
+/// reading it: that it is there, that it is not a directory, how long it is.
+fn open(path: &str) -> Result<Source<'_>, String> {
+    if path == STDIN {
+        return Ok(Source::Stdin);
     }
-    .map_err(|e| format!("{name}: {e}"))?;
-    let Some(raw) = raw else {
-        return Err(too_large());
+    let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+    // A regular file says how long it is, so one past the bound is refused
+    // before a byte is read, and one inside it is read into a buffer of its
+    // own size.
+    let len = match file.metadata() {
+        Ok(meta) if meta.is_file() => meta.len(),
+        // A directory opens like a file on Unix and refuses its first read.
+        // That read waits on nobody, so it is made here and the error is the
+        // operating system's own, the one `render --text /` has always
+        // printed. Where a directory can be read, it is no screen either way.
+        Ok(meta) if meta.is_dir() => match (&file).read(&mut [0; 1]) {
+            Ok(_) => 0,
+            Err(e) => return Err(format!("{path}: {e}")),
+        },
+        _ => 0,
     };
-    // The words `read_to_string` used, which this read replaced.
-    let raw = String::from_utf8(raw)
-        .map_err(|_| format!("{name}: stream did not contain valid UTF-8"))?;
+    if len > MAX_INPUT as u64 {
+        return Err(too_large(path));
+    }
+    Ok(Source::File {
+        path,
+        file,
+        len: len as usize,
+    })
+}
+
+/// Read an opened operand to its end and parse it: the second half of
+/// [`load`].
+fn read(source: Source<'_>) -> Result<Screen, String> {
+    let (name, raw) = match source {
+        Source::Stdin => (STDIN_NAME, read_bounded(io::stdin().lock(), 0, MAX_INPUT)),
+        Source::File { path, file, len } => (path, read_bounded(file, len, MAX_INPUT)),
+    };
+    let Some(raw) = raw.map_err(|e| format!("{name}: {e}"))? else {
+        return Err(too_large(name));
+    };
+    let text = decode(raw, MAX_INPUT).map_err(|e| match e {
+        // The words `read_to_string` used, which this read replaced.
+        NotText::Utf8 => format!("{name}: stream did not contain valid UTF-8"),
+        NotText::Utf16 => format!("{name}: stream did not contain valid UTF-16"),
+        NotText::TooLarge => format!(
+            "{name}: larger than {} GiB as UTF-8, which no saved screen is",
+            MAX_INPUT >> 30
+        ),
+        // As a refused reservation reads when the bytes are read.
+        NotText::Memory => format!("{name}: {}", io::Error::from(io::ErrorKind::OutOfMemory)),
+    })?;
+    // A byte-order mark says how the file was encoded and is no part of the
+    // screen. Left in, it made the header's first word `\u{feff}size:` and
+    // hid the `{` that tells JSON from the text format (#716).
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     // A checkout on Windows may have given the file CRLF endings; the
     // formats are line-based and neither cares. Only copied when there is
     // one, since the input may be hundreds of megabytes.
-    let raw = if raw.contains("\r\n") {
-        raw.replace("\r\n", "\n")
+    let text = if text.contains("\r\n") {
+        Cow::Owned(text.replace("\r\n", "\n"))
     } else {
-        raw
+        Cow::Borrowed(text)
     };
-    let body = strip_insta_header(&raw).trim_start_matches('\n');
+    let body = strip_insta_header(&text).trim_start_matches('\n');
     if body.starts_with('{') {
         return serde_json::from_str(body)
-            .map_err(|e| format!("{}: not a termlens Screen: {e}", name_of(path)));
+            .map_err(|e| format!("{name}: not a termlens Screen: {e}"));
     }
-    Screen::parse(strip_inspect_trailer(body)).map_err(|e| format!("{}: {e}", name_of(path)))
+    Screen::parse(strip_inspect_trailer(body)).map_err(|e| format!("{name}: {e}"))
+}
+
+/// Why an input's bytes are not text.
+#[derive(Debug, PartialEq, Eq)]
+enum NotText {
+    /// Not UTF-8, with no UTF-16 byte-order mark in front.
+    Utf8,
+    /// A UTF-16 byte-order mark, then half a code unit or a lone surrogate.
+    Utf16,
+    /// UTF-16 inside the bound as bytes and past it as UTF-8.
+    TooLarge,
+    /// The allocator refused the room the text needs.
+    Memory,
+}
+
+/// The text of an input's bytes: UTF-8, or UTF-16 behind its byte-order
+/// mark, in either byte order (#716). Windows PowerShell 5.1 re-encodes
+/// what a program prints, so `termlens inspect app > a.snap` there writes
+/// UTF-16LE with a mark, and the CLI could not read back its own output
+/// from the default Windows shell. The mark stays at the head of the text
+/// for the caller to strip, as a UTF-8 file's own mark does.
+///
+/// Nothing is read as UTF-16 without the mark: `FF` is in no UTF-8 text,
+/// so the mark cannot be mistaken, and anything else would be a guess.
+///
+/// UTF-16 grows by half when its characters are three bytes of UTF-8, so
+/// the bound on the bytes read is not a bound on the text. The text is
+/// measured before any room is reserved for it and refused past `limit`
+/// ([`MAX_INPUT`] outside the tests), and the room is the measured size,
+/// reserved fallibly: a refusal is an error to report, as in
+/// [`read_bounded`].
+fn decode(raw: Vec<u8>, limit: usize) -> Result<String, NotText> {
+    let big_endian = match raw.get(..2) {
+        Some([0xff, 0xfe]) => false,
+        Some([0xfe, 0xff]) => true,
+        _ => return String::from_utf8(raw).map_err(|_| NotText::Utf8),
+    };
+    if raw.len() % 2 != 0 {
+        return Err(NotText::Utf16);
+    }
+    let units = || {
+        raw.chunks_exact(2).map(|unit| {
+            let unit = [unit[0], unit[1]];
+            if big_endian {
+                u16::from_be_bytes(unit)
+            } else {
+                u16::from_le_bytes(unit)
+            }
+        })
+    };
+    let mut len = 0;
+    for decoded in char::decode_utf16(units()) {
+        len += decoded.map_err(|_| NotText::Utf16)?.len_utf8();
+        if len > limit {
+            return Err(NotText::TooLarge);
+        }
+    }
+    let mut text = String::new();
+    text.try_reserve_exact(len).map_err(|_| NotText::Memory)?;
+    // Every unit decoded in the pass above, so nothing is replaced here.
+    text.extend(char::decode_utf16(units()).map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)));
+    Ok(text)
 }
 
 /// The dash operand: standard input where a screen is read, standard
@@ -343,15 +458,6 @@ const REAP_GRACE: Duration = if cfg!(windows) {
 } else {
     Duration::from_millis(500)
 };
-
-/// A file operand as a diagnostic should name it.
-fn name_of(path: &str) -> &str {
-    if path == STDIN {
-        STDIN_NAME
-    } else {
-        path
-    }
-}
 
 /// insta writes `---\n<metadata>\n---\n` above the content; the content is
 /// what was snapshotted.
@@ -481,11 +587,24 @@ fn diff(args: &[String]) -> ExitCode {
     // that cannot be read is reported before the right one is touched, so
     // `diff missing.snap -` does not sit waiting for a stdin it will never
     // use (#651).
+    //
+    // The mirror takes one step out of that order (#715). With `-` on the
+    // left, the right operand is opened and measured before standard input
+    // is read, so `diff - missing.snap` does not wait either; the two are
+    // then read in argument order all the same.
+    let right = if a.as_str() == STDIN {
+        match open(b) {
+            Ok(source) => Some(source),
+            Err(e) => return fail(&e),
+        }
+    } else {
+        None
+    };
     let before = match load(a) {
         Ok(screen) => screen,
         Err(e) => return fail(&e),
     };
-    let after = match load(b) {
+    let after = match right.map_or_else(|| load(b), read) {
         Ok(screen) => screen,
         Err(e) => return fail(&e),
     };
@@ -991,7 +1110,86 @@ fn inspect(args: Vec<OsString>) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::read_bounded;
+    use super::{decode, read_bounded, NotText};
+
+    /// `text` as UTF-16 behind its byte-order mark.
+    fn utf16(text: &str, big_endian: bool) -> Vec<u8> {
+        std::iter::once(0xfeff)
+            .chain(text.encode_utf16())
+            .flat_map(|unit| {
+                if big_endian {
+                    unit.to_be_bytes()
+                } else {
+                    unit.to_le_bytes()
+                }
+            })
+            .collect()
+    }
+
+    /// UTF-16 is read behind its mark in either byte order, surrogate pairs
+    /// included, and comes back with the mark for the caller to strip, as
+    /// marked UTF-8 does. Without a mark the bytes are UTF-8 or nothing
+    /// (#716).
+    #[test]
+    fn decode_reads_utf8_and_utf16_behind_its_mark() {
+        let text = "size: 4x1  cursor: 0,0\n汉字 \u{1f600}";
+        assert_eq!(
+            decode(text.as_bytes().to_vec(), 1 << 20).as_deref(),
+            Ok(text)
+        );
+        let marked = format!("\u{feff}{text}");
+        assert_eq!(
+            decode(marked.as_bytes().to_vec(), 1 << 20).as_deref(),
+            Ok(marked.as_str())
+        );
+        for big_endian in [false, true] {
+            assert_eq!(
+                decode(utf16(text, big_endian), 1 << 20).as_deref(),
+                Ok(marked.as_str()),
+                "big-endian: {big_endian}"
+            );
+        }
+        // The same units without the mark are not UTF-8, and are not guessed at.
+        assert_eq!(
+            decode(utf16(text, false)[2..].to_vec(), 1 << 20),
+            Err(NotText::Utf8)
+        );
+        assert_eq!(decode(vec![b'a', 0xff], 1 << 20), Err(NotText::Utf8));
+        assert_eq!(decode(Vec::new(), 1 << 20).as_deref(), Ok(""));
+        assert_eq!(decode(vec![0xff, 0xfe], 1 << 20).as_deref(), Ok("\u{feff}"));
+    }
+
+    /// Half a code unit, or a surrogate without its other half, is not
+    /// UTF-16, and is refused rather than read as U+FFFD (#716).
+    #[test]
+    fn decode_refuses_broken_utf16() {
+        let mut odd = utf16("ok", false);
+        odd.push(b'!');
+        assert_eq!(decode(odd, 1 << 20), Err(NotText::Utf16));
+        for lone in [[0x3d, 0xd8], [0x00, 0xde]] {
+            let mut bytes = utf16("ok", false);
+            bytes.extend(lone);
+            bytes.extend(utf16("ok", false).split_off(2));
+            assert_eq!(decode(bytes, 1 << 20), Err(NotText::Utf16), "{lone:02x?}");
+        }
+    }
+
+    /// The bound is on the text as UTF-8, not only on the bytes read: ten
+    /// Han characters are 22 bytes of UTF-16 with the mark and 33 of UTF-8,
+    /// so a limit between the two refuses them, and one byte more reads
+    /// them (#716).
+    #[test]
+    fn decode_bounds_utf16_by_its_utf8_length() {
+        let bytes = utf16(&"汉".repeat(10), false);
+        assert_eq!(bytes.len(), 22);
+        assert_eq!(decode(bytes.clone(), 32), Err(NotText::TooLarge));
+        let text = decode(bytes, 33).expect("exactly the limit is read");
+        assert_eq!(text.len(), 33);
+        // The room is what the text measured, not the half again that the
+        // bytes could have come to: 18 bytes of ASCII need 11, not 27.
+        let ascii = decode(utf16("abcdefgh", false), 1 << 20).expect("ASCII");
+        assert!(ascii.capacity() <= 11, "{}", ascii.capacity());
+    }
 
     /// A reader that hands out at most `chunk` bytes per call, so the
     /// bounded read is exercised across many short reads, as a pipe gives.

@@ -183,16 +183,21 @@ than dropped, so both are counted — a lock-free pending count the writer
 clears only once bytes are actually out — and the next wait's error names the
 total.
 
-**How much of that is knowable differs by platform, and the honest answer is
-that Linux hides it.** A write into a full terminal input queue blocks on
-macOS, so the stuck replies are visible to us and the count is exact. Linux's
-`n_tty` driver instead *discards* input once its buffer (`N_TTY_BUF_SIZE`, 4
-KB) is full: the write succeeds, the kernel throws the bytes away, and nothing
-distinguishes that from delivery. We cannot report what we were never told, so
-on Linux an application that never reads produces a timeout carrying the
-screen and no reply count. The same kernel limit caps a legitimate batch too —
-past roughly 680 replies the application has to read as it asks, exactly as it
-would against a real terminal.
+**How much of that is knowable depends on the terminal mode, and one mode
+on Linux hides it.** In raw (non-canonical) mode, which is the mode of every
+application that reads its replies, a write into a full terminal input queue
+blocks, on Linux as on macOS: the stuck replies stay in our writer, so they
+are counted, and the next wait's error names them. Measured on Linux 7.0, a
+raw-mode application that never read took about 2,300 six-byte replies
+(13.8 KB) before the write blocked, and once it did read, every reply
+arrived. In canonical mode Linux's `n_tty` driver instead *discards* input
+once its buffer (`N_TTY_BUF_SIZE`, 4 KB) is full: the write succeeds, the
+kernel throws the bytes away, and nothing distinguishes that from delivery.
+We cannot report what we were never told, so on Linux a canonical-mode
+application that never reads produces a timeout carrying the screen and no
+reply count; it can later read 4,095 bytes, about 680 replies, and the rest
+are gone. Past either limit the application has to read as it asks, exactly
+as it would against a real terminal.
 
 `XTGETTCAP` is answered from a table of capabilities the crate actually
 implements, and every entry was checked against the code that implements it
@@ -235,8 +240,9 @@ it with `std::process::Command`:
   directory. `argv[0]` is the name as given. A working directory that is
   not a directory gives way to the child's `HOME`, as in portable-pty.
 - **The environment** is the same: the inherited one unless `env_clear`,
-  plus the `SHELL` that portable-pty fills in from the login shell when the
-  process has none, then termlens's pins and the test's own variables.
+  less `COLUMNS` and `LINES` (§5), plus the `SHELL` that portable-pty fills
+  in from the login shell when the process has none, then termlens's pins
+  and the test's own variables.
 - **The session** gets the same `pre_exec` steps. Six signals go back to
   their defaults and the mask is emptied. `setsid` gives the child a
   session of its own, and `TIOCSCTTY` makes the PTY its controlling
@@ -418,6 +424,19 @@ tests never leak zombies, including on panic. A child the kernel reaped,
 where the test process ignores SIGCHLD, counts as reaped: nothing is
 signalled, `wait_exit` says why there is no status, and `signal` refuses
 (#630).
+
+On Unix `Drop` stops the child's process group, not the child alone
+(#714). The child is a session and group leader (`setsid`), so its pid is
+the group's id, and a member that ignores SIGHUP, a `nohup`ed helper or a
+background job that traps it, ignores the kernel's hang-up as the session
+leader exits too and would run on, on a PTY nobody holds. The group is
+hung up; a child that has exited, or that outlives `HANGUP_GRACE`, is
+followed by SIGKILL to the group; then the child is reaped. A group id is
+safe to signal only while the child is unreaped, since its zombie holds
+the id, so `Drop` reaps nothing before the last signal (it polls the exit
+with `waitid(WNOWAIT)`), and signals nothing once the child is reaped:
+after `wait_exit`, or where the kernel reaped it. `signal` still reaches
+the child alone.
 
 ### `screen()` is the live grid, frames or no frames
 
@@ -669,6 +688,9 @@ Rules:
 3. **Trailing whitespace is stripped per line** (snapshot files stay
    readable and diff-able), but blanks are *preserved inside* the `Screen`
    grid, so `cell()`, `row_text()`, and `find()` coordinates are unaffected.
+   Whitespace is Unicode's (`str::trim_end`), so a no-break space or an
+   ideographic space the application drew at the end of a row is stripped
+   with the padding; "Reading it back" says what that costs.
 4. Wide characters occupy their real columns: the character appears once;
    its continuation cell contributes nothing to the text but does count
    for column arithmetic (`find` returns true terminal columns). The
@@ -677,7 +699,17 @@ Rules:
    (U+FE0F) makes the emoji it follows two columns, as vt100 0.18 lays it
    out. Releases before 0.11.7 gave such an emoji one column and the text
    does not say which wrote it, so the reader widens it unless the row
-   then would not fit, and reads that row the earlier way.
+   then would not fit, and reads that row the earlier way. A row an
+   earlier release wrote with room after the emoji therefore reads at the
+   later layout (#723): every cell after the emoji is one column right of
+   where its writer drew it, while the row's `styles:` spans and the
+   header's cursor keep their column numbers, so each lands one character
+   left of what it marked. `⚠️` and a red `ERR ok` written by 0.11.6 read
+   with the span `1-3` on the emoji's second half and `ER`, and the cursor
+   it left after `ok` on the `k`. No rule can tell the layouts apart — a
+   span or a cursor that only makes sense narrow hints at one, and is no
+   proof — so the JSON is the format to keep where an old file's columns
+   matter. `tests/compat/0.11.6/vs16-styled-after` pins the reading.
 5. Styles are text-invisible by default; `Screen::with_styles()` opts in.
    Its rendering is the plain `Display` output followed by a blank line
    and a `styles:` block:
@@ -877,15 +909,25 @@ against the original. It is not `==` to the original, and rule 5's last
 paragraph is why: equality is "the same observation" and the text format is
 deliberately blind to most of it. What does not survive is exactly what the
 rules above never wrote down — an erased cell and a written blank are one
-character either way; the out-of-band state, the title, the mode flags, the
-counters and the history, comes back default; and a hidden cursor's position
-is not recorded, so `cursor: hidden` parses back to a hidden cursor at
-`0,0`. `diff` reports none of those as a difference, which is the same claim
-from the other side: the text format is the *picture*, and two screens that
-render alike are the same picture. One header releases before 0.11.2 wrote
+character either way; whitespace of any other kind at the end of a row, a
+no-break space (U+00A0) or an ideographic space (U+3000) the application
+drew there, is stripped by rule 3 and comes back as blank cells, U+3000 as
+the two it covered (#724); the out-of-band state, the title, the mode
+flags, the counters and the history, comes back default; and a hidden
+cursor's position is not recorded, so `cursor: hidden` parses back to a
+hidden cursor at `0,0`. `diff` reports none of those as a difference, which
+is the same claim from the other side: the text format is the *picture*,
+and two screens that render alike are the same picture. For `diff` a cell
+that holds only whitespace is a blank wherever it sits, as it is on a
+terminal, so a no-break space inside a row does not differ from a space
+there either, though the text keeps it; `Cell::contents` tells the two
+apart, and so does the JSON. One header releases before 0.11.2 wrote
 does not render back as written: a visible cursor at `col == cols`, the
 pending-wrap column (#401), reads onto the last cell, as the JSON reader
-reads it, so the header comes back one column left (#643).
+reads it, so the header comes back one column left (#643). And one row
+releases before 0.11.7 wrote renders back as written but is not the
+picture its writer saw: a VS16 emoji with room after it reads two columns
+wide, as rule 4 says, so it differs from its own JSON twin (#723).
 
 The header's row count is what decides where the grid ends — not a search
 for the `styles:` marker — so a grid may hold the words `styles:` or
@@ -1164,6 +1206,12 @@ call order is a trap. `env_clear()` also pins `SHELL=/bin/sh` unless the
 test sets `SHELL` itself: the PTY layer fills `SHELL` from the host's login
 shell when it is absent, which put one machine-shaped value inside an
 environment `env_clear` promises is hermetic (#221).
+
+Without `env_clear` the child inherits the test process's environment, but
+never `COLUMNS` or `LINES`: curses and `tput` take them over the size the
+PTY reports, so a pair exported by the shell that ran the tests laid the
+program out at that shell's size and kept it there across a resize (#709).
+Set on the builder, either reaches the child like any other variable.
 
 ## 6. Input encoding
 
