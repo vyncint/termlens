@@ -98,7 +98,7 @@ fn same_named_failures_in_two_processes_leave_two_files() -> termlens::Result<()
     let dir = std::env::temp_dir().join(format!("termlens-artifact-two-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for run in ["first", "second"] {
-        let out = std::process::Command::new(std::env::current_exe()?)
+        let out = common::rerun_self(&["emit"])?
             .args(["--exact", NAME, "--nocapture"])
             .env("TERMLENS_ARTIFACT_DIR", &dir)
             .env(RUN, run)
