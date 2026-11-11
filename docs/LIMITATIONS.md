@@ -31,6 +31,14 @@ CHANGELOG entry.
   own: RIS and ED 3 (`CSI 3 J`, which `clear` sends, and its `CSI ? 3 J`
   and `CSI 3:1 J` spellings) empty a terminal's scrollback, and termlens
   keeps the rows it had already retained.
+- A `resize` that arrives while the alternate screen is up **and** a read
+  has left an escape sequence open is applied to the main screen behind it
+  as vt100 applies it, and settled when the main screen is back: a taller
+  screen there gains blank rows above the text, a row the resize pushed is
+  read at the width the screen has by then, and a row it pulled back and
+  pushed again keeps the text it was first copied with (#678, #684). Any
+  other resize is settled as it is made. The main screen is brought on
+  display for it with bytes, and bytes would cut the open sequence.
 
 ## Character sets, modes and tab stops
 

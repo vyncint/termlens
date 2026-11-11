@@ -4654,7 +4654,11 @@ impl Terminal {
     /// drops the rows below the cursor first, then pushes rows off the top
     /// into history; a taller one pulls the newest history rows back onto
     /// the grid, and they leave the history again, so no row is on record
-    /// twice. On the alternate screen nothing moves into history at all.
+    /// twice. The screen moves down only by the rows the history holds, and
+    /// the rest of the new rows go below, so with
+    /// [`scrollback(0)`](crate::TerminalBuilder::scrollback) the text stays
+    /// at the top. On the alternate screen nothing moves into history at
+    /// all.
     ///
     /// # After the child exits
     ///

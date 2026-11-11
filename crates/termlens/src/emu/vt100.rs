@@ -466,10 +466,12 @@ impl Vt100Emulator {
         // out of history onto the grid (vt100 0.18, as xterm does): those
         // rows are on screen again, so they leave the copy too, newest
         // first. A resize applied while the alternate screen was up is
-        // settled here, the first time the main screen is read again, and
-        // the count tells the two ends apart: a shorter screen that pushed
-        // a row and dropped one at the bound, then a taller one that pulled
-        // the row back, leaves the history one row shorter at the front.
+        // settled as it is made, with the main grid put on display for it
+        // (#678); one that came inside a sequence is settled here, the
+        // first time the main screen is read again, and the count tells the
+        // two ends apart: a shorter screen that pushed a row and dropped
+        // one at the bound, then a taller one that pulled the row back,
+        // leaves the history one row shorter at the front.
         if std::mem::take(&mut self.history_reset) {
             self.captured = 0;
         }
@@ -598,9 +600,10 @@ impl Vt100Emulator {
     /// rows go is vt100's own rule — the rows below the cursor are dropped
     /// first, and only the rest of the shortfall is pushed — and the mark
     /// is moved past them, so the capture after the resize finds them
-    /// already copied. The alternate screen hides the main grid, so a
-    /// resize while it is up is left to the capture that runs once it is
-    /// down.
+    /// already copied. While the alternate screen is up, the main grid is
+    /// put on display for the resize when it can be (see `set_size`);
+    /// otherwise it is hidden, and the resize is left to the capture that
+    /// runs once it is down.
     fn copy_rows_a_resize_pushes(&mut self, rows: u16) {
         let (old_rows, _) = size(self.parser.screen());
         if self.scrollback_len == 0 || self.parser.screen().alternate_screen() || rows >= old_rows {
@@ -949,6 +952,21 @@ impl Emulator for Vt100Emulator {
                     fed = i + 1;
                     None
                 }
+                SeqEvent::LinesMoved => {
+                    // xterm's `InsertLine` and `DeleteLine` move the cursor
+                    // to the left margin and reset a pending wrap, inside
+                    // the region only; vt100 moves the lines alone (#686).
+                    // A CR does both in vt100, and in the shadow with it.
+                    // The row is read after the sequence, which never
+                    // moves it.
+                    self.feed_staged(&bytes[fed..=i]);
+                    fed = i + 1;
+                    let row = self.parser.screen().cursor_position().0;
+                    if self.tracker.in_scroll_region(row) {
+                        self.feed(b"\r");
+                    }
+                    None
+                }
                 SeqEvent::None => None,
                 SeqEvent::SyncBegin => {
                     // Stamped here, at the byte that opened the update,
@@ -1136,16 +1154,36 @@ impl Emulator for Vt100Emulator {
     }
 
     fn set_size(&mut self, rows: u16, cols: u16) {
+        // While the alternate screen is up the main grid is resized too,
+        // out of sight, and every accessor reads the grid on display: the
+        // rows it pushed were read only once it was back, at the width it
+        // had then, and a row pulled back and pushed again kept the text it
+        // was first copied with (#678). So the main grid is put on display
+        // for the resize, copied from and captured as when it is up, and
+        // hidden again. `CSI ? 47 l` and `h` switch vt100's grids and do
+        // nothing else; being bytes, they go to both parsers only between
+        // sequences, and inside one the resize is settled when the main
+        // screen is back, as before.
+        let behind = self.parser.screen().alternate_screen() && !self.tracker.mid_sequence();
+        if behind {
+            self.parser.process(SHOW_MAIN_GRID);
+            self.shadow.feed_verbatim(SHOW_MAIN_GRID);
+        }
         self.copy_rows_a_resize_pushes(rows);
         // The parser's own resize, not the screen's: it reports each row it
         // drops off the front of a full history, which the capture below
-        // counts on (#671). The shadow keeps no count and needs none.
-        self.parser.set_size(nz(rows), nz(cols));
+        // counts on (#671). The shadow keeps no count and needs none. Both
+        // are resized the same way, so their grids stay in step.
+        resize_as_xterm(&mut self.parser, rows, cols);
         self.shadow.set_size(rows, cols);
         self.tracker.set_size(rows, cols);
         // A resize can push rows into history on its own, drop rows from
         // its front, or pull rows back out of it.
         self.capture_scrolled_rows();
+        if behind {
+            self.parser.process(SHOW_ALTERNATE_GRID);
+            self.shadow.feed_verbatim(SHOW_ALTERNATE_GRID);
+        }
     }
 }
 
@@ -1255,6 +1293,47 @@ pub(super) fn nz(n: u16) -> NonZeroU16 {
 fn size(screen: &::vt100::Screen) -> (u16, u16) {
     let (rows, cols) = screen.size();
     (rows.get(), cols.get())
+}
+
+/// Put vt100's main grid on display, and back: `CSI ? 47 l` and `h`, which
+/// in vt100 switch grids and change nothing else — no clear, no cursor
+/// save — whether `47` or `1049` put the alternate screen up.
+const SHOW_MAIN_GRID: &[u8] = b"\x1b[?47l";
+const SHOW_ALTERNATE_GRID: &[u8] = b"\x1b[?47h";
+
+/// Resize `parser` to `rows` by `cols` as xterm's `ScreenResize`
+/// (screen.c) does: a taller main screen moves down by
+/// `Min(nrow - oldrow, savedlines)`, the rows its history holds, pulling
+/// them back, and the rest of the new rows go below (#684).
+///
+/// vt100 moves it down by `min(diff, rows that ever scrolled off)`, which
+/// counts the rows a bounded history has dropped, every row with
+/// `scrollback(0)`, and fills the top with blank rows for them; the cursor
+/// and the saved cursor move down with it. So a taller resize is made in
+/// two steps: first by the rows the history holds, which vt100 pulls back
+/// whole, leaving it empty; then, with the count of rows that scrolled off
+/// cleared — which an empty history makes the only thing `clear_scrollback`
+/// changes — by the rest, which vt100 adds below.
+///
+/// The alternate screen keeps no history and always grows below. Both
+/// grids are resized together, and the history read and cleared is the
+/// grid's on display, so the caller puts the main grid on display first
+/// (`set_size`, with [`SHOW_MAIN_GRID`]); with the alternate one still up,
+/// the main grid behind it is resized as vt100 resizes it.
+pub(super) fn resize_as_xterm<CB: ::vt100::Callbacks>(
+    parser: &mut ::vt100::Parser<CB>,
+    rows: u16,
+    cols: u16,
+) {
+    let (old_rows, _) = size(parser.screen());
+    if rows > old_rows && !parser.screen().alternate_screen() {
+        let held = u16::try_from(parser.screen().scrollback_len()).unwrap_or(u16::MAX);
+        if held < rows - old_rows {
+            parser.set_size(nz(old_rows + held), nz(cols));
+            parser.screen_mut().clear_scrollback();
+        }
+    }
+    parser.set_size(nz(rows), nz(cols));
 }
 
 #[cfg(test)]
@@ -1738,17 +1817,18 @@ mod tests {
         }
     }
 
-    /// A 64 MiB OSC body, fed as the reader feeds it, in a child of this
-    /// test binary whose data segment is capped at 48 MiB: each parser held
-    /// the whole body before #694, about 128 MiB together, which the cap
-    /// turns into a failed allocation rather than a machine out of memory.
-    /// The child does the feeding only when it can see the cap in place.
-    #[test]
+    /// Whether this process is the calling test run again under a cap on
+    /// its data segment, having seen the cap in place. Otherwise that run
+    /// is started, as a child of this test binary under `ulimit -d`, and
+    /// asserted to pass.
+    ///
+    /// For a test of a memory bound: without the bound its body holds more
+    /// than the cap, which the cap turns into a failed allocation in the
+    /// child rather than a machine out of memory. The body runs only where
+    /// this returns `true`, so never uncapped.
     #[cfg(target_os = "linux")]
-    fn an_unterminated_osc_body_leaves_memory_bounded() {
-        const CHILD: &str = "TERMLENS_TEST_OSC_UNDER_CAP";
-        const CAP_KIB: u32 = 48 * 1024;
-        const NAME: &str = "emu::vt100::tests::an_unterminated_osc_body_leaves_memory_bounded";
+    fn under_data_cap(name: &str, cap_kib: u32) -> bool {
+        const CHILD: &str = "TERMLENS_TEST_UNDER_DATA_CAP";
         if std::env::var_os(CHILD).is_some() {
             let limits = std::fs::read_to_string("/proc/self/limits").unwrap();
             let data = limits
@@ -1756,18 +1836,8 @@ mod tests {
                 .find(|line| line.starts_with("Max data size"))
                 .unwrap();
             let soft = data.split_whitespace().nth(3).unwrap();
-            assert_eq!(soft, (u64::from(CAP_KIB) * 1024).to_string(), "{data}");
-            let mut emu = Vt100Emulator::new(24, 80, 1000, crate::graphics::DEFAULT_CAPTURE, false);
-            feed_all(&mut emu, b"\x1b]0;");
-            let chunk = [b'a'; 8192];
-            for _ in 0..(64 << 20) / chunk.len() {
-                feed_all(&mut emu, &chunk);
-            }
-            feed_all(&mut emu, b"\x07DONE");
-            let s = emu.snapshot();
-            assert_eq!(s.title().len(), super::super::seq::OSC_CAPTURE_MAX - 2);
-            assert_eq!(s.row_text(0).trim_end(), "DONE");
-            return;
+            assert_eq!(soft, (u64::from(cap_kib) * 1024).to_string(), "{data}");
+            return true;
         }
         let out = std::process::Command::new("sh")
             .args([
@@ -1775,9 +1845,9 @@ mod tests {
                 r#"ulimit -c 0 && ulimit -d "$1" && shift && exec "$@""#,
                 "sh",
             ])
-            .arg(CAP_KIB.to_string())
+            .arg(cap_kib.to_string())
             .arg(std::env::current_exe().unwrap())
-            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
             .env(CHILD, "1")
             .output()
             .unwrap();
@@ -1788,6 +1858,105 @@ mod tests {
             "{}\n{stdout}\n{stderr}",
             out.status
         );
+        false
+    }
+
+    /// A 64 MiB OSC body, fed as the reader feeds it, under a 48 MiB cap:
+    /// each parser held the whole body before #694, about 128 MiB together.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_unterminated_osc_body_leaves_memory_bounded() {
+        const NAME: &str = "emu::vt100::tests::an_unterminated_osc_body_leaves_memory_bounded";
+        if !under_data_cap(NAME, 48 * 1024) {
+            return;
+        }
+        let mut emu = Vt100Emulator::new(24, 80, 1000, crate::graphics::DEFAULT_CAPTURE, false);
+        feed_all(&mut emu, b"\x1b]0;");
+        let chunk = [b'a'; 8192];
+        for _ in 0..(64 << 20) / chunk.len() {
+            feed_all(&mut emu, &chunk);
+        }
+        feed_all(&mut emu, b"\x07DONE");
+        let s = emu.snapshot();
+        assert_eq!(s.title().len(), super::super::seq::OSC_CAPTURE_MAX - 2);
+        assert_eq!(s.row_text(0).trim_end(), "DONE");
+    }
+
+    /// A 32 MiB run of CSI parameter bytes that no final byte ends, fed as
+    /// the reader feeds it, under a 48 MiB cap: each of the two SGR
+    /// rewriters held the whole run before #730, to see whether it was an
+    /// SGR, and the child died growing one of them past 16 MiB.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_unterminated_csi_leaves_memory_bounded() {
+        const NAME: &str = "emu::vt100::tests::an_unterminated_csi_leaves_memory_bounded";
+        if !under_data_cap(NAME, 48 * 1024) {
+            return;
+        }
+        let mut emu = Vt100Emulator::new(24, 80, 1000, crate::graphics::DEFAULT_CAPTURE, false);
+        feed_all(&mut emu, b"\x1b[");
+        let chunk = [b'1'; 8192];
+        for _ in 0..(32 << 20) / chunk.len() {
+            feed_all(&mut emu, &chunk);
+        }
+        feed_all(&mut emu, b"mDONE");
+        assert_eq!(emu.snapshot().row_text(0).trim_end(), "DONE");
+    }
+
+    #[test]
+    fn an_sgr_too_long_to_hold_reads_as_the_same_sgr_written_short() {
+        // Past the rewriters' bound a plain CSI is held as vte holds it
+        // (#730), so a long SGR draws what its short form draws: in both
+        // grids, on record in `unsupported()` or not, fed whole or byte by
+        // byte. The zeros pad the first value; past 32 values vte stores
+        // nothing more, and a value saturates at 65535.
+        let pad = "0".repeat(300);
+        let ones = ";1".repeat(31);
+        for (long, short) in [
+            (format!("{pad}1;3;4mX"), "1;3;4mX".to_owned()),
+            (format!("{pad}5;8;9mX"), "5;8;9mX".to_owned()),
+            (
+                format!("5;8;9mA\x1b[{pad}1mX"),
+                "5;8;9mA\x1b[1mX".to_owned(),
+            ),
+            (
+                format!("5;8;9mA\x1b[{pad}25;28mX"),
+                "5;8;9mA\x1b[25;28mX".to_owned(),
+            ),
+            (format!("{pad}38:5:196;9mX"), "38:5:196;9mX".to_owned()),
+            (format!("{pad}9:1mX"), "9:1mX".to_owned()),
+            (format!("{pad}9{ones};5;0mX"), format!("9{ones}mX")),
+            (format!("{pad}99999999;8mX"), "65535;8mX".to_owned()),
+        ] {
+            let long = format!("\x1b[{long}");
+            let (whole, bytewise) = whole_and_bytewise(4, 10, 0, long.as_bytes());
+            let reference = emu_with(format!("\x1b[{short}").as_bytes());
+            assert_eq!(observed(&whole), observed(&reference), "{short:?}");
+            assert_eq!(observed(&bytewise), observed(&reference), "{short:?}");
+            assert_eq!(
+                whole.snapshot().unsupported(),
+                reference.snapshot().unsupported(),
+                "{short:?}"
+            );
+        }
+        // Spelled out once: the blink before it survives a long `1`.
+        let s = emu_with(format!("\x1b[5;8;9mA\x1b[{pad}1mX").as_bytes()).snapshot();
+        let x = *s.cell(0, 1).unwrap().style();
+        assert!(x.bold && x.blink && x.conceal && x.strikethrough, "{x:?}");
+    }
+
+    #[test]
+    fn a_csi_too_long_to_hold_is_carried_out_in_both_grids() {
+        // Not an SGR: the cursor moves and the cells shift in the shadow as
+        // in the grid, which the snapshot's lockstep assertion checks, and
+        // blink goes on (#730).
+        let pad = "0".repeat(300);
+        let stream = format!("\x1b[5mab\x1b[{pad}2;4HXZ\x1b[D\x1b[{pad}2@Y");
+        let (whole, bytewise) = whole_and_bytewise(4, 10, 0, stream.as_bytes());
+        let s = whole.snapshot();
+        assert_eq!(s.text(), "ab\n   XY Z\n\n", "{s}");
+        assert!(s.cell(1, 4).unwrap().style().blink, "{s}");
+        assert_eq!(observed(&whole), observed(&bytewise));
     }
 
     #[test]
@@ -2018,6 +2187,109 @@ mod tests {
     }
 
     #[test]
+    fn a_taller_screen_moves_down_only_by_the_rows_its_history_holds() {
+        // xterm's `ScreenResize` (screen.c) moves the screen down by
+        // `Min(nrow - oldrow, savedlines)`: the rows it can pull back, and
+        // the rest of the new rows go below. vt100 moved it down by every
+        // row that ever scrolled, `scrollback(0)` included, and filled the
+        // top with blank rows the history never held (#684). The cursor
+        // and the saved cursor move with the text: the save is on the `d`.
+        for (scrollback, text, history, cursor) in [
+            (0, "c\nd\ne\n\n\n", "", (2, 1)),
+            (1, "b\nc\nd\ne\n\n", "", (3, 1)),
+            (2, "a\nb\nc\nd\ne\n", "", (4, 1)),
+            (1000, "a\nb\nc\nd\ne\n", "", (4, 1)),
+        ] {
+            for styled in [false, true] {
+                let mut emu =
+                    Vt100Emulator::new(3, 10, scrollback, crate::graphics::DEFAULT_CAPTURE, styled);
+                feed_all(
+                    &mut emu,
+                    b"a\r\nb\r\nc\r\nd\r\n\x1b[5me\x1b[2H\x1b7\x1b[3;2H",
+                );
+                emu.set_size(6, 10);
+                let s = emu.snapshot();
+                let at = format!("scrollback({scrollback}), styled {styled}");
+                assert_eq!(s.text(), text, "{at}");
+                assert_eq!(s.scrollback_text(), history, "{at}");
+                assert_eq!((s.cursor().0, s.cursor().1), cursor, "{at}");
+                let e = s.find("e").unwrap();
+                assert!(s.cell(e.0, e.1).unwrap().style().blink, "{at}");
+                let d = s.find("d").unwrap();
+                feed_all(&mut emu, b"\x1b8X");
+                assert_eq!(emu.snapshot().find("X"), Some(d), "{at}");
+                // History carries on from the rows still in it.
+                feed_all(&mut emu, b"\x1b[6;1H\r\nf");
+                let s = emu.snapshot();
+                assert_eq!(s.text().lines().last(), Some("f"), "{at}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_taller_screen_moves_the_main_screen_as_xterm_does_behind_the_alternate() {
+        // The alternate screen keeps no history, so it grows at the
+        // bottom; the main screen behind it moves down only by the rows
+        // its history holds, as when it is on display (#684). After the
+        // exit the cursor is back after the `e`.
+        for (scrollback, text) in [
+            (0, "c\nd\neX\n\n\n"),
+            (1, "b\nc\nd\neX\n\n"),
+            (1000, "a\nb\nc\nd\neX\n"),
+        ] {
+            for enter in ["\x1b[?1049h", "\x1b[?47h"] {
+                let mut emu =
+                    Vt100Emulator::new(3, 10, scrollback, crate::graphics::DEFAULT_CAPTURE, false);
+                feed_all(&mut emu, b"a\r\nb\r\nc\r\nd\r\ne");
+                feed_all(&mut emu, format!("{enter}\x1b[2J\x1b[HTUI").as_bytes());
+                emu.set_size(6, 10);
+                let s = emu.snapshot();
+                assert_eq!(s.text(), "TUI\n\n\n\n\n", "{enter:?}");
+                assert_eq!((s.cursor().0, s.cursor().1), (0, 3), "{enter:?}");
+                // `47` saves nothing, and the main grid's own cursor moved
+                // with its text.
+                feed_all(&mut emu, format!("{}X", enter.replace('h', "l")).as_bytes());
+                let s = emu.snapshot();
+                assert_eq!(s.text(), text, "scrollback({scrollback}), {enter:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_taller_resize_inside_a_sequence_leaves_the_sequence_whole() {
+        // Behind the alternate screen the main grid is resized through
+        // bytes, which would cut a sequence a read left open; inside one it
+        // is resized as vt100 resizes it, and the sequence completes as it
+        // was written (#684).
+        for (open, close) in [
+            ("\x1b]0;tit", "le\x07X"),
+            ("\x1b[3", "1mX"),
+            ("\x1b", "[31mX"),
+            ("\x1bP", "q#0;2;0;0;0\x1b\\X"),
+        ] {
+            let mut emu = Vt100Emulator::new(3, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+            feed_all(
+                &mut emu,
+                format!("a\r\nb\r\nc\r\nd\x1b[?1049h{open}").as_bytes(),
+            );
+            emu.set_size(6, 10);
+            feed_all(&mut emu, close.as_bytes());
+            let s = emu.snapshot();
+            assert_eq!(s.text().trim_end(), "X", "{open:?}");
+            if open.contains(']') {
+                assert_eq!(s.title(), "title");
+            }
+            if open.contains('[') || close.starts_with('[') {
+                assert_eq!(
+                    s.cell(0, 0).unwrap().style().fg,
+                    Color::Indexed(1),
+                    "{open:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn rows_back_from_history_keep_the_attributes_the_shadow_carries() {
         // Blink lives in the attribute shadow, a second parser. Its grid
         // must get the same rows back from history as the primary's, or a
@@ -2179,22 +2451,69 @@ mod tests {
         // and the copy took that as the newest row pulled back: it dropped
         // `c`, which vt100 still held, and kept `a`. Counting what vt100
         // drops from the front tells the two ends apart (#671).
+        //
+        // Each resize is now settled as it is made, with the main grid on
+        // display (#678): `g1` is copied as it is pushed, which drops `a`
+        // from the copy at its bound, and leaves it when it comes back. The
+        // copy is then the terminal's own history, as it is after the same
+        // resizes with the main screen up.
         let mut emu = Vt100Emulator::new(4, 10, 3, crate::graphics::DEFAULT_CAPTURE, false);
+        let mut shown = Vt100Emulator::new(4, 10, 3, crate::graphics::DEFAULT_CAPTURE, false);
         feed_all(&mut emu, b"a\r\nb\r\nc\r\ng1\r\ng2\r\ng3\r\ng4");
+        feed_all(&mut shown, b"a\r\nb\r\nc\r\ng1\r\ng2\r\ng3\r\ng4");
         assert_eq!(emu.snapshot().scrollback_text(), "a\nb\nc");
         feed_all(&mut emu, b"\x1b[?1049hTUI");
-        emu.set_size(3, 10);
-        emu.set_size(4, 10);
+        for emu in [&mut emu, &mut shown] {
+            emu.set_size(3, 10);
+            emu.set_size(4, 10);
+        }
         feed_all(&mut emu, b"\x1b[?1049l");
         let s = emu.snapshot();
-        // `a` left vt100's history while out of sight, and the copy keeps
-        // it, as it keeps rows across a reset: nothing is on record twice
-        // and nothing still in the terminal is missing.
-        assert_eq!(s.scrollback_text(), "a\nb\nc");
-        assert_eq!(s.full_text(), "a\nb\nc\ng1\ng2\ng3\ng4");
+        assert_eq!(s.scrollback_text(), "b\nc");
+        assert_eq!(s.full_text(), "b\nc\ng1\ng2\ng3\ng4");
+        assert_eq!(observed(&emu), observed(&shown));
         // And the copy carries on from there.
         feed_all(&mut emu, b"\r\ng5");
         assert_eq!(emu.snapshot().scrollback_text(), "b\nc\ng1");
+    }
+
+    #[test]
+    fn rows_a_resize_pushes_behind_the_alternate_screen_keep_their_own_width() {
+        // Each resize is settled as it is made, the main grid on display,
+        // as if the alternate screen were not up (#678). Before, the
+        // resize was settled when the main screen came back: a row pushed
+        // meanwhile was read at the width the screen had then, and a row
+        // pulled back and pushed again cut to a narrower screen kept the
+        // text it was first copied with.
+        let width = |s: &Screen, row: usize| {
+            (0..)
+                .take_while(|&c| s.scrollback_cell(row, c).is_some())
+                .count()
+        };
+        for (resizes, history, widths) in [
+            // `b` pushed at 4 columns, then read back at 8.
+            (&[(3, 4), (2, 4), (2, 8)][..], "12345678\nb", &[8, 4][..]),
+            // Pulled back at 8, cut to 4 and pushed again.
+            (&[(4, 8), (4, 4), (3, 4)][..], "1234", &[4][..]),
+        ] {
+            let stream = b"12345678\r\nb\r\nc\r\nd";
+            let mut emu = Vt100Emulator::new(3, 8, 5, crate::graphics::DEFAULT_CAPTURE, true);
+            let mut shown = Vt100Emulator::new(3, 8, 5, crate::graphics::DEFAULT_CAPTURE, true);
+            feed_all(&mut emu, stream);
+            feed_all(&mut shown, stream);
+            feed_all(&mut emu, b"\x1b[?1049hTUI");
+            for &(rows, cols) in resizes {
+                emu.set_size(rows, cols);
+                shown.set_size(rows, cols);
+            }
+            feed_all(&mut emu, b"\x1b[?1049l");
+            let (s, t) = (emu.snapshot(), shown.snapshot());
+            assert_eq!(s.scrollback_text(), history, "{resizes:?}");
+            assert_eq!(t.scrollback_text(), history, "{resizes:?}");
+            let got: Vec<usize> = (0..s.scrollback_rows()).map(|row| width(&s, row)).collect();
+            assert_eq!(got, widths, "{resizes:?}");
+            assert_eq!(observed(&emu), observed(&shown), "{resizes:?}");
+        }
     }
 
     #[test]
@@ -2210,10 +2529,9 @@ mod tests {
         // The copy outlives vt100's history by design across RIS and ED 3,
         // so from the first of those on vt100's history must be the copy's
         // newest rows rather than all of it. A resize while the alternate
-        // screen hides the main one is settled only when it is back, from
-        // the lengths and the count alone, so a row it pulled back and
-        // pushed again at another width keeps the text it was copied with;
-        // after one, only the bound is checked, until a reset starts over.
+        // screen hides the main one is compared as exactly as any other: a
+        // row it pushes is copied at its own width, and a row it pulls back
+        // and pushes again at another width is copied again (#678).
         const PIECES: &[&str] = &[
             "a",
             "bc",
@@ -2272,25 +2590,32 @@ mod tests {
             let mut emu =
                 Vt100Emulator::new(rows, cols, 5, crate::graphics::DEFAULT_CAPTURE, styled);
             let mut raw = ::vt100::Parser::new(nz(rows), nz(cols), 5);
-            // `Some(true)`: the copy is vt100's history; `Some(false)`: it
-            // ends with it; `None`: a resize was settled out of sight.
-            let mut exact = Some(true);
+            // Whether the copy is vt100's history, or only ends with it.
+            let mut exact = true;
             for step in 0..40 {
                 let alternate = raw.screen().alternate_screen();
                 if next(5) == 0 {
                     rows = 2 + u16::try_from(next(5)).unwrap();
                     cols = 3 + u16::try_from(next(10)).unwrap();
+                    // The reference resizes as termlens does, which is
+                    // vt100's but for where a taller screen's new rows go
+                    // (#684): the rows each history holds are the same.
+                    // Behind the alternate screen the main grid is resized
+                    // on display, and its history read then (#678).
                     emu.set_size(rows, cols);
-                    raw.set_size(nz(rows), nz(cols));
                     if alternate {
-                        exact = None;
+                        raw.process(SHOW_MAIN_GRID);
+                    }
+                    resize_as_xterm(&mut raw, rows, cols);
+                    if alternate {
+                        raw.process(SHOW_ALTERNATE_GRID);
                     }
                 } else {
                     let piece = pieces[next(pieces.len())];
                     feed_all(&mut emu, piece.as_bytes());
                     raw.process(piece.as_bytes());
                     if piece == "\x1bc" || (piece == "\x1b[3J" && !alternate) {
-                        exact = Some(false);
+                        exact = false;
                     }
                 }
                 let s = emu.snapshot();
@@ -2306,11 +2631,11 @@ mod tests {
                 assert!(ours.len() <= 5, "{at}");
                 // vt100's accessors read the grid on display, and the
                 // alternate one has no history to compare with.
-                match exact {
-                    _ if raw.screen().alternate_screen() => {}
-                    Some(true) => assert_eq!(ours, theirs, "{at}"),
-                    Some(false) => assert!(ours.ends_with(&theirs), "{at}"),
-                    None => {}
+                if raw.screen().alternate_screen() {
+                } else if exact {
+                    assert_eq!(ours, theirs, "{at}");
+                } else {
+                    assert!(ours.ends_with(&theirs), "{at}");
                 }
                 let grid: Vec<String> = raw
                     .screen()
@@ -2527,6 +2852,36 @@ mod tests {
             .map(String::from)
             .collect();
         assert_eq!(shapes, ["^[[58:2:0:1:7m"]);
+    }
+
+    #[test]
+    fn an_sgr_sub_parameter_carries_no_attribute_and_is_on_record() {
+        // xterm reads a sub-parameter only on SGR 38 and 48 and skips any
+        // other group that has one, and vt100 matches no such group. The
+        // shadow read the group's first value, so `9:1` struck the cell
+        // through while `unsupported()` said the sequence was dropped
+        // (#688).
+        for group in ["5:1", "6:1", "8:0", "9:1", "5:6", "9:9:9"] {
+            let s = emu_with(format!("\x1b[{group}mX").as_bytes()).snapshot();
+            assert_eq!(*s.cell(0, 0).unwrap().style(), Style::default(), "{group}");
+            assert_eq!(
+                s.unsupported(),
+                [format!("^[[{group}m").as_str()],
+                "{group}"
+            );
+        }
+        // Nor does one reset: the attribute set before it stays, in a list
+        // with a parameter that is carried, too.
+        for (seq, shape) in [
+            ("\x1b[9m\x1b[29:1mX", "^[[29:1m"),
+            ("\x1b[9m\x1b[0:1mX", "^[[0:1m"),
+            ("\x1b[9;5:1mX", "^[[9;5:1m"),
+        ] {
+            let s = emu_with(seq.as_bytes()).snapshot();
+            let style = *s.cell(0, 0).unwrap().style();
+            assert!(style.strikethrough && !style.blink, "{seq:?}: {style:?}");
+            assert_eq!(s.unsupported(), [shape], "{seq:?}");
+        }
     }
 
     #[test]
@@ -3654,6 +4009,85 @@ mod tests {
     /// streams mix every sequence that moves either — regions valid and
     /// not, both screen switches, the saves, both resets — with resizes.
     #[test]
+    fn insert_and_delete_line_move_the_cursor_to_the_left_margin() {
+        // xterm's `InsertLine` and `DeleteLine` (util.c): the cursor goes
+        // to the left margin and a pending wrap is reset (#686). Text,
+        // cursor and wrap flags, fed whole and byte by byte.
+        let two_rows = "abcdefghij\r\nklmnopqrst";
+        for (stream, text, cursor) in [
+            (
+                format!("{two_rows}\x1b[2;5H\x1b[LX"),
+                "abcdefghij\nX\nklmnopqrst\n",
+                (1, 1),
+            ),
+            (
+                format!("{two_rows}\x1b[1;5H\x1b[MX"),
+                "Xlmnopqrst\n\n\n",
+                (0, 1),
+            ),
+            (
+                format!("{two_rows}\x1b[2;5H\x1b[0;7LX"),
+                "abcdefghij\nX\nklmnopqrst\n",
+                (1, 1),
+            ),
+            (format!("{two_rows}\x1b[1;5H\x1b[2:1MX"), "X\n\n\n", (0, 1)),
+            // Pending wrap: X lands at the start of the inserted row and
+            // the row it would have wrapped onto keeps its `a`.
+            ("abcdefghij\x1b[LX".to_owned(), "X\nabcdefghij\n\n", (0, 1)),
+            ("abcdefghij\x1b[MX".to_owned(), "X\n\n\n", (0, 1)),
+        ] {
+            let (whole, bytewise) = whole_and_bytewise(4, 10, 0, stream.as_bytes());
+            let s = whole.snapshot();
+            assert_eq!(s.text(), text, "{stream:?}");
+            assert_eq!((s.cursor().0, s.cursor().1), cursor, "{stream:?}");
+            assert_eq!(observed(&whole), observed(&bytewise), "{stream:?}");
+        }
+    }
+
+    #[test]
+    fn insert_and_delete_line_outside_the_region_leave_the_cursor() {
+        // Outside the scroll region xterm ignores both, and so does vt100:
+        // the cursor keeps its column. On the margins it is inside. Each
+        // screen has its own region: `47` keeps the alternate grid's, and
+        // `1049` clears it (#686).
+        for (stream, at) in [
+            ("\x1b[2;3r\x1b[4;5H\x1b[LX", (3, 4)),
+            ("\x1b[2;3r\x1b[1;5H\x1b[MX", (0, 4)),
+            ("\x1b[2;3r\x1b[3;5H\x1b[LX", (2, 0)),
+            ("\x1b[2;3r\x1b[2;5H\x1b[MX", (1, 0)),
+            ("\x1b[2;3r\x1b[?47h\x1b[4;5H\x1b[LX", (3, 0)),
+            ("\x1b[2;3r\x1b[?47h\x1b[?47l\x1b[4;5H\x1b[LX", (3, 4)),
+            (
+                "\x1b[?47h\x1b[1;2r\x1b[?47l\x1b[?47h\x1b[4;5H\x1b[LX",
+                (3, 4),
+            ),
+            (
+                "\x1b[?47h\x1b[1;2r\x1b[?47l\x1b[?1049h\x1b[4;5H\x1b[LX",
+                (3, 0),
+            ),
+            // A resize clears the region, and a region that is no region
+            // leaves the whole screen one.
+            ("\x1b[1;2r\x1b[3;3rRESIZE\x1b[4;5H\x1b[LX", (3, 0)),
+            ("\x1b[1;2r\x1b[3;3r\x1b[4;5H\x1b[LX", (3, 0)),
+            ("\x1b[1;2r\x1b[4;5H\x1b[LX", (3, 4)),
+        ] {
+            let (before, after) = stream.split_once("RESIZE").unwrap_or((stream, ""));
+            let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+            feed_all(&mut emu, before.as_bytes());
+            if !after.is_empty() {
+                emu.set_size(5, 10);
+            }
+            feed_all(&mut emu, after.as_bytes());
+            let s = emu.snapshot();
+            let x = s.text().lines().enumerate().find_map(|(row, line)| {
+                line.find('X')
+                    .map(|col| (u16::try_from(row).unwrap(), u16::try_from(col).unwrap()))
+            });
+            assert_eq!(x, Some(at), "{stream:?}\n{s}");
+        }
+    }
+
+    #[test]
     fn the_report_origin_follows_vt100s_margins_and_origin_mode() {
         const PIECES: &[&str] = &[
             "\x1b[2;4r",
@@ -3714,6 +4148,19 @@ mod tests {
                 homed.cursor_position().0,
                 "case {case}: {ops:?}"
             );
+            // The region `IL` and `DL` act in (#686): under origin mode
+            // vt100 homes the cursor to the top margin and clamps it to
+            // the bottom one, and no row past them is inside.
+            let top = run(b"\x1b[?6h").cursor_position().0;
+            let bottom = run(b"\x1b[?6h\x1b[999H").cursor_position().0;
+            let (rows, _) = emu.size();
+            for row in 0..rows {
+                assert_eq!(
+                    emu.tracker.in_scroll_region(row),
+                    (top..=bottom).contains(&row),
+                    "case {case}, row {row}: {ops:?}"
+                );
+            }
         }
     }
 }

@@ -306,13 +306,14 @@ impl Callbacks for Unhandled {
             // (#320). One parameter outside the set and the whole sequence
             // is still recorded: dropping it would hide a genuine gap, and
             // `^[[5;59m` — blink recovered, underline colour modelled by
-            // nobody — is exactly that shape.
+            // nobody — is exactly that shape. A parameter with a
+            // sub-parameter is outside the set whatever its values: the
+            // shadow carries none (#688), so `^[[5:6m` is a gap too.
             (None, None, 'm') => {
-                let mut seen = false;
-                params.iter().flat_map(|p| p.iter()).all(|p| {
-                    seen = true;
-                    SHADOW_SGR_PARAMS.contains(p)
-                }) && seen
+                !params.is_empty()
+                    && params
+                        .iter()
+                        .all(|p| matches!(*p, [value] if SHADOW_SGR_PARAMS.contains(value)))
             }
             _ => false,
         };
@@ -490,6 +491,19 @@ mod tests {
     #[test]
     fn xtsmgraphics_is_a_question_not_an_unsupported_sequence() {
         assert!(shapes(b"\x1b[?1;1;0S\x1b[?2;1;0S").is_empty());
+    }
+
+    /// An SGR parameter with a sub-parameter is read by nobody, so the
+    /// sequence is on record even when every value in it is one the shadow
+    /// recovers as a plain parameter (#688).
+    #[test]
+    fn an_sgr_sub_parameter_is_recorded_whatever_its_values() {
+        assert_eq!(
+            shapes(b"\x1b[5:6m\x1b[9:9:9m\x1b[5;8:8m"),
+            ["^[[5:6m", "^[[9:9:9m", "^[[5;8:8m"]
+        );
+        // The plain forms are the shadow's, as before (#320).
+        assert!(shapes(b"\x1b[5m\x1b[5;6;8;9;25;28;29m").is_empty());
     }
 
     #[test]

@@ -177,6 +177,35 @@ reads that marker.
   child alone. A test whose program leaves a helper running on purpose
   must have the helper leave the program's process group (`setsid`), or
   the drop now kills it. (#714)
+- Insert Line and Delete Line (`CSI L`, `CSI M`) with the cursor inside
+  the scroll region move the cursor to the start of its row and cancel a
+  pending wrap, as xterm does (#686). The cursor kept its column, so text
+  written after one began part-way along the row, and after a full row the
+  next character wrapped onto the line the insert had just moved down.
+  Outside the region both are still ignored and the cursor stays. A test
+  that expected the cursor's column, or text written after one of them,
+  where the application left it should expect column 0, as in xterm.
+- A resize that makes the screen taller moves the text down only by the
+  rows the history holds, as xterm does, and adds the rest of the new rows
+  below it (#684). It moved the text down by every row that had ever
+  scrolled off, and filled the top with blank rows the history did not
+  have: with `scrollback(0)` a taller screen always opened blank rows
+  above the text, and the cursor and a saved cursor moved down with it.
+  The main screen behind the alternate one is resized the same way. A test
+  that expected blank rows above the text after a taller resize, or a
+  cursor row counted from them, should expect the text to stay where it
+  was, moved down only by the rows that came back out of history.
+- A resize while the alternate screen is up is settled in the history at
+  once, as if the main screen were on display (#678). It was settled only
+  when the main screen came back: a row the resize pushed into history was
+  read at the width the screen had by then, a row pulled back and pushed
+  again cut to a narrower screen kept the text it was first copied with,
+  and a row the terminal's bounded history dropped meanwhile stayed in
+  `scrollback_text()`. A resize that arrives while a read has left an
+  escape sequence open is still settled on the way back, as
+  `docs/LIMITATIONS.md` says. A test that read the history after resizing
+  behind a full-screen application should expect what the same resizes
+  give with the main screen up.
 
 ### Fixed
 
@@ -391,6 +420,22 @@ reads that marker.
   application that reads its replies, Linux blocks the write once about
   2,300 replies (13.8 KB) are queued, as macOS blocks, and the next wait's
   error counts the replies stuck behind it, on Linux too. (#703)
+- An SGR parameter written with a sub-parameter no longer sets or clears
+  blink, conceal or strikethrough (#688). `CSI 9:1 m` struck the cell
+  through, and `5:1` and `8:0` made it blink or concealed it, while
+  `unsupported()` listed the same sequence as dropped; `25:1`, `28:0`,
+  `29:1` and `0:1` cleared an attribute the same way. xterm reads
+  sub-parameters only on SGR 38 and 48, and the backend ignores such a
+  group too, so the style is now left as it was. `unsupported()` also
+  lists the sequences it had missed because every value in them was one
+  of those parameters, such as `^[[5:6m`.
+- An unterminated CSI no longer grows the test process without bound
+  (#730). Both SGR rewriters held every byte of a CSI until its final
+  byte, to see whether it was an SGR, so a 16 MiB run of parameter bytes
+  raised peak memory by 48 MiB. A rewriter now holds at most 256 bytes of
+  one: past that a CSI of plain parameters is held as the parser holds it,
+  32 values at most and each capped at 65535, and any other passes through
+  as it comes. A long SGR draws what the same SGR written short draws.
 
 ## [0.11.8] - 2026-11-03
 

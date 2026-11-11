@@ -56,6 +56,112 @@ enum State {
     Ground,
     Esc,
     Csi,
+    /// Inside a plain CSI longer than [`CSI_HOLD_MAX`], whose parameters
+    /// are held in vte's own form from there on — see [`LongParams`].
+    CsiLong(LongParams),
+}
+
+/// The most bytes of one CSI a rewriter holds as written, from its `ESC [`
+/// on, while it waits for the final byte that says whether it is an SGR.
+///
+/// The whole sequence used to be held, so a CSI that no final byte ended
+/// grew `pending` with the child's output in both rewriters, about three
+/// bytes of memory for each byte written (#730). Past this a CSI that is
+/// still plain digits and separators is held as vte holds it, and any
+/// other passes through as it came. No SGR an application writes comes
+/// near it: 32 parameters of three digits each, the most vte reads, are
+/// 130 bytes.
+const CSI_HOLD_MAX: usize = 256;
+
+/// The parameter values vte stores for one CSI. It ignores every digit and
+/// separator after them, and vt100 dispatches the sequence on those it
+/// kept.
+const VTE_MAX_PARAMS: usize = 32;
+
+/// A byte of a plain SGR's parameters: a digit, or the separator of two
+/// parameters or of two sub-parameters. Anything else between `ESC [` and
+/// the `m` (a private prefix, an intermediate) makes the sequence
+/// something other than an SGR.
+fn plain_param(b: u8) -> bool {
+    matches!(b, b'0'..=b'9' | b';' | b':')
+}
+
+/// A plain CSI past [`CSI_HOLD_MAX`], read as vte reads it: each value
+/// saturated at `u16::MAX`, and nothing after the 32nd. What stays in
+/// `pending` is the same parameters written short (`ESC [`, then each
+/// stored value and the separator after it), so the parser reads the
+/// sequence the application wrote and the rewrite sees the values the
+/// parser will, in at most 193 bytes however long the sequence runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LongParams {
+    /// Values vte has stored: one for each separator so far.
+    stored: usize,
+    /// The value being read, or `None` before its first digit.
+    current: Option<u16>,
+}
+
+impl LongParams {
+    /// Rewrite `pending`, a plain CSI as written, into the short form.
+    fn compact(pending: &mut Vec<u8>) -> Self {
+        let params = pending.split_off(2);
+        let mut long = Self {
+            stored: 0,
+            current: None,
+        };
+        for b in params {
+            long.step(pending, b);
+        }
+        long
+    }
+
+    /// Read one more plain parameter byte.
+    fn step(&mut self, pending: &mut Vec<u8>, b: u8) {
+        if self.stored == VTE_MAX_PARAMS {
+            return;
+        }
+        if b.is_ascii_digit() {
+            let value = self.current.unwrap_or(0);
+            self.current = Some(value.saturating_mul(10).saturating_add(u16::from(b - b'0')));
+            return;
+        }
+        self.write_current(pending);
+        self.stored += 1;
+        // The separator after the 32nd value is left off: without it the
+        // final byte stores that value instead, the same parameters
+        // either way, where `rewrite_sgr` would read one more, empty, and
+        // take it for a reset.
+        if self.stored < VTE_MAX_PARAMS {
+            pending.push(b);
+        }
+    }
+
+    /// The short form complete, for the final byte to follow: the value
+    /// being read written after the stored ones, unless vte has no room
+    /// left for it.
+    fn finish(mut self, pending: &mut Vec<u8>) {
+        if self.stored < VTE_MAX_PARAMS {
+            self.write_current(pending);
+        }
+    }
+
+    /// The short form left for the parser to read the rest of the sequence
+    /// as it comes. With all 32 values stored, the separator that
+    /// [`step`](Self::step) left off goes back on, so the parser has no
+    /// room left either and ignores the digits that follow, as it would
+    /// have; without it they would be appended to the 32nd value.
+    fn flush(self, pending: &mut Vec<u8>) {
+        if self.stored == VTE_MAX_PARAMS {
+            pending.push(b';');
+        } else {
+            self.finish(pending);
+        }
+    }
+
+    fn write_current(&mut self, pending: &mut Vec<u8>) {
+        if let Some(value) = self.current.take() {
+            pending.extend_from_slice(value.to_string().as_bytes());
+        }
+    }
 }
 
 /// Rewrites the SGR colour forms `vt100` misreads into ones it reads right:
@@ -92,7 +198,8 @@ pub(super) struct AttrShadow {
     state: State,
     /// Bytes held back while this might be a plain SGR. Always emitted in
     /// the end — rewritten if it is one, verbatim if it is not — so the
-    /// shadow can never lose a byte that shapes the grid.
+    /// shadow can never lose a byte that shapes the grid. Never more than
+    /// [`CSI_HOLD_MAX`] of them.
     pending: Vec<u8>,
 }
 
@@ -120,10 +227,10 @@ impl AttrShadow {
         self.parser.screen_mut().set_scrollback(rows);
     }
 
+    /// Resized as the primary is, so the grids stay in step — see
+    /// [`resize_as_xterm`](super::vt100::resize_as_xterm).
     pub(super) fn set_size(&mut self, rows: u16, cols: u16) {
-        self.parser
-            .screen_mut()
-            .set_size(super::vt100::nz(rows), super::vt100::nz(cols));
+        super::vt100::resize_as_xterm(&mut self.parser, rows, cols);
     }
 
     /// The shadow cell at `(row, col)`, whose bold/italic/underline flags are
@@ -183,6 +290,9 @@ impl AttrShadow {
     }
 }
 
+/// `bytes` with every complete plain SGR replaced by what `rewrite` makes
+/// of it, and everything else as it came, but for the parameters of a CSI
+/// past [`CSI_HOLD_MAX`], which are written short ([`LongParams`]).
 fn rewrite_stream(
     state: &mut State,
     pending: &mut Vec<u8>,
@@ -194,6 +304,9 @@ fn rewrite_stream(
         // An ESC anywhere abandons whatever was being collected and starts a
         // new sequence, so the held bytes were not an SGR.
         if b == 0x1b {
+            if let State::CsiLong(long) = *state {
+                long.flush(pending);
+            }
             out.append(pending);
             pending.push(b);
             *state = State::Esc;
@@ -213,17 +326,25 @@ fn rewrite_stream(
             State::Csi => {
                 pending.push(b);
                 match b {
-                    // Parameter and intermediate bytes: keep collecting.
-                    0x20..=0x3f => {}
+                    // Parameter and intermediate bytes: keep collecting, as
+                    // far as the bound.
+                    0x20..=0x3f => {
+                        if pending.len() >= CSI_HOLD_MAX {
+                            if pending[2..].iter().all(|&b| plain_param(b)) {
+                                *state = State::CsiLong(LongParams::compact(pending));
+                            } else {
+                                // Not an SGR, whatever ends it: the rest
+                                // passes through as it comes.
+                                out.append(pending);
+                                *state = State::Ground;
+                            }
+                        }
+                    }
                     // Final byte: an SGR is rewritten, anything else passes
                     // through.
                     0x40..=0x7e => {
-                        let seq = std::mem::take(pending);
                         *state = State::Ground;
-                        match (b == b'm').then(|| rewrite(&seq)).flatten() {
-                            Some(rewritten) => out.extend_from_slice(&rewritten),
-                            None => out.extend_from_slice(&seq),
-                        }
+                        dispatch(pending, b, rewrite, &mut out);
                     }
                     // A control byte inside a CSI (CAN, SUB, …). vte decides
                     // what that means; preserve it rather than guessing.
@@ -233,9 +354,45 @@ fn rewrite_stream(
                     }
                 }
             }
+            State::CsiLong(long) => {
+                if plain_param(b) {
+                    long.step(pending, b);
+                    continue;
+                }
+                let long = *long;
+                *state = State::Ground;
+                if (0x40..=0x7e).contains(&b) {
+                    long.finish(pending);
+                    pending.push(b);
+                    dispatch(pending, b, rewrite, &mut out);
+                } else {
+                    // As in a CSI held whole: what was read goes out, and the
+                    // rest of the sequence passes through as it comes. The
+                    // parser is in the same state either way, since the
+                    // short form holds the same parameters.
+                    long.flush(pending);
+                    pending.push(b);
+                    out.append(pending);
+                }
+            }
         }
     }
     out
+}
+
+/// Emit the CSI in `pending`, whose final byte is `fin`: rewritten if it is
+/// an SGR `rewrite` has a form for, as it stands otherwise.
+fn dispatch(
+    pending: &mut Vec<u8>,
+    fin: u8,
+    rewrite: fn(&[u8]) -> Option<Vec<u8>>,
+    out: &mut Vec<u8>,
+) {
+    let seq = std::mem::take(pending);
+    match (fin == b'm').then(|| rewrite(&seq)).flatten() {
+        Some(rewritten) => out.extend_from_slice(&rewritten),
+        None => out.extend_from_slice(&seq),
+    }
 }
 
 /// One plain SGR in the form `vt100` reads right, or `None` to pass it
@@ -251,10 +408,7 @@ fn rewrite_stream(
 /// writes the semicolon form for `SetUnderlineColor`.
 fn normalize_for_grid(seq: &[u8]) -> Option<Vec<u8>> {
     let params = seq.get(2..seq.len().checked_sub(1)?)?;
-    if params
-        .iter()
-        .any(|b| !matches!(b, b'0'..=b'9' | b';' | b':'))
-    {
+    if !params.iter().all(|&b| plain_param(b)) {
         return None;
     }
     // The common case, checked without allocating: neither form is here.
@@ -331,10 +485,7 @@ fn normalize_for_grid(seq: &[u8]) -> Option<Vec<u8>> {
 fn rewrite_sgr(seq: &[u8]) -> Option<Vec<u8>> {
     // `ESC [ … m`
     let params = seq.get(2..seq.len().checked_sub(1)?)?;
-    if params
-        .iter()
-        .any(|b| !matches!(b, b'0'..=b'9' | b';' | b':'))
-    {
+    if !params.iter().all(|&b| plain_param(b)) {
         return None;
     }
 
@@ -370,6 +521,14 @@ fn rewrite_sgr(seq: &[u8]) -> Option<Vec<u8>> {
                     };
                 }
             }
+            // A group with a sub-parameter (`9:1`, `0:1`) carries nothing,
+            // not even a reset. xterm reads sub-parameters only on 38 and
+            // 48 and skips any other group that has one, and vt100 matches
+            // no such group, so the primary does nothing either: carrying
+            // the first value put an attribute on the cell that no terminal
+            // shows, beside the record saying the sequence was dropped
+            // (#688).
+            _ if group.contains(&b':') => i += 1,
             _ => {
                 if let Some(carrier) = carrier(v) {
                     out.push(carrier);
@@ -459,11 +618,10 @@ mod tests {
 
     /// The primary rewriter's output, as a readable string.
     fn normalized(bytes: &[u8]) -> String {
-        let mut state = State::Ground;
-        let mut pending = Vec::new();
-        let mut out = rewrite_stream(&mut state, &mut pending, bytes, normalize_for_grid);
+        let mut colors = ColorNormalizer::new();
+        let mut out = colors.feed(bytes);
         // Anything still held at the end of the stream is not a complete SGR.
-        out.append(&mut pending);
+        out.append(&mut colors.pending);
         String::from_utf8_lossy(&out).replace('\x1b', "E")
     }
 
@@ -567,6 +725,23 @@ mod tests {
     }
 
     #[test]
+    fn a_group_with_a_sub_parameter_carries_nothing() {
+        // xterm skips a group that has a sub-parameter unless it is 38 or
+        // 48, and vt100 matches none; the first value used to be carried
+        // as if the group were plain (#688).
+        assert_eq!(shadowed(b"\x1b[5:1mX"), "E[39mX");
+        assert_eq!(shadowed(b"\x1b[6:1mX"), "E[39mX");
+        assert_eq!(shadowed(b"\x1b[8:0mX"), "E[39mX");
+        assert_eq!(shadowed(b"\x1b[9:1mX"), "E[39mX");
+        // Not a reset either: vt100 carries none out for `0:1`, and the
+        // "off" forms would clear a carrier the primary still shows.
+        assert_eq!(shadowed(b"\x1b[0:1mX"), "E[39mX");
+        assert_eq!(shadowed(b"\x1b[25:1;28:0;29:1mX"), "E[39mX");
+        // A plain parameter beside one is still carried, in order.
+        assert_eq!(shadowed(b"\x1b[9;5:1;8mX"), "E[4;3mX");
+    }
+
+    #[test]
     fn anything_that_is_not_a_plain_sgr_passes_through_verbatim() {
         // Byte-for-byte passthrough is what keeps the shadow's geometry
         // identical to the primary's: only complete plain SGRs are touched.
@@ -635,6 +810,170 @@ mod tests {
                 String::from_utf8_lossy(seq)
             );
         }
+    }
+
+    /// A CSI of `len` bytes in all: `ESC [`, a run of `0`, then `tail`,
+    /// whose last byte is the final one. The zeros pad the first parameter
+    /// of `tail`, which keeps its value.
+    fn padded_csi(len: usize, tail: &[u8]) -> Vec<u8> {
+        let mut seq = b"\x1b[".to_vec();
+        seq.resize(len - tail.len(), b'0');
+        seq.extend_from_slice(tail);
+        assert_eq!(seq.len(), len);
+        seq
+    }
+
+    fn readable(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).replace('\x1b', "E")
+    }
+
+    #[test]
+    fn a_csi_as_long_as_the_hold_bound_is_held_as_written() {
+        let strike = padded_csi(CSI_HOLD_MAX, b"9m");
+        assert_eq!(shadowed(&strike), "E[4m");
+        let palette = padded_csi(CSI_HOLD_MAX, b"1;38:5:196m");
+        let zeros = "0".repeat(CSI_HOLD_MAX - "E[1;38:5:196m".len());
+        assert_eq!(normalized(&palette), format!("E[{zeros}1;38;5;196m"));
+        let cup = padded_csi(CSI_HOLD_MAX, b"2;4H");
+        assert_eq!(shadowed(&cup), readable(&cup));
+    }
+
+    #[test]
+    fn a_plain_csi_past_the_hold_bound_is_rewritten_from_vtes_values() {
+        // One byte past the bound the parameters are held as vte holds
+        // them (#730), and both rewriters work on that short form: the
+        // zeros padding a value are gone and the value is what it was.
+        let long = CSI_HOLD_MAX + 1;
+        assert_eq!(shadowed(&padded_csi(long, b"1;9m")), "E[4m");
+        assert_eq!(normalized(&padded_csi(long, b"1;9m")), "E[1;9m");
+        let palette = padded_csi(long, b"1;38:5:196m");
+        assert_eq!(normalized(&palette), "E[1;38;5;196m");
+        assert_eq!(shadowed(&palette), "E[39m");
+        let truecolor = padded_csi(long, b";38:2::1:2:3m");
+        assert_eq!(normalized(&truecolor), "E[0;38;2;1;2;3m");
+        // Not an SGR: the same parameters, the same final byte.
+        assert_eq!(shadowed(&padded_csi(long, b"2;4H")), "E[2;4H");
+        assert_eq!(normalized(&padded_csi(long, b"2;4H")), "E[2;4H");
+        // A value saturates where vte's does.
+        let huge = padded_csi(long, b"99999999;5m");
+        assert_eq!(normalized(&huge), "E[65535;5m");
+        assert_eq!(shadowed(&huge), "E[1m");
+    }
+
+    #[test]
+    fn a_long_csi_keeps_only_the_32_values_vte_stores() {
+        // vte stores 32 values and ignores every digit and separator after
+        // them, so the blink and the reset written past those are nobody's.
+        let mut seq = padded_csi(CSI_HOLD_MAX, b"9");
+        seq.extend_from_slice(";1".repeat(31).as_bytes());
+        seq.extend_from_slice(b";5;0:7;22m");
+        let kept = format!("9{}", ";1".repeat(31));
+        assert_eq!(normalized(&seq), format!("E[{kept}m"));
+        assert_eq!(shadowed(&seq), "E[4m");
+        // Split at the separator after the 32nd value, and one byte at a
+        // time, it reads the same.
+        let mut shadow = AttrShadow::new(4, 20, 0);
+        let mut out = Vec::new();
+        for b in &seq {
+            out.extend(shadow.rewrite_stream(std::slice::from_ref(b)));
+        }
+        assert_eq!(readable(&out), "E[4m");
+    }
+
+    #[test]
+    fn a_csi_past_the_hold_bound_that_is_not_plain_passes_through() {
+        let long = CSI_HOLD_MAX + 40;
+        // Shaped otherwise before the bound: every byte as it came.
+        for seq in [
+            [&b"\x1b[>"[..], &padded_csi(long, b"4m")[2..]].concat(),
+            [&b"\x1b[ "[..], &padded_csi(long, b"4m")[2..]].concat(),
+        ] {
+            assert_eq!(shadowed(&seq), readable(&seq));
+            assert_eq!(normalized(&seq), readable(&seq));
+        }
+        // Shaped otherwise after it: what was read in the short form, then
+        // the rest as it came. An intermediate makes it no SGR; CAN aborts
+        // it, and its `m` is a letter; an ESC starts the next sequence,
+        // which is held and rewritten as ever.
+        for (tail, expected) in [
+            (&b"4 m"[..], "E[4 m"),
+            (b"4$m", "E[4$m"),
+            (b"4\x18m", "E[4\x18m"),
+            (b"4\x1b[9mX", "E[4E[4mX"),
+        ] {
+            assert_eq!(shadowed(&padded_csi(long, tail)), expected, "{tail:?}");
+        }
+    }
+
+    #[test]
+    fn an_unterminated_csi_is_held_only_as_far_as_the_bound() {
+        // A megabyte of parameter bytes and no final byte, in reads of one
+        // byte, of seven, and of the reader's 8 KiB: neither rewriter holds
+        // more than the bound at any point (#730), and the split changes
+        // nothing. The value saturates, as vte's does.
+        let mut stream = b"\x1b[".to_vec();
+        stream.resize(1 << 20, b'1');
+        stream.extend_from_slice(b"mX\x1b[9mY");
+        for read in [1, 7, 8192, stream.len()] {
+            let mut shadow = AttrShadow::new(4, 20, 0);
+            let mut colors = ColorNormalizer::new();
+            let (mut shadowed, mut normalized) = (Vec::new(), Vec::new());
+            for chunk in stream.chunks(read) {
+                shadowed.extend(shadow.rewrite_stream(chunk));
+                normalized.extend(colors.feed(chunk));
+                for pending in [&shadow.pending, &colors.pending] {
+                    assert!(pending.len() <= CSI_HOLD_MAX, "{}", pending.len());
+                    assert!(pending.capacity() <= 2 * CSI_HOLD_MAX);
+                }
+            }
+            assert_eq!(readable(&shadowed), "E[39mXE[4mY", "reads of {read}");
+            assert_eq!(readable(&normalized), "E[65535mXE[9mY", "reads of {read}");
+        }
+    }
+
+    #[test]
+    fn a_long_csi_left_to_the_parser_leaves_it_as_full_as_it_was() {
+        // A BEL inside the CSI is executed and the sequence goes on, past
+        // the rewriters, to the parser. With 32 values stored vte ignores
+        // the `0` after it, so the 32nd value is still the italic `3`; the
+        // short form must leave the parser as full, or the `0` is appended
+        // to that value and makes it `30`, a foreground colour.
+        let mut seq = padded_csi(CSI_HOLD_MAX, b"0");
+        seq.extend_from_slice(";0".repeat(30).as_bytes());
+        seq.extend_from_slice(b";3;\x070mX");
+        let italic = |bytes: &[u8]| {
+            let mut parser =
+                ::vt100::Parser::new(super::super::vt100::nz(2), super::super::vt100::nz(10), 0);
+            parser.process(bytes);
+            parser.screen().cell(0, 0).unwrap().italic()
+        };
+        assert!(italic(&seq));
+        for split in [1, seq.len()] {
+            let mut colors = ColorNormalizer::new();
+            let mut shadow = AttrShadow::new(2, 10, 0);
+            let (mut normalized, mut shadowed) = (Vec::new(), Vec::new());
+            for chunk in seq.chunks(split) {
+                normalized.extend(colors.feed(chunk));
+                shadowed.extend(shadow.rewrite_stream(chunk));
+            }
+            assert!(italic(&normalized), "{}", readable(&normalized));
+            assert!(italic(&shadowed), "{}", readable(&shadowed));
+        }
+    }
+
+    #[test]
+    fn the_short_form_never_outgrows_the_bound() {
+        // The longest short form: 32 values of five digits each, and
+        // `u16::MAX` is the longest a value gets.
+        let mut seq = b"\x1b[".to_vec();
+        seq.extend_from_slice("000099999;".repeat(40).as_bytes());
+        let mut colors = ColorNormalizer::new();
+        let out = colors.feed(&seq);
+        assert!(out.is_empty());
+        assert_eq!(colors.pending.len(), 193);
+        let mut out = colors.feed(b"m");
+        out.truncate(out.len() - 1);
+        assert_eq!(readable(&out), format!("E[{}65535", "65535;".repeat(31)));
     }
 
     #[test]

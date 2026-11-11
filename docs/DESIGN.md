@@ -609,6 +609,14 @@ of reach until it is back (#622). The exit splits it just after its final
 byte, so the main screen is read back before anything scrolls it: a taller
 resize while it was hidden pulled rows back out of its history, and new
 rows scrolling off in the same feed would cancel that in the length (#682).
+A resize while the alternate screen is up reaches the main grid too, out of
+sight, so the emulator puts the main grid on display for it (`CSI ? 47 l`
+to both parsers, which in vt100 switches grids and nothing else, and
+`CSI ? 47 h` after) and copies and captures as if the main screen were up:
+a row the resize pushes is read at its own width, and a row it pulls back
+and pushes again is read again (#678). Bytes cannot be fed inside a
+sequence, so a resize that arrives while a read has left one open is still
+settled on the exit.
 At the length, vt100
 evicts from the front and its length stops changing, so growth is no
 longer visible there — and the rows cannot say it either, since
@@ -647,12 +655,16 @@ geometries, and says so where a caller meets it. A change of *height*
 moves rows the way xterm does (vt100 0.18): a shorter screen with the
 cursor on its last row pushes its top rows into history, and a taller one
 pulls the newest back onto the grid — where they leave the history, so no
-row is on record twice. RIS and ED 3 (`CSI 3 J`, which `clear` sends)
-empty the terminal's own history; the rows already retained survive both,
-since a record that forgets what a test may still assert on is worse than
-one a real terminal would have cleared. The alternate screen
-accumulates no history at all (vt100 gives the alternate grid none), which
-is what makes retention safe to default on for full-screen TUIs.
+row is on record twice. A taller screen moves down only by the rows the
+history holds, as xterm's `ScreenResize` does, and grows below for the
+rest; vt100 counts every row that ever scrolled off, and termlens resizes
+it in two steps so it adds no blank rows above the text (#684). RIS and ED
+3 (`CSI 3 J`, which `clear` sends) empty the terminal's own history; the
+rows already retained survive both, since a record that forgets what a
+test may still assert on is worse than one a real terminal would have
+cleared. The alternate screen accumulates no history at all (vt100 gives
+the alternate grid none), which is what makes retention safe to default on
+for full-screen TUIs.
 
 ## 3. Snapshot text format (spec)
 
@@ -1145,7 +1157,10 @@ recovered from **a second `vt100::Parser` fed the same byte stream with
 only SGR sequences rewritten**, so that three attributes vt100 does keep
 act as carriers for the three it drops (`5`/`6`→`1`, `8`→`3`, `9`→`4`, with
 `25`/`28`/`29` mapped to the matching resets and every other parameter
-dropped from the shadow stream).
+dropped from the shadow stream). A parameter written with a sub-parameter
+(`9:1`) is one of the dropped: xterm reads sub-parameters only on `38` and
+`48`, vt100 matches no such group, and carrying its first value put an
+attribute on the cell that no terminal shows (#688).
 
 This is sound for a reason that can be checked rather than hoped for: **in
 vt100, attributes never influence geometry.** `Attrs` is read in exactly
