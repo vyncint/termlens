@@ -79,7 +79,7 @@ tools/report-action-selftest/run.sh                     # …and the report acti
 tools/gates-listed-selftest/run.sh                      # …and the gates-listed gate, named, quoted and folded gates included
 tools/snippet-gate-selftest/run.sh                      # …and the snippet gate reads indented and variant-tagged Rust blocks
 tools/release-notes-selftest/run.sh                     # …and the release notes carry the link definitions their section uses
-.github/scripts/check-semver.sh 0.11.8                  # …and the public API is compatible with the last published release
+.github/scripts/check-semver.sh 0.11.9                  # …and the public API is compatible with the last published release
 ```
 
 The list is written out here rather than left as a pointer because a first

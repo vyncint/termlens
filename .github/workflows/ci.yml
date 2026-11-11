@@ -355,7 +355,7 @@ jobs:
           if printf '%s\n' "$labels" | grep -qx breaking; then breaking=true; else breaking=false; fi
           echo "BREAKING_LABEL=${breaking}"
           echo "BREAKING_LABEL=${breaking}" >> "$GITHUB_ENV"
-      - run: .github/scripts/check-semver.sh 0.11.8
+      - run: .github/scripts/check-semver.sh 0.11.9
         env:
           # The commit this change lands on: a pull request's base, or the
           # commit a push to main moved from. A push that creates its ref
