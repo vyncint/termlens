@@ -46,13 +46,35 @@ pub(crate) fn write_script(path: &std::path::Path, contents: &str) {
 /// Fixture names already rebuilt by this test process.
 static BUILT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// Set on a run of this test binary that [`rerun_self`] started: the
+/// process that started it has built every fixture already.
+const FIXTURES_BUILT: &str = "TERMLENS_TEST_FIXTURES_BUILT";
+
+/// A command that runs this test binary again, for a test that needs a
+/// process of its own (its own environment, or a second writer of the same
+/// artifact). The fixtures the run spawns are built here first, and the
+/// run is told so, and builds none: its `cargo build` would relink each
+/// one, removing the file before linking it again, while a test in this
+/// process runs it, which then finds nothing there (#278 again, on three
+/// macOS stress shards of the v0.11.9 release commit).
+#[allow(dead_code)]
+pub(crate) fn rerun_self(fixtures: &[&str]) -> std::io::Result<Command> {
+    for name in fixtures {
+        fixture_bin(name);
+    }
+    let mut cmd = Command::new(std::env::current_exe()?);
+    cmd.env(FIXTURES_BUILT, "1");
+    Ok(cmd)
+}
+
 /// Path to a fixture binary (a sibling workspace member, so
 /// `CARGO_BIN_EXE_*` is unavailable). Always runs `cargo build -p`
 /// once per fixture per test process: `cargo test` links test
 /// harnesses into `deps/` but does not refresh the plain bin artifact,
 /// so an existing `target/<profile>/<name>` can be stale and would
 /// silently test old fixture code. The build no-ops in milliseconds
-/// when everything is fresh (and stress.yml prebuilds --all-targets).
+/// when everything is fresh (and stress.yml prebuilds --all-targets). A
+/// run started by [`rerun_self`] builds nothing: its parent has.
 pub(crate) fn fixture_bin(name: &str) -> PathBuf {
     let profile = if cfg!(debug_assertions) {
         "debug"
@@ -74,7 +96,7 @@ pub(crate) fn fixture_bin(name: &str) -> PathBuf {
         .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
 
     let mut built = BUILT.lock().unwrap();
-    if !built.iter().any(|b| b == name) {
+    if !built.iter().any(|b| b == name) && std::env::var_os(FIXTURES_BUILT).is_none() {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let mut cmd = Command::new(cargo);
         cmd.args(["build", "-p", name]);

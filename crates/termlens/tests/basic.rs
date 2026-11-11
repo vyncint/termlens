@@ -200,7 +200,7 @@ fn columns_and_lines_are_not_inherited_but_can_be_set() -> termlens::Result<()> 
     const NAME: &str = "columns_and_lines_are_not_inherited_but_can_be_set";
     const CHILD: &str = "TERMLENS_COLUMNS_LINES_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let out = std::process::Command::new(std::env::current_exe()?)
+        let out = common::rerun_self(&["emit"])?
             .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
             .env(CHILD, "1")
             .env("COLUMNS", "200")
