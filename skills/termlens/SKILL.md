@@ -5,7 +5,7 @@ description: Write, fix or review headless terminal tests for a Rust CLI or TUI 
 
 # Testing terminal programs with termlens
 
-Written against **termlens 0.11.8**. 0.11.0 is the stability candidate:
+Written against **termlens 0.11.9**. 0.11.0 is the stability candidate:
 from it no promised public item changes incompatibly before 1.0, so the API below
 is one to build on, not one to expect to move. Every `rust` block below is
 a complete integration test that is compiled against the crate in CI, so
@@ -572,7 +572,7 @@ directory (see §9b).
   relative program path such as `./demo` is then found inside `DIR`.
 - In CI, set `TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens` and
   `INSTA_UPDATE: new` on the test step, and add
-  `uses: vyncint/termlens/.github/actions/report@v0.11.8` with
+  `uses: vyncint/termlens/.github/actions/report@v0.11.9` with
   `if: failure()` after it: every screen a failing wait embedded, and every
   `.snap.new` with its diff, lands in the pull request's step summary.
   `INSTA_UPDATE: new` is not optional: insta's default writes no `.snap.new`
@@ -591,7 +591,7 @@ directory (see §9b).
     env:
       TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens
       INSTA_UPDATE: new
-  - uses: vyncint/termlens/.github/actions/report@v0.11.8
+  - uses: vyncint/termlens/.github/actions/report@v0.11.9
     if: failure()
     with:
       artifact-dir: ${{ runner.temp }}/termlens
