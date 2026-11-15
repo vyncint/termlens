@@ -466,16 +466,17 @@ fn drop_stops_a_hangup_ignoring_helper_after_the_child_exited_unreaped() -> term
 /// that it stays unreaped.
 #[cfg(unix)]
 fn exited_unreaped(pid: u32) -> bool {
+    // id_t is u32 on Linux and macOS, but i32 on illumos and Solaris.
+    #[allow(clippy::useless_conversion)]
+    let id = libc::id_t::try_from(pid).expect("a child pid, which came from a pid_t, fits in id_t");
     // SAFETY: waitid only writes the zeroed siginfo_t it is handed, which
     // outlives the call, and si_pid reads a field of that same value.
     #[allow(unsafe_code)]
-    // `id_t` is `u32` on Linux and macOS, and may be wider elsewhere.
-    #[allow(clippy::useless_conversion)]
     unsafe {
         let mut info: libc::siginfo_t = std::mem::zeroed();
         let rc = libc::waitid(
             libc::P_PID,
-            pid.into(),
+            id,
             &mut info,
             libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
         );

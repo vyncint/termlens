@@ -17,6 +17,10 @@ reads that marker.
 
 ## [Unreleased]
 
+### Fixed
+
+- termlens now builds on illumos and Solaris.
+
 ## [0.11.9] - 2026-11-11
 
 ### Changed
