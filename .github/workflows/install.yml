@@ -317,7 +317,7 @@ jobs:
       # this always resolves; a missing tag fails the checkout by name, which
       # is the honest outcome for a version that was published from nothing
       # this repository can point at.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: v${{ steps.crate.outputs.version }}
           persist-credentials: false
