@@ -14,23 +14,31 @@ mod common;
 /// (#278). Same shape as `common::fixture_bin`'s guard, for the same reason.
 fn inspect_bin() -> &'static PathBuf {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let status = Command::new(cargo)
-            .args(["build", "-p", "termlens", "--example", "inspect"])
-            .status()
-            .expect("failed to run cargo build for the inspect example");
-        assert!(status.success(), "cargo build --example inspect failed");
+    BIN.get_or_init(|| common::cargo_built(&["-p", "termlens", "--example", "inspect"], "inspect"))
+}
 
-        let test_exe = std::env::current_exe().expect("test executable path is available");
-        let profile_dir = test_exe
-            .parent()
-            .and_then(|deps| deps.parent())
-            .expect("test executable is under target/<profile>/deps");
-        profile_dir
-            .join("examples")
-            .join(format!("inspect{}", std::env::consts::EXE_SUFFIX))
-    })
+/// What `common::cargo_built` reads out of Cargo's messages, on a stream
+/// shaped like the one `cargo build -p termlens-cli --bin termlens` prints:
+/// the library is also a target named `termlens` and has no executable, and
+/// other lines are not artifacts at all.
+#[test]
+fn the_built_path_is_the_one_cargo_reports_for_the_target() {
+    let messages = concat!(
+        r#"{"reason":"compiler-artifact","target":{"kind":["lib"],"name":"termlens"},"executable":null}"#,
+        "\n",
+        r#"{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"other"},"executable":"/t/debug/other"}"#,
+        "\n",
+        r#"{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"termlens"},"executable":"/t/debug/termlens"}"#,
+        "\n",
+        "warning: not a message\n",
+        r#"{"reason":"build-finished","success":true}"#,
+        "\n",
+    );
+    assert_eq!(
+        common::built_executable(messages, "termlens"),
+        Some(PathBuf::from("/t/debug/termlens"))
+    );
+    assert_eq!(common::built_executable(messages, "inspect"), None);
 }
 
 fn run_inspect(bin: &PathBuf, args: &[&str]) -> Output {
@@ -524,19 +532,7 @@ fn a_program_that_exits_after_the_silence_window_is_reported_exited_on_windows()
 fn command_bin() -> &'static PathBuf {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let status = Command::new(cargo)
-            .args(["build", "-p", "termlens-cli", "--bin", "termlens"])
-            .status()
-            .expect("failed to run cargo build for the termlens command");
-        assert!(status.success(), "cargo build --bin termlens failed");
-
-        let test_exe = std::env::current_exe().expect("test executable path is available");
-        let profile_dir = test_exe
-            .parent()
-            .and_then(|deps| deps.parent())
-            .expect("test executable is under target/<profile>/deps");
-        profile_dir.join(format!("termlens{}", std::env::consts::EXE_SUFFIX))
+        common::cargo_built(&["-p", "termlens-cli", "--bin", "termlens"], "termlens")
     })
 }
 
