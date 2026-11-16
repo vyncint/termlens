@@ -43,6 +43,57 @@ pub(crate) fn write_script(path: &std::path::Path, contents: &str) {
     assert!(status.success(), "writing {} failed", path.display());
 }
 
+/// Build one binary or example with Cargo and return the path Cargo gives
+/// for it. `target` selects it (`["-p", "termlens", "--example", "inspect"]`)
+/// and `name` is the target's name.
+///
+/// The path is read from Cargo's own `compiler-artifact` message. It used to
+/// be worked out from where this test binary sits, two directories up from
+/// `target/<profile>/deps/`, and Cargo 1.100 moved test binaries to
+/// `target/<profile>/build/<package>/<hash>/out/`: every test that ran a
+/// binary found that way failed with `NotFound`. Where Cargo keeps a test
+/// binary is its own business; where it put what it was asked to build is
+/// something it reports.
+///
+/// The build uses this test's profile, as [`fixture_bin`] does, so a
+/// `--release` test run measures a release binary.
+#[allow(dead_code)]
+pub(crate) fn cargo_built(target: &[&str], name: &str) -> PathBuf {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut cmd = Command::new(cargo);
+    cmd.arg("build").args(target);
+    if !cfg!(debug_assertions) {
+        cmd.arg("--release");
+    }
+    // The messages go to stdout; the build's own progress and any compile
+    // error stay on stderr, where a failing test shows them.
+    let out = cmd
+        .arg("--message-format=json")
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .expect("failed to run cargo build");
+    assert!(out.status.success(), "cargo build {target:?} failed");
+    let stdout = String::from_utf8(out.stdout).expect("cargo's messages are UTF-8");
+    built_executable(&stdout, name)
+        .unwrap_or_else(|| panic!("cargo build {target:?} reported no executable named {name}"))
+}
+
+/// The executable Cargo reports for the target `name` in a
+/// `--message-format=json` stream: the `executable` of its
+/// `compiler-artifact` message. A library, or a target that was not built,
+/// has none.
+#[allow(dead_code)]
+pub(crate) fn built_executable(messages: &str, name: &str) -> Option<PathBuf> {
+    messages
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|message| {
+            message["reason"] == "compiler-artifact" && message["target"]["name"] == name
+        })
+        .filter_map(|message| message["executable"].as_str().map(PathBuf::from))
+        .next_back()
+}
+
 /// Fixture names already rebuilt by this test process.
 static BUILT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
