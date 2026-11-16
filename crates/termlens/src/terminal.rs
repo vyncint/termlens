@@ -4853,16 +4853,17 @@ enum ChildState {
 /// will report it, rather than taking its status here.
 #[cfg(unix)]
 fn child_state(pid: u32) -> ChildState {
+    // id_t is u32 on Linux and macOS, but i32 on illumos and Solaris.
+    #[allow(clippy::useless_conversion)]
+    let id = libc::id_t::try_from(pid).expect("a child pid, which came from a pid_t, fits in id_t");
     // SAFETY: waitid only writes the zeroed siginfo_t it is handed, which
     // outlives the call, and si_pid reads a field of that same value.
     #[allow(unsafe_code)]
-    // `id_t` is `u32` on Linux and macOS, and may be wider elsewhere.
-    #[allow(clippy::useless_conversion)]
     let (rc, exited) = unsafe {
         let mut info: libc::siginfo_t = std::mem::zeroed();
         let rc = libc::waitid(
             libc::P_PID,
-            pid.into(),
+            id,
             &mut info,
             libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
         );

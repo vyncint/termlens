@@ -17,6 +17,18 @@ reads that marker.
 
 ## [Unreleased]
 
+### Fixed
+
+- termlens builds on illumos. `waitid` takes its id as `id_t`, which is
+  `i32` on illumos and Solaris where Linux and macOS have `u32`, and the
+  widening conversion the teardown used did not compile there ("the trait
+  bound `i32: From<u32>` is not satisfied"). The pid is now converted with
+  a checked conversion. illumos is not in CI: this was run by the
+  contributor on an illumos machine, and the workspace cross-compiles for
+  `x86_64-unknown-illumos` with clippy clean. Solaris shares the type but
+  does not build yet: `nix 0.28`, which `portable-pty 0.9` depends on, does
+  not compile for it. (#748)
+
 ## [0.11.9] - 2026-11-11
 
 ### Changed
