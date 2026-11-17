@@ -17,6 +17,8 @@ reads that marker.
 
 ## [Unreleased]
 
+## [0.11.10] - 2026-11-17
+
 ### Fixed
 
 - termlens builds on illumos. `waitid` takes its id as `id_t`, which is
@@ -3237,7 +3239,8 @@ in the worst of them — hung itself.
 [Keep a Changelog]: https://keepachangelog.com/en/1.1.0/
 [`Unsupported`]: https://docs.rs/termlens/0.11.0/termlens/struct.Unsupported.html
 
-[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.9...HEAD
+[Unreleased]: https://github.com/vyncint/termlens/compare/v0.11.10...HEAD
+[0.11.10]: https://github.com/vyncint/termlens/compare/v0.11.9...v0.11.10
 [0.11.9]: https://github.com/vyncint/termlens/compare/v0.11.8...v0.11.9
 [0.11.8]: https://github.com/vyncint/termlens/compare/v0.11.7...v0.11.8
 [0.11.7]: https://github.com/vyncint/termlens/compare/v0.11.6...v0.11.7
