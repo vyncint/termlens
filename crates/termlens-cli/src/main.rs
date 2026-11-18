@@ -318,7 +318,7 @@ fn read(source: Source<'_>) -> Result<Screen, String> {
         Cow::Borrowed(text)
     };
     let body = strip_insta_header(&text).trim_start_matches('\n');
-    if body.starts_with('{') {
+    if body.trim_start().starts_with('{') {
         return serde_json::from_str(body)
             .map_err(|e| format!("{name}: not a termlens Screen: {e}"));
     }

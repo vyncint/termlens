@@ -17,6 +17,12 @@ reads that marker.
 
 ## [Unreleased]
 
+### Fixed
+
+- Saved JSON screens with leading spaces, tabs or carriage returns are
+  recognized as JSON by `render` and `diff`, rather than rejected as text
+  snapshots with a missing `size:` header. (#786)
+
 ## [0.11.10] - 2026-11-17
 
 ### Fixed
