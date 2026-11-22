@@ -17,6 +17,14 @@ reads that marker.
 
 ## [Unreleased]
 
+### Changed
+
+- `Screen::unsupported()` lists a CSI with a `<` private marker with the
+  marker before the parameters, as it lists the `?`, `=` and `>` ones. The
+  kitty keyboard pop that crossterm sends (`CSI < 1 u`) was listed as
+  `^[[1<u`, which is not a sequence; it is now `^[[<1u`. A test that pins
+  the old spelling needs the new one. (#759)
+
 ### Fixed
 
 - Saved JSON screens with leading spaces, tabs or carriage returns are
