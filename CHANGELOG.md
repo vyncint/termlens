@@ -309,9 +309,10 @@ reads that marker.
   xterm's parser takes it whatever the parameters. It reset nothing: the
   rendition, the scroll margins and origin mode stayed as they were, and
   nothing was listed. `CSI SP ! p`, which xterm does not take for one, no
-  longer resets either, and is listed. A test that expected `CSI Ps ! p`
-  to leave the screen's state alone should expect it reset as by
-  `CSI ! p`. (#801)
+  longer resets either, and is listed. Written after the `!`
+  (`CSI ! 1 p`), a parameter makes the sequence ignored, as xterm and vte
+  ignore it. A test that expected `CSI Ps ! p` to leave the screen's
+  state alone should expect it reset as by `CSI ! p`. (#801)
 - CHT, CBT and TBC written with more than one parameter act on the first,
   as xterm's do: `CSI 1;2 I` moves to the next tab stop, `CSI 1;2 Z` to
   the previous one, and `CSI 3;5 g` clears every stop. They did nothing,
@@ -331,6 +332,16 @@ reads that marker.
   was right, but nothing said the sequence had been dropped. A test that
   expected an empty list beside one of these should expect its entry.
   (#804)
+- A parameter written after an intermediate makes a CSI one termlens
+  ignores, as xterm and vte do: vte reads such a sequence to its final
+  byte and dispatches nothing, and xterm's tables after `SP` and `$` send
+  the parameter to `CASE_CSI_IGNORE`. So `CSI SP 2 q` no longer sets the
+  cursor shape (`CSI 2 SP q` still does), `CSI ? $ 2026 p` is no longer
+  answered as a mode request, and `CSI $ 4 p` is no longer named in a
+  timeout. A test that expected `CSI SP Ps q` to change
+  `Screen::cursor_shape()`, or a reply or a timeout note for such a
+  request, should expect the shape the last well-formed `DECSCUSR` set,
+  and no reply or note. (#801)
 
 ### Fixed
 

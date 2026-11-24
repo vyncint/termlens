@@ -4738,6 +4738,14 @@ mod tests {
     /// origin mode included, and nothing was on record (#801). A
     /// sub-parameter is rejected there, and a `SP` before the `!` makes it
     /// another sequence.
+    ///
+    /// A parameter written *after* the `!` is not one: xterm's table for
+    /// `CSI !` sends a digit, `:` or `;` to `CASE_CSI_IGNORE` (VTPrsTbl.c
+    /// 1188-1201), and vte goes from its intermediate state to `CsiIgnore`,
+    /// so the sequence does nothing and, dispatched to nobody, is listed
+    /// nowhere. Taking every parameter for #801 made `CSI ! 1 p` a full
+    /// soft reset. The same holds after the `SP` of DECSCUSR (1837-1850):
+    /// `CSI SP 2 q` sets no cursor shape.
     #[test]
     fn a_soft_reset_written_with_a_parameter_is_one() {
         for reset in ["\x1b[1!p", "\x1b[0!p", "\x1b[1;2!p"] {
@@ -4763,6 +4771,34 @@ mod tests {
             assert!(s.cell(0, 0).unwrap().style().bold, "{other:?}");
             assert_eq!(s.unsupported(), [shape], "{other:?}");
         }
+        for ignored in ["\x1b[!1p", "\x1b[!;p", "\x1b[1!2p"] {
+            let stream = format!("\x1b(0\x1b[4h\x1b[1;5;9m{ignored}qX");
+            let (whole, bytewise) = whole_and_bytewise(4, 10, 0, stream.as_bytes());
+            assert_eq!(observed(&whole), observed(&bytewise), "{ignored:?}");
+            let s = whole.snapshot();
+            // The rendition, the character set and insert mode as they were.
+            assert_eq!(s.row_text(0).trim_end(), "\u{2500}X", "{ignored:?}");
+            let style = *s.cell(0, 0).unwrap().style();
+            assert!(
+                style.bold && style.blink && style.strikethrough,
+                "{ignored:?}: {style:?}"
+            );
+            assert!(s.insert_mode(), "{ignored:?}");
+            assert!(
+                s.unsupported().is_empty(),
+                "{ignored:?}: {:?}",
+                s.unsupported()
+            );
+            // Origin mode still on: the report counts from the top margin.
+            let emu = emu_with(format!("\x1b[2;4r\x1b[?6h\x1b[2;5H{ignored}").as_bytes());
+            assert_eq!(emu.reported_position(), (1, 4), "{ignored:?}");
+            // And the cursor still hidden.
+            let s = emu_with(format!("\x1b[?25l{ignored}").as_bytes()).snapshot();
+            assert!(!s.cursor().2, "{ignored:?}");
+        }
+        let s = emu_with(b"\x1b[4 q\x1b[ 2q").snapshot();
+        assert_eq!(s.cursor_shape(), crate::CursorShape::Underline);
+        assert!(s.unsupported().is_empty(), "{:?}", s.unsupported());
     }
 
     /// The tracker follows vt100's margins and origin mode, which vt100

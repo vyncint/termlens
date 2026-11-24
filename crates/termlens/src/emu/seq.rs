@@ -1732,6 +1732,18 @@ impl SeqTracker {
 
     /// Track one CSI parameter/intermediate byte.
     fn scan_csi_byte(&mut self, b: u8) {
+        // A parameter byte after an intermediate makes the sequence one
+        // nobody carries out: vte goes from its intermediate state to
+        // `CsiIgnore` and dispatches nothing, and xterm's tables after `!`,
+        // `SP` and `$` send it to `CASE_CSI_IGNORE` (VTPrsTbl.c 1188, 1837,
+        // 3137, 4437). Read on as a parameter, it made `CSI ! 1 p` a soft
+        // reset once DECSTR took parameters (#801), `CSI SP 2 q` a cursor
+        // shape, and `CSI ? $ 2026 p` a mode request.
+        if (0x30..=0x3f).contains(&b)
+            && self.csi_collected.iter().any(|c| (0x20..=0x2f).contains(c))
+        {
+            self.csi_invalid = true;
+        }
         if (0x20..=0x2f).contains(&b) || ((0x3c..=0x3f).contains(&b) && self.csi_first) {
             if let Some(slot) = self.csi_collected.iter_mut().find(|slot| **slot == 0) {
                 *slot = b;
@@ -4115,6 +4127,32 @@ mod tests {
         // sequence, not a DECSCUSR with extra decoration.
         assert_eq!(fed(b"\x1b[?5 q").cursor_style(), None);
         assert_eq!(fed(b"\x1b[5;2 q").cursor_style(), None);
+        // A parameter after the `SP` makes it nothing at all: vte ignores
+        // the sequence, and xterm's `CSI SP` table sends the digit to
+        // `CASE_CSI_IGNORE`.
+        assert_eq!(fed(b"\x1b[5 q\x1b[ 2q").cursor_style(), Some(5));
+    }
+
+    /// A parameter byte after an intermediate makes the CSI one vte ignores
+    /// (its intermediate state goes to `CsiIgnore`) and xterm ignores (the
+    /// tables after `!`, `SP` and `$` send it to `CASE_CSI_IGNORE`), so the
+    /// tracker acts on none of them. Read on, `CSI ! 1 p` was a soft reset
+    /// once #801 let DECSTR take parameters, which come before the `!`.
+    #[test]
+    fn a_parameter_after_an_intermediate_makes_the_csi_nothing() {
+        let resets = |bytes: &[u8]| {
+            let mut t = SeqTracker::new(crate::graphics::DEFAULT_CAPTURE, TEST_ROWS, TEST_COLS);
+            bytes
+                .iter()
+                .filter(|&&b| t.step(b) == SeqEvent::SoftReset)
+                .count()
+        };
+        for ignored in [&b"\x1b[!1p"[..], b"\x1b[!;p", b"\x1b[1!2p", b"\x1b[!1:2p"] {
+            assert_eq!(resets(ignored), 0, "{ignored:?}");
+        }
+        for reset in [&b"\x1b[!p"[..], b"\x1b[1!p", b"\x1b[1;2!p"] {
+            assert_eq!(resets(reset), 1, "{reset:?}");
+        }
     }
 
     /// `SP` is the intermediate of DECSCUSR *and* of SL/SR (`CSI Ps SP @`
@@ -5110,6 +5148,12 @@ mod tests {
             queries_of(b"\x1b[4$p"),
             vec![Query::Unanswerable("^[[4$p".into())]
         );
+        // The mode written after the `$` is no request: vte ignores the
+        // sequence, and so does xterm (`csi_dollar_table` and
+        // `csi_dec_dollar_table` send the digit to `CASE_CSI_IGNORE`), so
+        // nothing answers it or names it.
+        assert_eq!(queries_of(b"\x1b[?$2026p"), vec![]);
+        assert_eq!(queries_of(b"\x1b[$4p"), vec![]);
     }
 
     #[test]
