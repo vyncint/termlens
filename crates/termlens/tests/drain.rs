@@ -272,3 +272,75 @@ fn a_zero_timeout_send_to_a_reading_application_succeeds() -> termlens::Result<(
     t.wait_until_for(|s| s.contains("line-10"), Duration::from_secs(10))?;
     Ok(())
 }
+
+/// On Windows a send has a deadline too (#771). There the master cannot
+/// be duplicated, so no writer thread was started: a send wrote on the test
+/// thread, under the lock the reader writes query replies under, with no
+/// deadline at all. Whether ConPTY's input pipe ever fills, so that the
+/// write blocks, nobody had measured; this asks it with an application that
+/// never reads, and a watchdog, so that a write that never returns fails
+/// here instead of holding the CI job to its own limit.
+///
+/// The measurement goes straight to stderr, past the test harness's
+/// capture, so that the `windows` workflow's log records it whether this
+/// passes or not.
+#[cfg(windows)]
+#[test]
+fn a_send_to_an_application_that_never_reads_returns_by_its_deadline() -> termlens::Result<()> {
+    use std::io::Write as _;
+    use std::sync::mpsc;
+
+    const SIZE: usize = 64 << 20;
+    // The send's deadline, which the rustdoc promises it keeps.
+    const DEADLINE: Duration = Duration::from_secs(1);
+    // Far past that deadline: only a send that is not coming back reaches it.
+    const WATCHDOG: Duration = Duration::from_secs(20);
+
+    let mut t = common::spawn_emit(
+        Terminal::builder().timeout(DEADLINE),
+        &["ready", "--sleep", "60s"],
+    )?;
+    t.wait_until_for(|s| s.contains("ready"), Duration::from_secs(10))?;
+    let (sent_tx, sent) = mpsc::channel();
+    let (dropped_tx, dropped) = mpsc::channel();
+    std::thread::spawn(move || {
+        let start = Instant::now();
+        let outcome = t.send_str(&"x".repeat(SIZE));
+        let _ = sent_tx.send((start.elapsed(), outcome));
+        let start = Instant::now();
+        drop(t);
+        let _ = dropped_tx.send(start.elapsed());
+    });
+    let (took, outcome) = match sent.recv_timeout(WATCHDOG) {
+        Ok(sent) => sent,
+        Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+            "send_str of {SIZE} bytes to a program that never reads, with a {DEADLINE:?} \
+             deadline, did not return in {WATCHDOG:?}: the send has no deadline (#771)"
+        ),
+        Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the send panicked; see above"),
+    };
+    let summary = match &outcome {
+        Ok(()) => "Ok".to_owned(),
+        Err(e) => e.to_string().lines().next().unwrap_or_default().to_owned(),
+    };
+    let _ = writeln!(
+        std::io::stderr(),
+        "#771 measurement: send_str({SIZE} bytes), deadline {DEADLINE:?}: {summary} after {took:?}"
+    );
+    match dropped.recv_timeout(WATCHDOG) {
+        Ok(took) => {
+            let _ = writeln!(std::io::stderr(), "#771 measurement: drop took {took:?}");
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("dropping the terminal after the send did not return in {WATCHDOG:?}")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the drop panicked; see above"),
+    }
+    match outcome {
+        // ConPTY took everything: the write never had to give up.
+        Ok(()) => {}
+        Err(Error::Write { what, .. }) => assert!(what.contains("not reading its input"), "{what}"),
+        Err(other) => panic!("a send that cannot be written fails as Error::Write: {other}"),
+    }
+    Ok(())
+}
