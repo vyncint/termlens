@@ -912,8 +912,18 @@ impl Recorder {
     /// synchronized update — the diagnosis [`wait_frame`](Terminal::wait_frame)
     /// gives. A recording is made of complete frames; sampling the grid on a
     /// timer instead would be the torn-frame problem in a new hat.
+    /// [`Error::Emulator`] once the emulation has failed, as every wait
+    /// returns it: no frame after the failure was seen, so the recording
+    /// would end there without saying so.
     pub fn stop(self) -> Result<Recording> {
         let frames_seen = self.deregister();
+        // Ahead of the count, as `resize` puts it ahead of its own refusal
+        // (#702): frames completed after the panic were never seen, so
+        // "never emitted a synchronized update" could be false, and frames
+        // recorded before it made a recording cut at the panic (#776).
+        if let Some(failure) = self.shared.lock().emulator_failure() {
+            return Err(failure);
+        }
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if frames_seen == 0 {
             return Err(Error::Input(
@@ -5637,6 +5647,54 @@ mod tests {
             other => panic!("expected Error::Emulator, got {other:?}"),
         }
         assert_eq!(late_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// `Recorder::stop` after an emulator panic returns the panic, as
+    /// every wait and `resize` do (#776). It said the application "never
+    /// emitted a DEC 2026 synchronized update", though its frame came after
+    /// the emulator stopped seeing anything; and with a frame recorded
+    /// before the panic it returned `Ok`, a recording cut at the panic
+    /// passing for a whole one.
+    #[cfg(unix)]
+    #[test]
+    fn a_recording_across_an_emulator_panic_stops_with_the_panic() {
+        use std::time::Duration;
+
+        // A frame only after the panic, then one before it as well.
+        for frame_first in [false, true] {
+            let (armed, late_calls) = faulty_next_spawn();
+            let mut t = crate::Terminal::builder()
+                .size(40, 6)
+                .args([
+                    "-c",
+                    r"read line; printf '\033[?2026hframe 1\033[?2026l'; read line; printf '\033[?2026hframe 2\033[?2026l'; read line",
+                ])
+                .spawn("sh")
+                .expect("spawns");
+            let recorder = t.record();
+            if frame_first {
+                t.send_str("a\r").expect("the child is reading");
+                t.wait_frame_for(|s| s.contains("frame 1"), Duration::from_secs(10))
+                    .expect("the child drew a frame");
+            }
+            // The echo of this line is the emulator's next read, and it
+            // panics; the frame drawn after it is never seen.
+            armed.store(true, Ordering::SeqCst);
+            t.send_str("go\r").expect("the child is reading");
+            match t.wait_until_for(|s| s.contains("never"), Duration::from_secs(10)) {
+                Err(Error::Emulator { .. }) => {}
+                other => panic!("expected Error::Emulator, got {other:?}"),
+            }
+            match recorder.stop() {
+                Err(Error::Emulator { detail, .. }) => {
+                    assert_eq!(detail, "an injected emulator fault");
+                }
+                other => {
+                    panic!("frame first: {frame_first}: expected Error::Emulator, got {other:?}")
+                }
+            }
+            assert_eq!(late_calls.load(Ordering::SeqCst), 0);
+        }
     }
 
     fn panicking_state() -> Monitor<EmuState> {

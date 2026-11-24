@@ -93,6 +93,13 @@ reads that marker.
   full-throughput stream, and `wait_frame` keeps the live screen when it
   returns a frame. Found by fault injection: no input is known to make the
   emulator panic. (#775)
+- `Recorder::stop` after an emulator panic returns that panic,
+  `Error::Emulator`, as every wait and `resize` do. It said the
+  application "never emitted a DEC 2026 synchronized update" when its
+  frames came after the emulator had stopped seeing anything, and with
+  frames recorded before the panic it returned `Ok`, a recording cut at
+  the panic with nothing to say so. Found by fault injection: no input is
+  known to make the emulator panic. (#776)
 
 ## [0.11.10] - 2026-11-17
 
