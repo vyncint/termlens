@@ -176,10 +176,12 @@ reads that marker.
   the timeout said nothing of them, so its screen read as an application
   that drew nothing in answer; one outside suite blamed the harness for
   keys queued behind a stalled read. The count is the terminal's own, so
-  in canonical mode it counts complete lines only. Windows and the other
-  Unixes leave the note out rather than guess. A test that matched a whole
-  timeout message, not a part of it, should expect the added clause.
-  (#790)
+  in canonical mode it counts complete lines only, and on Linux it stops
+  at the 4,095 bytes the line discipline's 4 KiB read buffer holds, where
+  more can wait behind them: at that count the note says "at least 4095
+  bytes". Windows and the other Unixes leave the note out rather than
+  guess. A test that matched a whole timeout message, not a part of it,
+  should expect the added clause. (#790)
 
 - An image taller than the screen scrolls it as far as kitty and xterm
   scroll it: by as many rows as its last row is past the bottom margin, and,

@@ -152,7 +152,8 @@ Every wait has a `_for(…, timeout)` twin for one slow step. Input calls are
 bounded too: typing into an application that has stopped reading, or into a
 child that has exited, is an error carrying the screen rather than a hang.
 On Linux and macOS a wait that times out also says how many bytes of input
-the application left unread, when it left any.
+the application left unread, when it left any; past the 4 KiB the Linux
+line discipline's read buffer holds, it says "at least" that many.
 The three rules for race-free waits — one predicate per instant, wait on
 the last thing painted, settle before whole-screen snapshots — are
 [docs/DESIGN.md](https://github.com/vyncint/termlens/blob/main/docs/DESIGN.md) §2.

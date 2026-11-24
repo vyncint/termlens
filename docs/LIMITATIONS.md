@@ -260,10 +260,13 @@ CHANGELOG entry.
   macOS only.** The count is the terminal's own, the slave's `FIONREAD`,
   so it is what a read would return at once: in raw mode every byte
   queued, query replies included, and in canonical mode only complete
-  lines, so a line still waiting for its Enter is not counted. Elsewhere
-  the note is left out rather than guessed: the other Unixes are not
-  measured, and on Windows ConPTY keeps typed input on its own side of the
-  pipe, where nothing can count it.
+  lines, so a line still waiting for its Enter is not counted. On Linux it
+  stops at 4,095 bytes, what n_tty's 4 KiB read buffer (`N_TTY_BUF_SIZE`)
+  holds; a raw-mode program can have more queued behind that, so at 4,095
+  the note says "at least 4095 bytes" (5,000 and 10,000 queued were both
+  counted as 4,095). Elsewhere the note is left out rather than guessed:
+  the other Unixes are not measured, and on Windows ConPTY keeps typed
+  input on its own side of the pipe, where nothing can count it.
 
 ## Windows
 

@@ -3969,6 +3969,9 @@ impl Terminal {
         match unread {
             None | Some(0) => String::new(),
             Some(1) => " — note: the application left 1 byte of input unread".to_owned(),
+            Some(n) if n >= UNREAD_COUNT_CAP => {
+                format!(" — note: the application left at least {n} bytes of input unread")
+            }
             Some(n) => format!(" — note: the application left {n} bytes of input unread"),
         }
     }
@@ -5674,6 +5677,18 @@ fn unblock_teardown(master: &dyn portable_pty::MasterPty) {
     }
 }
 
+/// The count of unread input at which the note says "at least": what Linux's
+/// line discipline keeps where a read can take it. n_tty's read buffer is
+/// `N_TTY_BUF_SIZE`, 4096 bytes, of which it fills 4095, and the slave's
+/// `FIONREAD` counts that buffer alone; input past it waits in the tty's
+/// own buffers. Measured: a raw-mode program that read nothing was sent
+/// 5,000 and 10,000 bytes, every one taken by the kernel and read by the
+/// program later, and each count was 4095, which the note gave as all of
+/// it. The note says "at least" at this count on every platform: a count
+/// never exceeds what is unread, so it is never false, and only Linux's
+/// count is known to stop here.
+const UNREAD_COUNT_CAP: usize = 4095;
+
 /// How many bytes sit in the terminal's input queue that the application
 /// has not read: input it could read now and has not (#790).
 ///
@@ -5691,7 +5706,9 @@ fn unblock_teardown(master: &dyn portable_pty::MasterPty) {
 /// The count is what a read would return at once: in canonical mode the
 /// complete lines, so a line still waiting for its Enter, which the
 /// application cannot read yet, is not counted. A query reply the
-/// application has not read is input too, and counted.
+/// application has not read is input too, and counted. It stops at what the
+/// line discipline's read buffer holds, [`UNREAD_COUNT_CAP`] on Linux, where
+/// more can be queued behind it.
 ///
 /// Linux and macOS only, and `None` wherever the count cannot be had, so
 /// that a platform that cannot measure it omits the note rather than

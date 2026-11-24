@@ -226,11 +226,17 @@ the count is not zero. termlens keeps no slave descriptor past that one
 call, since one would hide the EOF every exit is read from, and after the
 close the master still sees it. The count is the kernel's answer to "how
 much would a read return now": every queued byte in raw mode, query
-replies included, and only complete lines in canonical mode. Linux is
-measured, macOS reads `FIONREAD` from its terminal queues too and CI's
-leg runs the test that holds the count, and everywhere else the note is
-left out, never guessed: the other Unixes are unmeasured, and ConPTY keeps
-typed input on its own side of the pipe.
+replies included, and only complete lines in canonical mode, up to what
+the line discipline's read buffer holds. On Linux that is 4,095 bytes:
+n_tty's buffer is `N_TTY_BUF_SIZE`, 4 KiB, and input past it waits in the
+tty's own buffers, where `FIONREAD` does not look. A raw-mode program that
+read nothing was sent 5,000 and then 10,000 bytes, the kernel took them
+all and the program read them all later, and both were counted as 4,095,
+which the note gave as the whole. So at 4,095 the note says "at least
+4095 bytes". Linux is measured, macOS reads `FIONREAD` from its terminal
+queues too and CI's leg runs the test that holds the count, and everywhere
+else the note is left out, never guessed: the other Unixes are unmeasured,
+and ConPTY keeps typed input on its own side of the pipe.
 
 `XTGETTCAP` is answered from a table of capabilities the crate actually
 implements, and every entry was checked against the code that implements it
