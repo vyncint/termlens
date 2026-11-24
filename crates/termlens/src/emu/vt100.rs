@@ -569,13 +569,25 @@ impl Vt100Emulator {
     /// the cursor back where the reset found it. xterm's soft reset moves
     /// no cursor, but vt100 homes it on each margin and origin reset the
     /// replay makes, and the replay homes it once more to save it there.
-    /// The move back is absolute, since origin mode is off by then. A
-    /// cursor pending wrap comes back onto the last column, not past it:
-    /// `CUP` cannot address the column past the margin.
+    /// The move back is absolute, since origin mode is off by then.
+    ///
+    /// A cursor pending wrap goes back pending, since xterm's soft reset
+    /// keeps its wrap flag. `CUP` cannot address the column past the
+    /// margin, and moving back onto the last column made the next
+    /// character overwrite it rather than start the next row (#753), so
+    /// the last column is drawn again, which is the one way to put a
+    /// cursor back there.
     fn soft_reset(&mut self) {
-        let (row, col) = self.cursor_position();
+        let screen = self.parser.screen();
+        let (row, col) = screen.cursor_position();
+        let (_, cols) = size(screen);
         self.feed(SOFT_RESET_REPLAY);
-        self.feed(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
+        if col < cols {
+            self.feed(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
+        } else {
+            self.feed(format!("\x1b[{}d", row + 1).as_bytes());
+            self.redraw_last_column(row);
+        }
     }
 
     /// The cursor as a snapshot should report it: a column pending wrap
@@ -3999,6 +4011,41 @@ mod tests {
     fn a_soft_reset_homes_the_saved_cursor() {
         let s = emu_with(b"\x1b(0\x1b[3;5H\x1b7\x1b[!p\x1b[2;2H\x1b8q").snapshot();
         assert_eq!(s.find("q"), Some((0, 0)), "{s}");
+    }
+
+    /// `DECSTR` at a pending wrap leaves it pending: xterm's soft reset
+    /// never clears its wrap flag, so the next character starts the next
+    /// row, scrolling on the last one, and a wide character in the last
+    /// two columns stays whole. The replay's `CUP` cannot address the
+    /// column past the margin, and the next character overwrote the last
+    /// one (#753). Whole and a character at a time; the last column keeps
+    /// its attributes, the shadow's included, and the text after the reset
+    /// is plain.
+    #[test]
+    fn a_soft_reset_keeps_a_pending_wrap() {
+        for (stream, text, cursor) in [
+            ("abcde\x1b[!pX", "abcde\nX\n\n", (1, 1)),
+            ("abc\u{6f22}\x1b[!pX", "abc\u{6f22}\nX\n\n", (1, 1)),
+            ("\x1b[4;1Habcde\x1b[!pX", "\n\nabcde\nX", (3, 1)),
+            ("\x1b[4;1Habc\u{6f22}\x1b[!pX", "\n\nabc\u{6f22}\nX", (3, 1)),
+            ("\x1b[1;5;9mabcde\x1b[!pX", "abcde\nX\n\n", (1, 1)),
+        ] {
+            let (whole, bytewise) = whole_and_bytewise(4, 5, 0, stream.as_bytes());
+            assert_eq!(observed(&whole), observed(&bytewise), "{stream:?}");
+            let s = whole.snapshot();
+            assert_eq!(s.text(), text, "{stream:?}: {s}");
+            let (row, col) = cursor;
+            assert_eq!(s.cursor(), (row, col, true), "{stream:?}: {s}");
+            assert!(s.row_wrapped(row - 1), "{stream:?}: {s}");
+            assert_eq!(
+                *s.cell(row, 0).unwrap().style(),
+                Style::default(),
+                "{stream:?}: {s}"
+            );
+        }
+        let s = emu_with_size(4, 5, b"\x1b[1;5;9mabcde\x1b[!pX").snapshot();
+        let last = *s.cell(0, 4).unwrap().style();
+        assert!(last.bold && last.blink && last.strikethrough, "{last:?}");
     }
 
     /// The tracker follows vt100's margins and origin mode, which vt100

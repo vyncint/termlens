@@ -24,6 +24,14 @@ reads that marker.
   kitty keyboard pop that crossterm sends (`CSI < 1 u`) was listed as
   `^[[1<u`, which is not a sequence; it is now `^[[<1u`. A test that pins
   the old spelling needs the new one. (#759)
+- A soft reset (`DECSTR`, `CSI ! p`) at a pending wrap leaves the wrap
+  pending, as xterm's soft reset does and as 0.11.8 did: the next
+  character starts the next row, and on the last row the screen scrolls.
+  Since 0.11.9 the reset put the cursor back onto the last column, so the
+  next character overwrote it, and a wide character in the last two
+  columns was erased. A test that pinned the overwritten row should expect
+  the last column kept and the text after the reset on the next row.
+  (#753)
 
 ### Fixed
 
