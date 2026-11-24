@@ -351,3 +351,65 @@ fn a_send_to_an_application_that_never_reads_returns_by_its_deadline() -> termle
     );
     Ok(())
 }
+
+/// A timeout names the input the application left unread (#790). An
+/// application that has stopped reading looks, in the timeout's screen,
+/// like one that read a key and drew nothing for it; one outside suite
+/// blamed termlens for keys that sat in the terminal's input queue behind
+/// a stalled read. The count is the slave's: in raw mode, the mode a TUI
+/// runs in, every byte sent; in canonical mode the complete lines, since a
+/// line still waiting for its Enter cannot be read yet.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY keeps typed input on its own side of the pipe, so there is no queue to count (#790)"
+)]
+fn a_timeout_names_the_input_the_application_left_unread() -> termlens::Result<()> {
+    // Each wait below must expire, so each names its own short deadline;
+    // the markers before them get the builder's generous one.
+    const EXPIRES: Duration = Duration::from_millis(500);
+    let builder = || {
+        Terminal::builder()
+            .size(80, 6)
+            .timeout(Duration::from_secs(10))
+    };
+    let expire = |t: &mut Terminal| match t.wait_until_for(|s| s.contains("never drawn"), EXPIRES) {
+        Err(err @ Error::Timeout { .. }) => err.to_string(),
+        other => panic!("nothing draws it, so the wait expires: {other:?}"),
+    };
+    let names = |message: &str, bytes: usize| {
+        let note = format!("the application left {bytes} bytes of input unread");
+        assert!(message.contains(&note), "no `{note}` in: {message}");
+    };
+
+    // `--idle` never reads its input.
+    let mut raw = common::spawn_emit(builder(), &["--raw-mode", "READY", "--idle"])?;
+    raw.wait_until(|s| s.contains("READY"))?;
+    raw.send_str(&"x".repeat(100))?;
+    names(&expire(&mut raw), 100);
+    // Counting opened the slave and closed it again. The master must still
+    // see the EOF of an exit, which is how every exit is read; a slave
+    // descriptor left open would hold it off, and this wait would time out.
+    // (`signal` is Unix-only; the test is ignored on Windows.)
+    #[cfg(unix)]
+    {
+        raw.signal(termlens::Signal::Term)?;
+        raw.wait_exit()?;
+        match raw.wait_until_for(|s| s.contains("never drawn"), Duration::from_secs(10)) {
+            Err(Error::Eof { .. }) => {}
+            other => panic!("the program exited, so the wait ends at EOF: {other:?}"),
+        }
+    }
+
+    let mut cooked = common::spawn_emit(builder(), &["READY", "--idle"])?;
+    cooked.wait_until(|s| s.contains("READY"))?;
+    cooked.send_str("abc")?;
+    let partial = expire(&mut cooked);
+    assert!(
+        !partial.contains("input unread"),
+        "a line without its end is not readable yet: {partial}"
+    );
+    cooked.send_str("\n")?;
+    names(&expire(&mut cooked), 4);
+    Ok(())
+}

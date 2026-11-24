@@ -163,6 +163,17 @@ reads that marker.
   program leaves a helper running on purpose under SIGCHLD ignored must
   have the helper leave the group (`setsid`), as it already had to under
   the default disposition. (#774)
+- A wait that times out on Linux or macOS names the input the application
+  left unread, when it left any: "…while waiting for the screen predicate
+  to hold — note: the application left 100 bytes of input unread". Keys an
+  application has stopped reading sit in the terminal's input queue, and
+  the timeout said nothing of them, so its screen read as an application
+  that drew nothing in answer; one outside suite blamed the harness for
+  keys queued behind a stalled read. The count is the terminal's own, so
+  in canonical mode it counts complete lines only. Windows and the other
+  Unixes leave the note out rather than guess. A test that matched a whole
+  timeout message, not a part of it, should expect the added clause.
+  (#790)
 
 ### Fixed
 

@@ -10,7 +10,7 @@ issues in escape-sequence handling) are treated as security issues.
 
 What the project does continuously, enforced by required CI on every change:
 
-- **`unsafe` is confined to eight audited blocks, all Unix-only.** Three
+- **`unsafe` is confined to nine audited blocks, all Unix-only.** Three
   are single lines. `BorrowedFd::borrow_raw` borrows the PTY master's
   descriptor, which std then duplicates, close-on-exec, into the responder
   thread's second writer. `access(2)` resolves the program the way the PTY
@@ -26,7 +26,10 @@ What the project does continuously, enforced by required CI on every change:
   step by step, with two changes: inherited descriptors are marked
   close-on-exec rather than closed, so that a failed exec can be reported
   (#563), and the umask step is left out because termlens never sets a
-  umask. Each block sits under its own `SAFETY` comment and carries its own
+  umask. The ninth asks `ioctl(2)` with `FIONREAD` how many bytes of input
+  the application left unread, through a descriptor of the slave opened
+  for that one call, so a wait's timeout can say so (#790); it writes one
+  `int`. Each block sits under its own `SAFETY` comment and carries its own
   `#[allow(unsafe_code)]`.
   The workspace sets `unsafe_code = "warn"` and CI runs clippy with
   `-D warnings`, so a new block fails unless it carries that `#[allow]` as

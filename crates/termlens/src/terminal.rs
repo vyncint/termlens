@@ -3913,6 +3913,21 @@ impl Terminal {
         )
     }
 
+    /// The timeout note's clause on the input the application left unread,
+    /// or nothing: nothing queued, or a platform where [`unread_input`]
+    /// cannot count it. Taken with no lock held, since it opens a device.
+    fn unread_note(&self) -> String {
+        let unread = self
+            .master
+            .as_deref()
+            .and_then(|master| unread_input(master));
+        match unread {
+            None | Some(0) => String::new(),
+            Some(1) => " — note: the application left 1 byte of input unread".to_owned(),
+            Some(n) => format!(" — note: the application left {n} bytes of input unread"),
+        }
+    }
+
     /// Write to the child, bounded by the default deadline.
     ///
     /// Writes into a PTY block once the application stops reading its
@@ -4163,7 +4178,11 @@ impl Terminal {
                     ""
                 };
                 Err(Error::Timeout {
-                    waiting_for: format!("{what}{silent}{note}{}", history_note(&screen)),
+                    waiting_for: format!(
+                        "{what}{silent}{note}{}{}",
+                        self.unread_note(),
+                        history_note(&screen)
+                    ),
                     timeout,
                     screen,
                 }
@@ -4363,12 +4382,12 @@ impl Terminal {
                 // picture that claims to be current — and what changed
                 // between that frame and the live grid is shown as a diff,
                 // which is the question a stuck wait actually asks.
-                let (frames, screen, note) = {
+                let (frames, screen, query) = {
                     let mut guard = self.shared.lock();
                     let screen = guard.snapshot();
-                    let note = format!("{}{}", guard.query_note(), history_note(&screen));
-                    (guard.frames_seen, screen, note)
+                    (guard.frames_seen, screen, guard.query_note())
                 };
+                let note = format!("{query}{}{}", self.unread_note(), history_note(&screen));
                 // What put the cursor where it is: the resize that moved it
                 // last, or else a frame an earlier wait returned. The message
                 // names that one, since the other never happened (#705).
@@ -4529,8 +4548,9 @@ impl Terminal {
                     None
                 };
                 let screen = guard.snapshot();
-                let note = guard.query_note();
+                let query = guard.query_note();
                 drop(guard);
+                let note = format!("{query}{}", self.unread_note());
                 let waiting_for = if stuck_mid_frame {
                     format!(
                         "{quiet:?} of output silence — the application is inside an \
@@ -4739,8 +4759,9 @@ impl Terminal {
                     None
                 };
                 let screen = guard.snapshot();
-                let note = format!("{}{}", guard.query_note(), history_note(&screen));
+                let query = guard.query_note();
                 drop(guard);
+                let note = format!("{query}{}{}", self.unread_note(), history_note(&screen));
                 let waiting_for = if stuck_mid_frame {
                     format!(
                         "the screen to hold still for {quiet:?} — the application is inside \
@@ -4911,11 +4932,12 @@ impl Terminal {
             }
             let now = Instant::now();
             if now >= deadline {
+                let query = self.shared.lock().query_note();
                 return Err(Error::Timeout {
                     waiting_for: format!(
-                        "`{}` to exit{}",
+                        "`{}` to exit{query}{}",
                         self.command_desc,
-                        self.shared.lock().query_note()
+                        self.unread_note()
                     ),
                     timeout,
                     screen: self.screen(),
@@ -5542,6 +5564,60 @@ fn unblock_teardown(master: &dyn portable_pty::MasterPty) {
             libc::tcflush(slave.as_raw_fd(), libc::TCIFLUSH);
         }
     }
+}
+
+/// How many bytes sit in the terminal's input queue that the application
+/// has not read: input it could read now and has not (#790).
+///
+/// The master cannot say: its `FIONREAD` counts the other direction, the
+/// output waiting for the reader thread, and with 100 bytes queued both it
+/// and `TIOCOUTQ` read 0, measured on Linux. The slave's `FIONREAD` counts
+/// them, so the slave is opened by name for this one call, `O_NOCTTY` so it
+/// cannot become this process's controlling terminal, and closed again.
+/// termlens must hold no slave descriptor of its own, or the master would
+/// never see the EOF every exit is read from; after the close it still
+/// does, measured on Linux and held by `tests/drain.rs`. Like
+/// `unblock_teardown`'s, this open is no lifecycle edge: the master stays
+/// open throughout.
+///
+/// The count is what a read would return at once: in canonical mode the
+/// complete lines, so a line still waiting for its Enter, which the
+/// application cannot read yet, is not counted. A query reply the
+/// application has not read is input too, and counted.
+///
+/// Linux and macOS only, and `None` wherever the count cannot be had, so
+/// that a platform that cannot measure it omits the note rather than
+/// claiming a wrong count. Linux is measured. macOS answers `FIONREAD` on a
+/// terminal from its input queues too (XNU's `ttnread`), and the test that
+/// holds the count runs on CI's macOS leg; the other Unixes are not
+/// measured, and say nothing. ConPTY keeps typed input on its own side of
+/// the pipe, so Windows has no count to give.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn unread_input(master: &dyn portable_pty::MasterPty) -> Option<usize> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let slave = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(master.tty_name()?)
+        .ok()?;
+    let mut queued: libc::c_int = 0;
+    // SAFETY: `slave` is an open descriptor for the whole call, and
+    // FIONREAD writes one `int` through the pointer, which points at one.
+    #[allow(unsafe_code)]
+    let rc = unsafe { libc::ioctl(slave.as_raw_fd(), libc::FIONREAD, &mut queued) };
+    if rc != 0 {
+        return None;
+    }
+    usize::try_from(queued).ok()
+}
+
+/// See the Linux and macOS [`unread_input`]: nothing measured here, so
+/// nothing claimed.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn unread_input(_master: &dyn portable_pty::MasterPty) -> Option<usize> {
+    None
 }
 
 impl Drop for Terminal {

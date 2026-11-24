@@ -227,6 +227,14 @@ CHANGELOG entry.
   canonical-mode application on Linux loses replies silently: there the
   kernel discards what does not fit, so that loss is undetectable and goes
   unreported.
+- **A timeout names the input the application left unread on Linux and
+  macOS only.** The count is the terminal's own, the slave's `FIONREAD`,
+  so it is what a read would return at once: in raw mode every byte
+  queued, query replies included, and in canonical mode only complete
+  lines, so a line still waiting for its Enter is not counted. Elsewhere
+  the note is left out rather than guessed: the other Unixes are not
+  measured, and on Windows ConPTY keeps typed input on its own side of the
+  pipe, where nothing can count it.
 
 ## Windows
 
@@ -255,8 +263,10 @@ CHANGELOG entry.
   the program's HT); a timeout
   that names the escape sequence or character a quiet program stopped
   inside (ConPTY keeps the unfinished sequence to itself, so `wait_idle`
-  and `wait_stable` see a terminal that is simply quiet); and bytes
-  that are not UTF-8 (Rust's console stdio refuses to write them). The
+  and `wait_stable` see a terminal that is simply quiet); a timeout's count
+  of the input a program left unread (ConPTY keeps typed input on its own
+  side of the pipe); and bytes that are not UTF-8 (Rust's console stdio
+  refuses to write them). The
   tests for each are `#[cfg_attr(windows, ignore = "…")]` with
   the reason in the attribute; the probe that measured all of this is
   `tests/conpty_probe.rs`, and the `windows` workflow re-runs it on demand.

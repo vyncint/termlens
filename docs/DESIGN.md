@@ -213,6 +213,25 @@ reply count; it can later read 4,095 bytes, about 680 replies, and the rest
 are gone. Past either limit the application has to read as it asks, exactly
 as it would against a real terminal.
 
+**What the application left unread is counted at a timeout, where it can
+be (#790).** Input an application has stopped reading sits in the
+terminal's input queue, and a wait then timed out on a screen that read as
+an application drawing nothing in answer: one outside suite blamed the
+harness for keys queued behind a stalled read. The master cannot see that
+queue — its `FIONREAD` counts the other direction, and with 100 bytes
+queued it and `TIOCOUTQ` read 0 on Linux — and the slave's `FIONREAD`
+can. So a timeout opens the slave by name (`O_NOCTTY`), asks, and closes
+it, and the note says "the application left N bytes of input unread" when
+the count is not zero. termlens keeps no slave descriptor past that one
+call, since one would hide the EOF every exit is read from, and after the
+close the master still sees it. The count is the kernel's answer to "how
+much would a read return now": every queued byte in raw mode, query
+replies included, and only complete lines in canonical mode. Linux is
+measured, macOS reads `FIONREAD` from its terminal queues too and CI's
+leg runs the test that holds the count, and everywhere else the note is
+left out, never guessed: the other Unixes are unmeasured, and ConPTY keeps
+typed input on its own side of the pipe.
+
 `XTGETTCAP` is answered from a table of capabilities the crate actually
 implements, and every entry was checked against the code that implements it
 rather than copied from a terminfo file — the key capabilities are literally
