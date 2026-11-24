@@ -24,12 +24,82 @@ reads that marker.
   kitty keyboard pop that crossterm sends (`CSI < 1 u`) was listed as
   `^[[1<u`, which is not a sequence; it is now `^[[<1u`. A test that pins
   the old spelling needs the new one. (#759)
+- A send blocked on a full input queue fails as soon as the application
+  releases the terminal, and names the exit: "the child released the
+  terminal (EOF) before this write of 1048576 bytes finished; nothing can
+  read what it had not written". It waited out the whole deadline, since
+  Linux does not wake a master write when the other side closes, and then
+  reported "the application is not reading its input … reaches the
+  application if it reads again" about an application that was gone. The
+  send now waits for its write in 50 ms slices and looks at the terminal
+  between them; a write that fails as the terminal closes, rather than
+  blocking, is reported the same way. A test that matched "not reading its
+  input" on a send into an application that exits during it should match
+  "released the terminal (EOF) before this write" instead. (#770)
+- A `wait_idle` or `wait_stable` timeout on a terminal whose output went
+  quiet inside an escape sequence or a UTF-8 character it never finished
+  names it, as an open DEC 2026 update was already named: "…while waiting
+  for 100ms of output silence — the output has been silent that long, but
+  it stopped inside an unfinished escape sequence (`^[]0;title`), and the
+  terminal is still waiting for the rest of it", or "…inside an incomplete
+  UTF-8 character…". The sequence is shown as received, its first 24
+  bytes. Both waits refused such a terminal before too, and said only
+  "100ms of output silence" or "the screen to hold still for 100ms" about
+  one that had been silent all along; `snapshot_after`'s settle says the
+  same now. A test that matched the whole message, not a part of it,
+  should expect the added clause. (#772)
+- With SIGCHLD ignored in the test process, dropping a terminal whose
+  program is still running kills a helper in the program's process group
+  that ignores SIGHUP, as the drop already did with the default
+  disposition. The drop's hang-up ended the program, the kernel reaped it
+  at once, and teardown took that reap for the end of the group and
+  stopped before its SIGKILL, so the helper ran on. The group is now
+  killed after such a reap too: POSIX reuses no process group id while a
+  member of the group exists. A program reaped before the drop, by
+  `wait_exit` or by the kernel, still has nothing signalled. A test whose
+  program leaves a helper running on purpose under SIGCHLD ignored must
+  have the helper leave the group (`setsid`), as it already had to under
+  the default disposition. (#774)
 
 ### Fixed
 
 - Saved JSON screens with leading spaces, tabs or carriage returns are
   recognized as JSON by `render` and `diff`, rather than rejected as text
   snapshots with a missing `size:` header. (#786)
+- On Windows every write into the terminal goes through the writer
+  thread, so a send keeps the terminal's deadline there as it does on Unix.
+  The thread was started only with a duplicate of the master, which
+  portable-pty does not expose on Windows, so there every send was written
+  on the test thread with no deadline, and every query reply on the reader
+  thread under the same lock: a full ConPTY input pipe would have hung the
+  test and stopped the drain behind it. The thread is now handed the PTY
+  layer's own writer where there is no duplicate. (#771)
+- A failure screen is written to `TERMLENS_ARTIFACT_DIR` for a test whose
+  path is too long to be a file name whole. `<test>-<n>.screen.txt` (or
+  `.json`) used the path all of it, so one past about 230 bytes, which
+  generated cases and deeply nested modules reach, made a name longer than
+  the 255 bytes a filesystem allows; the write failed with "File name too
+  long" and only a line on stderr was left. A name past 222 bytes is now
+  cut to its first 200 and 16 hex digits of a hash of the whole name, which
+  keeps two such tests apart. Names up to 222 bytes are unchanged; one of
+  223 to about 240 that fitted with a small `<n>` is now cut too, so each
+  test keeps one name whatever its count. (#773)
+- After an emulator panic, `Error::Emulator`'s screen and `screen()` show
+  the screen the test last saw, through a wait or `screen()`. They showed
+  the last one `screen()` had stored, since the waits kept none of theirs:
+  after a `wait_until` that had seen `ready`, the blank grid from the
+  spawn, or an older screen if `screen()` had been called earlier. Every
+  wait now keeps the screen it takes, which costs nothing measurable on a
+  full-throughput stream, and `wait_frame` keeps the live screen when it
+  returns a frame. Found by fault injection: no input is known to make the
+  emulator panic. (#775)
+- `Recorder::stop` after an emulator panic returns that panic,
+  `Error::Emulator`, as every wait and `resize` do. It said the
+  application "never emitted a DEC 2026 synchronized update" when its
+  frames came after the emulator had stopped seeing anything, and with
+  frames recorded before the panic it returned `Ok`, a recording cut at
+  the panic with nothing to say so. Found by fault injection: no input is
+  known to make the emulator panic. (#776)
 
 ## [0.11.10] - 2026-11-17
 

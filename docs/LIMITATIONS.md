@@ -250,7 +250,10 @@ CHANGELOG entry.
   `ResizePseudoConsole` on its own thread, so a program's output written
   right after a resize can be laid out at the old width — after `resize()`
   on Windows, wait for the program's own repaint before asserting on
-  layout — and its re-render never forwards the program's HT); and bytes
+  layout — and its re-render never forwards the program's HT); a timeout
+  that names the escape sequence or character a quiet program stopped
+  inside (ConPTY keeps the unfinished sequence to itself, so `wait_idle`
+  and `wait_stable` see a terminal that is simply quiet); and bytes
   that are not UTF-8 (Rust's console stdio refuses to write them). The
   tests for each are `#[cfg_attr(windows, ignore = "…")]` with
   the reason in the attribute; the probe that measured all of this is
@@ -277,10 +280,14 @@ CHANGELOG entry.
 - **After `wait_exit`, `Drop` signals nothing** (Unix). `Drop` stops the
   program's whole process group, a helper that ignores SIGHUP included,
   but only while the program is unreaped: once a wait has reaped it, or
-  the kernel has (SIGCHLD ignored), the group's id may be another
-  process's. A helper still running in the group then runs on. Stop it
-  before the program exits, or have it leave the group with `setsid` if it
-  is meant to outlive the terminal (#714).
+  the kernel has before the drop (SIGCHLD ignored), the group's id may be
+  another process's. A helper still running in the group then runs on.
+  Stop it before the program exits, or have it leave the group with
+  `setsid` if it is meant to outlive the terminal (#714). A program still
+  running at the drop is the other case: where SIGCHLD is ignored, the
+  drop's hang-up ends it and the kernel reaps it at once, and the group is
+  killed all the same, since a member still running keeps the group's id
+  from being reused (#774).
 - Exotic grapheme clusters render as the vt100 crate renders them; the
   unicode-torture fixture pins the current behaviour.
 - **Needle matching is NFC, then substring, not grapheme matching.**

@@ -387,8 +387,8 @@ impl<T: Write> Write for MasterDup<T> {
 /// has just opened, which is what the lock exists to prevent (#589).
 struct Opening {
     pair: Option<PtyPair>,
-    /// The terminal's writer, once there is one: the PTY layer's writer is
-    /// taken out of it on failure, since the reader thread keeps the cell.
+    /// The terminal's writer cell, once there is one: the PTY layer's writer
+    /// in it is taken out and closed here on failure.
     writer: Option<SharedWriter>,
     lifecycle: Option<LifecycleGuard>,
 }
@@ -474,9 +474,11 @@ pub(crate) fn open_pty(size: PtySize) -> Result<(PtyPair, LifecycleGuard)> {
     )))
 }
 
-/// The PTY writer, shared between `Terminal` (typed input) and the reader
-/// thread (query replies). `None` after teardown. Locked briefly per write;
-/// never while the emulator state lock is held.
+/// The PTY layer's own writer, held by the terminal, and by a spawn until it
+/// succeeds, only so that it is closed under the lifecycle lock: every write
+/// goes through the writer thread, which writes through a duplicate of the
+/// master. `None` after teardown, and from the start where there is no
+/// duplicate and the writer thread was handed this writer instead (#771).
 type SharedWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
 
 /// Open a second writer onto the same PTY master, for the responder
@@ -914,8 +916,18 @@ impl Recorder {
     /// synchronized update — the diagnosis [`wait_frame`](Terminal::wait_frame)
     /// gives. A recording is made of complete frames; sampling the grid on a
     /// timer instead would be the torn-frame problem in a new hat.
+    /// [`Error::Emulator`] once the emulation has failed, as every wait
+    /// returns it: no frame after the failure was seen, so the recording
+    /// would end there without saying so.
     pub fn stop(self) -> Result<Recording> {
         let frames_seen = self.deregister();
+        // Ahead of the count, as `resize` puts it ahead of its own refusal
+        // (#702): frames completed after the panic were never seen, so
+        // "never emitted a synchronized update" could be false, and frames
+        // recorded before it made a recording cut at the panic (#776).
+        if let Some(failure) = self.shared.lock().emulator_failure() {
+            return Err(failure);
+        }
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if frames_seen == 0 {
             return Err(Error::Input(
@@ -1234,6 +1246,15 @@ thread_local! {
     /// the only way to drive the public API down that path (#702).
     static WRAP_EMULATOR: std::cell::RefCell<Option<WrapEmulator>> =
         const { std::cell::RefCell::new(None) };
+
+    /// The next spawn on this thread goes without a duplicate of the
+    /// master, as every spawn does on Windows, where portable-pty exposes no
+    /// descriptor: that path then runs where a test can fill an input queue
+    /// (#771).
+    // Already `const`; see HOLDS_LIFECYCLE for why the lint still fires on
+    // illumos (#791).
+    #[allow(clippy::missing_const_for_thread_local)]
+    static NO_MASTER_DUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Shared between the test thread and the PTY reader thread.
@@ -1607,6 +1628,17 @@ impl EmuState {
     /// Snapshot the screen and remember it, rebuilding only if the state
     /// changed since the last stored snapshot. An unchanged terminal costs
     /// one Arc clone per call instead of a full grid conversion.
+    ///
+    /// Every wait takes its screens here, as `screen()` does, so the one
+    /// remembered is the last a test saw, and that is the one an emulator
+    /// panic freezes (#775). The waits used to take theirs without storing
+    /// them, so the panic froze whatever `screen()` had last stored, often
+    /// the blank grid from the spawn. Storing costs two reference counts
+    /// on a screen that was built anyway. Measured on `seq 1 300000` under
+    /// a `wait_until` that evaluated it about 550 times, in two sets of 15
+    /// release runs each way, one way after the other: a median of 514 and
+    /// 515 ms without storing, 508 and 510 ms with it. That is noise, where
+    /// the waits' reason for not storing had been ~3% on such a stream.
     fn snapshot(&mut self) -> Screen {
         if let Some((generation, screen)) = &self.snapshot_cache {
             if *generation == self.generation {
@@ -1649,10 +1681,23 @@ impl EmuState {
         self.emu_panic.as_ref().map(|detail| {
             Error::Emulator {
                 detail: detail.clone(),
-                screen: self.peek_snapshot(),
+                // The frozen screen: the emulator is not asked again.
+                screen: self.build_snapshot(),
             }
             .recorded()
         })
+    }
+
+    /// What the stream ends inside, when it ends inside something a quiet
+    /// terminal is not settled in: an escape sequence, named as received,
+    /// or a character whose remaining bytes the reader is holding back for.
+    /// The DEC 2026 update is the third such thing, named on its own.
+    fn unfinished(&self) -> Option<String> {
+        if let Some(sequence) = self.emu.open_sequence() {
+            return Some(format!("an unfinished escape sequence (`{sequence}`)"));
+        }
+        self.utf8_pending
+            .then(|| "an incomplete UTF-8 character".to_owned())
     }
 
     /// One-line diagnosis when a query went unanswered, appended to every
@@ -1730,21 +1775,6 @@ impl EmuState {
                 blocking.join(", ")
             )
         }
-    }
-
-    /// Cache-aware read that never writes: serve the stored snapshot when
-    /// current, else build a fresh one *without* storing it. The wait loop
-    /// uses this — during a chatty stream every chunk advances the
-    /// generation, so storing there would pay clone-and-evict costs on
-    /// every chunk for a cache the next chunk invalidates (measured ~3% on
-    /// a full-throughput stream).
-    fn peek_snapshot(&self) -> Screen {
-        if let Some((generation, screen)) = &self.snapshot_cache {
-            if *generation == self.generation {
-                return screen.clone();
-            }
-        }
-        self.build_snapshot()
     }
 }
 
@@ -1850,7 +1880,9 @@ impl TerminalBuilder {
     /// It is also how long a send waits for its bytes to be written before
     /// it reports the application as not reading, though never less than a
     /// tenth of a second: the write happens on another thread, and a
-    /// shorter wait reported writes that were merely not yet done (#632).
+    /// shorter wait reported writes that were merely not yet done (#632). A
+    /// send whose application releases the terminal meanwhile fails then,
+    /// without waiting the rest (#770).
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -2348,9 +2380,6 @@ impl TerminalBuilder {
             },
             Arc::clone(&replies_pending),
         )));
-        let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
-        opening.writer = Some(Arc::clone(&writer));
-
         // Everything written *to* the child goes through a thread of its
         // own: query replies from the drain, and typed input from the
         // test. A write into the PTY blocks whenever the application has
@@ -2358,26 +2387,38 @@ impl TerminalBuilder {
         // would deadlock the harness (the child then blocks writing into
         // a full output buffer), and the test thread would hang with no
         // deadline and no diagnosis.
-        let write_tx = match dup_writer(opening.pair().master.as_ref()) {
-            Some(pty_writer) => {
-                let mut pty_writer = MasterDup(Some(pty_writer));
-                let (tx, rx) = mpsc::channel::<WriteRequest>();
-                let written = Arc::clone(&replies_pending);
-                let drained = Arc::clone(&queued_bytes);
-                let busy = Arc::clone(&writer_busy);
-                thread::Builder::new()
-                    .name("termlens-pty-writer".into())
-                    .spawn(move || writer_loop(&mut pty_writer, &rx, &written, &drained, &busy))
-                    .map_err(Error::Io)?;
-                Some(tx)
-            }
-            // No descriptor to duplicate: fall back to writing inline,
-            // as before.
-            None => None,
+        //
+        // The thread writes through a duplicate of the master where there is
+        // one, and the PTY layer's writer stays here, to be closed under the
+        // lifecycle lock with the master. Where there is none — Windows,
+        // where portable-pty exposes no descriptor — the thread is handed
+        // the PTY layer's writer itself. It used not to be started at all
+        // there, and every send and reply was written inline, with no
+        // deadline and under one lock (#771).
+        let dup = dup_writer(opening.pair().master.as_ref());
+        #[cfg(test)]
+        let dup = if NO_MASTER_DUP.with(std::cell::Cell::take) {
+            None
+        } else {
+            dup
         };
+        let (pty_writer, writer): (Box<dyn Write + Send>, _) = match dup {
+            Some(dup) => (Box::new(dup), Some(writer)),
+            None => (writer, None),
+        };
+        let writer: SharedWriter = Arc::new(Mutex::new(writer));
+        opening.writer = Some(Arc::clone(&writer));
+        let mut pty_writer = MasterDup(Some(pty_writer));
+        let (write_tx, write_rx) = mpsc::channel::<WriteRequest>();
+        let written = Arc::clone(&replies_pending);
+        let drained = Arc::clone(&queued_bytes);
+        let busy = Arc::clone(&writer_busy);
+        thread::Builder::new()
+            .name("termlens-pty-writer".into())
+            .spawn(move || writer_loop(&mut pty_writer, &write_rx, &written, &drained, &busy))
+            .map_err(Error::Io)?;
 
         let reader_shared = Arc::clone(&shared);
-        let reader_writer = Arc::clone(&writer);
         let reader_tx = write_tx.clone();
         let reader_pending = Arc::clone(&replies_pending);
         let reader_queued = Arc::clone(&queued_bytes);
@@ -2387,8 +2428,7 @@ impl TerminalBuilder {
                 reader_loop(
                     reader,
                     &reader_shared,
-                    &reader_writer,
-                    reader_tx.as_ref(),
+                    &reader_tx,
                     &reader_pending,
                     &reader_queued,
                 )
@@ -2758,12 +2798,12 @@ fn writer_loop(
     }
 }
 
-/// Drain the PTY into the emulator until EOF. Runs on a dedicated thread.
+/// Drain the PTY into the emulator until EOF, handing query replies to the
+/// writer thread through `replies_to`. Runs on a dedicated thread.
 fn reader_loop(
     mut reader: Box<dyn Read + Send>,
     shared: &Monitor<EmuState>,
-    writer: &SharedWriter,
-    replies_to: Option<&mpsc::Sender<WriteRequest>>,
+    replies_to: &mpsc::Sender<WriteRequest>,
     pending: &AtomicUsize,
     queued_bytes: &AtomicUsize,
 ) {
@@ -2799,14 +2839,14 @@ fn reader_loop(
             // writer thread under the state lock, and written after it
             // is released; the state lock and the writer lock are never
             // held together.
-            let replies = shared.mutate(|state| {
+            shared.mutate(|state| {
                 // A panicked emulator is never fed again: its grid is in
                 // whatever state the panic left it. The loop still runs, so
                 // the PTY keeps draining and the child does not block
                 // writing into a full buffer — the same reason the reply
                 // queue never backpressures the reader.
                 if state.emu_panic.is_some() {
-                    return Vec::new();
+                    return;
                 }
                 // Counted before the chunk is processed, so a query
                 // inside it is recorded against *this* read: output
@@ -2872,7 +2912,9 @@ fn reader_loop(
                 if let Err(payload) = processing {
                     // Freeze the last good screen before `touch()` can
                     // invalidate the cache, so the error carries the grid as
-                    // it stood when the emulator was last coherent.
+                    // it stood when the emulator was last coherent: the last
+                    // screen a wait or `screen()` took, since each of them
+                    // stores what it takes (#775).
                     let frozen = state
                         .snapshot_cache
                         .take()
@@ -2887,32 +2929,8 @@ fn reader_loop(
                 // tick — and types in response must find the replies ahead
                 // of its input in the writer's queue, as a terminal answers
                 // a query before it shows anything after it (#591).
-                if let Some(tx) = replies_to {
-                    queue_replies(tx, &mut replies, state, pending, queued_bytes);
-                }
-                replies
+                queue_replies(replies_to, &mut replies, state, pending, queued_bytes);
             });
-            // One queue entry per *read*, not per reply. A single read
-            // can carry dozens of queries — a startup batch is a
-            // legitimate pattern — and enqueueing each answer separately
-            // made the reader outrun the writer, which issues one
-            // `write(2)` per entry. The queue then filled and answers
-            // were discarded although nothing was blocked: measured at
-            // 173 of 200 delivered back-to-back, and 200 of 200 with a
-            // millisecond between the queries. Batching is what removes
-            // that mismatch; ordering is unchanged, since the bytes are
-            // concatenated in the order they were built.
-            // No responder thread (no descriptor to duplicate): the
-            // replies are still here, and are written inline, as before —
-            // after the state lock is released, since writing needs the
-            // writer lock.
-            if !replies.is_empty() {
-                let batch: Vec<u8> = replies.concat();
-                let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
-                if let Some(writer) = writer.as_mut() {
-                    let _ = writer.write_all(&batch).and_then(|()| writer.flush());
-                }
-            }
         }
         if at_eof {
             break;
@@ -2985,11 +3003,12 @@ pub struct Terminal {
     // Option only so Drop can close it under the PTY lifecycle lock;
     // Some for the entire life of the value outside Drop.
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
-    /// Shared with the reader thread, which writes query replies.
+    /// The PTY layer's own writer, closed under the lifecycle lock by
+    /// `Drop`; nothing writes through it. Empty where the writer thread was
+    /// handed it for want of a duplicate of the master (Windows).
     writer: SharedWriter,
-    /// Queue to the writer thread. `None` only when no descriptor could
-    /// be duplicated, in which case writes go through `writer` directly.
-    write_tx: Option<mpsc::Sender<WriteRequest>>,
+    /// Queue to the writer thread, which makes every write into the PTY.
+    write_tx: mpsc::Sender<WriteRequest>,
     /// Set by the writer thread while it is inside `write(2)`.
     writer_busy: Arc<AtomicBool>,
     shared: Arc<Monitor<EmuState>>,
@@ -3151,10 +3170,12 @@ impl Terminal {
     ///
     /// [`Error::Write`] when the bytes cannot be handed to the child — it
     /// released the terminal, or it stopped reading its input and the write
-    /// gave up at the terminal's deadline rather than blocking forever. The
-    /// error embeds the screen, so a CI log shows what the application was
-    /// displaying when the keystroke had nowhere to go. A write that gave
-    /// up is not withdrawn: [`Error::Write`] says what happens to its bytes.
+    /// gave up at the terminal's deadline rather than blocking forever. A
+    /// write still blocked when the child releases the terminal fails then,
+    /// naming the exit, rather than at the deadline. The error embeds the
+    /// screen, so a CI log shows what the application was displaying when
+    /// the keystroke had nowhere to go. A write that gave up is not
+    /// withdrawn: [`Error::Write`] says what happens to its bytes.
     ///
     /// This is the same answer on every platform. A raw write to a closed
     /// terminal fails with `EIO` on macOS and *succeeds* on Linux, where
@@ -3663,15 +3684,8 @@ impl Terminal {
     /// never reports EOF while it is open, so there the reaped child is
     /// the signal (see [`EXIT_CLOSES_THE_TERMINAL`]).
     fn ensure_deliverable(&mut self, what: &str) -> Result<()> {
-        {
-            let mut state = self.shared.lock();
-            // Where a reaped child is the terminal closing, a send asks too:
-            // input long after the exit must not need a wait to be refused.
-            self.exit_watch
-                .tick(&mut self.child, &mut self.exit_status, &mut state);
-            if !state.eof {
-                return Ok(());
-            }
+        if !self.terminal_closed() {
+            return Ok(());
         }
         let reason = match &self.exit_status {
             Some(status) => format!("the child is gone ({status}) and the terminal is closed"),
@@ -3684,6 +3698,36 @@ impl Terminal {
         .recorded())
     }
 
+    /// Whether the terminal has closed, by the signal
+    /// [`ensure_deliverable`](Self::ensure_deliverable) describes: EOF, or
+    /// where a reaped child is the terminal closing, that.
+    fn terminal_closed(&mut self) -> bool {
+        let mut state = self.shared.lock();
+        // Where a reaped child is the terminal closing, a send asks too:
+        // input long after the exit must not need a wait to be refused.
+        self.exit_watch
+            .tick(&mut self.child, &mut self.exit_status, &mut state);
+        state.eof
+    }
+
+    /// Why a send of `len` bytes failed when the terminal closed while its
+    /// write was still going.
+    ///
+    /// How much of it went is not said, because it is not known: a blocked
+    /// `write(2)` into a PTY reports no count until it returns, Linux leaves
+    /// this one asleep in the kernel until teardown, and macOS fails it with
+    /// EIO, which carries none.
+    fn closed_mid_write(&self, len: usize) -> String {
+        let closed = match &self.exit_status {
+            Some(status) => format!("the child is gone ({status}) and the terminal closed"),
+            None => "the child released the terminal (EOF)".to_owned(),
+        };
+        format!(
+            "{closed} before this write of {len} bytes finished; nothing can read \
+             what it had not written"
+        )
+    }
+
     /// Write to the child, bounded by the default deadline.
     ///
     /// Writes into a PTY block once the application stops reading its
@@ -3694,20 +3738,6 @@ impl Terminal {
     /// gets a screen-carrying failure naming the real cause instead of
     /// the six-hour CI job `docs/DESIGN.md` §2 exists to prevent.
     fn write_within_deadline(&mut self, bytes: &[u8]) -> std::result::Result<(), String> {
-        let Some(tx) = &self.write_tx else {
-            // No writer thread (no descriptor to duplicate): the original
-            // synchronous path, which can block — better than not being
-            // able to type at all.
-            let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-            return match writer.as_mut() {
-                Some(writer) => writer
-                    .write_all(bytes)
-                    .and_then(|()| writer.flush())
-                    .map_err(|e| e.to_string()),
-                None => Err("the terminal is closed".to_owned()),
-            };
-        };
-
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
         let request = WriteRequest {
             bytes: bytes.to_vec(),
@@ -3720,22 +3750,68 @@ impl Terminal {
         // no full-queue case to retry. The deadline that matters is the
         // acknowledgement below: it is the write itself that can stall, when
         // the application has stopped reading and the PTY buffer is full.
-        if tx.send(request).is_err() {
+        if self.write_tx.send(request).is_err() {
             return Err("the terminal is closed".to_owned());
         }
         let mut waited = self.default_timeout.max(ACK_FLOOR);
+        let mut deadline = deadline_after(waited);
+        let mut floor_given = false;
+        // Waited for in slices, with the terminal looked at between them. An
+        // application that exits while the write is blocked leaves nothing to
+        // end it: Linux does not wake a master write when the other side
+        // closes, so a send waited out its whole deadline and then blamed an
+        // application that was gone for not reading (#770).
+        let outcome = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match ack_rx.recv_timeout(left.min(POLL_CAP)) {
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                outcome => break outcome,
+            }
+            if self.terminal_closed() {
+                // The write may have finished in the meantime: then the
+                // bytes are out, as they would be had the ack come sooner.
+                return match ack_rx.try_recv() {
+                    Ok(Ok(())) => Ok(()),
+                    _ => Err(self.closed_mid_write(bytes.len())),
+                };
+            }
+            if Instant::now() >= deadline {
+                // No write blocked means nothing stands between these bytes
+                // and the application but the writer thread getting to run,
+                // so it is given the floor once more before anything is
+                // reported.
+                if floor_given || self.writer_busy.load(Ordering::Relaxed) {
+                    break Err(mpsc::RecvTimeoutError::Timeout);
+                }
+                floor_given = true;
+                deadline = deadline.checked_add(ACK_FLOOR).unwrap_or(deadline);
+                waited += ACK_FLOOR;
+            }
+        };
         let busy = || self.writer_busy.load(Ordering::Relaxed);
-        let mut outcome = ack_rx.recv_timeout(waited);
-        // No write blocked means nothing stands between these bytes and the
-        // application but the writer thread getting to run, so it is given
-        // the floor once more before anything is reported.
-        if matches!(outcome, Err(mpsc::RecvTimeoutError::Timeout)) && !busy() {
-            outcome = ack_rx.recv_timeout(ACK_FLOOR);
-            waited += ACK_FLOOR;
-        }
         match outcome {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(e.to_string()),
+            // A write into a terminal whose other side has closed fails on
+            // macOS (EIO) where Linux leaves it blocked. The reader is about
+            // to read the EOF that close caused, and the send then says what
+            // it says on Linux (#770); any other failure is reported as is.
+            // The close is waited for as long as the send would have waited
+            // anyway, and never less than the drain grace, which is what
+            // the reaped child takes to count as the terminal closing where
+            // there is no EOF.
+            Ok(Err(e)) => {
+                let closes = deadline.max(Instant::now() + DRAIN_GRACE);
+                let closed = self.shared.wait_until(closes, |state| {
+                    self.exit_watch
+                        .tick(&mut self.child, &mut self.exit_status, state);
+                    state.eof.then_some(())
+                });
+                if closed.is_ok() {
+                    Err(self.closed_mid_write(bytes.len()))
+                } else {
+                    Err(e.to_string())
+                }
+            }
             // The write is not withdrawn: it is mid-`write(2)` on the writer
             // thread, which no portable call can interrupt, and the rest of
             // it follows once the application reads again (#590). A full
@@ -3842,7 +3918,7 @@ impl Terminal {
             if let Some(failure) = state.emulator_failure() {
                 return Some(Err(failure));
             }
-            let screen = state.peek_snapshot();
+            let screen = state.snapshot();
             if predicate(&screen) {
                 return Some(Ok(()));
             }
@@ -4025,11 +4101,17 @@ impl Terminal {
                     .iter()
                     .find(|(index, frame)| *index > cursor && predicate(frame));
                 if let Some((index, frame)) = matched {
-                    return Some(Ok((*index, frame.clone())));
+                    let found = Ok((*index, frame.clone()));
+                    // A frame is not a snapshot a wait takes, so the live
+                    // screen is taken too: it is at least as new as the
+                    // frame, and an emulator panic after this wait then
+                    // freezes it rather than an older one (#775).
+                    state.snapshot();
+                    return Some(found);
                 }
             }
             if state.eof {
-                let screen = state.peek_snapshot();
+                let screen = state.snapshot();
                 return Some(Err(Error::Eof {
                     waiting_for: format!("{WHAT}{}{}", state.query_note(), history_note(&screen)),
                     screen,
@@ -4139,7 +4221,9 @@ impl Terminal {
     /// whole-screen snapshots" rule work — after `wait_idle` returns, a
     /// [`screen`](Self::screen) snapshot cannot be a torn frame. An
     /// application that opens an update and never closes it therefore times
-    /// out here, and the error says so.
+    /// out here, and the error says so. So does one whose output goes silent
+    /// inside an escape sequence or a UTF-8 character it never finishes,
+    /// and the error names that too, with the sequence's first bytes.
     ///
     /// This is a heuristic: "no output for N ms" is evidence, not proof,
     /// that the application finished rendering. Prefer
@@ -4210,9 +4294,15 @@ impl Terminal {
                 // time out "waiting for 100ms of output silence", which
                 // reads as nonsense to someone looking at a quiet terminal.
                 // Name the real state: the application is inside a repaint
-                // it never finished.
+                // it never finished, or the output went silent inside a
+                // sequence or a character it never finished (#772).
                 let stuck_mid_frame = guard.emu.in_sync_update();
-                let screen = guard.peek_snapshot();
+                let unfinished = if elapsed >= quiet {
+                    guard.unfinished()
+                } else {
+                    None
+                };
+                let screen = guard.snapshot();
                 let note = guard.query_note();
                 drop(guard);
                 let waiting_for = if stuck_mid_frame {
@@ -4220,6 +4310,12 @@ impl Terminal {
                         "{quiet:?} of output silence — the application is inside an \
                          unfinished DEC 2026 synchronized update (Begin with no End), so \
                          the screen below is a half-painted frame{note}"
+                    )
+                } else if let Some(unfinished) = unfinished {
+                    format!(
+                        "{quiet:?} of output silence — the output has been silent that \
+                         long, but it stopped inside {unfinished}, and the terminal is \
+                         still waiting for the rest of it{note}"
                     )
                 } else {
                     format!("{quiet:?} of output silence{note}")
@@ -4347,8 +4443,9 @@ impl Terminal {
     ///
     /// [`Error::Timeout`] when the deadline (builder `timeout`) expires
     /// first — the picture kept changing, `quiet` exceeds the timeout, or
-    /// the application is inside an unfinished synchronized update, which
-    /// the message names. [`Error::Emulator`] if the emulation failed.
+    /// the application is inside an unfinished synchronized update, escape
+    /// sequence or UTF-8 character, which the message names.
+    /// [`Error::Emulator`] if the emulation failed.
     pub fn wait_stable(&mut self, quiet: Duration) -> Result<Screen> {
         self.wait_stable_deadline(quiet, self.default_timeout)
     }
@@ -4372,7 +4469,7 @@ impl Terminal {
         // Bytes are the only thing that can change the grid, so the last
         // byte's arrival bounds the last change: stillness before the call
         // counts, exactly as silence before a `wait_idle` does.
-        let mut last = guard.peek_snapshot();
+        let mut last = guard.snapshot();
         let mut since = guard.last_activity;
         let mut seen_generation = guard.generation;
         loop {
@@ -4385,7 +4482,7 @@ impl Terminal {
             }
             if guard.generation != seen_generation {
                 seen_generation = guard.generation;
-                let now = guard.peek_snapshot();
+                let now = guard.snapshot();
                 if !now.same_picture(&last) {
                     since = guard.last_activity;
                 }
@@ -4408,7 +4505,14 @@ impl Terminal {
             let now = Instant::now();
             if now >= deadline {
                 let stuck_mid_frame = guard.emu.in_sync_update();
-                let screen = guard.peek_snapshot();
+                // Still, and still not settled: the stream ended inside a
+                // sequence or a character it never finished (#772).
+                let unfinished = if held >= quiet {
+                    guard.unfinished()
+                } else {
+                    None
+                };
+                let screen = guard.snapshot();
                 let note = format!("{}{}", guard.query_note(), history_note(&screen));
                 drop(guard);
                 let waiting_for = if stuck_mid_frame {
@@ -4416,6 +4520,12 @@ impl Terminal {
                         "the screen to hold still for {quiet:?} — the application is inside \
                          an unfinished DEC 2026 synchronized update (Begin with no End), so \
                          the screen below is a half-painted frame{note}"
+                    )
+                } else if let Some(unfinished) = unfinished {
+                    format!(
+                        "the screen to hold still for {quiet:?} — it has held still that \
+                         long, but the output is inside {unfinished}, and the terminal is \
+                         still waiting for the rest of it{note}"
                     )
                 } else {
                     format!("the screen to hold still for {quiet:?}{note}")
@@ -4724,7 +4834,7 @@ impl Terminal {
             if let Some(failure) = state.emulator_failure() {
                 return Err(failure);
             }
-            let (old_cols, old_rows) = state.peek_snapshot().size();
+            let (old_cols, old_rows) = state.snapshot().size();
             // A resize to the size the grid already has is a true no-op, and
             // it has to be one: TIOCSWINSZ raises SIGWINCH only when a
             // dimension actually changes, so the application is never told
@@ -4945,12 +5055,15 @@ fn stop_child(child: &mut PtyChild, deadline: Instant) {
 /// on a PTY nobody holds. The kernel's own hangup, as the session leader
 /// exits, goes to the same group and such a member ignores it.
 ///
-/// The group id is safe to signal only while the child is unreaped: once
-/// it is reaped, the id may be reused by an unrelated process. So the child
-/// is never reaped before the last signal: its exit is polled with
-/// `WNOWAIT`, and an exited child is a zombie that holds the id. A child
-/// found reaped elsewhere, where the kernel reaps children itself, ends it:
-/// nothing more is signalled (#630).
+/// The group id is safe to signal while the child is unreaped, or while
+/// anything else is in the group: POSIX reuses no process group id while a
+/// member of the group exists. So the child is never reaped before the last
+/// signal: its exit is polled with `WNOWAIT`, and an exited child is a
+/// zombie that holds the id. A child found reaped elsewhere before the stop
+/// began, where the kernel reaps children itself, ends it: nothing is
+/// signalled, since the group may have emptied long ago and its id gone to
+/// another (#630). One the kernel reaps during the stop, as the hang-up
+/// ends it, does not: the group is killed all the same (#774).
 ///
 /// This is portable-pty's `kill` sequence, aimed at the group, with the
 /// exit polled from 1 ms where portable-pty slept in fixed 50 ms steps, so a
@@ -4964,6 +5077,17 @@ fn stop_group(child: &mut PtyChild, id: u32, pid: libc::pid_t, deadline: Instant
     if state == ChildState::Running {
         let _ = send_signal(group, libc::SIGHUP);
         state = settled_by(id, (Instant::now() + HANGUP_GRACE).min(deadline));
+        if state == ChildState::Gone {
+            // The hang-up ended the child and the kernel reaped it (SIGCHLD
+            // ignored), so no zombie holds the id. A member that ignored the
+            // hang-up still does, while it lives, and it is what this kill is
+            // for; an emptied group's id is taken again only once the pid
+            // space has wrapped, and this comes a poll step after the reap,
+            // the window `send_signal` accepts. Stopping here left that
+            // member running where the default disposition killed it (#774).
+            let _ = send_signal(group, libc::SIGKILL);
+            return;
+        }
     }
     if state == ChildState::Gone {
         return;
@@ -5012,7 +5136,8 @@ fn reaped_by(child: &mut PtyChild, deadline: Instant) -> bool {
 
 /// `kill(2)`, the one call site. Every caller passes its own child, not yet
 /// reaped, or the negated pid of that child to signal the process group it
-/// leads.
+/// leads, while the child is unreaped or, in `stop_group`, just after the
+/// kernel reaped it in answer to the hang-up there (#774).
 #[cfg(unix)]
 fn send_signal(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
     // SAFETY: kill(2) touches no memory. The pid is the caller's own child,
@@ -5022,7 +5147,8 @@ fn send_signal(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
     // kernel reaps children itself (SIGCHLD ignored) there is no zombie to
     // hold either, so callers first ask whether the child is gone (#630);
     // one that exits between that question and this call frees its pid in a
-    // window no portable call closes.
+    // window no portable call closes. `stop_group` kills the group once
+    // more after such a reap, which a member still alive keeps from reuse.
     #[allow(unsafe_code)]
     let rc = unsafe { libc::kill(pid, signal) };
     if rc == 0 {
@@ -5104,9 +5230,12 @@ impl Drop for Terminal {
     /// hung up, and whatever in it outlives the hangup is killed, a helper
     /// that ignores `SIGHUP` included (#714). That takes the child unreaped,
     /// so after `wait_exit`, or where the kernel reaped the child itself
-    /// (SIGCHLD ignored), nothing is signalled: the group's id may be
-    /// another process's by then. A helper meant to outlive the terminal
-    /// has to leave the group, with `setsid`.
+    /// (SIGCHLD ignored) before the drop, nothing is signalled: the group's
+    /// id may be another process's by then. Where SIGCHLD is ignored and the
+    /// hangup itself ends the child, the kernel reaps it at once, and the
+    /// group is killed all the same: a member still running keeps its id
+    /// from being reused (#774). A helper meant to outlive the terminal has
+    /// to leave the group, with `setsid`.
     ///
     /// Closing the master and writer descriptors runs under the
     /// process-wide PTY lifecycle lock: on macOS, letting a master close
@@ -5272,6 +5401,9 @@ mod tests {
         fn mid_sequence(&self) -> bool {
             false
         }
+        fn open_sequence(&self) -> Option<String> {
+            None
+        }
         fn in_sync_update(&self) -> bool {
             false
         }
@@ -5335,6 +5467,10 @@ mod tests {
         fn mid_sequence(&self) -> bool {
             self.called();
             self.inner.mid_sequence()
+        }
+        fn open_sequence(&self) -> Option<String> {
+            self.called();
+            self.inner.open_sequence()
         }
         fn in_sync_update(&self) -> bool {
             self.called();
@@ -5422,6 +5558,150 @@ mod tests {
             0,
             "a call reached the emulator after it panicked"
         );
+    }
+
+    /// The next spawn on this thread gets a [`FaultyEmulator`], and the
+    /// switch that arms it and the count of calls that reach it after it
+    /// panicked.
+    #[cfg(unix)]
+    fn faulty_next_spawn() -> (Arc<std::sync::atomic::AtomicBool>, Arc<AtomicUsize>) {
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let late_calls = Arc::new(AtomicUsize::new(0));
+        let (arm, count) = (Arc::clone(&armed), Arc::clone(&late_calls));
+        super::WRAP_EMULATOR.with(|wrap| {
+            *wrap.borrow_mut() = Some(Box::new(move |inner| {
+                Box::new(FaultyEmulator {
+                    inner,
+                    armed: arm,
+                    panicked: false,
+                    late_calls: count,
+                })
+            }));
+        });
+        (armed, late_calls)
+    }
+
+    /// After an emulator panic, the error and `screen()` show the screen the
+    /// test last saw (#775). They showed the last one *stored*, and only
+    /// `screen()` stored one: here the `one` it took, though the wait after
+    /// it had seen ` two` as well; with no `screen()` at all, the blank grid
+    /// the terminal was spawned with.
+    #[cfg(unix)]
+    #[test]
+    fn an_emulator_panic_freezes_the_screen_last_seen() {
+        use std::time::Duration;
+
+        let (armed, late_calls) = faulty_next_spawn();
+        let mut t = crate::Terminal::builder()
+            .size(40, 6)
+            .args([
+                "-c",
+                "printf one; read line; printf ' two'; read line; read line",
+            ])
+            .spawn("sh")
+            .expect("spawns");
+        t.wait_until_for(|s| s.contains("one"), Duration::from_secs(10))
+            .expect("the child printed one");
+        assert!(t.screen().contains("one"));
+        t.send_str("x\r").expect("the child is reading");
+        t.wait_until_for(|s| s.contains("two"), Duration::from_secs(10))
+            .expect("the child printed two");
+        // The child is blocked in `read` and prints nothing more, so the
+        // echo of this line is the emulator's next read, and it panics.
+        armed.store(true, Ordering::SeqCst);
+        t.send_str("go\r").expect("the child is reading");
+        match t.wait_until_for(|s| s.contains("never"), Duration::from_secs(10)) {
+            Err(Error::Emulator { screen, .. }) => assert!(
+                screen.contains("one") && screen.contains("two"),
+                "the error's screen is not the last one seen:\n{screen}"
+            ),
+            other => panic!("expected Error::Emulator, got {other:?}"),
+        }
+        let frozen = t.screen();
+        assert!(
+            frozen.contains("two"),
+            "screen() after the panic:\n{frozen}"
+        );
+        assert_eq!(late_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// The same after `wait_frame`: a panic freezes a screen at least as new
+    /// as the frame it returned (#775). Frames are not snapshots a wait
+    /// takes, so the blank spawn grid was frozen here.
+    #[cfg(unix)]
+    #[test]
+    fn an_emulator_panic_after_wait_frame_freezes_a_screen_as_new_as_its_frame() {
+        use std::time::Duration;
+
+        let (armed, late_calls) = faulty_next_spawn();
+        let mut t = crate::Terminal::builder()
+            .size(40, 6)
+            .args([
+                "-c",
+                r"printf '\033[?2026hframe 1\033[?2026l'; read line; read line",
+            ])
+            .spawn("sh")
+            .expect("spawns");
+        t.wait_frame_for(|s| s.contains("frame 1"), Duration::from_secs(10))
+            .expect("the child drew a frame");
+        armed.store(true, Ordering::SeqCst);
+        t.send_str("go\r").expect("the child is reading");
+        match t.wait_until_for(|s| s.contains("never"), Duration::from_secs(10)) {
+            Err(Error::Emulator { screen, .. }) => assert!(
+                screen.contains("frame 1"),
+                "the error's screen is older than the frame returned:\n{screen}"
+            ),
+            other => panic!("expected Error::Emulator, got {other:?}"),
+        }
+        assert_eq!(late_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// `Recorder::stop` after an emulator panic returns the panic, as
+    /// every wait and `resize` do (#776). It said the application "never
+    /// emitted a DEC 2026 synchronized update", though its frame came after
+    /// the emulator stopped seeing anything; and with a frame recorded
+    /// before the panic it returned `Ok`, a recording cut at the panic
+    /// passing for a whole one.
+    #[cfg(unix)]
+    #[test]
+    fn a_recording_across_an_emulator_panic_stops_with_the_panic() {
+        use std::time::Duration;
+
+        // A frame only after the panic, then one before it as well.
+        for frame_first in [false, true] {
+            let (armed, late_calls) = faulty_next_spawn();
+            let mut t = crate::Terminal::builder()
+                .size(40, 6)
+                .args([
+                    "-c",
+                    r"read line; printf '\033[?2026hframe 1\033[?2026l'; read line; printf '\033[?2026hframe 2\033[?2026l'; read line",
+                ])
+                .spawn("sh")
+                .expect("spawns");
+            let recorder = t.record();
+            if frame_first {
+                t.send_str("a\r").expect("the child is reading");
+                t.wait_frame_for(|s| s.contains("frame 1"), Duration::from_secs(10))
+                    .expect("the child drew a frame");
+            }
+            // The echo of this line is the emulator's next read, and it
+            // panics; the frame drawn after it is never seen.
+            armed.store(true, Ordering::SeqCst);
+            t.send_str("go\r").expect("the child is reading");
+            match t.wait_until_for(|s| s.contains("never"), Duration::from_secs(10)) {
+                Err(Error::Emulator { .. }) => {}
+                other => panic!("expected Error::Emulator, got {other:?}"),
+            }
+            match recorder.stop() {
+                Err(Error::Emulator { detail, .. }) => {
+                    assert_eq!(detail, "an injected emulator fault");
+                }
+                other => {
+                    panic!("frame first: {frame_first}: expected Error::Emulator, got {other:?}")
+                }
+            }
+            assert_eq!(late_calls.load(Ordering::SeqCst), 0);
+        }
     }
 
     fn panicking_state() -> Monitor<EmuState> {
@@ -5673,12 +5953,10 @@ mod tests {
         let (tx, rx) = mpsc::channel::<super::WriteRequest>();
         let reader_shared = Arc::clone(&shared);
         let reader = std::thread::spawn(move || {
-            let writer: super::SharedWriter = Arc::new(std::sync::Mutex::new(None));
             reader_loop(
                 Box::new(std::io::Cursor::new(b"ready\x1b[6n".to_vec())),
                 &reader_shared,
-                &writer,
-                Some(&tx),
+                &tx,
                 &AtomicUsize::new(0),
                 &AtomicUsize::new(0),
             );
@@ -5850,6 +6128,65 @@ mod tests {
             .expect("the writer ends when its queue closes");
     }
 
+    /// Where the master cannot be duplicated, as on Windows, a send keeps
+    /// its deadline all the same (#771). The writer thread was started only
+    /// with a duplicate; without one a send wrote on the calling thread with
+    /// no deadline at all, under the lock the reader wrote its replies
+    /// under. Forced here, where a raw-mode program that never reads fills
+    /// its input queue and a write into it blocks, as a write into ConPTY's
+    /// input pipe may; the watchdog turns a send that never returns into a
+    /// failure, and the thread it is stuck on is left behind.
+    #[cfg(unix)]
+    #[test]
+    fn without_a_duplicate_of_the_master_a_send_keeps_its_deadline() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        const DEADLINE: Duration = Duration::from_millis(500);
+        // Far past the deadline, and past the drop's reap grace.
+        const WATCHDOG: Duration = Duration::from_secs(30);
+
+        super::NO_MASTER_DUP.with(|no| no.set(true));
+        let mut t = crate::Terminal::builder()
+            .size(40, 5)
+            .timeout(DEADLINE)
+            .args(["-c", "stty raw -echo; printf ready; exec sleep 60"])
+            .spawn("sh")
+            .expect("spawns");
+        assert!(
+            !super::NO_MASTER_DUP.with(std::cell::Cell::get),
+            "the spawn went without a duplicate"
+        );
+        t.wait_until_for(|s| s.contains("ready"), Duration::from_secs(10))
+            .expect("the program is up, and reads nothing");
+        let (sent_tx, sent) = mpsc::channel();
+        let (dropped_tx, dropped) = mpsc::channel();
+        std::thread::spawn(move || {
+            let start = Instant::now();
+            let outcome = t.send_str(&"x".repeat(1 << 20));
+            let _ = sent_tx.send((start.elapsed(), outcome));
+            drop(t);
+            let _ = dropped_tx.send(());
+        });
+        match sent.recv_timeout(WATCHDOG) {
+            Ok((_, Err(Error::Write { what, .. }))) => {
+                assert!(what.contains("not reading its input"), "{what}");
+            }
+            Ok((took, other)) => {
+                panic!("1 MiB into a full input queue gives up: {other:?} after {took:?}")
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                "the send did not return in {WATCHDOG:?}: without a duplicate of the master \
+                 it has no deadline (#771)"
+            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the send panicked; see above"),
+        }
+        assert!(
+            dropped.recv_timeout(WATCHDOG).is_ok(),
+            "the drop did not return in {WATCHDOG:?}"
+        );
+    }
+
     /// A reply to a cursor or size query costs the same on any grid. Each
     /// used to snapshot the whole screen to read two numbers, so 2000
     /// cursor-position queries at 200x50 took ten seconds in a debug build
@@ -5961,7 +6298,7 @@ mod tests {
     #[test]
     fn an_emulator_panic_is_recorded_rather_than_lost() {
         let shared = panicking_state();
-        let writer: super::SharedWriter = Arc::new(std::sync::Mutex::new(None));
+        let (replies, _) = std::sync::mpsc::channel();
         let pending = AtomicUsize::new(0);
         let queued = AtomicUsize::new(0);
 
@@ -5978,8 +6315,7 @@ mod tests {
         reader_loop(
             Box::new(std::io::Cursor::new(b"first\nsecond\n".to_vec())),
             &shared,
-            &writer,
-            None,
+            &replies,
             &pending,
             &queued,
         );
@@ -6290,7 +6626,7 @@ mod tests {
             use std::sync::atomic::AtomicUsize;
 
             use super::super::{
-                reader_loop, EmuState, Graphics, Monitor, Responder, SharedWriter, Vt100Emulator,
+                reader_loop, EmuState, Graphics, Monitor, Responder, Vt100Emulator,
             };
 
             /// As many one-byte reads as it is given, then end of stream.
@@ -6336,14 +6672,13 @@ mod tests {
                 },
                 Arc::new(AtomicUsize::new(0)),
             ));
-            let writer: SharedWriter = Arc::new(Mutex::new(None));
+            let (replies, _) = std::sync::mpsc::channel();
             // On this thread, as the reader thread runs it: the duplicate
             // is the loop's, and closes as the loop returns.
             reader_loop(
                 Box::new(MasterDup(Some(Reads(2, Arc::clone(&log))))),
                 &shared,
-                &writer,
-                None,
+                &replies,
                 &AtomicUsize::new(0),
                 &AtomicUsize::new(0),
             );

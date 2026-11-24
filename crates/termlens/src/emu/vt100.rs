@@ -1086,6 +1086,10 @@ impl Emulator for Vt100Emulator {
         self.tracker.mid_sequence()
     }
 
+    fn open_sequence(&self) -> Option<String> {
+        self.tracker.open_sequence()
+    }
+
     fn in_sync_update(&self) -> bool {
         self.tracker.in_sync_update()
     }

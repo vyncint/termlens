@@ -26,7 +26,10 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// current thread's name — under `cargo test`, the test's path — and `<n>`
 /// counts this process's screens from 1, stepping past any name already in
 /// the directory: a file there is never replaced, so two test binaries
-/// with a test of the same name each leave their own. Give it an absolute
+/// with a test of the same name each leave their own. A name is kept to
+/// ASCII letters, digits, `-` and `_`, and one past 222 bytes is cut to its
+/// first 200 and 16 hex digits of a hash of the whole, so the file name
+/// fits the 255 bytes a filesystem allows (#773). Give it an absolute
 /// path: a relative one is taken against the test process's working
 /// directory, and `cargo test` runs each test binary in its own package's
 /// directory, so in a workspace each crate's screens land in that crate's
@@ -102,8 +105,11 @@ pub enum Error {
     /// snapshot returned the same frozen screen, and each wait ran to its
     /// deadline reporting a predicate that was never going to become true.
     /// A wait now fails immediately and says why. The screen is the last one
-    /// taken before the failure — the emulator is not asked again, because
-    /// its state after a panic means nothing.
+    /// taken before the failure, by a wait or by
+    /// [`Terminal::screen`](crate::Terminal::screen): what the test last
+    /// saw (#775). The emulator is not asked again, because its state after
+    /// a panic means nothing, so the screen may be older than the output
+    /// that reached it after that.
     #[error(
         "the terminal emulator failed and the screen stopped advancing: {detail}\n\
          --- last screen before the failure ---\n{screen}"
@@ -145,7 +151,9 @@ pub enum Error {
     /// it ever reads again, and input sent afterwards waits behind them —
     /// failing the same way while the queue does not move. So a retry types
     /// its input twice, and "the application never got these bytes" is not
-    /// what this error says (#590).
+    /// what this error says (#590). A write the child released the terminal
+    /// under is the exception: it fails as the terminal closes, and nothing
+    /// can read what it had not written (#770).
     #[error("failed to send {what}\n--- screen at the failed write ---\n{screen}")]
     Write {
         /// What was being sent, which command it was going to, and why the
@@ -207,10 +215,59 @@ pub(crate) mod artifact {
     /// past what one directory holds from a run.
     const ATTEMPTS: usize = 1 << 16;
 
+    /// The most bytes a file name may have where tests write: 255 on ext4
+    /// and APFS, 255 UTF-16 units on NTFS. `<test>` is ASCII once
+    /// sanitised, so its bytes are its units.
+    const NAME_MAX: usize = 255;
+
+    /// The longest `-<n>.screen.<ext>` there is, with the counter at its
+    /// widest.
+    const SUFFIX_MAX: usize = "-18446744073709551615.screen.json".len();
+
+    /// How much of a test name too long for a file name is kept, ahead of a
+    /// hash of the whole of it.
+    const KEPT: usize = 200;
+
+    // A shortened `<test>` (what is kept, `-`, 16 hex digits) fits as well.
+    const _: () = assert!(KEPT + 17 + SUFFIX_MAX <= NAME_MAX);
+
+    /// `<test>` for a thread named `name`: the name sanitised, whole while
+    /// every file name it can head fits in [`NAME_MAX`], and otherwise its
+    /// first [`KEPT`] bytes and a hash of the whole name as it was before it
+    /// was sanitised, so names that share a beginning, or that sanitise
+    /// alike, stay apart. A test path that long, from generated cases or
+    /// deeply nested modules, made `<test>-<n>.screen.txt` too long to
+    /// create, and its screen was lost to `ENAMETOOLONG` (#773).
+    pub(super) fn file_stem(name: &str) -> String {
+        let sanitised: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if sanitised.len() + SUFFIX_MAX <= NAME_MAX {
+            return sanitised;
+        }
+        format!("{}-{:016x}", &sanitised[..KEPT], fnv1a(name.as_bytes()))
+    }
+
+    /// FNV-1a, 64 bits: one name hashes the same in every process and on
+    /// every toolchain, which std's hasher does not promise.
+    pub(super) fn fnv1a(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
     /// Write `screen` to `$TERMLENS_ARTIFACT_DIR/<test>-<n>.screen.json`
     /// (with the `serde` feature) or `.screen.txt` (the `with_styles`
     /// rendering, which `Screen::parse` reads back). `<test>` is the
-    /// current thread's name, which under `cargo test` is the test's path.
+    /// current thread's name, which under `cargo test` is the test's path,
+    /// as [`file_stem`] makes it fit.
     /// Best effort: a directory that cannot be written is reported once on
     /// stderr, and the error the screen came from is returned regardless.
     ///
@@ -225,18 +282,7 @@ pub(crate) mod artifact {
         };
         let dir = PathBuf::from(dir);
         let thread = std::thread::current();
-        let test: String = thread
-            .name()
-            .unwrap_or("screen")
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
+        let test = file_stem(thread.name().unwrap_or("screen"));
         let (ext, body) = render(screen);
         if let Err(e) = std::fs::create_dir_all(&dir) {
             eprintln!("termlens: could not write {} ({VAR}): {e}", dir.display());
@@ -292,6 +338,43 @@ mod tests {
         }
         cells.push(Cell::new(String::new(), Style::default(), false, false));
         Screen::from_parts(3, 1, 0, 2, true, cells, TermState::default())
+    }
+
+    /// The artifact's `<test>` is the name whole while every file name it
+    /// can head fits, and past that its first 200 bytes and a hash of the
+    /// whole name (#773): the file name fits at any counter, and two names
+    /// that share their first 200 bytes, or that sanitise alike, stay apart.
+    #[test]
+    fn an_artifact_name_too_long_for_a_file_name_is_cut_and_hashed() {
+        use super::artifact::file_stem;
+
+        let widest = "-18446744073709551615.screen.json".len();
+        let whole = "t".repeat(255 - widest);
+        assert_eq!(file_stem(&whole), whole, "a name that fits is kept whole");
+        assert_eq!(file_stem("a::b c"), "a__b_c", "and sanitised as before");
+
+        let long = |end: &str| format!("{}{end}", "nested::".repeat(40));
+        let cut = file_stem(&long("case_1"));
+        assert_eq!(cut.len(), 217, "{cut}");
+        assert!(cut.len() + widest <= 255);
+        assert!(cut.starts_with(&"nested__".repeat(25)), "{cut}");
+        assert!(cut[201..].bytes().all(|b| b.is_ascii_hexdigit()), "{cut}");
+        assert_ne!(cut, file_stem(&long("case_2")), "same beginning");
+        assert_ne!(
+            file_stem(&format!("{}::x", "y".repeat(300))),
+            file_stem(&format!("{}__x", "y".repeat(300))),
+            "sanitised alike"
+        );
+        let one_past = "t".repeat(256 - widest);
+        let hash = super::artifact::fnv1a(one_past.as_bytes());
+        assert_eq!(
+            file_stem(&one_past),
+            format!("{}-{hash:016x}", "t".repeat(200)),
+            "a byte too long is cut"
+        );
+        // FNV-1a's own reference values, so the hash is the same anywhere.
+        assert_eq!(super::artifact::fnv1a(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(super::artifact::fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
     }
 
     #[test]
