@@ -57,6 +57,9 @@ pub(super) struct Unhandled {
     /// record yet, because the call after it decides whether it is one —
     /// see that callback.
     icon: Option<IconName>,
+    /// What the tracker saw of the `OSC` vte dispatches next, when vte
+    /// keeps only part of it — see [`CutOsc`].
+    cut_osc: Option<CutOsc>,
     /// The content length of the last OSC recorded, before its entry was
     /// cut: how much of a body reached vt100, which the capture-bound
     /// tests read now that the entry no longer shows it (#694, #695).
@@ -73,6 +76,7 @@ impl Default for Unhandled {
             visual_bells: 0,
             evicted: 0,
             icon: None,
+            cut_osc: None,
             #[cfg(test)]
             last_osc_len: 0,
         }
@@ -118,6 +122,17 @@ impl Unhandled {
         }
     }
 
+    /// Tell the record what the tracker saw of the next `OSC` vte
+    /// dispatches, which vte keeps only part of. The emulator says so just
+    /// before it feeds the byte that ends the string. vte dispatches it at
+    /// that byte, or for an ESC once the rewriters let the ESC go, with the
+    /// byte after it, maybe a read later; nothing else is dispatched first
+    /// either way. With more parameters than vt100's own forms take, it
+    /// always reaches `unhandled_osc`, which takes this.
+    pub(super) fn expect_cut_osc(&mut self, cut: CutOsc) {
+        self.cut_osc = Some(cut);
+    }
+
     fn record(&mut self, shape: String) {
         self.settle();
         self.keep(shape);
@@ -154,11 +169,38 @@ fn params_text(params: &[&[u16]]) -> String {
         .join(";")
 }
 
+/// The parameters of an `OSC` vte keeps: it stores sixteen and drops the
+/// rest of the string.
+const VTE_OSC_PARAMS: usize = 16;
+
+/// What the tracker saw of an `OSC` that vte keeps only part of, which the
+/// record is told before vte dispatches it (#762). The entry is then cut
+/// where vte stopped, and says so with `…`; it ended there with nothing
+/// to say so, and two strings that differ only past it were one entry.
+/// And a palette query is told by the whole string, as the tracker tells
+/// it: one for eight colours or more was named in a timeout and listed as
+/// well, since the record took vte's sixteenth parameter for the last.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CutOsc {
+    palette_query: bool,
+}
+
+impl CutOsc {
+    /// The `OSC` whose content is `content`, as the tracker captured it,
+    /// when vte keeps only part of it.
+    pub(super) fn of(content: &[u8]) -> Option<Self> {
+        let separators = content.iter().filter(|&&b| b == b';').count();
+        (separators >= VTE_OSC_PARAMS).then(|| Self {
+            palette_query: content.starts_with(b"4;") && content.ends_with(b"?"),
+        })
+    }
+}
+
 /// An OSC's entry: `^[]` and the parameters as written, `;` between them,
 /// kept to [`MAX_STRING_SHAPE`] bytes of content and ending in `…` when
-/// cut. A cut falls on a character boundary of the rendering, so it never
-/// leaves half a character.
-fn osc_shape(params: &[&[u8]]) -> String {
+/// cut — here, or by vte (`dropped`). A cut falls on a character boundary
+/// of the rendering, so it never leaves half a character.
+fn osc_shape(params: &[&[u8]], dropped: bool) -> String {
     // Join no more than the bound and a character's worth past it: a
     // byte the rendering cannot decode only grows (to U+FFFD), so the
     // first `MAX_STRING_SHAPE` bytes of the rendering come from at most
@@ -181,10 +223,10 @@ fn osc_shape(params: &[&[u8]]) -> String {
     let lossy = String::from_utf8_lossy(&content);
     let text = super::vt100::restore_replacement(&lossy);
     let mut shape = String::from("^[]");
-    if total == content.len() && text.len() <= MAX_STRING_SHAPE {
+    if !dropped && total == content.len() && text.len() <= MAX_STRING_SHAPE {
         shape.push_str(&text);
     } else {
-        let mut end = MAX_STRING_SHAPE;
+        let mut end = MAX_STRING_SHAPE.min(text.len());
         while !text.is_char_boundary(end) {
             end -= 1;
         }
@@ -303,7 +345,7 @@ impl Callbacks for Unhandled {
         // call after it.
         self.settle();
         self.icon = Some(IconName {
-            shape: osc_shape(&[b"1", name]),
+            shape: osc_shape(&[b"1", name], false),
             digest: digest(name),
         });
     }
@@ -456,11 +498,15 @@ impl Callbacks for Unhandled {
         // `10;#ff0000;?` as set-then-query, and since the responder does
         // not answer *that*, it belongs here. A palette query is any
         // `4;…?`, which is the rule `seq.rs` applies to it.
+        let cut = self.cut_osc.take();
         let colour_query = match params.first() {
             // `12;?`, the cursor colour, is named rather than answered, and
             // in the same one shape (#691).
             Some(&b"10" | &b"11" | &b"12") => params.len() == 2 && params[1] == b"?",
-            Some(&b"4") => matches!(params.last(), Some(&b"?")),
+            Some(&b"4") => cut.map_or_else(
+                || matches!(params.last(), Some(&b"?")),
+                |cut| cut.palette_query,
+            ),
             _ => false,
         };
         // The title is the tracker's too, in every form that names one:
@@ -476,7 +522,7 @@ impl Callbacks for Unhandled {
             self.last_osc_len =
                 params.iter().map(|p| p.len()).sum::<usize>() + params.len().saturating_sub(1);
         }
-        self.record(osc_shape(params));
+        self.record(osc_shape(params, cut.is_some()));
     }
 }
 

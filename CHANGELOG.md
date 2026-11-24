@@ -70,6 +70,14 @@ reads that marker.
   the title show it. The entry held U+FDD0, the noncharacter termlens
   feeds its parsers in place of U+FFFD. A test that pinned `\u{fdd0}` in
   an entry should expect `\u{fffd}`. (#761)
+- An `OSC` with more than sixteen parameters, the most the backend keeps,
+  is read whole for `Screen::unsupported()`. Its entry ends in `…` after
+  the sixteenth, where it ended there with nothing to say it was cut, so
+  two that differed only past it read as one; and a palette query for
+  eight colours or more (`OSC 4 ; 0 ; ? ; … ; 8 ; ?`) is not listed, as
+  the shorter ones are not, since the timeout already names it. It was
+  named and listed both. A test that pinned such an entry should expect
+  the `…`, or for the palette query no entry. (#762)
 
 ### Fixed
 

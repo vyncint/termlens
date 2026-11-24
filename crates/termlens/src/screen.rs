@@ -1155,11 +1155,12 @@ impl Screen {
     /// test's to set, so the request is recorded rather than honoured.
     ///
     /// An operating system command (`OSC`) is kept to the first 64 bytes of
-    /// its content, which hold its number and first parameters, and ends in
+    /// its content, which hold its number and first parameters, and to its
+    /// first sixteen parameters, the most the backend reads, and ends in
     /// `…` where it was cut, so an iTerm2 inline image (`OSC 1337 ;
     /// File=…`) is listed by its number, its first parameters and the start
-    /// of its payload, not by the whole payload. Two that agree in those 64
-    /// bytes are one entry.
+    /// of its payload, not by the whole payload. Two that agree in what is
+    /// kept are one entry.
     ///
     /// ```no_run
     /// # fn main() -> termlens::Result<()> {

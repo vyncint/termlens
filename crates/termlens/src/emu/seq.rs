@@ -1446,6 +1446,20 @@ impl SeqTracker {
             && !matches!(b, 0x07 | 0x18 | 0x1a | 0x1b)
     }
 
+    /// The content of the `OSC` string `b` ends for the parsers, or `None`
+    /// when it ends none. vte dispatches an `OSC` at its BEL, CAN or SUB,
+    /// and at the ESC of an ST — or of whatever sequence that ESC starts —
+    /// a byte before the tracker reads what follows it; what was captured
+    /// is what vte holds, since the body past [`OSC_CAPTURE_MAX`] reaches
+    /// neither.
+    ///
+    /// Consulted **before** the byte is stepped, as
+    /// [`withholds`](Self::withholds) is.
+    pub(crate) fn osc_ending(&self, b: u8) -> Option<&[u8]> {
+        (self.state == State::Osc && matches!(b, 0x07 | 0x18 | 0x1a | 0x1b))
+            .then_some(self.osc_buf.as_slice())
+    }
+
     /// The glyph `b` draws in the invoked character set, when that set
     /// redefines `b` — the 32 bytes DEC Special Graphics redraws, or `#` in
     /// the UK set — or `None` when the byte draws as itself, or is not a

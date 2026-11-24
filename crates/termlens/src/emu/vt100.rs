@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use super::seq::{SeqEvent, SeqTracker, TabOp};
 use super::shadow::{AttrShadow, ColorNormalizer};
-use super::unhandled::Unhandled;
+use super::unhandled::{CutOsc, Unhandled};
 use super::{Emulator, FrameSpan, InputModes, ModeState, MouseEncoding, Processed, Stop};
 use crate::graphics::{
     kitty_cells, GraphicsAction, GraphicsPayload, GraphicsProtocol, GraphicsSeen, Placement,
@@ -894,6 +894,16 @@ impl Emulator for Vt100Emulator {
                 self.feed_staged(&bytes[fed..i]);
                 fed = i + 1;
             }
+            // An `OSC` with more parameters than vte keeps is read whole by
+            // the tracker alone, so the record is told what it saw, between
+            // the bytes before the one that ends the string and that byte,
+            // which is where vte dispatches it (#762).
+            if let Some(cut) = self.tracker.osc_ending(byte).and_then(CutOsc::of) {
+                self.feed_staged(&bytes[fed..i]);
+                self.parser.callbacks_mut().expect_cut_osc(cut);
+                self.feed_staged(&bytes[i..=i]);
+                fed = i + 1;
+            }
             // Asked before the step, because whether this byte is a character
             // at all depends on the state the tracker is in before it — and
             // a designation's own final byte must not be drawn.
@@ -1462,6 +1472,65 @@ mod tests {
                 [format!("^[]{}{cut}", &content[..end]).as_str()],
                 "pad {pad}"
             );
+        }
+    }
+
+    /// vte keeps sixteen of an `OSC`'s parameters and drops the rest, and
+    /// the tracker reads the whole string. A palette query for eight
+    /// colours or more was named in a timeout and listed as well, since the
+    /// record read vte's sixteenth parameter as the last; and any `OSC` cut
+    /// there was listed with no `…` to say so, so two that differ only past
+    /// it were one entry (#762). Whole, split at every character, and
+    /// terminated by BEL or ST.
+    #[test]
+    fn an_osc_past_vtes_sixteen_parameters_is_read_whole() {
+        let palette = |colours: u32| -> String {
+            (0..colours).map(|n| format!(";{n};?")).collect::<String>()
+        };
+        let numbers = |count: u32| -> String { (1..count).map(|n| format!(";{n}")).collect() };
+        let cases: Vec<(String, Vec<String>, usize)> = vec![
+            // Nine colours: named, never listed.
+            (format!("\x1b]4{}\x07", palette(9)), vec![], 1),
+            (format!("\x1b]4{}\x1b\\", palette(9)), vec![], 1),
+            // Seven: as before.
+            (format!("\x1b]4{}\x07", palette(7)), vec![], 1),
+            // Seventeen parameters that ask nothing: the sixteen vte kept,
+            // and the cut.
+            (
+                format!("\x1b]777{}\x07", numbers(17)),
+                vec![format!("^[]777{}…", numbers(16))],
+                0,
+            ),
+            // Sixteen: whole, as before.
+            (
+                format!("\x1b]777{}\x07", numbers(16)),
+                vec![format!("^[]777{}", numbers(16))],
+                0,
+            ),
+            // A palette set past the sixteenth parameter stays listed.
+            (
+                format!("\x1b]4{};9;rgb:1/2/3\x07", palette(8)),
+                vec![format!("^[]4{}…", &palette(8)[..30])],
+                0,
+            ),
+        ];
+        for (stream, listed, named) in &cases {
+            for cut in (0..stream.len()).filter(|&cut| stream.is_char_boundary(cut)) {
+                let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+                let mut stops = 0;
+                for piece in [&stream[..cut], &stream[cut..]] {
+                    let mut off = 0;
+                    while off < piece.len() {
+                        let processed = emu.process(&piece.as_bytes()[off..]);
+                        stops += usize::from(processed.stop.is_some());
+                        off += processed.consumed;
+                    }
+                }
+                let s = emu.snapshot();
+                let shapes: Vec<String> = s.unsupported().iter().map(String::from).collect();
+                assert_eq!(&shapes, listed, "{stream:?} cut at {cut}");
+                assert_eq!(stops, *named, "{stream:?} cut at {cut}");
+            }
         }
     }
 
