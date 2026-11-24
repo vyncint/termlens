@@ -244,6 +244,12 @@ reads that marker.
   the panic with nothing to say so. Found by fault injection: no input is
   known to make the emulator panic. (#776)
 
+- `docs/LIMITATIONS.md` says which kitty placements leave the cursor
+  where it is. It said a placement of an image whose transmission has
+  left the payload log does, but given `c=` and `r=` one moves it by
+  those, taken to succeed as every placement is; only without them does
+  it stay, as a PNG placed without them does. (#769)
+
 ## [0.11.10] - 2026-11-17
 
 ### Fixed

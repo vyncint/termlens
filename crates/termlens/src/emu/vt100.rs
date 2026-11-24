@@ -3360,6 +3360,21 @@ mod tests {
         assert_eq!(emu.graphics.len(), emu.graphics_named.len());
     }
 
+    /// A placement of an image whose transmission has left the payload log
+    /// has no size to be moved by but its own `c=` and `r=`, by which it
+    /// moves the cursor, taken to succeed as every placement is. Without
+    /// them it does not move. `docs/LIMITATIONS.md` said such a placement
+    /// never moved (#769). 30x50 px in 10x20-pixel cells is 3x3.
+    #[test]
+    fn a_placement_of_an_image_the_log_dropped_moves_only_by_its_cells() {
+        let sent = "\x1b_Ga=t,i=5,f=24,s=30,v=50;AAAA\x1b\\";
+        let evict = "\x1b_Ga=d,d=i,i=6\x1b\\".repeat(HISTORY + 8);
+        assert_eq!(x_after(&format!("{sent}\x1b_Ga=p,i=5\x1b\\")), Some((2, 3)));
+        let dropped = format!("{sent}{evict}\x1b_Ga=p,i=5");
+        assert_eq!(x_after(&format!("{dropped}\x1b\\")), Some((0, 0)));
+        assert_eq!(x_after(&format!("{dropped},c=2,r=3\x1b\\")), Some((2, 2)));
+    }
+
     /// A query that kitty took as an upload's last chunk completes the
     /// upload, and an `a=T` upload is then placed — `handle_put_command`
     /// runs for it in kitty's `grman_handle_command` — before the query is

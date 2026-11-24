@@ -138,8 +138,8 @@ CHANGELOG entry.
   from the pixel size and `cell_size()` — for `a=p`, the pixel size of the
   newest transmission of that image id, or, for one that names its image
   by number (`I=`) alone, of the newest transmission with that number. A
-  PNG (`f=100`) placed without `c=` and `r=`, a placement of an image whose
-  transmission has left the payload log, or one that names neither an id
+  PNG (`f=100`) or an image whose transmission has left the payload log,
+  placed without `c=` and `r=`, or a placement that names neither an id
   nor a number, does not move it. Whether kitty would have loaded the
   image at all is not knowable here, so a placement is taken to succeed.
   Past the bottom of a scroll region the protocol leaves the cursor's
