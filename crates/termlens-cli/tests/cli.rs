@@ -2753,3 +2753,66 @@ fn render_refuses_json_rows_past_the_header_without_building_them() {
     );
     assert_eq!(out.status.code(), Some(2), "{out:?}");
 }
+
+/// The state is held to what it declares as the grid is (#778). History
+/// has no bound on its rows — `scrollback(n)` takes any `n` — so it is
+/// bounded a row at a time, the empty row shared, and room the allocator
+/// refuses is exit 2 with the reason rather than an abort. The derive took
+/// about fifty bytes of memory a row: ten million empty rows, 30 MB of
+/// `"",` or `[],`, aborted under a 160 MiB address-space cap.
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "`ulimit -v` caps the child's address space only on Linux"
+)]
+fn render_refuses_history_it_has_no_room_for_with_exit_two() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let screen = Screen::parse("size: 1x1  cursor: 0,0\nx").expect("a 1x1 screen");
+    let json = serde_json::to_string(&screen).expect("serialize");
+    for (field, empty, what) in [
+        ("scrollback", "\"\"", "rows of history"),
+        ("scrollback_cells", "[]", "rows of styled history"),
+    ] {
+        let written = json
+            .find(&format!("\"{field}\":"))
+            .expect("the field is written");
+        let value = written + field.len() + 3;
+        let end = value + json[value..].find([',', '}']).expect("the value ends");
+        let (head, tail) = (
+            format!("{}[", &json[..value]),
+            format!("{empty}]{}", &json[end..]),
+        );
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(r#"ulimit -v 163840 && exec "$0" "$@""#)
+            .arg(env!("CARGO_BIN_EXE_termlens"))
+            .args(["render", "--text", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("sh runs");
+        let mut stdin = child.stdin.take().expect("a stdin pipe");
+        let writer = std::thread::spawn(move || {
+            let chunk = format!("{empty},").repeat(1_000_000);
+            // A refusal before the end of the input closes the pipe; that
+            // is a result, not a failure of the writer.
+            let _ = stdin.write_all(head.as_bytes());
+            for _ in 0..10 {
+                let _ = stdin.write_all(chunk.as_bytes());
+            }
+            let _ = stdin.write_all(tail.as_bytes());
+        });
+        let out = child.wait_with_output().expect("termlens runs");
+        writer.join().expect("the writer thread");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.starts_with(
+                "termlens: <stdin>: not a termlens Screen: the allocator refused the room for "
+            ) && stderr.contains(what),
+            "{field}: {stderr}"
+        );
+        assert_eq!(out.status.code(), Some(2), "{field}: {out:?}");
+    }
+}

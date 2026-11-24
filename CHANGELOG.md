@@ -30,6 +30,18 @@ reads that marker.
 - Saved JSON screens with leading spaces, tabs or carriage returns are
   recognized as JSON by `render` and `diff`, rather than rejected as text
   snapshots with a missing `size:` header. (#786)
+- The JSON reader holds the out-of-band state to what the file declares,
+  as #713 held the grid. The state was read with no bound: a 1x1 screen
+  whose history held 67 million empty rows, 201 MB on disk, took 1.77 GB,
+  and `termlens render` aborted with exit 134 under a memory cap. History
+  has no row count to hold it to, since `scrollback(n)` takes any `n`, so
+  each row is held instead: to 1000 cells of at most 22 bytes, the most a
+  terminal's row and vt100's cell hold, or as text to the 22,000 bytes
+  those come to. The empty row is one allocation for all of them, and room
+  the allocator refuses is an error, so `render` and `diff` exit 2 naming
+  it. The unsupported sequences and the links are read to the 32 and 64 a
+  terminal keeps. Every file a release wrote reads as before; the JSON
+  format does not change. (#778)
 
 ## [0.11.10] - 2026-11-17
 

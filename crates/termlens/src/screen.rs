@@ -571,6 +571,7 @@ pub(crate) struct TermState {
     pub(crate) cursor_style: Option<u8>,
     /// `OSC 8` hyperlinks emitted, oldest first, behind an `Arc` so a
     /// snapshot costs one refcount rather than a copy of every link.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "serde_impl::links"))]
     pub(crate) links: Arc<Vec<Link>>,
     /// Inline graphics payloads transmitted.
     pub(crate) graphics: GraphicsSeen,
@@ -583,9 +584,19 @@ pub(crate) struct TermState {
     /// cells per snapshot would dominate the cost of every wait, and
     /// history is asserted on for its content. The rows are shared, so a
     /// snapshot pays one `Arc` clone each.
+    #[cfg_attr(
+        feature = "serde",
+        serde(deserialize_with = "serde_impl::history_text")
+    )]
     pub(crate) scrollback: Arc<[Arc<str>]>,
     /// The scrolled-off rows as cells, when the terminal retains styled
     /// history; `None` when it does not. In lockstep with `scrollback`.
+    // `default` keeps what the derive did for a missing `Option` field,
+    // which a `deserialize_with` would otherwise make an error.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, deserialize_with = "serde_impl::history_cells")
+    )]
     pub(crate) scrollback_cells: Option<Arc<[Arc<[Cell]>]>>,
     /// Per row, whether it ended in a soft wrap rather than a line end —
     /// the backend's own record, never asked for before #265.
@@ -593,6 +604,7 @@ pub(crate) struct TermState {
     /// `IRM` is set: the application left the terminal in insert mode.
     pub(crate) insert_mode: bool,
     /// Escape sequences nobody honoured, distinct, first seen first (#266).
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "serde_impl::unsupported"))]
     pub(crate) unsupported: Arc<[Arc<str>]>,
     /// Distinct unsupported shapes beyond the bound, counted only.
     pub(crate) unsupported_overflow: u64,

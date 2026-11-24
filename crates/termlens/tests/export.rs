@@ -677,6 +677,58 @@ mod json {
         Ok(())
     }
 
+    /// The reader holds each part of the state to a bound (#778), and a
+    /// terminal filled past every one of them still reads back equal:
+    /// styled history at a terminal's widest, 1000 columns of cells sent
+    /// `e` and seven variation selectors, of which vt100 keeps five, 21
+    /// bytes; 40 unsupported sequences, of which it names 32; and 70 links,
+    /// of which it keeps 64. Each is sent past what the terminal keeps, so a
+    /// backend or a bound in `emu/` that kept more would fail here until the
+    /// reader's bound moved with it.
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "ConPTY drops unsupported sequences and gives links ids of its own before termlens sees them (#149)"
+    )]
+    fn a_screen_filled_to_every_bound_the_reader_holds_round_trips() -> termlens::Result<()> {
+        let cell = format!("e{}", "\u{e0100}".repeat(5));
+        let line = format!("e{}", "\u{e0100}".repeat(7)).repeat(1000);
+        let unsupported: String = (20..60u16).map(|mode| format!(r"\e[{mode}h")).collect();
+        let links: String = (0..70)
+            .map(|i| format!(r"\e]8;;https://example.com/{i}\e\\L\e]8;;\e\\"))
+            .collect();
+        let mut steps = vec!["--raw", &unsupported, "--raw", &links, "NL"];
+        for _ in 0..6 {
+            steps.extend([line.as_str(), "NL"]);
+        }
+        steps.extend(["DONE", "--wait"]);
+        let mut t = common::spawn_emit(
+            Terminal::builder()
+                .size(1000, 3)
+                .scrollback_styles(true)
+                .timeout(Duration::from_secs(10)),
+            &steps,
+        )?;
+        t.wait_until(|s| s.contains("DONE"))?;
+        let s = t.screen();
+        assert_eq!(s.unsupported().len(), 32);
+        assert_eq!(s.links().len(), 64);
+        let widest = s
+            .scrollback_text()
+            .lines()
+            .position(|row| row.len() == 21_000)
+            .expect("a full row in history, 1000 cells of 21 bytes");
+        assert_eq!(s.scrollback_cell(widest, 999).unwrap().contents(), cell);
+
+        let back: termlens::Screen =
+            serde_json::from_str(&serde_json::to_string(&s).expect("serializes"))
+                .expect("every bound holds what the terminal kept");
+        assert_eq!(back, s);
+        t.send(Key::Enter)?;
+        assert!(t.wait_exit()?.success());
+        Ok(())
+    }
+
     /// The column bound was `>` where the row bound was `>=`, so
     /// `col == cols` — a column that does not exist — passed validation
     /// and `render --text` wrote a header the text parser then refused

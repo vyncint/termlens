@@ -1022,6 +1022,18 @@ in proportion to the screen it declares, not to its length (#713). A grid
 that comes before the header (`jq -S` sorts `cells` ahead of `cols`) is
 held to the 1000-per-axis limit until the header is known.
 
+The state is held the same way (#778). The history has no count a file
+could be held to — `scrollback(n)` takes any `n`, and a bound on it would
+refuse a release's own output — so each row is held instead: to 1000
+cells of at most 22 bytes, a terminal's widest row of vt100's fullest
+cells, or as text to the 22,000 bytes those come to. The empty row, the
+commonest, is one allocation however often it comes, and room the
+allocator refuses for the rows is an error, not an abort. The unsupported
+sequences and the links are read to the 32 and the 64 a terminal keeps,
+and one past is refused. So the history costs memory in proportion to
+the rows it declares: a pointer for an empty one, where the derive spent
+about fifty bytes on each three of file.
+
 A cell must also be one a termlens could have written, because the CLI
 prints what it reads: a cell carrying an escape sequence drove the
 terminal of whoever ran `render --text` or `diff` on the file (#582).
