@@ -1432,6 +1432,26 @@ fn inspect(args: Vec<OsString>) -> ExitCode {
         return usage_error(INSPECT_USAGE);
     };
 
+    // A bare name is looked up on PATH, and the child has one only if this
+    // process does or `--env` gives one: PATH is passed through when the
+    // environment is cleared, and inherited with it under `--inherit-env`.
+    // Without one the builder refuses the name with advice for code that
+    // called `env_clear()` and `.env(…)`, which a user of the CLI never
+    // wrote, so the refusal is made here, naming what that user can do
+    // (#785) — as `--cwd` is checked above, for the same reason (#312).
+    // "Bare" is the builder's own test: no directory part.
+    let bare = Path::new(&program)
+        .parent()
+        .is_none_or(|dir| dir.as_os_str().is_empty());
+    if bare && std::env::var_os("PATH").is_none() && !env.iter().any(|(key, _)| key == "PATH") {
+        return fail(&format!(
+            "`{}` is a bare program name and there is no PATH to find it in, \
+             since termlens has none to pass on, with --inherit-env or without; \
+             give the program's absolute path, or a PATH with --env PATH=DIR",
+            program.to_string_lossy()
+        ));
+    }
+
     let mut builder = Terminal::builder()
         .size(size.0, size.1)
         .timeout(timeout)

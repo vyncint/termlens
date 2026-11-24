@@ -779,6 +779,33 @@ fn inspect_example_and_command_agree_on_exit_codes_when_inspect_cannot_run() {
     }
 }
 
+/// With no PATH to find a bare program name in, both refuse it naming
+/// what their user can do, `--env PATH=…` among it, rather than passing on
+/// the builder's advice about `env_clear()` (#785).
+#[cfg(unix)]
+#[test]
+fn inspect_example_and_command_agree_on_a_bare_name_without_path() {
+    let example = Command::new(inspect_bin())
+        .env_remove("PATH")
+        .args(["sh", "-c", "true"])
+        .output()
+        .expect("the example runs");
+    let command = Command::new(command_bin())
+        .env_remove("PATH")
+        .args(["inspect", "sh", "-c", "true"])
+        .output()
+        .expect("termlens runs");
+    for (who, out) in [("example", &example), ("command", &command)] {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{who}: {stderr}");
+        assert!(out.stdout.is_empty(), "{who}: {out:?}");
+        assert!(
+            stderr.contains("--env PATH=") && !stderr.contains("env_clear"),
+            "{who}: {stderr}"
+        );
+    }
+}
+
 /// A program that exists but cannot be executed is inspect failing to run
 /// it, exit 2 with the missing interpreter named, in both. Both used to
 /// paint a screen for a child killed by SIGABRT and exit 0 (#563).

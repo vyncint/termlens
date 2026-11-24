@@ -77,6 +77,13 @@ reads that marker.
   full of NULs, and a big-endian one as "not valid UTF-8". The exit code
   is 2 as before; a script that matched either old diagnosis needs the
   new one. (#784)
+- `termlens inspect` of a bare program name, with no PATH in its
+  environment, says what a user of the CLI can do: give the program's
+  absolute path, or a PATH with `--env PATH=DIR`. It passed on the
+  library's advice to remove `env_clear()` or call `.env("PATH", …)`,
+  which the CLI's user never wrote, and under `--inherit-env` the PTY
+  layer's "Unable to resolve the PATH". The exit code is 2 as before; a
+  script that matched either message needs the new one. (#785)
 
 ### Fixed
 

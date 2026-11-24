@@ -1982,6 +1982,58 @@ fn inspect_refuses_a_cwd_that_is_not_a_directory() -> termlens::Result<()> {
     Ok(())
 }
 
+/// With no PATH in its environment, `inspect` of a bare program name says
+/// what a CLI user can do — give the program's absolute path, or a PATH
+/// with `--env PATH=…` — in one line naming the flag (#785). The message
+/// was the library's, for code that called `env_clear()` and `.env(…)`,
+/// which the user of the CLI never wrote. `--inherit-env` gives the child
+/// no PATH either when there is none to inherit, so it is refused the same
+/// way; each of the two remedies then runs the program.
+#[test]
+#[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
+fn inspect_without_path_names_what_the_cli_user_can_do() {
+    use std::process::Command;
+    let inspect = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_termlens"))
+            .env_remove("PATH")
+            .arg("inspect")
+            .args(args)
+            .output()
+            .expect("termlens runs")
+    };
+    for args in [
+        &["sh", "-c", "true"][..],
+        &["--inherit-env", "sh", "-c", "true"],
+    ] {
+        let out = inspect(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(stderr.lines().count(), 1, "{args:?}: one line: {stderr}");
+        assert!(
+            stderr.starts_with("termlens: `sh` is a bare program name and there is no PATH"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains("absolute path") && stderr.contains("--env PATH="),
+            "{args:?}: it names the remedies: {stderr}"
+        );
+        assert!(
+            !stderr.contains("env_clear") && !stderr.contains(".env("),
+            "{args:?}: not the builder's advice: {stderr}"
+        );
+    }
+    let sh = ["/bin/sh", "/usr/bin/sh"]
+        .into_iter()
+        .find(|sh| std::path::Path::new(sh).exists())
+        .expect("a POSIX shell");
+    let dir = std::path::Path::new(sh).parent().unwrap().to_str().unwrap();
+    let path = format!("--env=PATH={dir}");
+    for args in [&[sh, "-c", "true"][..], &[&path, "sh", "-c", "true"]] {
+        let out = inspect(args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {out:?}");
+    }
+}
+
 /// `inspect` exists so a test sees the screen its own program will see, so
 /// the child environment starts bare; `--inherit-env` is the explicit
 /// opt-in to the caller's (#367). A regression in either direction is

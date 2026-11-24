@@ -265,6 +265,22 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
+    // A bare name with no PATH to find it in is refused here, naming what a
+    // user of this tool can do, rather than by the builder, whose advice is
+    // for code that called `env_clear()` (#785); `termlens inspect` makes
+    // the same check.
+    let bare = Path::new(&program)
+        .parent()
+        .is_none_or(|dir| dir.as_os_str().is_empty());
+    if bare && std::env::var_os("PATH").is_none() && !env.iter().any(|(key, _)| key == "PATH") {
+        return fail(&format!(
+            "`{}` is a bare program name and there is no PATH to find it in, \
+             since inspect has none to pass on, with --inherit-env or without; \
+             give the program's absolute path, or a PATH with --env PATH=DIR",
+            program.to_string_lossy()
+        ));
+    }
+
     let mut builder = Terminal::builder()
         .size(size.0, size.1)
         .timeout(timeout)
