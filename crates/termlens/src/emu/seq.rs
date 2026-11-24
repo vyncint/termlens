@@ -1966,23 +1966,23 @@ impl SeqTracker {
                 self.csi_first_param
             };
             let count = u16::try_from(ps).unwrap_or(u16::MAX).max(1);
+            // The three read their first parameter and ignore the rest, as
+            // xterm does (`GetParam(0)` and `one_if_default(0)`); taking
+            // them only alone dropped `CSI 1;2 I` while the record took the
+            // shape for this tracker's (#802).
             match b {
                 // Only `0` (this column) and `3` (all) are modelled. The
                 // rest of the family clears *line* tab stops, which this
                 // crate has no notion of; ignoring them beats inventing one.
-                b'g' if self.csi_param_count <= 1 => {
+                b'g' => {
                     return match ps {
                         0 => SeqEvent::Tabs(TabOp::ClearAtCursor),
                         3 => SeqEvent::Tabs(TabOp::ClearAll),
                         _ => SeqEvent::None,
                     };
                 }
-                b'I' if self.csi_param_count <= 1 => {
-                    return SeqEvent::Tabs(TabOp::Forward(count));
-                }
-                b'Z' if self.csi_param_count <= 1 => {
-                    return SeqEvent::Tabs(TabOp::Back(count));
-                }
+                b'I' => return SeqEvent::Tabs(TabOp::Forward(count)),
+                b'Z' => return SeqEvent::Tabs(TabOp::Back(count)),
                 // ED 3, erase the saved lines. vt100 reads the first
                 // parameter alone, and so does this.
                 b'J' if ps == 3 => return SeqEvent::ScrollbackErased,

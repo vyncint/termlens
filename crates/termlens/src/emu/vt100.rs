@@ -4079,6 +4079,24 @@ mod tests {
         assert_eq!(cursor_col(b"\x1b[9Z"), 0);
     }
 
+    /// CHT, CBT and TBC read their first parameter and ignore the rest, as
+    /// xterm does (`CASE_CHT` and `CASE_CBT` count with `one_if_default(0)`,
+    /// charproc.c 3760 and 3751, and `CASE_TBC` reads `GetParam(0)`, 4301).
+    /// A second parameter made termlens drop the sequence, and the arm that
+    /// takes the three shapes for the tracker's hid it: the cursor stayed,
+    /// the stops stayed, and nothing was on record (#802).
+    #[test]
+    fn a_second_tab_parameter_is_ignored_not_the_sequence() {
+        assert_eq!(cursor_col(b"\x1b[1;2I"), 8);
+        assert_eq!(cursor_col(b"\x1b[2;5I"), 16);
+        assert_eq!(cursor_col(b"\x1b[0;9I"), 8);
+        assert_eq!(cursor_col(b"\t\t\x1b[1;2Z"), 8);
+        assert_eq!(cursor_col(b"\x1b[9G\x1b[0;1g\x1b[1G\t"), 16);
+        assert_eq!(cursor_col(b"\x1b[3;5g\t"), 23);
+        let emu = wide_emu(b"\x1b[1;2I\x1b[1;2Z\x1b[3;5g");
+        assert!(emu.snapshot().unsupported().is_empty());
+    }
+
     /// Through the grid: `RIS` restores the default stops, and `DECSTR`
     /// keeps the custom one, as xterm's soft reset does (#687).
     #[test]

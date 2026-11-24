@@ -109,6 +109,12 @@ reads that marker.
   longer resets either, and is listed. A test that expected `CSI Ps ! p`
   to leave the screen's state alone should expect it reset as by
   `CSI ! p`. (#801)
+- CHT, CBT and TBC written with more than one parameter act on the first,
+  as xterm's do: `CSI 1;2 I` moves to the next tab stop, `CSI 1;2 Z` to
+  the previous one, and `CSI 3;5 g` clears every stop. They did nothing,
+  and nothing was listed. A test that expected such a sequence to leave
+  the cursor or the stops alone should expect it to act as with its first
+  parameter alone. (#802)
 
 ### Fixed
 
