@@ -32,10 +32,14 @@ reads that marker.
   compact JSON `TERMLENS_ARTIFACT_DIR` writes, which `render` refused with
   exit 2. JSON is now parsed as it is read, holding memory for the screen
   and history it declares (#778) rather than for the file; its strings and
-  its nesting are held to what a saved screen has. Only the text format,
-  which holds a grid alone and is at most about 110 MB, is still held to
-  1 GiB, and the refusal says so: a script that matched `which no saved
-  screen is` needs `which no screen in the text format is`. (#777)
+  its nesting are held to what a saved screen has. `render --json` writes
+  the document as it makes it, as `render`'s other formats, `diff` and
+  `inspect` now write theirs, so that screen renders back to JSON in the
+  484 MB it is read in, where building the document and a copy of it took
+  5.6 GB. Only the text format, which holds a grid alone and is at most
+  about 110 MB, is still held to 1 GiB, and the refusal says so: a script
+  that matched `which no saved screen is` needs `which no screen in the
+  text format is`. (#777)
 - Masking a stranded wide character masks its one cell. A wide character
   a resize left without its second column, which files 0.11.6 and earlier
   wrote, is one cell, but `mask_matching`, `mask_rect` and the other masks

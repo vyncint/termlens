@@ -129,11 +129,18 @@ run — bad arguments, a file that is missing or not a saved screen, or an
 /// Where a rendering goes, so a reader that closed early (`termlens … |
 /// head`) is a clean exit rather than a panic on a broken pipe.
 fn print(out: &str) -> ExitCode {
-    let mut stdout = io::stdout().lock();
-    match stdout
-        .write_all(out.as_bytes())
-        .and_then(|()| stdout.flush())
-    {
+    emit(|stdout| stdout.write_all(out.as_bytes()))
+}
+
+/// [`print`] for a rendering made as it is written: `write` writes it to
+/// stdout through a buffer, so none is held whole first. A screen's JSON
+/// grows with its history past any bound (#777), and `to_string_pretty`
+/// then `format!` held it twice and more: `render --json` of a 1.25 GiB
+/// screen needed some 3.6 times its output, and aborted under a cap that
+/// read the screen.
+fn emit(write: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> ExitCode {
+    let mut stdout = io::BufWriter::new(io::stdout().lock());
+    match write(&mut stdout).and_then(|()| stdout.flush()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(e) => fail(&format!("writing the output failed: {e}")),
@@ -1022,11 +1029,14 @@ fn diff(args: &[String]) -> ExitCode {
     // plain one already ends its last line, "no difference" and the
     // coloured one do not. Adding one regardless left a blank line after
     // every plain diff, in a pipe and in the report action's summary (#652).
-    let code = if rendered.ends_with('\n') {
-        print(&rendered)
-    } else {
-        print(&format!("{rendered}\n"))
-    };
+    let code = emit(|out| {
+        out.write_all(rendered.as_bytes())?;
+        if rendered.ends_with('\n') {
+            Ok(())
+        } else {
+            out.write_all(b"\n")
+        }
+    });
     if code != ExitCode::SUCCESS {
         return code;
     }
@@ -1238,30 +1248,44 @@ fn render(args: &[String]) -> ExitCode {
         Ok(screen) => screen,
         Err(e) => return fail(&e),
     };
-    let out = match format {
-        "--svg" => screen.to_svg(),
-        "--html" => screen.to_html(),
-        "--ansi" => screen.to_ansi(),
-        // Pretty-printed and newline-terminated, the shape the corpus
-        // commits: a saved screen a human diffs, and one `load` reads back.
-        "--json" => match serde_json::to_string_pretty(&screen) {
-            Ok(json) => format!("{json}\n"),
-            Err(e) => return fail(&format!("writing the JSON failed: {e}")),
-        },
-        _ => format!("{}\n", screen.with_styles()),
+    // Each rendering is written as it is made (#777): the text and the JSON
+    // straight to the output, through a buffer, and the SVG, HTML and ANSI
+    // from the one string the library makes of each.
+    let write = |out: &mut dyn Write| -> io::Result<()> {
+        match format {
+            "--svg" => out.write_all(screen.to_svg().as_bytes()),
+            "--html" => out.write_all(screen.to_html().as_bytes()),
+            "--ansi" => out.write_all(screen.to_ansi().as_bytes()),
+            // Pretty-printed and newline-terminated, the shape the corpus
+            // commits: a saved screen a human diffs, and one `load` reads
+            // back.
+            "--json" => {
+                serde_json::to_writer_pretty(&mut *out, &screen)?;
+                out.write_all(b"\n")
+            }
+            _ => writeln!(out, "{}", screen.with_styles()),
+        }
     };
     // The file is created here, after the screen parsed, and not before
     // (#313): `termlens render … > out.svg` truncates out.svg in the shell
     // before the process runs, so a failing render leaves an empty file
-    // behind. --out cannot, because nothing is opened until there are bytes.
-    // `--out -` is stdout, the same stream every other `-` operand already
-    // is (#469). Treating it as a filename wrote `./-` and printed nothing.
+    // behind. --out cannot, because nothing is opened until the screen is
+    // read. `--out -` is stdout, the same stream every other `-` operand
+    // already is (#469). Treating it as a filename wrote `./-` and printed
+    // nothing.
     match out_path {
-        Some(STDIN) | None => print(&out),
-        Some(path) => match std::fs::write(path, &out) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => fail(&format!("{path}: {e}")),
-        },
+        Some(STDIN) | None => emit(write),
+        Some(path) => {
+            let written = std::fs::File::create(path).and_then(|file| {
+                let mut file = io::BufWriter::new(file);
+                write(&mut file)?;
+                file.flush()
+            });
+            match written {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(&format!("{path}: {e}")),
+            }
+        }
     }
 }
 
@@ -1530,7 +1554,7 @@ fn inspect(args: Vec<OsString>) -> ExitCode {
         Err(termlens::Error::Timeout { .. }) => at_the_deadline.to_owned(),
         Err(e) => format!("--- waiting for the program failed: {e} ---"),
     };
-    let code = print(&format!("{}\n", inspect_render(&t.screen(), ansi)));
+    let code = emit(|out| writeln!(out, "{}", inspect_render(&t.screen(), ansi)));
     // The trailer is what inspect reports about the program; if stderr
     // cannot take it, say so with the exit code rather than a panic (#594).
     if report(&trailer).is_err() {

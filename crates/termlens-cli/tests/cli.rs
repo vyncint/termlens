@@ -1492,6 +1492,92 @@ fn every_corpus_file_renders() -> termlens::Result<()> {
     Ok(())
 }
 
+/// `render` writes each rendering as it is made rather than building it
+/// whole first (#777), and the bytes are the ones it printed before: the
+/// library's own rendering of the screen it read — the text format and the
+/// pretty JSON each with one newline after it, the SVG, HTML and ANSI as
+/// they are — on stdout and through `--out`, for the corpus screens of the
+/// last release and every extra 0.11.6 shape. `diff` likewise prints the
+/// diff's own text with exactly one newline after it.
+#[test]
+fn render_and_diff_print_the_library_rendering_byte_for_byte() {
+    use std::process::Command;
+    let bin = env!("CARGO_BIN_EXE_termlens");
+    let compat = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../termlens/tests/compat");
+    let mut files: Vec<std::path::PathBuf> = ["0.11.10", "0.11.6"]
+        .iter()
+        .flat_map(|version| std::fs::read_dir(compat.join(version)).expect("a version directory"))
+        .map(|entry| entry.expect("a corpus file").path())
+        .collect();
+    files.sort();
+    assert!(files.len() >= 24, "{files:?}");
+    let dir = std::env::temp_dir().join(format!("termlens-render-bytes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let written = dir.join("out");
+    let read = |path: &std::path::Path| -> Screen {
+        let text = std::fs::read_to_string(path)
+            .expect("a corpus file")
+            .replace("\r\n", "\n");
+        if path.extension().is_some_and(|e| e == "json") {
+            serde_json::from_str(&text).expect("a JSON screen")
+        } else {
+            Screen::parse(&text).expect("a text screen")
+        }
+    };
+    for file in &files {
+        let screen = read(file);
+        let path = file.to_str().unwrap();
+        for (flag, expected) in [
+            ("--text", format!("{}\n", screen.with_styles())),
+            (
+                "--json",
+                format!("{}\n", serde_json::to_string_pretty(&screen).unwrap()),
+            ),
+            ("--svg", screen.to_svg()),
+            ("--html", screen.to_html()),
+            ("--ansi", screen.to_ansi()),
+        ] {
+            let out = Command::new(bin)
+                .args(["render", flag, path])
+                .output()
+                .expect("termlens runs");
+            assert_eq!(out.status.code(), Some(0), "{flag} {path}: {out:?}");
+            assert!(out.stdout == expected.as_bytes(), "{flag} {path} on stdout");
+            let out = Command::new(bin)
+                .args(["render", flag, "--out", written.to_str().unwrap(), path])
+                .output()
+                .expect("termlens runs");
+            assert_eq!(out.status.code(), Some(0), "{flag} {path}: {out:?}");
+            assert!(
+                std::fs::read(&written).unwrap() == expected.as_bytes(),
+                "{flag} {path} through --out"
+            );
+        }
+    }
+
+    let (plain, styled) = (
+        compat.join("0.11.10/plain.txt"),
+        compat.join("0.11.10/styled.txt"),
+    );
+    for (a, b) in [(&plain, &styled), (&plain, &plain)] {
+        let diff = read(a).diff(&read(b)).to_string();
+        let expected = if diff.ends_with('\n') {
+            diff
+        } else {
+            format!("{diff}\n")
+        };
+        let out = Command::new(bin)
+            .args(["diff", "--color", "never"])
+            .arg(a)
+            .arg(b)
+            .output()
+            .expect("termlens runs");
+        assert!(matches!(out.status.code(), Some(0 | 1)), "{out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Run the CLI with `input` on standard input, and without a PTY: a pipe is
 /// the whole point of `-`, and through a PTY there is no EOF to read to.
 fn with_stdin(args: &[&str], input: impl AsRef<[u8]>) -> std::process::Output {
