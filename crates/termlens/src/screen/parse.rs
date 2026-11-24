@@ -238,16 +238,21 @@ pub(super) fn cell_width(ch: char) -> std::result::Result<usize, String> {
 /// without its second half, and a program that redrew after the screen
 /// widened again put text in the column that half had held (#683). As
 /// many wide characters as the row needs are read as those stranded
-/// cells, the leftmost first, as the JSON reader holds them (`check_row`).
+/// cells, as the JSON reader holds them (`check_row`): the leftmost
+/// first, but one in the first column last. No resize strands that one,
+/// a terminal being two columns wide at least, and taking it first moved
+/// every cell, span and cursor after it a column left of what the writer
+/// drew when the stranded character was a later one (#782). It is still
+/// taken when nothing else fits, so no row that read stops reading.
 /// A row that fits is read as fitting: the text does not say a wide
 /// character lost its second half, and two columns is what every capture
 /// writes.
 fn parse_row(line: &str, number: usize, cols: u16, row: &mut [Cell]) -> Result<()> {
     let blank =
         |row: &mut [Cell]| row.fill(Cell::new(String::new(), Style::default(), false, false));
-    let whole = lay_out_row(line, number, cols, row, true, 0).or_else(|_| {
+    let whole = lay_out_row(line, number, cols, row, true, 0, false).or_else(|_| {
         blank(row);
-        lay_out_row(line, number, cols, row, false, 0)
+        lay_out_row(line, number, cols, row, false, 0, false)
     });
     let Err(err) = whole else {
         return Ok(());
@@ -256,13 +261,15 @@ fn parse_row(line: &str, number: usize, cols: u16, row: &mut [Cell]) -> Result<(
     // that lands in the last column strands there by itself, so the row
     // fits at `over - 1` strands or at `over`, or at no count.
     let over = natural_width(line).saturating_sub(usize::from(cols));
-    for strand in [over.saturating_sub(1), over] {
-        if strand == 0 {
-            continue;
-        }
-        blank(row);
-        if lay_out_row(line, number, cols, row, false, strand).is_ok() {
-            return Ok(());
+    for first in [false, true] {
+        for strand in [over.saturating_sub(1), over] {
+            if strand == 0 {
+                continue;
+            }
+            blank(row);
+            if lay_out_row(line, number, cols, row, false, strand, first).is_ok() {
+                return Ok(());
+            }
         }
     }
     Err(err)
@@ -278,8 +285,9 @@ fn natural_width(line: &str) -> usize {
 }
 
 /// [`parse_row`] for one layout: `widen` is whether the selector widens,
-/// and `strand` how many wide characters, the leftmost first, are laid out
-/// as stranded one-column cells.
+/// `strand` how many wide characters, the leftmost first, are laid out as
+/// stranded one-column cells, and `first` whether one in the first column
+/// may be among them.
 fn lay_out_row(
     line: &str,
     number: usize,
@@ -287,6 +295,7 @@ fn lay_out_row(
     row: &mut [Cell],
     widen: bool,
     mut strand: usize,
+    first: bool,
 ) -> Result<()> {
     let too_wide = || {
         Error::Parse(format!(
@@ -334,7 +343,7 @@ fn lay_out_row(
         }
         // At most two columns, as the emulator draws them.
         let width = width.min(2);
-        if width == 2 && strand > 0 && col < usize::from(cols) {
+        if width == 2 && strand > 0 && col < usize::from(cols) && (first || col > 0) {
             // A wide character stranded before other text (#683): one
             // cell, wide, with no continuation, as below.
             strand -= 1;
@@ -622,18 +631,25 @@ mod tests {
         let marked = Screen::parse("size: 5x1  cursor: 0,0\nab\u{6771}\u{301}cd").unwrap();
         assert_eq!(marked.cell(0, 2).unwrap().contents(), "\u{6771}\u{301}");
         assert_eq!(marked.cell(0, 3).unwrap().contents(), "c");
-        // As many as the row needs, the leftmost first; the rest keep their
-        // second column, and one landing in the last column strands there.
+        // As many as the row needs, the leftmost first but one in the first
+        // column last, since no resize strands it (#782); the rest keep
+        // their second column, and one landing in the last column strands
+        // there.
         let two = Screen::parse("size: 7x1  cursor: 0,0\n\u{6771}a\u{6771}b\u{6771}c").unwrap();
         assert_eq!(two.row_text(0), "\u{6771}a\u{6771}b\u{6771}c");
-        assert!(!two.cell(0, 1).unwrap().is_wide_continuation());
-        assert!(!two.cell(0, 3).unwrap().is_wide_continuation());
-        assert!(two.cell(0, 5).unwrap().is_wide_continuation());
+        assert!(two.cell(0, 1).unwrap().is_wide_continuation());
+        assert!(!two.cell(0, 4).unwrap().is_wide_continuation());
+        assert!(!two.cell(0, 6).unwrap().is_wide_continuation());
+        assert_eq!(two.cell(0, 6).unwrap().contents(), "c");
         let edge = Screen::parse("size: 6x1  cursor: 0,0\n\u{6771}ab\u{6771}\u{6771}").unwrap();
-        assert_eq!(edge.cell(0, 0).unwrap().contents(), "\u{6771}");
-        assert!(!edge.cell(0, 1).unwrap().is_wide_continuation());
-        assert!(edge.cell(0, 4).unwrap().is_wide_continuation());
+        assert!(edge.cell(0, 1).unwrap().is_wide_continuation());
+        assert_eq!(edge.cell(0, 4).unwrap().contents(), "\u{6771}");
+        assert!(!edge.cell(0, 5).unwrap().is_wide_continuation());
         assert_eq!(edge.cell(0, 5).unwrap().contents(), "\u{6771}");
+        // The first column's is stranded when nothing else fits, as before.
+        let only = Screen::parse("size: 4x1  cursor: 0,0\n\u{6771}abc").unwrap();
+        assert!(only.cell(0, 0).unwrap().is_wide());
+        assert_eq!(only.cell(0, 1).unwrap().contents(), "a");
         // Five fit eight columns, one stranded and one in the last column.
         let five = "\u{6771}".repeat(5);
         let five = Screen::parse(&format!("size: 8x1  cursor: 0,0\n{five}")).unwrap();

@@ -52,6 +52,23 @@ reads that marker.
   the one blank its column holds, as the diff already did at a screen's
   edge; the SVG still fits the glyph to its cell. A snapshot of such a
   rendering shows a blank where the glyph was. (#781)
+- `Screen::parse` strands a wide character in a row's first column last.
+  A text row 0.11.6 or earlier wrote with a wide character stranded by a
+  resize, and only fitting with one at one column, read with the leftmost
+  stranded, even the one in column 0, which no resize strands. When the
+  writer had stranded a later one, every cell, `styles:` span and cursor
+  between the two read a column left of its JSON twin: `東abc東Zy` with
+  `abc` red read `find("abc")` as `(0, 1)` against the twin's `(0, 2)`.
+  The first column's is now stranded only when no other reading fits, so
+  that row reads as its twin and no row that read stops reading. The
+  0.11.9 note that such rows read "the leftmost first, as its JSON twin
+  holds them" was true only where the stranded character was the row's
+  leftmost wide one. A row that fits still reads every wide character
+  whole, so one stranded with nothing redrawn after it differs from its
+  twin in the blank after it; DESIGN §3 and LIMITATIONS now describe both
+  shapes, and the corpus holds a pair of each that the published 0.11.6
+  wrote. A test that pinned the old reading of such a row sees the cells
+  after the first column's wide character one column right. (#782)
 
 ### Fixed
 

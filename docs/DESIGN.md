@@ -924,10 +924,14 @@ there either, though the text keeps it; `Cell::contents` tells the two
 apart, and so does the JSON. One header releases before 0.11.2 wrote
 does not render back as written: a visible cursor at `col == cols`, the
 pending-wrap column (#401), reads onto the last cell, as the JSON reader
-reads it, so the header comes back one column left (#643). And one row
-releases before 0.11.7 wrote renders back as written but is not the
-picture its writer saw: a VS16 emoji with room after it reads two columns
-wide, as rule 4 says, so it differs from its own JSON twin (#723).
+reads it, so the header comes back one column left (#643). And two rows
+releases before 0.11.7 wrote render back as written but are not the
+picture their writer saw: a VS16 emoji with room after it reads two
+columns wide, as rule 4 says, so it differs from its own JSON twin (#723);
+and a wide character a resize stranded can read whole, or another one can
+read stranded in its place, since the text does not say which lost its
+second column — "The JSON shape" below says which readings it takes
+(#782).
 
 The header's row count is what decides where the grid ends — not a search
 for the `styles:` marker — so a grid may hold the words `styles:` or
@@ -1067,11 +1071,18 @@ wide character whose second column would fall one past the edge is that
 stranded cell, not an over-long row (#643). So is one that a redraw after
 widening left before other text: a row too long at two columns per wide
 character, but not at one for some of them, reads with as many as it needs
-stranded, the leftmost first (#683). A row that fits reads with every wide
-character whole, since the text does not say one lost its second half; the
-JSON twin of such a row, which carries the flags, can then hold the text
-after a stranded character one column further left than the text reads it.
-Both render back to the same text. A picture of the grid — the ANSI and
+stranded, the leftmost first (#683) — but one in the first column last,
+since no resize strands it, a terminal being two columns wide at least, and
+taking it first read every cell, span and cursor after it a column left of
+its JSON twin when the writer had stranded a later one (#782). It is still
+taken when no other reading fits, so no file that read stops reading. A
+row that fits reads with every wide character whole, since the text does
+not say one lost its second half; the JSON twin of such a row, which
+carries the flags, can then hold the text after a stranded character one
+column further left than the text reads it, or, where nothing was redrawn
+after it, a blank where the text reads its second column (#782). Both
+render back to the same text, and `tests/compat/0.11.6` pins a file of
+each shape. A picture of the grid — the ANSI and
 HTML renderings, the diff's frame — draws a stranded character as the one
 blank its column holds, since its glyph takes two columns in any font, and
 the SVG fits the glyph to its one cell (#781).

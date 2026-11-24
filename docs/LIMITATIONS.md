@@ -303,3 +303,20 @@ CHANGELOG entry.
   columns, land one character left of what they marked (#723). The file
   still parses and renders back as written. The JSON twin (`serde`)
   holds the columns its writer drew; keep that where they matter.
+- **A saved text screen from before 0.11.7 can read a stranded wide
+  character as a whole one, or take the wrong one as stranded.** Releases
+  up to 0.11.6 narrowed a row by cutting it, so a wide character a resize
+  cut kept one column, and the text format does not say which one did.
+  `Screen::parse` reads a row whole whenever it fits, so `abcd東` written
+  after a resize to 5 columns and back to 8, with nothing redrawn, reads
+  `東` with both its columns where the writer had it stranded before a
+  blank: the JSON twin and the text differ in that one cell, and
+  `termlens diff` of the two exits 1. A row that only fits with some wide
+  characters at one column reads with the leftmost stranded, though never
+  one in the first column while another reading fits, since no resize
+  strands that one (#782); where the writer had stranded a later one and
+  left an earlier one whole, the cells, `styles:` spans and cursor between
+  the two read a column off. The file still parses and renders back as
+  written. The JSON twin holds the flags its writer had; keep that where
+  they matter. Every rendering draws a stranded character as the one
+  blank its column holds, the SVG excepted (#781).
