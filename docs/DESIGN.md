@@ -1082,13 +1082,15 @@ holds every later release to reading them (#327).
 `Screen::mask_rect`, `mask_matching`, `mask_cells` (and `mask_matches` with
 the `regex` feature) return a *new* `Screen` with cell contents replaced and
 nothing else changed: the size, the cursor, every style, and the two columns
-of a wide character (both become the fill) are preserved, so the masked
-screen renders in this same format — a masked cell renders as its fill, a
-blank fill as the blank a cell renders as anyway — and its `styles:` block
-is the original's. That is the whole reason the masks exist in the crate
-rather than as a text filter in the snapshot tool: a filter over the
-rendering changes a field's width and moves every column after it while the
-style runs still name the original columns; a mask over the grid cannot.
+of a wide character (both become the fill; a stranded one has only its
+first, which becomes one, and the cell after it is its own, #780) are
+preserved, so the masked screen renders in this same format — a masked cell
+renders as its fill, a blank fill as the blank a cell renders as anyway —
+and its `styles:` block is the original's. That is the whole reason the
+masks exist in the crate rather than as a text filter in the snapshot tool:
+a filter over the rendering changes a field's width and moves every column
+after it while the style runs still name the original columns; a mask over
+the grid cannot.
 
 ## 4. Emulator abstraction — why
 

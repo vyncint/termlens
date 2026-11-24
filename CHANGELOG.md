@@ -36,6 +36,14 @@ reads that marker.
   which holds a grid alone and is at most about 110 MB, is still held to
   1 GiB, and the refusal says so: a script that matched `which no saved
   screen is` needs `which no screen in the text format is`. (#777)
+- Masking a stranded wide character masks its one cell. A wide character
+  a resize left without its second column, which files 0.11.6 and earlier
+  wrote, is one cell, but `mask_matching`, `mask_rect` and the other masks
+  blanked the cell after it too, as though it were the second half:
+  `abcd東Zyw` masked at `東` read `abcd##yw`, and `find("Z")` lost the `Z`.
+  It now reads `abcd#Zyw`; a whole wide character still masks both of its
+  columns. A snapshot of such a masked screen shows the character after
+  the stranded one again. (#780)
 
 ### Fixed
 

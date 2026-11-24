@@ -1862,8 +1862,9 @@ impl Screen {
     /// `pattern` — a literal, matched the way [`find_all`](Self::find_all)
     /// matches — replaced by `fill`, one per column, so an eight-column
     /// time stays eight columns of `▒`. A wide character under a match
-    /// becomes two fill cells. See [`mask_rect`](Self::mask_rect) for what
-    /// a mask keeps.
+    /// becomes two fill cells — one, if it is a stranded character an old
+    /// file holds without its second column. See
+    /// [`mask_rect`](Self::mask_rect) for what a mask keeps.
     ///
     /// With the `regex` feature, `mask_matches` takes a pattern instead; the
     /// two share one engine.
@@ -1997,13 +1998,22 @@ impl Screen {
             );
         }
         // A masked wide character masks both of its columns, whichever of
-        // the two was hit, so the row keeps its width.
+        // the two was hit, so the row keeps its width. One a resize left
+        // without its second column — a stranded cell, which files 0.11.6
+        // and earlier wrote (DESIGN §3) — has one column, and the cell
+        // after it is a character of its own, never masked for it (#780).
         let width = usize::from(self.cols);
         for i in 0..hits.len() {
             if !hits[i] {
                 continue;
             }
-            if self.cells[i].is_wide() && (i + 1) % width != 0 && i + 1 < hits.len() {
+            if self.cells[i].is_wide()
+                && (i + 1) % width != 0
+                && self
+                    .cells
+                    .get(i + 1)
+                    .is_some_and(Cell::is_wide_continuation)
+            {
                 hits[i + 1] = true;
             }
             if self.cells[i].is_wide_continuation() && i % width != 0 {

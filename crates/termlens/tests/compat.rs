@@ -268,6 +268,37 @@ fn a_stranded_wide_character_redrawn_after_in_0_11_6_round_trips() {
     );
 }
 
+/// Masking the stranded `東` in that file masks its one cell and not the
+/// `Z` after it, which is no half of it (#780). A mask keeps the
+/// wide-character structure: a whole wide character masks both its
+/// columns, and a stranded one has one. The JSON twin is held to the same
+/// in the `json` module.
+#[test]
+fn masking_a_stranded_wide_character_masks_its_one_cell() {
+    let (screen, _) = round_trip(&read(&extra("0.11.6", "stranded-wide-redrawn", "txt")));
+    masks_one_cell(&screen);
+}
+
+/// What [`masking_a_stranded_wide_character_masks_its_one_cell`] holds
+/// the 0.11.6 `stranded-wide-redrawn` screen to, from either twin.
+fn masks_one_cell(screen: &Screen) {
+    let matched = screen.mask_matching("東", '#');
+    assert_eq!(matched.row_text(0), "abcd#Zyw");
+    assert_eq!(matched.find("Z"), Some((0, 5)));
+    let rect = screen.mask_rect(4..5, 0..1);
+    assert_eq!(rect.row_text(0), "abcd Zyw");
+    assert_eq!(rect.find("Z"), Some((0, 5)));
+    assert!(screen
+        .diff(&rect)
+        .cells()
+        .all(|(row, col, ..)| (row, col) == (0, 4)));
+    // A whole wide character still masks both of its columns, whichever
+    // was hit.
+    let whole = Screen::parse("size: 8x1  cursor: 0,0\nabcd東yw").unwrap();
+    assert_eq!(whole.mask_matching("東", '#').row_text(0), "abcd##yw");
+    assert_eq!(whole.mask_rect(5..6, 0..1).row_text(0), "abcd  yw");
+}
+
 /// `printf '⚠️\033[31mERR\033[0m ok'` on 10x2, written by the published
 /// 0.11.6 (a scratch crate on `termlens = "=0.11.6"`, vt100 0.16), which
 /// drew `⚠️` one column wide. It is not in [`EXTRA_SHAPES`]: that list
@@ -503,6 +534,16 @@ mod json {
         // on the text file's reading, not the JSON's.
         let again = Screen::parse(&from_json.with_styles().to_string()).expect("parses");
         assert!(from_text.diff(&again).is_empty());
+    }
+
+    /// [`masks_one_cell`] from the JSON twin, which carries the stranded
+    /// cell's flags rather than inferring them (#780).
+    #[test]
+    fn masking_a_stranded_wide_character_masks_its_one_cell_in_json() {
+        let path = extra("0.11.6", "stranded-wide-redrawn", "json");
+        let screen: Screen = serde_json::from_str(&read(&path))
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        masks_one_cell(&screen);
     }
 
     #[test]
