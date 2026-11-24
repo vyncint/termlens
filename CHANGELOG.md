@@ -162,6 +162,14 @@ reads that marker.
   the RGB/RGBA mix-up, gave a 2x1 image whose second pixel was magenta. A
   test that decoded such a payload should expect `Malformed`, or the
   application should send exactly the declared size. (#767)
+- An APC holding only `G` (`ESC _ G ESC \`) is no kitty escape, as kitty
+  drops an APC shorter than two bytes before reading it. It was counted
+  as a kitty transmission of one byte, so `graphics().kitty()` counted an
+  image the application never sent, and in a chunked upload it was taken
+  as the last chunk, which made the real last chunk a second image. #735
+  fixed the empty APC only. A test that counted such an APC should expect
+  one image fewer, and an upload it interrupted to be one image of all its
+  chunks. (#768)
 
 ### Fixed
 

@@ -2093,7 +2093,11 @@ impl SeqTracker {
         // as kitty does; it used to be taken as the upload's next chunk.
         // The first byte captured, not slot 0: a reset zeroes only the
         // length, so an empty APC found the last escape's `G` there (#735).
+        // And two bytes at least: kitty's `dispatch_apc` drops a shorter
+        // APC before it reads it, so a lone `G` is nothing, and leaves an
+        // upload where it was too (#768).
         if self.dcs_introducer == b'_'
+            && self.dcs_data_len >= 2
             && self.dcs_head[..usize::from(self.dcs_head_len)].first() == Some(&b'G')
         {
             let control = self.kitty_control.clone();
@@ -3195,6 +3199,31 @@ mod tests {
             assert_eq!(seen[0].data(), Some(&b"AAAACCCC"[..]), "{shown}");
             assert_eq!(tracker.graphics().kitty, 1, "{shown}");
         }
+    }
+
+    /// kitty's `dispatch_apc` drops an APC shorter than two bytes before it
+    /// reads it (`if (bufsz < 2) return;`), so a lone `G` is no kitty
+    /// escape: no image, and an upload in progress goes on to its real last
+    /// chunk. It was counted as a kitty transmission of one byte, and in an
+    /// upload taken as its last chunk, which made the real last chunk a
+    /// second image (#768). Two bytes reach kitty's parser: `G;` is a chunk
+    /// with no keys, and ends the upload.
+    #[test]
+    fn a_lone_g_apc_is_no_kitty_escape() {
+        let lone: &[u8] = b"\x1b_G\x1b\\";
+        let (seen, _, tracker) = kitty_events(lone);
+        assert_eq!(seen, []);
+        assert_eq!((tracker.graphics().kitty, tracker.graphics().bytes), (0, 0));
+        let last: &[u8] = b"\x1b_Gm=0;CCCC\x1b\\";
+        let (seen, _, tracker) = kitty_events(&[UPLOAD_OF_5, lone, last].concat());
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].chunks(), 2);
+        assert_eq!(seen[0].data(), Some(&b"AAAACCCC"[..]));
+        assert_eq!(tracker.graphics().kitty, 1);
+        let (seen, _, tracker) = kitty_events(&[UPLOAD_OF_5, b"\x1b_G;\x1b\\", last].concat());
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[0].chunks(), 2);
+        assert_eq!(tracker.graphics().kitty, 2);
     }
 
     /// A control block naming every key a transmission and its placement
