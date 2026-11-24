@@ -65,6 +65,11 @@ reads that marker.
   thing in one read, with nothing listed between them. A test that
   expected an empty list beside an `OSC 1` should expect its entry.
   (#760)
+- `Screen::unsupported()` lists an `OSC` holding U+FFFD, or invalid UTF-8,
+  which the reader turns into U+FFFD, with U+FFFD in it, as the grid and
+  the title show it. The entry held U+FDD0, the noncharacter termlens
+  feeds its parsers in place of U+FFFD. A test that pinned `\u{fdd0}` in
+  an entry should expect `\u{fffd}`. (#761)
 
 ### Fixed
 

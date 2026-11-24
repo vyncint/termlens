@@ -1280,8 +1280,9 @@ fn stand_in_for_replacement(bytes: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(out)
 }
 
-/// Grid text as the snapshot reports it: the stand-in reads as U+FFFD again.
-fn restore_replacement(text: &str) -> Cow<'_, str> {
+/// Grid text as the snapshot reports it, and an unsupported entry's text
+/// as the record keeps it: the stand-in reads as U+FFFD again.
+pub(super) fn restore_replacement(text: &str) -> Cow<'_, str> {
     if text.contains(STAND_IN) {
         Cow::Owned(text.replace(STAND_IN, REPLACEMENT))
     } else {
@@ -1433,6 +1434,35 @@ mod tests {
             "{}",
             screen.full_text()
         );
+    }
+
+    /// An `OSC` holding U+FFFD — or invalid UTF-8, which the reader turns
+    /// into it — is listed with U+FFFD, as the title and the grid show it,
+    /// and not with the stand-in the parsers are fed (#761). The two are
+    /// the same length, so an entry cut at the bound is cut where it was.
+    #[test]
+    fn an_osc_holding_a_replacement_character_is_listed_with_it() {
+        let s =
+            emu_with("\x1b]777;notify;caf\u{FFFD}\x07\x1b]2;caf\u{FFFD}\x07".as_bytes()).snapshot();
+        assert_eq!(s.unsupported(), ["^[]777;notify;caf\u{FFFD}"]);
+        assert_eq!(s.title(), "caf\u{FFFD}");
+        let s = emu_with("\x1b]1;\u{FFFD}\x07".as_bytes()).snapshot();
+        assert_eq!(s.unsupported(), ["^[]1;\u{FFFD}"]);
+        // Straddling the 64-byte bound, and just inside it.
+        for pad in [57, 58, 60] {
+            let content = format!("9;{}\u{FFFD}\u{FFFD}", "x".repeat(pad));
+            let s = emu_with(format!("\x1b]{content}\x07").as_bytes()).snapshot();
+            let mut end = content.len().min(super::super::unhandled::MAX_STRING_SHAPE);
+            while !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            let cut = if end < content.len() { "…" } else { "" };
+            assert_eq!(
+                s.unsupported(),
+                [format!("^[]{}{cut}", &content[..end]).as_str()],
+                "pad {pad}"
+            );
+        }
     }
 
     #[test]

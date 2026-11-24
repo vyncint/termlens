@@ -174,7 +174,12 @@ fn osc_shape(params: &[&[u8]]) -> String {
             content.extend_from_slice(&part[..part.len().min(room)]);
         }
     }
-    let text = String::from_utf8_lossy(&content);
+    // The parsers are fed a stand-in for U+FFFD, which vt100 would drop
+    // from the grid, and an entry shows what the application wrote, as the
+    // title and the grid do (#761). The two are the same length, so the
+    // cut below falls where it would have.
+    let lossy = String::from_utf8_lossy(&content);
+    let text = super::vt100::restore_replacement(&lossy);
     let mut shape = String::from("^[]");
     if total == content.len() && text.len() <= MAX_STRING_SHAPE {
         shape.push_str(&text);
