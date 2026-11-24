@@ -1,0 +1,8 @@
+size: 30x3  cursor: 1,13
+pw:         at ▒▒▒▒▒▒▒▒
+id= 4711 DONE
+
+
+styles:
+0: 4-10 conceal
+1: 0-2 bold
