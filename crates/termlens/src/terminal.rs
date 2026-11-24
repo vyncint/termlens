@@ -5033,12 +5033,15 @@ fn stop_child(child: &mut PtyChild, deadline: Instant) {
 /// on a PTY nobody holds. The kernel's own hangup, as the session leader
 /// exits, goes to the same group and such a member ignores it.
 ///
-/// The group id is safe to signal only while the child is unreaped: once
-/// it is reaped, the id may be reused by an unrelated process. So the child
-/// is never reaped before the last signal: its exit is polled with
-/// `WNOWAIT`, and an exited child is a zombie that holds the id. A child
-/// found reaped elsewhere, where the kernel reaps children itself, ends it:
-/// nothing more is signalled (#630).
+/// The group id is safe to signal while the child is unreaped, or while
+/// anything else is in the group: POSIX reuses no process group id while a
+/// member of the group exists. So the child is never reaped before the last
+/// signal: its exit is polled with `WNOWAIT`, and an exited child is a
+/// zombie that holds the id. A child found reaped elsewhere before the stop
+/// began, where the kernel reaps children itself, ends it: nothing is
+/// signalled, since the group may have emptied long ago and its id gone to
+/// another (#630). One the kernel reaps during the stop, as the hang-up
+/// ends it, does not: the group is killed all the same (#774).
 ///
 /// This is portable-pty's `kill` sequence, aimed at the group, with the
 /// exit polled from 1 ms where portable-pty slept in fixed 50 ms steps, so a
@@ -5052,6 +5055,17 @@ fn stop_group(child: &mut PtyChild, id: u32, pid: libc::pid_t, deadline: Instant
     if state == ChildState::Running {
         let _ = send_signal(group, libc::SIGHUP);
         state = settled_by(id, (Instant::now() + HANGUP_GRACE).min(deadline));
+        if state == ChildState::Gone {
+            // The hang-up ended the child and the kernel reaped it (SIGCHLD
+            // ignored), so no zombie holds the id. A member that ignored the
+            // hang-up still does, while it lives, and it is what this kill is
+            // for; an emptied group's id is taken again only once the pid
+            // space has wrapped, and this comes a poll step after the reap,
+            // the window `send_signal` accepts. Stopping here left that
+            // member running where the default disposition killed it (#774).
+            let _ = send_signal(group, libc::SIGKILL);
+            return;
+        }
     }
     if state == ChildState::Gone {
         return;
@@ -5100,7 +5114,8 @@ fn reaped_by(child: &mut PtyChild, deadline: Instant) -> bool {
 
 /// `kill(2)`, the one call site. Every caller passes its own child, not yet
 /// reaped, or the negated pid of that child to signal the process group it
-/// leads.
+/// leads, while the child is unreaped or, in `stop_group`, just after the
+/// kernel reaped it in answer to the hang-up there (#774).
 #[cfg(unix)]
 fn send_signal(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
     // SAFETY: kill(2) touches no memory. The pid is the caller's own child,
@@ -5110,7 +5125,8 @@ fn send_signal(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
     // kernel reaps children itself (SIGCHLD ignored) there is no zombie to
     // hold either, so callers first ask whether the child is gone (#630);
     // one that exits between that question and this call frees its pid in a
-    // window no portable call closes.
+    // window no portable call closes. `stop_group` kills the group once
+    // more after such a reap, which a member still alive keeps from reuse.
     #[allow(unsafe_code)]
     let rc = unsafe { libc::kill(pid, signal) };
     if rc == 0 {
@@ -5192,9 +5208,12 @@ impl Drop for Terminal {
     /// hung up, and whatever in it outlives the hangup is killed, a helper
     /// that ignores `SIGHUP` included (#714). That takes the child unreaped,
     /// so after `wait_exit`, or where the kernel reaped the child itself
-    /// (SIGCHLD ignored), nothing is signalled: the group's id may be
-    /// another process's by then. A helper meant to outlive the terminal
-    /// has to leave the group, with `setsid`.
+    /// (SIGCHLD ignored) before the drop, nothing is signalled: the group's
+    /// id may be another process's by then. Where SIGCHLD is ignored and the
+    /// hangup itself ends the child, the kernel reaps it at once, and the
+    /// group is killed all the same: a member still running keeps its id
+    /// from being reused (#774). A helper meant to outlive the terminal has
+    /// to leave the group, with `setsid`.
     ///
     /// Closing the master and writer descriptors runs under the
     /// process-wide PTY lifecycle lock: on macOS, letting a master close

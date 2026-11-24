@@ -48,6 +48,18 @@ reads that marker.
   one that had been silent all along; `snapshot_after`'s settle says the
   same now. A test that matched the whole message, not a part of it,
   should expect the added clause. (#772)
+- With SIGCHLD ignored in the test process, dropping a terminal whose
+  program is still running kills a helper in the program's process group
+  that ignores SIGHUP, as the drop already did with the default
+  disposition. The drop's hang-up ended the program, the kernel reaped it
+  at once, and teardown took that reap for the end of the group and
+  stopped before its SIGKILL, so the helper ran on. The group is now
+  killed after such a reap too: POSIX reuses no process group id while a
+  member of the group exists. A program reaped before the drop, by
+  `wait_exit` or by the kernel, still has nothing signalled. A test whose
+  program leaves a helper running on purpose under SIGCHLD ignored must
+  have the helper leave the group (`setsid`), as it already had to under
+  the default disposition. (#774)
 
 ### Fixed
 

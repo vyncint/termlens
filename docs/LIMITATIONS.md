@@ -280,10 +280,14 @@ CHANGELOG entry.
 - **After `wait_exit`, `Drop` signals nothing** (Unix). `Drop` stops the
   program's whole process group, a helper that ignores SIGHUP included,
   but only while the program is unreaped: once a wait has reaped it, or
-  the kernel has (SIGCHLD ignored), the group's id may be another
-  process's. A helper still running in the group then runs on. Stop it
-  before the program exits, or have it leave the group with `setsid` if it
-  is meant to outlive the terminal (#714).
+  the kernel has before the drop (SIGCHLD ignored), the group's id may be
+  another process's. A helper still running in the group then runs on.
+  Stop it before the program exits, or have it leave the group with
+  `setsid` if it is meant to outlive the terminal (#714). A program still
+  running at the drop is the other case: where SIGCHLD is ignored, the
+  drop's hang-up ends it and the kernel reaps it at once, and the group is
+  killed all the same, since a member still running keeps the group's id
+  from being reused (#774).
 - Exotic grapheme clusters render as the vt100 crate renders them; the
   unicode-torture fixture pins the current behaviour.
 - **Needle matching is NFC, then substring, not grapheme matching.**

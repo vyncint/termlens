@@ -452,8 +452,12 @@ followed by SIGKILL to the group; then the child is reaped. A group id is
 safe to signal only while the child is unreaped, since its zombie holds
 the id, so `Drop` reaps nothing before the last signal (it polls the exit
 with `waitid(WNOWAIT)`), and signals nothing once the child is reaped:
-after `wait_exit`, or where the kernel reaped it. `signal` still reaches
-the child alone.
+after `wait_exit`, or where the kernel reaped it before the drop. One the
+kernel reaps during it, where SIGCHLD is ignored and the hang-up ends the
+child, is the exception: the group is killed all the same, since POSIX
+reuses no process group id while a member of the group exists, and a
+member that ignored the hang-up is what the kill is for (#774). `signal`
+still reaches the child alone.
 
 ### `screen()` is the live grid, frames or no frames
 
