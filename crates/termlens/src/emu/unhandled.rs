@@ -303,21 +303,31 @@ impl Callbacks for Unhandled {
         };
         let first = params.first().and_then(|p| p.first()).copied();
         let handled = match (prefix, intermediate, c) {
+            // An SGR every one of whose parameters is honoured, by vt100 or
+            // by the shadow, is implemented, and naming it here would
+            // contradict the cell (#320, #754). See `sgr_honoured`, which
+            // reads the sub-parameters vt100 reads.
+            (None, None, 'm') => sgr_honoured(params),
+            // Nothing below is the tracker's with a sub-parameter: it reads
+            // one only for ED, DECSTBM, IL and DL, which vt100 carries out,
+            // and xterm ignores these forms. Read by their values alone,
+            // `CSI 6:1 n` and `CSI 4:4 h` were answered by nobody and named
+            // nowhere (#757).
+            _ if params.iter().any(|p| p.len() > 1) => false,
             // Tab stops, insert mode, the queries the responder answers or
             // names, and the window reports it answers or names.
             (None, None, 'g' | 'I' | 'Z' | 'c' | 'n') => true,
             // The window reports the responder answers (14, 16, 18) and the
-            // ones it names in a timeout — `seq.rs`'s own predicate, which
-            // reads no sub-parameter. Everything else in the family, the
-            // title stack included, nobody honoured.
+            // ones it names in a timeout — `seq.rs`'s own predicate.
+            // Everything else in the family, the title stack included,
+            // nobody honoured.
             (None, None, 't') => {
                 let second = params.get(1).and_then(|p| p.first()).copied();
-                params.iter().all(|p| p.len() == 1)
-                    && super::seq::is_window_report(
-                        params.len(),
-                        first.map_or(0, u32::from),
-                        second.map_or(0, u32::from),
-                    )
+                super::seq::is_window_report(
+                    params.len(),
+                    first.map_or(0, u32::from),
+                    second.map_or(0, u32::from),
+                )
             }
             // Insert mode is the one ANSI mode honoured, so a list is
             // handled only when it names nothing else: `CSI 4;20 h` sets
@@ -344,10 +354,6 @@ impl Callbacks for Unhandled {
                 .iter()
                 .flat_map(|p| p.iter())
                 .all(|m| TRACKED_PRIVATE_MODES.contains(m) || (c == 'h' && *m == AUTOWRAP)),
-            // An SGR every one of whose parameters is honoured, by vt100 or
-            // by the shadow, is implemented, and naming it here would
-            // contradict the cell (#320, #754). See `sgr_honoured`.
-            (None, None, 'm') => sgr_honoured(params),
             _ => false,
         };
         if handled {
@@ -711,6 +717,42 @@ mod tests {
                      \x1b[?2026l\x1b[?1000h\x1b[?u\x1b]8;;http://x\x1b\\\x1b]52;c;aGk=\x07\
                      \x1b]11;?\x07\x0e\x0f";
         assert_eq!(shapes(ours), Vec::<String>::new());
+    }
+
+    /// What the tracker handles, it handles without a sub-parameter: it
+    /// reads one only on ED, DECSTBM, IL and DL, and xterm ignores these
+    /// forms as well, so none is answered, named or set. The arms above
+    /// read the values alone and hid every one (#757); `CSI ? 996:1 n` was
+    /// listed until #691 hid it.
+    #[test]
+    fn what_the_tracker_handles_with_a_sub_parameter_is_reported() {
+        for shape in [
+            "?996:1n",
+            "6:1n",
+            "4:4h",
+            "?1000:1000h",
+            "?7:1h",
+            "0:1c",
+            ">0:1c",
+            "=0:1c",
+            "?1:1S",
+            "?1:1u",
+            "3:1g",
+            "2:1I",
+            "1:1Z",
+            "1:2!p",
+            "7:1 q",
+            "?2026:1$p",
+            "18:1t",
+        ] {
+            assert_eq!(
+                shapes(format!("\x1b[{shape}").as_bytes()),
+                [format!("^[[{shape}")],
+                "{shape}"
+            );
+        }
+        // Written plain, each is the tracker's or the responder's, as before.
+        assert!(shapes(b"\x1b[?996n\x1b[6n\x1b[4h\x1b[?1000h\x1b[?7h\x1b[c\x1b[3g").is_empty());
     }
 
     #[test]

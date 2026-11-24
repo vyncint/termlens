@@ -3003,6 +3003,29 @@ mod tests {
         assert_eq!(s.unsupported(), ["^[[5;59m"]);
     }
 
+    /// A query or a mode written with a sub-parameter is one xterm ignores
+    /// and the tracker does not read: nothing answers it, nothing names
+    /// it, no mode changes — and `unsupported()` now says so, where it
+    /// said nothing (#757).
+    #[test]
+    fn a_query_or_a_mode_with_a_sub_parameter_is_on_record_and_nothing_else() {
+        for shape in ["?996:1n", "6:1n", "4:4h", "?1000:1000h"] {
+            let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+            let stream = format!("ab\r\x1b[{shape}X");
+            let mut off = 0;
+            while off < stream.len() {
+                let processed = emu.process(&stream.as_bytes()[off..]);
+                assert_eq!(processed.stop, None, "{shape}");
+                off += processed.consumed;
+            }
+            let s = emu.snapshot();
+            assert_eq!(s.row_text(0).trim_end(), "Xb", "{shape}");
+            assert!(!s.insert_mode(), "{shape}");
+            assert_eq!(s.mouse_mode(), MouseMode::None, "{shape}");
+            assert_eq!(s.unsupported(), [format!("^[[{shape}").as_str()], "{shape}");
+        }
+    }
+
     #[test]
     fn insert_mode_reserves_the_columns_the_grid_gives_the_run() {
         // The reservation was the run's string width, and the grid lays a

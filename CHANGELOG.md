@@ -50,6 +50,13 @@ reads that marker.
   DEL or a non-ASCII byte inside an SGR did the same, and is now ignored
   there as vte ignores it. A test that pinned the extra or the missing
   attribute should expect exactly the ones the SGR names. (#755)
+- `Screen::unsupported()` lists a query or a mode written with a
+  sub-parameter, such as `CSI ? 996:1 n`, `CSI 6:1 n`, `CSI 4:4 h` or
+  `CSI ? 1000:1000 h`. termlens answers and names no such query and sets
+  no such mode, as xterm ignores them, but the list read their values
+  alone and left them out, so they were reported nowhere; `CSI ? 996:1 n`
+  was listed until 0.11.9. A test that expected an empty list beside one
+  of these should expect its entry. (#757)
 
 ### Fixed
 
