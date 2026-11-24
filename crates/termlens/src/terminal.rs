@@ -1611,6 +1611,17 @@ impl EmuState {
     /// Snapshot the screen and remember it, rebuilding only if the state
     /// changed since the last stored snapshot. An unchanged terminal costs
     /// one Arc clone per call instead of a full grid conversion.
+    ///
+    /// Every wait takes its screens here, as `screen()` does, so the one
+    /// remembered is the last a test saw, and that is the one an emulator
+    /// panic freezes (#775). The waits used to take theirs without storing
+    /// them, so the panic froze whatever `screen()` had last stored, often
+    /// the blank grid from the spawn. Storing costs two reference counts
+    /// on a screen that was built anyway. Measured on `seq 1 300000` under
+    /// a `wait_until` that evaluated it about 550 times, in two sets of 15
+    /// release runs each way, one way after the other: a median of 514 and
+    /// 515 ms without storing, 508 and 510 ms with it. That is noise, where
+    /// the waits' reason for not storing had been ~3% on such a stream.
     fn snapshot(&mut self) -> Screen {
         if let Some((generation, screen)) = &self.snapshot_cache {
             if *generation == self.generation {
@@ -1653,7 +1664,8 @@ impl EmuState {
         self.emu_panic.as_ref().map(|detail| {
             Error::Emulator {
                 detail: detail.clone(),
-                screen: self.peek_snapshot(),
+                // The frozen screen: the emulator is not asked again.
+                screen: self.build_snapshot(),
             }
             .recorded()
         })
@@ -1746,21 +1758,6 @@ impl EmuState {
                 blocking.join(", ")
             )
         }
-    }
-
-    /// Cache-aware read that never writes: serve the stored snapshot when
-    /// current, else build a fresh one *without* storing it. The wait loop
-    /// uses this — during a chatty stream every chunk advances the
-    /// generation, so storing there would pay clone-and-evict costs on
-    /// every chunk for a cache the next chunk invalidates (measured ~3% on
-    /// a full-throughput stream).
-    fn peek_snapshot(&self) -> Screen {
-        if let Some((generation, screen)) = &self.snapshot_cache {
-            if *generation == self.generation {
-                return screen.clone();
-            }
-        }
-        self.build_snapshot()
     }
 }
 
@@ -2898,7 +2895,9 @@ fn reader_loop(
                 if let Err(payload) = processing {
                     // Freeze the last good screen before `touch()` can
                     // invalidate the cache, so the error carries the grid as
-                    // it stood when the emulator was last coherent.
+                    // it stood when the emulator was last coherent: the last
+                    // screen a wait or `screen()` took, since each of them
+                    // stores what it takes (#775).
                     let frozen = state
                         .snapshot_cache
                         .take()
@@ -3902,7 +3901,7 @@ impl Terminal {
             if let Some(failure) = state.emulator_failure() {
                 return Some(Err(failure));
             }
-            let screen = state.peek_snapshot();
+            let screen = state.snapshot();
             if predicate(&screen) {
                 return Some(Ok(()));
             }
@@ -4085,11 +4084,17 @@ impl Terminal {
                     .iter()
                     .find(|(index, frame)| *index > cursor && predicate(frame));
                 if let Some((index, frame)) = matched {
-                    return Some(Ok((*index, frame.clone())));
+                    let found = Ok((*index, frame.clone()));
+                    // A frame is not a snapshot a wait takes, so the live
+                    // screen is taken too: it is at least as new as the
+                    // frame, and an emulator panic after this wait then
+                    // freezes it rather than an older one (#775).
+                    state.snapshot();
+                    return Some(found);
                 }
             }
             if state.eof {
-                let screen = state.peek_snapshot();
+                let screen = state.snapshot();
                 return Some(Err(Error::Eof {
                     waiting_for: format!("{WHAT}{}{}", state.query_note(), history_note(&screen)),
                     screen,
@@ -4280,7 +4285,7 @@ impl Terminal {
                 } else {
                     None
                 };
-                let screen = guard.peek_snapshot();
+                let screen = guard.snapshot();
                 let note = guard.query_note();
                 drop(guard);
                 let waiting_for = if stuck_mid_frame {
@@ -4447,7 +4452,7 @@ impl Terminal {
         // Bytes are the only thing that can change the grid, so the last
         // byte's arrival bounds the last change: stillness before the call
         // counts, exactly as silence before a `wait_idle` does.
-        let mut last = guard.peek_snapshot();
+        let mut last = guard.snapshot();
         let mut since = guard.last_activity;
         let mut seen_generation = guard.generation;
         loop {
@@ -4460,7 +4465,7 @@ impl Terminal {
             }
             if guard.generation != seen_generation {
                 seen_generation = guard.generation;
-                let now = guard.peek_snapshot();
+                let now = guard.snapshot();
                 if !now.same_picture(&last) {
                     since = guard.last_activity;
                 }
@@ -4490,7 +4495,7 @@ impl Terminal {
                 } else {
                     None
                 };
-                let screen = guard.peek_snapshot();
+                let screen = guard.snapshot();
                 let note = format!("{}{}", guard.query_note(), history_note(&screen));
                 drop(guard);
                 let waiting_for = if stuck_mid_frame {
@@ -4812,7 +4817,7 @@ impl Terminal {
             if let Some(failure) = state.emulator_failure() {
                 return Err(failure);
             }
-            let (old_cols, old_rows) = state.peek_snapshot().size();
+            let (old_cols, old_rows) = state.snapshot().size();
             // A resize to the size the grid already has is a true no-op, and
             // it has to be one: TIOCSWINSZ raises SIGWINCH only when a
             // dimension actually changes, so the application is never told
@@ -5536,6 +5541,102 @@ mod tests {
             0,
             "a call reached the emulator after it panicked"
         );
+    }
+
+    /// The next spawn on this thread gets a [`FaultyEmulator`], and the
+    /// switch that arms it and the count of calls that reach it after it
+    /// panicked.
+    #[cfg(unix)]
+    fn faulty_next_spawn() -> (Arc<std::sync::atomic::AtomicBool>, Arc<AtomicUsize>) {
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let late_calls = Arc::new(AtomicUsize::new(0));
+        let (arm, count) = (Arc::clone(&armed), Arc::clone(&late_calls));
+        super::WRAP_EMULATOR.with(|wrap| {
+            *wrap.borrow_mut() = Some(Box::new(move |inner| {
+                Box::new(FaultyEmulator {
+                    inner,
+                    armed: arm,
+                    panicked: false,
+                    late_calls: count,
+                })
+            }));
+        });
+        (armed, late_calls)
+    }
+
+    /// After an emulator panic, the error and `screen()` show the screen the
+    /// test last saw (#775). They showed the last one *stored*, and only
+    /// `screen()` stored one: here the `one` it took, though the wait after
+    /// it had seen ` two` as well; with no `screen()` at all, the blank grid
+    /// the terminal was spawned with.
+    #[cfg(unix)]
+    #[test]
+    fn an_emulator_panic_freezes_the_screen_last_seen() {
+        use std::time::Duration;
+
+        let (armed, late_calls) = faulty_next_spawn();
+        let mut t = crate::Terminal::builder()
+            .size(40, 6)
+            .args([
+                "-c",
+                "printf one; read line; printf ' two'; read line; read line",
+            ])
+            .spawn("sh")
+            .expect("spawns");
+        t.wait_until_for(|s| s.contains("one"), Duration::from_secs(10))
+            .expect("the child printed one");
+        assert!(t.screen().contains("one"));
+        t.send_str("x\r").expect("the child is reading");
+        t.wait_until_for(|s| s.contains("two"), Duration::from_secs(10))
+            .expect("the child printed two");
+        // The child is blocked in `read` and prints nothing more, so the
+        // echo of this line is the emulator's next read, and it panics.
+        armed.store(true, Ordering::SeqCst);
+        t.send_str("go\r").expect("the child is reading");
+        match t.wait_until_for(|s| s.contains("never"), Duration::from_secs(10)) {
+            Err(Error::Emulator { screen, .. }) => assert!(
+                screen.contains("one") && screen.contains("two"),
+                "the error's screen is not the last one seen:\n{screen}"
+            ),
+            other => panic!("expected Error::Emulator, got {other:?}"),
+        }
+        let frozen = t.screen();
+        assert!(
+            frozen.contains("two"),
+            "screen() after the panic:\n{frozen}"
+        );
+        assert_eq!(late_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// The same after `wait_frame`: a panic freezes a screen at least as new
+    /// as the frame it returned (#775). Frames are not snapshots a wait
+    /// takes, so the blank spawn grid was frozen here.
+    #[cfg(unix)]
+    #[test]
+    fn an_emulator_panic_after_wait_frame_freezes_a_screen_as_new_as_its_frame() {
+        use std::time::Duration;
+
+        let (armed, late_calls) = faulty_next_spawn();
+        let mut t = crate::Terminal::builder()
+            .size(40, 6)
+            .args([
+                "-c",
+                r"printf '\033[?2026hframe 1\033[?2026l'; read line; read line",
+            ])
+            .spawn("sh")
+            .expect("spawns");
+        t.wait_frame_for(|s| s.contains("frame 1"), Duration::from_secs(10))
+            .expect("the child drew a frame");
+        armed.store(true, Ordering::SeqCst);
+        t.send_str("go\r").expect("the child is reading");
+        match t.wait_until_for(|s| s.contains("never"), Duration::from_secs(10)) {
+            Err(Error::Emulator { screen, .. }) => assert!(
+                screen.contains("frame 1"),
+                "the error's screen is older than the frame returned:\n{screen}"
+            ),
+            other => panic!("expected Error::Emulator, got {other:?}"),
+        }
+        assert_eq!(late_calls.load(Ordering::SeqCst), 0);
     }
 
     fn panicking_state() -> Monitor<EmuState> {

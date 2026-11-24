@@ -84,6 +84,15 @@ reads that marker.
   keeps two such tests apart. Names up to 222 bytes are unchanged; one of
   223 to about 240 that fitted with a small `<n>` is now cut too, so each
   test keeps one name whatever its count. (#773)
+- After an emulator panic, `Error::Emulator`'s screen and `screen()` show
+  the screen the test last saw, through a wait or `screen()`. They showed
+  the last one `screen()` had stored, since the waits kept none of theirs:
+  after a `wait_until` that had seen `ready`, the blank grid from the
+  spawn, or an older screen if `screen()` had been called earlier. Every
+  wait now keeps the screen it takes, which costs nothing measurable on a
+  full-throughput stream, and `wait_frame` keeps the live screen when it
+  returns a frame. Found by fault injection: no input is known to make the
+  emulator panic. (#775)
 
 ## [0.11.10] - 2026-11-17
 

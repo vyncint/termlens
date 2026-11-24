@@ -105,8 +105,11 @@ pub enum Error {
     /// snapshot returned the same frozen screen, and each wait ran to its
     /// deadline reporting a predicate that was never going to become true.
     /// A wait now fails immediately and says why. The screen is the last one
-    /// taken before the failure — the emulator is not asked again, because
-    /// its state after a panic means nothing.
+    /// taken before the failure, by a wait or by
+    /// [`Terminal::screen`](crate::Terminal::screen): what the test last
+    /// saw (#775). The emulator is not asked again, because its state after
+    /// a panic means nothing, so the screen may be older than the output
+    /// that reached it after that.
     #[error(
         "the terminal emulator failed and the screen stopped advancing: {detail}\n\
          --- last screen before the failure ---\n{screen}"
