@@ -120,10 +120,20 @@ fn main() -> io::Result<()> {
 
     let (cols, rows) = terminal::size()?;
     draw(&mut out, cols, rows)?;
+    let mut size = (cols, rows);
 
     loop {
         match event::read()? {
-            Event::Resize(cols, rows) => on_resize(&mut out, what, cols, rows)?,
+            // A resize to the size the program already has is not one. The
+            // Windows console reports one as the program starts. There the
+            // `clear-only` repaint erased the first frame before any test
+            // could see it, while every other mode left it as it was
+            // (windows.yml runs 45444329525 and 45444351961).
+            Event::Resize(cols, rows) if (cols, rows) == size => {}
+            Event::Resize(cols, rows) => {
+                size = (cols, rows);
+                on_resize(&mut out, what, cols, rows)?;
+            }
             Event::Key(key)
                 if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') =>
             {
