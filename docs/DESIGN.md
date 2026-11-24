@@ -153,13 +153,13 @@ the drain behind it (#771).
 
 Which failures are errors and which are panics is a deliberate split, not
 an accident of history. `send`/`send_str`/`paste`/`click`/`drag`/`scroll`
-all return `Result`, because *whether the child is still there to receive
-input* is a fact about the run, discovered at runtime, and a test may
-legitimately want to handle it. `Key::F(13)` still panics, because there
-is no thirteenth function key on any terminal and never will be: that is a
-mistake in the test's own source, and the same category as indexing a
-slice out of bounds. Environmental failures are errors; impossible
-arguments are panics.
+and the mouse's step-by-step calls all return `Result`, because *whether
+the child is still there to receive input* is a fact about the run,
+discovered at runtime, and a test may legitimately want to handle it.
+`Key::F(13)` still panics, because there is no thirteenth function key on
+any terminal and never will be: that is a mistake in the test's own
+source, and the same category as indexing a slice out of bounds.
+Environmental failures are errors; impossible arguments are panics.
 
 Replies go to that same thread, fire-and-forget: writing them from the
 reader thread would block whenever the application stopped reading its
@@ -212,6 +212,25 @@ application that never reads produces a timeout carrying the screen and no
 reply count; it can later read 4,095 bytes, about 680 replies, and the rest
 are gone. Past either limit the application has to read as it asks, exactly
 as it would against a real terminal.
+
+**What the application left unread is counted at a timeout, where it can
+be (#790).** Input an application has stopped reading sits in the
+terminal's input queue, and a wait then timed out on a screen that read as
+an application drawing nothing in answer: one outside suite blamed the
+harness for keys queued behind a stalled read. The master cannot see that
+queue — its `FIONREAD` counts the other direction, and with 100 bytes
+queued it and `TIOCOUTQ` read 0 on Linux — and the slave's `FIONREAD`
+can. So a timeout opens the slave by name (`O_NOCTTY`), asks, and closes
+it, and the note says "the application left N bytes of input unread" when
+the count is not zero. termlens keeps no slave descriptor past that one
+call, since one would hide the EOF every exit is read from, and after the
+close the master still sees it. The count is the kernel's answer to "how
+much would a read return now": every queued byte in raw mode, query
+replies included, and only complete lines in canonical mode. Linux is
+measured, macOS reads `FIONREAD` from its terminal queues too and CI's
+leg runs the test that holds the count, and everywhere else the note is
+left out, never guessed: the other Unixes are unmeasured, and ConPTY keeps
+typed input on its own side of the pipe.
 
 `XTGETTCAP` is answered from a table of capabilities the crate actually
 implements, and every entry was checked against the code that implements it
@@ -354,7 +373,8 @@ Every wait runs under the terminal's **default deadline** (builder
 `timeout`, 5s default) or a per-call one: each `wait_*` has a `_for` twin
 (`wait_until_for`, `wait_frame_for`, `wait_idle_for`, `wait_stable_for`,
 `wait_exit_for`, and `wait_until_matches_for` with the `regex` feature), as
-does `snapshot_after` (`snapshot_after_for`), so one known-slow step does not
+do `snapshot_after` (`snapshot_after_for`) and `resize_and_wait`
+(`resize_and_wait_for`), so one known-slow step does not
 force its deadline on the whole suite. There
 is deliberately no unbounded wait: a hung TUI in CI must produce a readable
 failure, not a 6-hour job timeout. On expiry the error **embeds the full
@@ -566,6 +586,28 @@ actually changes: `resize` advances the frame cursor, so only a frame
 completed *after* the resize can satisfy the wait. A resize to the size
 the grid already has is a no-op, and the frame the application last drew
 is still the current truth.
+
+`resize_and_wait(cols, rows, pred)` is the resize and the wait in one call,
+for any application: its predicate is asked only about screens that output
+read after the resize produced, so on Linux and macOS the stale frame cannot
+satisfy it. The read count it compares against is taken under the lock that
+resizes, as the frame cursor is, so no read falls between the two (#788).
+After a no-op resize the screen as it is answers, as for `wait_frame`. It
+does not make the rule above optional. Output read after the resize is not
+always drawn for it: an application that paints on its own can paint the old
+layout before it handles `SIGWINCH`.
+
+On Windows the stale frame comes back as output. ConPTY repaints the screen
+itself after a resize, so output arrives even when the application draws
+nothing, and a predicate the content from before the resize satisfies passes
+on that repaint. Measured on `windows-latest` (run 45393517904): a program
+that ignores the resize satisfied `contains("READY")` with the text it had
+drawn before it, where Linux and macOS time out. ConPTY also applies the
+resize on a thread of its own and lays out what it relays at the old width
+until it has (#499). A predicate naming what only the new layout shows holds
+on every platform; one the stale frame also satisfies holds only on Linux
+and macOS, and there only where the application paints in answer to the
+resize.
 
 ### The instant-exit caveat (macOS PTY teardown)
 
@@ -1288,6 +1330,19 @@ that acts *along* the path: a drawing surface painting each crossed cell, a
 selection highlighting incrementally, a drag that must cross a pane edge to
 register. A real pointer's exact path is not reproducible and does not need
 to be; every intervening cell being reported is the property that matters.
+
+**A gesture can also be driven a step at a time.** `mouse_down` presses
+a button and holds it, `mouse_move` reports motion, and `mouse_up`
+releases the button: a hover, and a drag whose middle a test can see. The
+terminal keeps which buttons are held between the press and the release,
+because whether a motion is reported at all depends on it: any-event
+tracking (`?1003`) reports every motion, button-event tracking (`?1002`)
+only while a button is down, and `?1000` and X10 none. A move the mode
+cannot carry is a typed error, as a click without tracking is. A motion
+carries the code of the button pressed last and still held, with the
+modifiers it was pressed with, or `3` with none held, plus 32 — xterm's
+arithmetic — so a hover is SGR `35` and a step of a left drag `32`, and a
+press, a move per cell and a release send the bytes `drag` sends.
 
 **Focus events** (`ESC [ I` / `ESC [ O`) follow the same mode-aware contract
 as the mouse: sent only when the application enabled mode 1004, refused with

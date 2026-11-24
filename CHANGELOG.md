@@ -17,6 +17,45 @@ reads that marker.
 
 ## [Unreleased]
 
+### Added
+
+- `Screen::find_all_styled(needle, style)` and `Screen::runs_where(style)`
+  find text by its style. `find_all_styled` matches as `find_all` does,
+  counting only the occurrences whose every cell passes `style`, so "which
+  `beta` is the selected one" is one call where `find_all` found both and
+  `find_by` named one cell and no text. `runs_where` returns each stretch of a row
+  whose cells pass, as a `Run` with its row, its columns and its text: the
+  selected row of a list, what an error colour covers. A wide character
+  is judged by the cell that holds it and counts both of its columns.
+  Several outside test suites carried a helper for this. (#787)
+- `Terminal::mouse_move(col, row)`, `mouse_down(button, col, row)` and
+  `mouse_up(button, col, row)` send a pointer move, a press and a release
+  as calls of their own: a hover, which crossterm reads as `Moved`, and a
+  drag driven a step at a time, with the screen asserted in the middle of
+  it. They encode as `click` does, in every encoding, and refuse with
+  `Error::Input` what the application's tracking mode would not report: a
+  move needs `?1003`, or `?1002` while a button is held, so the terminal
+  keeps which buttons `mouse_down` pressed until `mouse_up` releases them,
+  and X10 reports neither a move nor a release. A motion carries the held
+  press's button and modifiers, so a press, a move per cell and a release
+  send what `drag` sends. Only hand-written bytes (`\x1b[<35;10;5M`)
+  produced a hover before. (#789)
+- `Terminal::resize_and_wait(cols, rows, predicate)` and
+  `resize_and_wait_for(cols, rows, predicate, timeout)` resize, then wait
+  until the predicate holds on output read after the resize, and return
+  that screen. `resize` gives the grid the new size at once and keeps the
+  old content until the application repaints, so
+  `wait_until(|s| s.contains("ready"))` after `resize(100, 30)` returned at
+  once on a screen still reading `size 80x24 ready`; outside suites wrote
+  the same helper to avoid it. A resize to the size the grid has reaches
+  no one, and the screen as it is answers. A timeout says when nothing was
+  read after the resize at all. Output read after the resize can still be
+  the old layout where an application paints on its own. On Windows
+  ConPTY repaints the screen itself after a resize, measured, so a
+  predicate the old content satisfies can pass with nothing drawn by the
+  application: there the predicate must name something only the new
+  layout has. (#788)
+
 ### Changed
 
 - `Screen::unsupported()` lists a CSI with a `<` private marker with the
@@ -125,6 +164,17 @@ reads that marker.
   program leaves a helper running on purpose under SIGCHLD ignored must
   have the helper leave the group (`setsid`), as it already had to under
   the default disposition. (#774)
+- A wait that times out on Linux or macOS names the input the application
+  left unread, when it left any: "…while waiting for the screen predicate
+  to hold — note: the application left 100 bytes of input unread". Keys an
+  application has stopped reading sit in the terminal's input queue, and
+  the timeout said nothing of them, so its screen read as an application
+  that drew nothing in answer; one outside suite blamed the harness for
+  keys queued behind a stalled read. The count is the terminal's own, so
+  in canonical mode it counts complete lines only. Windows and the other
+  Unixes leave the note out rather than guess. A test that matched a whole
+  timeout message, not a part of it, should expect the added clause.
+  (#790)
 
 - An image taller than the screen scrolls it as far as kitty and xterm
   scroll it: by as many rows as its last row is past the bottom margin, and,

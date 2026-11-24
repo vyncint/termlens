@@ -144,12 +144,15 @@ returns either the thing you asked for or a timeout carrying the screen.
 | `wait_frame(pred)` | a **complete** DEC 2026 frame satisfies `pred`; returns that frame, and each call sees a frame no earlier call did | the application brackets repaints in synchronized updates (crossterm's `BeginSynchronizedUpdate`) |
 | `snapshot_after(pred)` | `pred` holds and the picture has then held still; returns that screen | a whole-screen snapshot — what `assert_screen_snapshot!` uses |
 | `wait_stable(quiet)` | no cell, cursor or size change for `quiet`; returns the screen | settling after a resize, or without a predicate |
+| `resize_and_wait(cols, rows, pred)` | after the resize, `pred` holds on output read since; returns that screen | a resize: on Linux and macOS the old screen, still on the grid at the new size, cannot satisfy it; on Windows ConPTY repaints it after the resize, so name what only the new layout has |
 | `wait_idle(quiet)` | no **bytes** for `quiet`, not mid-sequence, no update open | output silence is itself the fact; a heuristic, and documented as one |
 | `wait_exit()` | the process ended; returns its `ExitStatus` | the end of every test |
 
 Every wait has a `_for(…, timeout)` twin for one slow step. Input calls are
 bounded too: typing into an application that has stopped reading, or into a
 child that has exited, is an error carrying the screen rather than a hang.
+On Linux and macOS a wait that times out also says how many bytes of input
+the application left unread, when it left any.
 The three rules for race-free waits — one predicate per instant, wait on
 the last thing painted, settle before whole-screen snapshots — are
 [docs/DESIGN.md](https://github.com/vyncint/termlens/blob/main/docs/DESIGN.md) §2.
@@ -182,7 +185,7 @@ header — is also its input format. The `termlens` command reads a whole
 | Question | Accessors |
 | --- | --- |
 | What does the user see? | `text()`, `row_text(row)`, `cell(row, col)`, `contains`, `find`, `find_all`; with `regex`: `matches`, `find_match`, `wait_until_matches` |
-| Is it styled as claimed? | `cell(..).style()` — colours, bold/dim, italic, underline, reverse, **blink**, **conceal**, **strikethrough** |
+| Is it styled as claimed? | `cell(..).style()` — colours, bold/dim, italic, underline, reverse, **blink**, **conceal**, **strikethrough**; `find_all_styled(needle, pred)` finds text by its style (which `beta` is the selected one), `runs_where(pred)` the stretches a style covers, with their text |
 | Where is the cursor, and what shape? | `cursor()`, `cursor_visible()`, `cursor_shape()`, `cursor_blink()` |
 | Which modes did the application turn on? | `alternate_screen()`, `bracketed_paste()`, `mouse_mode()`, `focus_events()`, `application_cursor()`, `insert_mode()` |
 | What did it tell the terminal out of band? | `title()`, `clipboard()` (`OSC 52`), `links()` (`OSC 8`) |
@@ -191,10 +194,11 @@ header — is also its input format. The `termlens` command reads a whole
 | Did the emulator understand everything it was sent? | `unsupported()` — every sequence it did not implement, so a plausible grid can be told from a right one |
 
 **Input is mode-aware.** `send(Key)`, modifier chords, `paste`, `click`,
-`drag` (one motion per cell crossed), `scroll` with modifiers, `focus_in`
-/`focus_out`, `resize` and `signal` are encoded exactly as the application
-configured its terminal — SGR mouse, bracketed paste, DECCKM — because the
-emulator knows which modes it enabled.
+`drag` (one motion per cell crossed), `mouse_move` (a hover) with
+`mouse_down`/`mouse_up` (a gesture a step at a time), `scroll` with
+modifiers, `focus_in`/`focus_out`, `resize` and `signal` are encoded
+exactly as the application configured its terminal — SGR mouse, bracketed
+paste, DECCKM — because the emulator knows which modes it enabled.
 
 **Images are captured, not composited.** `graphics()` reports every kitty
 and sixel transmission — placement, declared size and cell extent, format,
@@ -270,7 +274,7 @@ termlens assertion that does:
 | Invisible to `TestBackend` | The assertion that sees it |
 | --- | --- |
 | raw-mode entry and exit, the alternate screen | `t.wait_until(\|s\| s.alternate_screen())`, and `!alternate_screen()` after `q` |
-| a resize reaching the application | `t.resize(60, 14)?; t.wait_until(\|s\| s.contains("60x14"))?` |
+| a resize reaching the application | `t.resize_and_wait(60, 14, \|s\| s.contains("60x14"))?` |
 | output outside ratatui — a `println!`, a logger, a panic | `s.contains("panicked")`, or a snapshot of the whole grid |
 | a torn frame, in an application that emits DEC 2026 synchronized updates (stock ratatui does not) | `wait_frame` returns complete DEC 2026 frames only |
 | capability probes and the modes they turn on | `answer_queries` replies as a terminal would; `s.mouse_mode()`, `s.bracketed_paste()` say what was asked for |

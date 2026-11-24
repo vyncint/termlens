@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use termlens::{Key, Screen, Terminal};
+use termlens::{Color, Key, Screen, Terminal};
 
 mod common;
 
@@ -436,6 +436,182 @@ fn a_mask_covers_a_needle_that_spans_rows() -> termlens::Result<()> {
     Ok(())
 }
 
+/// Which `beta` is the selected one (#787). A list draws its selected row
+/// reversed across its width, and a pane repeats the selection's name in
+/// cyan: `find_all` finds both, and `find_by` names one cell and no text.
+#[test]
+fn a_highlighted_row_is_found_by_its_style() -> termlens::Result<()> {
+    let mut t = emit(&[
+        "--raw",
+        r"  alpha\n\e[7m> beta    \e[0m  \e[36mbeta\e[0m\n  gamma\nDONE",
+        "--wait",
+    ])?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    let styled = s.with_styles();
+    assert_eq!(s.find_all("beta"), [(1, 2), (1, 12)], "{styled}");
+    assert_eq!(
+        s.find_all_styled("beta", |c| c.style().reverse),
+        [(1, 2)],
+        "{styled}"
+    );
+    let cyan = |c: &termlens::Cell| c.style().fg == Color::Indexed(6);
+    assert_eq!(s.find_all_styled("beta", cyan), [(1, 12)], "{styled}");
+
+    // The selected row: one run, the highlight's full width, its text
+    // without the highlighted padding.
+    let selected = s.runs_where(|c| c.style().reverse);
+    let runs: Vec<_> = selected
+        .iter()
+        .map(|run| (run.row, run.cols.clone(), run.text.as_str()))
+        .collect();
+    assert_eq!(runs, [(1, 0..10, "> beta")], "{styled}");
+    let pane: Vec<_> = s
+        .runs_where(cyan)
+        .into_iter()
+        .map(|run| (run.row, run.cols, run.text))
+        .collect();
+    assert_eq!(pane, [(1, 12..16, "beta".to_owned())], "{styled}");
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// A needle whose cells do not all pass is no match, wherever the style
+/// changes inside it; one whose cells pass under two styles is. And only
+/// matches use up cells: a plain occurrence overlapping a styled one does
+/// not hide it, as it would if the styled search filtered `find_all`.
+#[test]
+fn a_needle_that_spans_a_style_change() -> termlens::Result<()> {
+    let mut t = emit(&[
+        "--raw",
+        r"\e[1mbe\e[0mta\n\e[31mre\e[32md\e[0m\na\e[7maa\e[0m\nDONE",
+        "--wait",
+    ])?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    let styled = s.with_styles();
+    let bold = |c: &termlens::Cell| c.style().bold;
+    assert_eq!(s.find_all("beta"), [(0, 0)], "{styled}");
+    assert!(
+        s.find_all_styled("beta", bold).is_empty(),
+        "half bold: {styled}"
+    );
+    assert_eq!(s.find_all_styled("be", bold), [(0, 0)], "{styled}");
+
+    // Red then green: both coloured, so the whole word is; red alone is not.
+    let coloured = |c: &termlens::Cell| c.style().fg != Color::Default;
+    assert_eq!(s.find_all_styled("red", coloured), [(1, 0)], "{styled}");
+    let red = |c: &termlens::Cell| c.style().fg == Color::Indexed(1);
+    assert!(s.find_all_styled("red", red).is_empty(), "{styled}");
+    let runs: Vec<_> = s
+        .runs_where(coloured)
+        .into_iter()
+        .map(|run| (run.row, run.cols, run.text))
+        .collect();
+    assert_eq!(
+        runs,
+        [(1, 0..3, "red".to_owned())],
+        "one run across the change: {styled}"
+    );
+
+    // `a` plain, then `aa` reversed. `find_all` takes the first two and
+    // leaves one; the styled search refuses that first pair and finds the
+    // reversed one it overlaps.
+    assert_eq!(s.find_all("aa"), [(2, 0)], "{styled}");
+    assert_eq!(
+        s.find_all_styled("aa", |c| c.style().reverse),
+        [(2, 1)],
+        "{styled}"
+    );
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// A wide character covers two columns in a styled search as in `find_all`:
+/// the column reported after one is the real one, and a run takes the
+/// character whole, judged by the cell that holds it. Its second cell is
+/// empty, so a predicate on the contents would split every wide character
+/// if it were asked about that cell.
+#[test]
+fn a_styled_search_keeps_wide_characters_whole() -> termlens::Result<()> {
+    let mut t = emit(&[
+        "--raw",
+        r"\e[7m東京\e[0m東京\n\e[7m東\e[0mab\e[7mab\e[0m\nDONE",
+        "--wait",
+    ])?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    let styled = s.with_styles();
+    let reverse = |c: &termlens::Cell| c.style().reverse;
+    assert_eq!(s.find_all("東京"), [(0, 0), (0, 4)], "{styled}");
+    assert_eq!(s.find_all_styled("東京", reverse), [(0, 0)], "{styled}");
+    assert_eq!(s.find_all_styled("ab", reverse), [(1, 4)], "{styled}");
+
+    let runs =
+        |pred: &dyn Fn(&termlens::Cell) -> bool| -> Vec<(u16, std::ops::Range<u16>, String)> {
+            s.runs_where(pred)
+                .into_iter()
+                .map(|run| (run.row, run.cols, run.text))
+                .collect()
+        };
+    assert_eq!(
+        runs(&reverse),
+        [
+            (0, 0..4, "東京".to_owned()),
+            (1, 0..2, "東".to_owned()),
+            (1, 4..6, "ab".to_owned()),
+        ],
+        "{styled}"
+    );
+    assert_eq!(
+        runs(&|c| !c.contents().is_empty()),
+        [
+            (0, 0..8, "東京東京".to_owned()),
+            (1, 0..6, "東abab".to_owned()),
+            (2, 0..4, "DONE".to_owned()),
+        ],
+        "{styled}"
+    );
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// A multi-row needle is matched as `find_all` matches it, every cell it
+/// covers asked: the end of its first row, the whole rows between, the
+/// start of its last. A candidate refused spends nothing, so on four rows
+/// of `a`, the first plain, a three-row needle is found on rows 1 to 3,
+/// where `find_all`'s one match takes rows 0 to 2.
+#[test]
+fn a_styled_search_spans_rows_as_find_all_does() -> termlens::Result<()> {
+    let reverse = |c: &termlens::Cell| c.style().reverse;
+    let s = Screen::parse(
+        "size: 3x4  cursor: 0,0\na\na\na\na\n\nstyles:\n1: 0 reverse\n2: 0 reverse\n3: 0 reverse",
+    )?;
+    assert_eq!(s.find_all("a\na\na"), [(0, 0)]);
+    assert_eq!(s.find_all_styled("a\na\na", reverse), [(1, 0)]);
+
+    // `xb`, `cd`, `ey`: the needle `b\ncd\ne` covers the `b`, all of `cd`
+    // and the `e`, and not the `x` or the `y`.
+    let screen = |styles: &str| {
+        Screen::parse(&format!(
+            "size: 3x3  cursor: 0,0\nxb\ncd\ney\n\nstyles:\n{styles}"
+        ))
+    };
+    let all = screen("0: 1 reverse\n1: 0-1 reverse\n2: 0 reverse")?;
+    assert_eq!(all.find_all_styled("b\ncd\ne", reverse), [(0, 1)]);
+    let middle_half = screen("0: 1 reverse\n1: 0 reverse\n2: 0 reverse")?;
+    assert!(middle_half.find_all_styled("b\ncd\ne", reverse).is_empty());
+    let last_plain = screen("0: 1 reverse\n1: 0-1 reverse")?;
+    assert!(last_plain.find_all_styled("b\ncd\ne", reverse).is_empty());
+    Ok(())
+}
+
 /// The fastest of `runs` timings of `search`: a transient stall on a loaded
 /// machine has to hit every run to count.
 fn fastest<T>(runs: usize, search: impl Fn() -> T) -> Duration {
@@ -561,6 +737,13 @@ fn every_search_costs_a_small_multiple_of_the_work_it_cannot_avoid() {
         "find, the last cell non-ASCII",
         &|| {
             std::hint::black_box(late.find("zzz"));
+        },
+        &pass,
+    );
+    within(
+        "find_all_styled",
+        &|| {
+            std::hint::black_box(ascii.find_all_styled("zzz", |c| c.style().bold));
         },
         &pass,
     );

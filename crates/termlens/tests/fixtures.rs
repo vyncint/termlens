@@ -110,6 +110,93 @@ fn resize_reaches_the_child_as_sigwinch() -> termlens::Result<()> {
     Ok(())
 }
 
+/// `resize_and_wait` passes on the application's repaint and not on the
+/// screen the resize left behind (#788). `press q to quit` is on that
+/// screen already, at the old size, so `wait_until` on it after `resize`
+/// returns at once; here it is waited for in the repaint. `resize-echo`
+/// clears the screen before each draw and draws that line last, so no
+/// screen part way through the repaint holds it either: only the old
+/// screen and the whole repaint do.
+#[test]
+fn resize_and_wait_passes_on_the_repaint_not_on_the_old_screen() -> termlens::Result<()> {
+    let mut t = spawn_fixture("resize-echo")?;
+    t.wait_until(|s| s.contains("size: 80x24") && s.contains("press q to quit"))?;
+
+    for (cols, rows) in [(100, 30), (60, 20)] {
+        let s = t.resize_and_wait(cols, rows, |s| s.contains("press q to quit"))?;
+        assert!(
+            s.contains(&format!("size: {cols}x{rows}")),
+            "the repaint, not the screen left behind:\n{s}"
+        );
+        assert_eq!(s.size(), (cols, rows), "{s}");
+    }
+
+    t.send(Key::Char('q'))?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// A resize to the size the grid already has reaches no one, so nothing
+/// repaints, and the screen as it is answers the predicate at once.
+#[test]
+fn resize_and_wait_to_the_size_it_has_answers_from_the_screen() -> termlens::Result<()> {
+    let mut t = spawn_fixture("resize-echo")?;
+    t.wait_until(|s| s.contains("size: 80x24") && s.contains("press q to quit"))?;
+
+    let s = t.resize_and_wait(80, 24, |s| s.contains("size: 80x24"))?;
+    assert_eq!(s.size(), (80, 24), "{s}");
+
+    t.send(Key::Char('q'))?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// An application that does not repaint when resized never satisfies the
+/// wait, even with a predicate the screen left behind satisfies, and the
+/// timeout says that nothing was read after the resize rather than
+/// blaming the predicate. `emit` leaves SIGWINCH at its default, ignored.
+///
+/// Not on Windows: ConPTY repaints the screen itself after a resize, so
+/// output arrives though the program draws nothing, and the old `READY`
+/// satisfies the predicate (run 45393517904). That is why the rustdoc tells
+/// a Windows test to name something only the new layout has.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY repaints the screen itself after a resize, so output arrives though the program draws nothing and the old text satisfies the predicate (run 45393517904)"
+)]
+fn resize_and_wait_times_out_naming_the_resize_when_nothing_repaints() -> termlens::Result<()> {
+    let mut t = util::spawn_emit(
+        Terminal::builder()
+            .size(40, 6)
+            .timeout(Duration::from_secs(10)),
+        &["READY", "--wait"],
+    )?;
+    t.wait_until(|s| s.contains("READY"))?;
+
+    let expired = t.resize_and_wait_for(50, 8, |s| s.contains("READY"), Duration::from_millis(500));
+    match expired {
+        Err(err @ termlens::Error::Timeout { .. }) => {
+            let message = err.to_string();
+            assert!(
+                message.contains("after the resize to 50x8")
+                    && message.contains("no output has been read since the resize"),
+                "{message}"
+            );
+            let screen = err.screen().expect("a timeout carries the screen");
+            assert!(
+                screen.contains("READY") && screen.size() == (50, 8),
+                "{screen}"
+            );
+        }
+        other => panic!("nothing repaints, so the wait must time out: {other:?}"),
+    }
+
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// Normalization folding against real vt100 output rather than a
 /// hand-built grid — one form on screen, the other in the needle, so the
 /// match can only come from folding.

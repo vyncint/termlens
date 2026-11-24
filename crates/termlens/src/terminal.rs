@@ -649,7 +649,8 @@ impl ScrollChord {
     }
 }
 
-/// A mouse button, for [`Terminal::click_with`] and [`Terminal::drag`].
+/// A mouse button, for [`Terminal::click_with`], [`Terminal::drag`],
+/// [`Terminal::mouse_down`] and [`Terminal::mouse_up`].
 ///
 /// Add modifiers the same way [`Key`](crate::Key) does:
 /// `MouseButton::Left.ctrl()`.
@@ -2459,6 +2460,7 @@ impl TerminalBuilder {
             last_frame: None,
             record_budget: self.record_budget,
             cell_size: self.cell_size,
+            mouse_held: Vec::new(),
         })
     }
 }
@@ -2993,6 +2995,15 @@ fn queue_replies(
     }
 }
 
+/// A resize that changed the size, as a wait after it needs it: how many
+/// reads had been processed when the grid took the size, and the size.
+#[derive(Debug, Clone, Copy)]
+struct Resized {
+    reads: u64,
+    cols: u16,
+    rows: u16,
+}
+
 /// A program running inside a real PTY, observed through an emulated screen.
 ///
 /// See the crate-level docs for a full example. Dropping a `Terminal` kills
@@ -3041,6 +3052,12 @@ pub struct Terminal {
     /// Declared pixels per cell, kept so a resize can recompute the PTY's
     /// pixel geometry rather than silently dropping it.
     cell_size: Option<(u16, u16)>,
+    /// The buttons [`mouse_down`](Terminal::mouse_down) pressed and
+    /// [`mouse_up`](Terminal::mouse_up) has not released, each with the
+    /// modifiers it went down with, in the order they went down. A motion
+    /// reports the last of them, and `?1002` reports motion only while there
+    /// is one.
+    mouse_held: Vec<MouseChord>,
 }
 
 impl Terminal {
@@ -3184,8 +3201,10 @@ impl Terminal {
     /// and reported on another.
     ///
     /// [`send_str`](Self::send_str), [`paste`](Self::paste),
-    /// [`click`](Self::click), [`drag`](Self::drag) and
-    /// [`scroll`](Self::scroll) share this contract.
+    /// [`click`](Self::click), [`drag`](Self::drag),
+    /// [`scroll`](Self::scroll), [`mouse_move`](Self::mouse_move),
+    /// [`mouse_down`](Self::mouse_down) and [`mouse_up`](Self::mouse_up)
+    /// share this contract.
     pub fn send(&mut self, key: impl Input + fmt::Debug) -> Result<()> {
         let what = format!("{key:?}");
         self.ensure_deliverable(&what)?;
@@ -3525,6 +3544,172 @@ impl Terminal {
         self.write_input(&bytes, "a mouse drag")
     }
 
+    /// Move the pointer to `(col, row)` — columns first, like
+    /// [`click`](Self::click) — with no button held: a hover. Or, with a
+    /// button [`mouse_down`](Self::mouse_down) pressed and not yet released,
+    /// one step of a drag driven by hand.
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// t.mouse_move(10, 4)?;                          // hover over a button
+    /// t.wait_until(|s| s.contains("Save (ctrl+s)"))?; // its tooltip
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// The report is the motion a terminal sends: the button code of the
+    /// press still held — the last one, with its modifiers, if there are
+    /// several — or `3`, no button, plus 32, as xterm writes it. With no
+    /// button that is SGR `CSI < 35 ; col ; row M`, which crossterm reads as
+    /// `Moved`; with the left button held, `CSI < 32 ; … M`, `Drag(Left)`.
+    /// It is encoded as `click` encodes, in the encoding the application
+    /// enabled.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Write`] when the child is gone, checked first as on `click`.
+    /// Then [`Error::Input`] when the application's tracking mode does not
+    /// report this motion, as a terminal would not: a move with no button
+    /// held needs any-event tracking (`CSI ? 1003 h`), and one with a button
+    /// held that or button-event tracking (`?1002`); press-and-release
+    /// tracking (`?1000`) and X10 (`?9`) report no motion at all. Then, as
+    /// on `click`, when no tracking is enabled, when `(col, row)` is outside
+    /// the current grid, or when the position is unrepresentable in the
+    /// legacy encoding (columns/rows beyond 222).
+    pub fn mouse_move(&mut self, col: u16, row: u16) -> Result<()> {
+        self.ensure_deliverable("a mouse move")?;
+        let modes = self.input_modes();
+        let held = self.mouse_held.last().copied();
+        match (modes.mouse, held) {
+            (MouseMode::None, _) => return Err(no_mouse_tracking()),
+            (MouseMode::Press, _) => {
+                return Err(Error::Input(
+                    "the application enabled X10 mouse tracking (CSI ?9 h), which \
+                     reports presses only — a terminal sends no motion in that mode"
+                        .into(),
+                ))
+            }
+            (MouseMode::PressRelease, _) => {
+                return Err(Error::Input(
+                    "the application enabled press-and-release mouse tracking \
+                     (CSI ?1000 h), which reports no motion — a move needs \
+                     button-event tracking (?1002) with a button held, or any-event \
+                     tracking (?1003)"
+                        .into(),
+                ))
+            }
+            (MouseMode::ButtonMotion, None) => {
+                return Err(Error::Input(
+                    "the application enabled button-event mouse tracking (CSI ?1002 h), \
+                     which reports motion only while a button is held, and no \
+                     mouse_down holds one — a move with no button needs any-event \
+                     tracking (?1003)"
+                        .into(),
+                ))
+            }
+            (MouseMode::ButtonMotion, Some(_)) | (MouseMode::AnyMotion, _) => {}
+        }
+        let (cols, rows) = self.screen().size();
+        check_mouse_in_grid(col, row, cols, rows)?;
+        // A motion report is the button code plus 32, and with no button
+        // held the code is 3, the one a release carries: xterm's `BtnCode`.
+        let code = held.map_or(3, MouseChord::code) + 32;
+        let bytes = self.mouse_report(&modes, code, col, row, true)?;
+        self.write_input(&bytes, "a mouse move")
+    }
+
+    /// Press `button` at `(col, row)` and hold it: the first half of
+    /// [`click_with`](Self::click_with), for a gesture a test drives step
+    /// by step — press, [`mouse_move`](Self::mouse_move), look at the
+    /// screen mid-drag, [`mouse_up`](Self::mouse_up):
+    ///
+    /// ```no_run
+    /// # use termlens::MouseButton;
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// t.mouse_down(MouseButton::Left, 2, 5)?;          // grab the splitter
+    /// t.mouse_move(20, 5)?;                            // Drag(Left)
+    /// t.wait_until(|s| s.contains("width: 20"))?;      // mid-gesture
+    /// t.mouse_up(MouseButton::Left, 20, 5)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// The press is encoded as `click_with` encodes its press, and under
+    /// X10 (`CSI ? 9 h`) it carries the button alone, as xterm's does. The
+    /// button counts as held, with these modifiers, until `mouse_up`
+    /// releases it: a motion in between reports it. Under `?1002` or
+    /// `?1003`, a press, a move to each cell on the way and a release of
+    /// the same chord send exactly what [`drag`](Self::drag) sends. A
+    /// button pressed again while held is pressed again, as written, and
+    /// is held from then on with the new modifiers.
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`click`](Self::click). A press whose write gave
+    /// up is held all the same: [`Error::Write`] says its bytes stay queued
+    /// for the application.
+    pub fn mouse_down(&mut self, button: impl Into<MouseChord>, col: u16, row: u16) -> Result<()> {
+        self.ensure_deliverable("a mouse press")?;
+        let chord = button.into();
+        let modes = self.input_modes();
+        // X10 reports the button alone, as `click_with` sends it (#642).
+        let code = match modes.mouse {
+            MouseMode::None => return Err(no_mouse_tracking()),
+            MouseMode::Press => chord.button.code(),
+            MouseMode::PressRelease | MouseMode::ButtonMotion | MouseMode::AnyMotion => {
+                chord.code()
+            }
+        };
+        let (cols, rows) = self.screen().size();
+        check_mouse_in_grid(col, row, cols, rows)?;
+        let bytes = self.mouse_report(&modes, code, col, row, true)?;
+        self.mouse_held.retain(|held| held.button != chord.button);
+        self.mouse_held.push(chord);
+        self.write_input(&bytes, "a mouse press")
+    }
+
+    /// Release `button` at `(col, row)`: the second half of
+    /// [`click_with`](Self::click_with), ending a gesture
+    /// [`mouse_down`](Self::mouse_down) began, wherever the pointer has
+    /// moved since. See `mouse_down` for an example.
+    ///
+    /// The release is encoded as `click_with` encodes its release: SGR
+    /// repeats the button code with a final `m`, and the other encodings
+    /// send button `3` plus the modifier bits, which is why the button
+    /// released is not on the wire there. The modifiers are the ones given
+    /// here. A button that is not held is released all the same, as
+    /// written; a motion after the release reports the press still held, if
+    /// any.
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`click`](Self::click), and [`Error::Input`] under
+    /// X10 tracking (`CSI ? 9 h`), in which a terminal reports no release.
+    /// The button is then still held.
+    pub fn mouse_up(&mut self, button: impl Into<MouseChord>, col: u16, row: u16) -> Result<()> {
+        self.ensure_deliverable("a mouse release")?;
+        let chord = button.into();
+        let modes = self.input_modes();
+        match modes.mouse {
+            MouseMode::None => return Err(no_mouse_tracking()),
+            MouseMode::Press => {
+                return Err(Error::Input(
+                    "the application enabled X10 mouse tracking (CSI ?9 h), which \
+                     reports presses only — a terminal sends no release in that mode"
+                        .into(),
+                ))
+            }
+            MouseMode::PressRelease | MouseMode::ButtonMotion | MouseMode::AnyMotion => {}
+        }
+        let (cols, rows) = self.screen().size();
+        check_mouse_in_grid(col, row, cols, rows)?;
+        let bytes = self.mouse_report(&modes, chord.code(), col, row, false)?;
+        self.mouse_held.retain(|held| held.button != chord.button);
+        self.write_input(&bytes, "a mouse release")
+    }
+
     /// Scroll the wheel one notch at `(col, row)` (0-based).
     ///
     /// The unmodified case of [`scroll_with`](Self::scroll_with), exactly as
@@ -3728,6 +3913,21 @@ impl Terminal {
         )
     }
 
+    /// The timeout note's clause on the input the application left unread,
+    /// or nothing: nothing queued, or a platform where [`unread_input`]
+    /// cannot count it. Taken with no lock held, since it opens a device.
+    fn unread_note(&self) -> String {
+        let unread = self
+            .master
+            .as_deref()
+            .and_then(|master| unread_input(master));
+        match unread {
+            None | Some(0) => String::new(),
+            Some(1) => " — note: the application left 1 byte of input unread".to_owned(),
+            Some(n) => format!(" — note: the application left {n} bytes of input unread"),
+        }
+    }
+
     /// Write to the child, bounded by the default deadline.
     ///
     /// Writes into a PTY block once the application stops reading its
@@ -3895,10 +4095,31 @@ impl Terminal {
 
     fn wait_until_deadline(
         &mut self,
-        mut predicate: impl FnMut(&Screen) -> bool,
+        predicate: impl FnMut(&Screen) -> bool,
         timeout: Duration,
     ) -> Result<()> {
-        const WHAT: &str = "the screen predicate to hold";
+        self.wait_screen_deadline(predicate, timeout, None)
+            .map(drop)
+    }
+
+    /// `wait_until`'s wait, returning the screen the predicate held on.
+    ///
+    /// After a resize (`resized`), the predicate is asked only about screens
+    /// that output processed after the resize produced: the screen the
+    /// resize left behind is the old frame at the new size, and the
+    /// predicate may well hold on that (#788).
+    fn wait_screen_deadline(
+        &mut self,
+        mut predicate: impl FnMut(&Screen) -> bool,
+        timeout: Duration,
+        resized: Option<Resized>,
+    ) -> Result<Screen> {
+        let what = match resized {
+            None => "the screen predicate to hold".to_owned(),
+            Some(Resized { cols, rows, .. }) => format!(
+                "the screen predicate to hold on output read after the resize to {cols}x{rows}"
+            ),
+        };
         let deadline = deadline_after(timeout);
         let mut seen_generation = None;
         let outcome = self.shared.wait_until(deadline, |state| {
@@ -3918,13 +4139,19 @@ impl Terminal {
             if let Some(failure) = state.emulator_failure() {
                 return Some(Err(failure));
             }
-            let screen = state.snapshot();
-            if predicate(&screen) {
-                return Some(Ok(()));
+            // A read counts once it has been processed, and the resize took
+            // its count under the lock that processes them, so no read falls
+            // between the two.
+            if resized.is_none_or(|resized| state.reads > resized.reads) {
+                let screen = state.snapshot();
+                if predicate(&screen) {
+                    return Some(Ok(screen));
+                }
             }
             if state.eof {
+                let screen = state.snapshot();
                 return Some(Err(Error::Eof {
-                    waiting_for: format!("{WHAT}{}{}", state.query_note(), history_note(&screen)),
+                    waiting_for: format!("{what}{}{}", state.query_note(), history_note(&screen)),
                     screen,
                 }
                 .recorded()));
@@ -3935,9 +4162,27 @@ impl Terminal {
             Ok(inner) => inner,
             Err(Expired) => {
                 let screen = self.screen();
-                let note = self.shared.lock().query_note();
+                let (note, silent) = {
+                    let state = self.shared.lock();
+                    let silent = resized.is_some_and(|resized| state.reads == resized.reads);
+                    (state.query_note(), silent)
+                };
+                // Nothing at all since the resize is a different failure
+                // from a predicate that held on none of it, and the one an
+                // application that ignores the resize produces.
+                let silent = if silent {
+                    " — no output has been read since the resize, so the application has \
+                     not repainted; if it does not repaint when resized, wait with \
+                     wait_until on the screen as it is"
+                } else {
+                    ""
+                };
                 Err(Error::Timeout {
-                    waiting_for: format!("{WHAT}{note}{}", history_note(&screen)),
+                    waiting_for: format!(
+                        "{what}{silent}{note}{}{}",
+                        self.unread_note(),
+                        history_note(&screen)
+                    ),
                     timeout,
                     screen,
                 }
@@ -4137,12 +4382,12 @@ impl Terminal {
                 // picture that claims to be current — and what changed
                 // between that frame and the live grid is shown as a diff,
                 // which is the question a stuck wait actually asks.
-                let (frames, screen, note) = {
+                let (frames, screen, query) = {
                     let mut guard = self.shared.lock();
                     let screen = guard.snapshot();
-                    let note = format!("{}{}", guard.query_note(), history_note(&screen));
-                    (guard.frames_seen, screen, note)
+                    (guard.frames_seen, screen, guard.query_note())
                 };
+                let note = format!("{query}{}{}", self.unread_note(), history_note(&screen));
                 // What put the cursor where it is: the resize that moved it
                 // last, or else a frame an earlier wait returned. The message
                 // names that one, since the other never happened (#705).
@@ -4303,8 +4548,9 @@ impl Terminal {
                     None
                 };
                 let screen = guard.snapshot();
-                let note = guard.query_note();
+                let query = guard.query_note();
                 drop(guard);
+                let note = format!("{query}{}", self.unread_note());
                 let waiting_for = if stuck_mid_frame {
                     format!(
                         "{quiet:?} of output silence — the application is inside an \
@@ -4513,8 +4759,9 @@ impl Terminal {
                     None
                 };
                 let screen = guard.snapshot();
-                let note = format!("{}{}", guard.query_note(), history_note(&screen));
+                let query = guard.query_note();
                 drop(guard);
+                let note = format!("{query}{}{}", self.unread_note(), history_note(&screen));
                 let waiting_for = if stuck_mid_frame {
                     format!(
                         "the screen to hold still for {quiet:?} — the application is inside \
@@ -4685,11 +4932,12 @@ impl Terminal {
             }
             let now = Instant::now();
             if now >= deadline {
+                let query = self.shared.lock().query_note();
                 return Err(Error::Timeout {
                     waiting_for: format!(
-                        "`{}` to exit{}",
+                        "`{}` to exit{query}{}",
                         self.command_desc,
-                        self.shared.lock().query_note()
+                        self.unread_note()
                     ),
                     timeout,
                     screen: self.screen(),
@@ -4726,7 +4974,9 @@ impl Terminal {
     /// row — or use [`wait_frame`](Self::wait_frame) where the app emits
     /// synchronized updates, which is safe here when the size actually
     /// changes: the frame cursor advances, so only a frame completed
-    /// *after* it can satisfy the wait. A resize to the size the grid
+    /// *after* it can satisfy the wait. For any application,
+    /// [`resize_and_wait`](Self::resize_and_wait) resizes and asks its
+    /// predicate only about output read after the resize. A resize to the size the grid
     /// already has is a no-op — `TIOCSWINSZ` raises no `SIGWINCH` for an
     /// unchanged size, so there is no repaint and the cursor stays put —
     /// and the frame the application last drew is the current truth.
@@ -4793,6 +5043,13 @@ impl Terminal {
     /// released the terminal, carrying the final screen; [`Error::Pty`] if
     /// the ioctl fails.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        self.resize_counted(cols, rows).map(drop)
+    }
+
+    /// [`resize`](Self::resize), and what a wait after it needs to know:
+    /// `None` for a resize to the size the grid already has, which nothing
+    /// answers.
+    fn resize_counted(&mut self, cols: u16, rows: u16) -> Result<Option<Resized>> {
         check_size(cols, rows)?;
         // Ahead of the refusal after an exit, as in the waits: a reader that
         // drained to EOF behind a panicked emulator is not why this failed.
@@ -4824,7 +5081,11 @@ impl Terminal {
         // The cursor is what makes the advice in the stale-frame trap above
         // hold for `wait_frame`: a frame drawn at the old size cannot be the
         // repaint that answers this resize, so it stops being offered.
-        let cursor = self.shared.mutate(|state| {
+        //
+        // The read count is taken under the same lock for the same reason:
+        // `resize_and_wait` asks its predicate only about reads past it, and
+        // no read can be processed between the resize and the count.
+        let taken = self.shared.mutate(|state| {
             // Again under the lock that resizes, since the reader may have
             // panicked since the check above. A panicked emulator is never
             // called again (#211), and resizing the PTY alone is no better:
@@ -4853,13 +5114,109 @@ impl Terminal {
                 return Err(Error::Pty(format!("resize failed: {e}")));
             }
             state.touch();
-            Ok(Some(state.frames_seen))
+            Ok(Some((state.frames_seen, state.reads)))
         })?;
-        if let Some(cursor) = cursor {
-            self.frame_cursor = cursor;
-            self.frame_cursor_resize = Some((cols, rows));
-        }
-        Ok(())
+        let Some((cursor, reads)) = taken else {
+            return Ok(None);
+        };
+        self.frame_cursor = cursor;
+        self.frame_cursor_resize = Some((cols, rows));
+        Ok(Some(Resized { reads, cols, rows }))
+    }
+
+    /// Resize, then wait until `predicate` holds on output read after the
+    /// resize, and return the screen it held on: [`resize`](Self::resize)
+    /// and a wait that cannot pass on the screen the resize left behind.
+    ///
+    /// `resize` gives the grid the new size at once and keeps the old
+    /// content until the application repaints, the stale-frame trap of
+    /// `docs/DESIGN.md` §2: after `resize(100, 30)`,
+    /// `wait_until(|s| s.contains("ready"))` returns at once on a screen
+    /// still reading `size 80x24 ready`. Here the predicate is not asked
+    /// about that screen at all, only about the screens that output read
+    /// after the resize produced:
+    ///
+    /// ```
+    /// # fn main() -> termlens::Result<()> {
+    /// # #[cfg(unix)] {
+    /// let mut t = termlens::Terminal::builder()
+    ///     .size(80, 24)
+    ///     .timeout(std::time::Duration::from_secs(10))
+    ///     .args(["-c", r#"show() { printf '\r\033[Ksize %s ready' "$(stty size)"; }
+    ///                     trap show WINCH; show; while :; do sleep 0.05; done"#])
+    ///     .spawn("sh")?;
+    /// t.wait_until(|s| s.contains("size 24 80 ready"))?;
+    /// // `ready` is on the screen already; what is waited for is the repaint.
+    /// let s = t.resize_and_wait(100, 30, |s| s.contains("ready"))?;
+    /// assert!(s.contains("size 30 100 ready"), "{s}");
+    /// # }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Assert on the returned `Screen`, as with
+    /// [`snapshot_after`](Self::snapshot_after): the live grid may have
+    /// moved on since. A resize to the size the grid already has sends the
+    /// application nothing and nothing repaints, so there the screen as it
+    /// is answers the predicate, as `wait_until` would.
+    ///
+    /// The wait is `wait_until`'s otherwise, and so is what it cannot know.
+    /// A predicate can hold on a repaint drawn halfway, so name the last
+    /// thing the repaint draws (rule 2 of `docs/DESIGN.md` §2). And output
+    /// read after the resize is not always drawn for it: an application that
+    /// paints on its own, a clock or a spinner, can paint the old layout
+    /// before it handles the resize. Where that can happen, name what only
+    /// the new layout shows — the size as the application reports it, or
+    /// text that needs the new width; `s.size()` is new at once, so it
+    /// tells nothing apart — as the stale-frame trap advises for every
+    /// resize.
+    ///
+    /// # On Windows
+    ///
+    /// **Name something only the new layout has.** ConPTY repaints the
+    /// screen itself after a resize, so output arrives after this call even
+    /// when the application draws nothing at all, and a predicate the
+    /// content from before the resize satisfies can pass on that repaint:
+    /// measured on `windows-latest` (run 45393517904), where a program that
+    /// ignores the resize satisfied `contains("READY")` with the text it had
+    /// drawn before it. ConPTY also applies the resize on a thread of its
+    /// own, so what the application writes right after this call can still
+    /// be laid out at the old width (#499).
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`resize`](Self::resize) returns, before anything is waited
+    /// for. Then [`Error::Timeout`] at the deadline (builder `timeout`) and
+    /// [`Error::Eof`] as soon as the terminal closes with the predicate
+    /// false, each carrying the screen, as from `wait_until`. On Linux and
+    /// macOS a timeout says when nothing at all was read after the resize,
+    /// which is what an application that does not repaint when resized
+    /// produces; on Windows ConPTY's own repaint arrives regardless.
+    pub fn resize_and_wait(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        predicate: impl FnMut(&Screen) -> bool,
+    ) -> Result<Screen> {
+        self.resize_and_wait_for(cols, rows, predicate, self.default_timeout)
+    }
+
+    /// [`resize_and_wait`](Self::resize_and_wait) with a per-call timeout,
+    /// for the one repaint slower than the rest of the suite's waits.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`resize_and_wait`](Self::resize_and_wait), against
+    /// `timeout`.
+    pub fn resize_and_wait_for(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        predicate: impl FnMut(&Screen) -> bool,
+        timeout: Duration,
+    ) -> Result<Screen> {
+        let resized = self.resize_counted(cols, rows)?;
+        self.wait_screen_deadline(predicate, timeout, resized)
     }
 }
 
@@ -5219,6 +5576,60 @@ fn unblock_teardown(master: &dyn portable_pty::MasterPty) {
             libc::tcflush(slave.as_raw_fd(), libc::TCIFLUSH);
         }
     }
+}
+
+/// How many bytes sit in the terminal's input queue that the application
+/// has not read: input it could read now and has not (#790).
+///
+/// The master cannot say: its `FIONREAD` counts the other direction, the
+/// output waiting for the reader thread, and with 100 bytes queued both it
+/// and `TIOCOUTQ` read 0, measured on Linux. The slave's `FIONREAD` counts
+/// them, so the slave is opened by name for this one call, `O_NOCTTY` so it
+/// cannot become this process's controlling terminal, and closed again.
+/// termlens must hold no slave descriptor of its own, or the master would
+/// never see the EOF every exit is read from; after the close it still
+/// does, measured on Linux and held by `tests/drain.rs`. Like
+/// `unblock_teardown`'s, this open is no lifecycle edge: the master stays
+/// open throughout.
+///
+/// The count is what a read would return at once: in canonical mode the
+/// complete lines, so a line still waiting for its Enter, which the
+/// application cannot read yet, is not counted. A query reply the
+/// application has not read is input too, and counted.
+///
+/// Linux and macOS only, and `None` wherever the count cannot be had, so
+/// that a platform that cannot measure it omits the note rather than
+/// claiming a wrong count. Linux is measured. macOS answers `FIONREAD` on a
+/// terminal from its input queues too (XNU's `ttnread`), and the test that
+/// holds the count runs on CI's macOS leg; the other Unixes are not
+/// measured, and say nothing. ConPTY keeps typed input on its own side of
+/// the pipe, so Windows has no count to give.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn unread_input(master: &dyn portable_pty::MasterPty) -> Option<usize> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let slave = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(master.tty_name()?)
+        .ok()?;
+    let mut queued: libc::c_int = 0;
+    // SAFETY: `slave` is an open descriptor for the whole call, and
+    // FIONREAD writes one `int` through the pointer, which points at one.
+    #[allow(unsafe_code)]
+    let rc = unsafe { libc::ioctl(slave.as_raw_fd(), libc::FIONREAD, &mut queued) };
+    if rc != 0 {
+        return None;
+    }
+    usize::try_from(queued).ok()
+}
+
+/// See the Linux and macOS [`unread_input`]: nothing measured here, so
+/// nothing claimed.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn unread_input(_master: &dyn portable_pty::MasterPty) -> Option<usize> {
+    None
 }
 
 impl Drop for Terminal {
