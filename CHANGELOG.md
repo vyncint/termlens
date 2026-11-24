@@ -213,14 +213,16 @@ reads that marker.
   file, skipping the key. A test that expected a transparent pixel inside
   a sixel's declared area should expect register 0's colour there, or the
   application should send `P2 = 1`. (#766)
-- A raw kitty RGB or RGBA payload (`f=24`, `f=32`) holding more bytes
-  than its `s=` and `v=` declare is refused with `DecodeError::Malformed`,
-  as kitty refuses it ("Image dimensions … do not match data size") and
-  as termlens already refused the same bytes zlib-compressed. It decoded
-  `Ok` as its first `s=` x `v=` pixels: two RGBA pixels sent as `f=24`,
-  the RGB/RGBA mix-up, gave a 2x1 image whose second pixel was magenta. A
-  test that decoded such a payload should expect `Malformed`, or the
-  application should send exactly the declared size. (#767)
+- A raw kitty RGB or RGBA payload (`f=24`, `f=32`) holding more than 10
+  bytes past what its `s=` and `v=` declare is refused with
+  `DecodeError::Malformed`, as kitty refuses it: kitty loads raw data into
+  a buffer of the declared size plus 10 bytes and aborts a load that
+  outgrows it ("Too much data"). It decoded `Ok` as its first `s=` x `v=`
+  pixels. A surplus of 10 bytes or fewer still does, as kitty draws it:
+  two RGBA pixels sent as `f=24`, the RGB/RGBA mix-up, are a 2x1 image
+  whose second pixel is magenta, as before. A test that decoded a payload
+  more than 10 bytes too long should expect `Malformed`, or the
+  application should send the declared size. (#767)
 - An APC holding only `G` (`ESC _ G ESC \`) is no kitty escape, as kitty
   drops an APC shorter than two bytes before reading it. It was counted
   as a kitty transmission of one byte, so `graphics().kitty()` counted an

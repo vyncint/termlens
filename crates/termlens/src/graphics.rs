@@ -409,10 +409,12 @@ impl GraphicsPayload {
     /// image, and [`DecodeError::Unsupported`] when its format is not
     /// supported. [`DecodeError::Malformed`] covers contradictory or invalid
     /// payload data, including data that cannot be decoded within its declared
-    /// size, and kitty pixel data longer or shorter than that size, which
-    /// kitty refuses too. [`DecodeError::TooLarge`] covers declared
-    /// dimensions or sixel commands beyond the 4096-pixel and related safety
-    /// limits.
+    /// size, and the kitty pixel data kitty refuses too: data short of the
+    /// declared size, zlib data that does not inflate to exactly that size,
+    /// and raw data more than 10 bytes past it. Raw data within those 10
+    /// bytes decodes from its declared prefix, as kitty draws it.
+    /// [`DecodeError::TooLarge`] covers declared dimensions or sixel commands
+    /// beyond the 4096-pixel and related safety limits.
     #[cfg(feature = "decode")]
     #[cfg_attr(docsrs, doc(cfg(feature = "decode")))]
     pub fn decode(&self) -> Result<Bitmap, DecodeError> {
@@ -498,17 +500,20 @@ impl GraphicsPayload {
                 "fewer bytes than the declared size needs",
             ));
         }
-        // A surplus is refused too, as kitty refuses it (`data_sz !=
-        // required_sz` in `handle_add_command`) and as the zlib form above
-        // already was: it is the RGB/RGBA mix-up, not padding, and its
-        // prefix decoded into a plausible wrong picture (#767).
-        if raw.len() > wanted {
+        // Raw data past the declared size is what kitty's load buffer
+        // decides (#767): kitty keeps KITTY_RAW_SLACK bytes of room past it
+        // and refuses a load that outgrows them, and within them it never
+        // reads the surplus, so neither is it decoded here. Refusing every
+        // surplus byte refused what kitty draws. Inflated data is already
+        // held to the size exactly above, as kitty's inflate holds it.
+        if raw.len() > wanted.saturating_add(KITTY_RAW_SLACK) {
             return Err(DecodeError::Malformed(
-                "more bytes than the declared size holds",
+                "raw data more than the 10 bytes past its declared size that kitty loads \
+                 (\"Too much data\")",
             ));
         }
         let mut pixels = Vec::with_capacity(wanted / channels);
-        for chunk in raw.chunks_exact(channels) {
+        for chunk in raw[..wanted].chunks_exact(channels) {
             pixels.push([
                 chunk[0],
                 chunk[1],
@@ -647,6 +652,14 @@ const MAX_DECODED_HEIGHT: usize = 4096;
 /// this.
 #[cfg(feature = "decode")]
 const MAX_SIXEL_REGISTERS: usize = 65_536;
+/// The bytes of raw kitty data (`f=24`, `f=32`, no `o=z`) a payload may
+/// carry past its declared size and still be drawn: kitty loads it into a
+/// buffer of the declared size plus 10 (`initialize_load_data`,
+/// `graphics.c`), aborts a load past that with `EFBIG`, "Too much data"
+/// (`load_image_data`), and reads only the declared size of one within it
+/// (#767).
+#[cfg(feature = "decode")]
+const KITTY_RAW_SLACK: usize = 10;
 
 /// Why a payload could not be decoded.
 #[cfg(feature = "decode")]
@@ -2164,44 +2177,112 @@ mod tests {
         }
     }
 
-    /// kitty refuses an image whose data is not exactly `s=` x `v=` pixels,
-    /// compressed or not: `handle_add_command` (`graphics.c`) aborts with
-    /// `EINVAL`, "Image dimensions: %ux%u do not match data size", unless
-    /// `data_sz == required_sz`. Raw data with bytes to spare decoded `Ok`
-    /// as its prefix (#767): two RGBA pixels sent as `f=24`, the RGB/RGBA
-    /// mix-up, came out as two pixels with the second one magenta, while
-    /// the same bytes compressed were refused.
+    /// kitty loads a raw image (`f=24` or `f=32`, no `o=z`) into a buffer of
+    /// the declared size plus 10 bytes (`initialize_load_data`,
+    /// `graphics.c`) and aborts a load that outgrows it with `EFBIG`, "Too
+    /// much data" (`load_image_data`). Within the buffer the surplus is
+    /// never read: raw data leaves `data_sz` at the declared size, so
+    /// `handle_add_command`'s `data_sz != required_sz` cannot fire, and the
+    /// image is the declared prefix. #767 refused every surplus byte, and
+    /// so refused what kitty draws: two RGBA pixels sent as `f=24`, the
+    /// RGB/RGBA mix-up, which kitty shows as two pixels, the second
+    /// magenta. The buffer fills chunk by chunk, so the surplus is the
+    /// whole upload's, and a chunked one is held to the same 10 bytes.
     #[cfg(feature = "decode")]
     #[test]
-    fn kitty_data_must_be_exactly_the_declared_size() {
-        // Red, then green, as RGBA: 8 bytes.
-        let rgba = [0xff, 0, 0, 0xff, 0, 0xff, 0, 0xff];
-        for (control, raw) in [
-            // 6 bytes needed, then 4: a surplus. 8 needed, 6 sent: short.
-            ("a=T,f=24,s=2,v=1", &rgba[..]),
-            ("a=T,f=32,s=1,v=1", &rgba[..]),
-            ("a=T,f=32,s=2,v=1", &rgba[..6]),
-        ] {
-            for compressed in [false, true] {
-                let (control, data) = if compressed {
-                    let deflated = miniz_oxide::deflate::compress_to_vec_zlib(raw, 6);
-                    (format!("{control},o=z"), deflated)
-                } else {
-                    (control.to_owned(), raw.to_vec())
-                };
-                let payload = kitty_payload(control.as_bytes(), base64(&data).as_bytes());
-                assert!(
-                    matches!(payload.decode(), Err(DecodeError::Malformed(_))),
-                    "{control} with {} bytes: {:?}",
-                    raw.len(),
-                    payload.decode()
-                );
+    fn kitty_raw_data_may_run_ten_bytes_past_the_declared_size() {
+        for (format, channels) in [(24, 3), (32, 4)] {
+            let control = format!("a=T,f={format},s=2,v=1");
+            let wanted = 2 * channels;
+            for surplus in [0, 1, 10, 11] {
+                let raw: Vec<u8> = (1..=u8::try_from(wanted + surplus).unwrap()).collect();
+                let whole = kitty_payload(control.as_bytes(), base64(&raw).as_bytes());
+                // `m=1` with the first pixel's bytes, then `m=0` with the
+                // rest, each chunk its own base64, fed as the tracker feeds
+                // the two escapes.
+                let mut builder = GraphicsBuilder::default();
+                builder.kitty(format!("{control},m=1").as_bytes());
+                let first = base64(&raw[..channels]);
+                builder.chunk(first.len() as u64, first.as_bytes(), true, usize::MAX);
+                builder.kitty(b"m=0");
+                let rest = base64(&raw[channels..]);
+                builder.chunk(rest.len() as u64, rest.as_bytes(), true, usize::MAX);
+                let chunked = builder.finish().expect("a payload");
+                assert_eq!(chunked.chunks(), 2);
+                for (shape, payload) in [("whole", whole), ("chunked", chunked)] {
+                    let decoded = payload.decode();
+                    if surplus <= 10 {
+                        let bitmap = decoded.unwrap_or_else(|e| {
+                            panic!("f={format}, {surplus} surplus bytes, {shape}: {e}")
+                        });
+                        assert_eq!((bitmap.width(), bitmap.height()), (2, 1));
+                        // Two pixels and no more: the surplus is not read.
+                        let pixels: u32 = bitmap.colours().iter().map(|(_, n)| n).sum();
+                        assert_eq!(pixels, 2, "f={format}, {surplus} surplus bytes, {shape}");
+                        // The second pixel is the declared prefix's.
+                        let second = &raw[channels..2 * channels];
+                        let alpha = if channels == 4 { second[3] } else { 0xff };
+                        assert_eq!(
+                            bitmap.pixel(1, 0),
+                            Some([second[0], second[1], second[2], alpha]),
+                            "f={format}, {surplus} surplus bytes, {shape}"
+                        );
+                    } else {
+                        assert_eq!(
+                            decoded,
+                            Err(DecodeError::Malformed(
+                                "raw data more than the 10 bytes past its declared size \
+                                 that kitty loads (\"Too much data\")"
+                            )),
+                            "f={format}, {surplus} surplus bytes, {shape}"
+                        );
+                    }
+                }
             }
         }
-        // Exactly the declared size decodes.
-        let exact = kitty_payload(b"a=T,f=32,s=2,v=1", base64(&rgba).as_bytes());
-        let bitmap = exact.decode().expect("decodes");
-        assert_eq!(bitmap.pixel(1, 0), Some([0, 0xff, 0, 0xff]));
+        // The CHANGELOG's mix-up, as kitty draws it: red, then magenta.
+        let rgba = [0xff, 0, 0, 0xff, 0, 0xff, 0, 0xff];
+        let mixed = kitty_payload(b"a=T,f=24,s=2,v=1", base64(&rgba).as_bytes());
+        let bitmap = mixed.decode().expect("8 bytes for 6 is within kitty's 10");
+        assert_eq!(bitmap.pixel(1, 0), Some([0xff, 0, 0xff, 0xff]));
+        // Short is refused at once, as kitty's "Insufficient image data".
+        let short = kitty_payload(b"a=T,f=32,s=2,v=1", base64(&rgba[..7]).as_bytes());
+        assert_eq!(
+            short.decode(),
+            Err(DecodeError::Malformed(
+                "fewer bytes than the declared size needs"
+            ))
+        );
+    }
+
+    /// Compressed, kitty inflates into exactly the declared size
+    /// (`inflate_zlib`, `graphics.c`): more output than that is "Failed to
+    /// inflate image data" (`Z_BUF_ERROR`), less is "Image data size post
+    /// inflation does not match expected size". There is no slack after
+    /// the inflate, so a zlib payload that inflates to the RGB/RGBA mix-up,
+    /// or short of the size, is refused, and one that inflates to exactly
+    /// the size decodes.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn kitty_zlib_data_must_inflate_to_exactly_the_declared_size() {
+        // Red, then green, as RGBA: 8 bytes.
+        let rgba = [0xff, 0, 0, 0xff, 0, 0xff, 0, 0xff];
+        for (control, raw, decodes) in [
+            ("a=T,f=24,s=2,v=1,o=z", &rgba[..], false),
+            ("a=T,f=32,s=1,v=1,o=z", &rgba[..], false),
+            ("a=T,f=32,s=2,v=1,o=z", &rgba[..7], false),
+            ("a=T,f=32,s=2,v=1,o=z", &rgba[..], true),
+        ] {
+            let deflated = miniz_oxide::deflate::compress_to_vec_zlib(raw, 6);
+            let payload = kitty_payload(control.as_bytes(), base64(&deflated).as_bytes());
+            match payload.decode() {
+                Ok(bitmap) if decodes => {
+                    assert_eq!(bitmap.pixel(1, 0), Some([0, 0xff, 0, 0xff]));
+                }
+                Err(DecodeError::Malformed(_)) if !decodes => {}
+                other => panic!("{control} inflating to {} bytes: {other:?}", raw.len()),
+            }
+        }
     }
 
     #[cfg(feature = "decode")]
