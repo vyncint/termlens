@@ -357,6 +357,15 @@ struct ScreenFrame {
     saved_charsets: Option<SavedCharsets>,
 }
 
+/// The glyph `b` draws in `set`, when the set redefines it.
+fn glyph_in(set: Charset, b: u8) -> Option<&'static str> {
+    match set {
+        Charset::Ascii => None,
+        Charset::Uk => (b == b'#').then_some("\u{a3}"),
+        Charset::DecSpecialGraphics => dec_special_graphics(b),
+    }
+}
+
 /// The glyph a byte draws in DEC Special Graphics, where it differs from
 /// ASCII: the 32 bytes `0x5f..=0x7e`. Everything below `_` draws as itself.
 /// The mapping is xterm's, which is also what every terminfo `acsc` string
@@ -479,6 +488,13 @@ pub(crate) enum SeqEvent {
     /// a pending wrap when the cursor is inside the scroll region, which
     /// only the emulator can check, since the row is the grid's (#686).
     LinesMoved,
+    /// `REP` (`CSI Ps b`) completed, any form vt100 would carry out. vt100
+    /// repeats the glyph it drew last, whatever came after it; xterm
+    /// repeats the character printed just before the sequence, if one was,
+    /// through GL as invoked now (#756) — see
+    /// [`printed`](SeqTracker::printed). The emulator takes the sequence
+    /// from vt100 and draws `glyph` `count` times, or nothing for `None`.
+    Repeat { glyph: Option<char>, count: u16 },
 }
 
 /// A terminal query the application issued. The tracker classifies;
@@ -808,6 +824,11 @@ pub(crate) struct SeqTracker {
     csi_prefix: u8,
     /// Intermediate byte seen in the current CSI (only `$` matters).
     csi_intermediate: u8,
+    /// The intermediates of the current CSI as vte collects them — a
+    /// private marker that opens it, then the bytes 0x20–0x2F — the first
+    /// two, as many as vte keeps, and 0 for none. vt100 drops them for a
+    /// `SP` first; see [`spaced_csi`](Self::spaced_csi).
+    csi_collected: [u8; 2],
     csi_invalid: bool,
     /// The current CSI wrote a sub-parameter (`:`). Only ED reads one —
     /// see [`scan_csi_byte`](Self::scan_csi_byte) — so for every other
@@ -1031,6 +1052,14 @@ pub(crate) struct SeqTracker {
     tabs: TabStops,
     /// `IRM` (`CSI 4 h`) is set — see [`insert_mode`](Self::insert_mode).
     insert_mode: bool,
+    /// The character `REP` would repeat, xterm's `lastchar`: the last one
+    /// printed, forgotten by every byte that leaves the parser in ground
+    /// without printing one — see [`printed`](Self::printed).
+    rep: Option<char>,
+    /// The bytes of the character being printed, while its UTF-8 sequence
+    /// is incomplete.
+    rep_partial: [u8; 4],
+    rep_partial_len: u8,
 }
 
 impl SeqTracker {
@@ -1043,6 +1072,7 @@ impl SeqTracker {
             sync_update: false,
             csi_prefix: 0,
             csi_intermediate: 0,
+            csi_collected: [0; 2],
             csi_invalid: false,
             csi_colon: false,
             csi_in_subparam: false,
@@ -1108,6 +1138,9 @@ impl SeqTracker {
             sixel_meter: SixelMeter::default(),
             tabs: TabStops::new(cols),
             insert_mode: false,
+            rep: None,
+            rep_partial: [0; 4],
+            rep_partial_len: 0,
         }
     }
 
@@ -1470,6 +1503,37 @@ impl SeqTracker {
             && !matches!(b, 0x07 | 0x18 | 0x1a | 0x1b)
     }
 
+    /// The content of the `OSC` string `b` ends for the parsers, or `None`
+    /// when it ends none. vte dispatches an `OSC` at its BEL, CAN or SUB,
+    /// and at the ESC of an ST — or of whatever sequence that ESC starts —
+    /// a byte before the tracker reads what follows it; what was captured
+    /// is what vte holds, since the body past [`OSC_CAPTURE_MAX`] reaches
+    /// neither.
+    ///
+    /// Consulted **before** the byte is stepped, as
+    /// [`withholds`](Self::withholds) is.
+    pub(crate) fn osc_ending(&self, b: u8) -> Option<&[u8]> {
+        (self.state == State::Osc && matches!(b, 0x07 | 0x18 | 0x1a | 0x1b))
+            .then_some(self.osc_buf.as_slice())
+    }
+
+    /// The intermediates vte collected for the CSI `b` ends, when vt100
+    /// would not report that CSI as written: one whose first intermediate
+    /// is `SP`, which vt100 carries out only for DECSCUSR (`q`) and hands
+    /// every other one to its callback as if it had none — SL
+    /// (`CSI 2 SP @`) as ICH (#764) — and DECSCUSR with a sub-parameter,
+    /// which xterm does not take and vt100 carries out by its first value,
+    /// with no callback at all (#804). The second is 0 when there is none.
+    ///
+    /// Consulted **before** the byte is stepped.
+    pub(crate) fn spaced_csi(&self, b: u8) -> Option<[u8; 2]> {
+        (self.state == State::Csi
+            && (0x40..=0x7e).contains(&b)
+            && (b != b'q' || self.csi_colon)
+            && self.csi_collected[0] == b' ')
+            .then_some(self.csi_collected)
+    }
+
     /// The glyph `b` draws in the invoked character set, when that set
     /// redefines `b` — the 32 bytes DEC Special Graphics redraws, or `#` in
     /// the UK set — or `None` when the byte draws as itself, or is not a
@@ -1485,11 +1549,7 @@ impl SeqTracker {
         if self.state != State::Ground {
             return None;
         }
-        match self.invoked_charset() {
-            Charset::Ascii => None,
-            Charset::Uk => (b == b'#').then_some("\u{a3}"),
-            Charset::DecSpecialGraphics => dec_special_graphics(b),
-        }
+        glyph_in(self.invoked_charset(), b)
     }
 
     fn invoked_charset(&self) -> Charset {
@@ -1590,6 +1650,7 @@ impl SeqTracker {
     fn reset_csi_scanner(&mut self) {
         self.csi_prefix = 0;
         self.csi_intermediate = 0;
+        self.csi_collected = [0; 2];
         self.csi_invalid = false;
         self.csi_colon = false;
         self.csi_in_subparam = false;
@@ -1671,6 +1732,11 @@ impl SeqTracker {
 
     /// Track one CSI parameter/intermediate byte.
     fn scan_csi_byte(&mut self, b: u8) {
+        if (0x20..=0x2f).contains(&b) || ((0x3c..=0x3f).contains(&b) && self.csi_first) {
+            if let Some(slot) = self.csi_collected.iter_mut().find(|slot| **slot == 0) {
+                *slot = b;
+            }
+        }
         match b {
             b'?' | b'>' | b'=' if self.csi_first => self.csi_prefix = b,
             // A sub-parameter's digits are not the parameter's.
@@ -1707,6 +1773,25 @@ impl SeqTracker {
 
     /// The event (if any) implied by a CSI final byte.
     fn csi_final(&mut self, b: u8) -> SeqEvent {
+        // REP, every form vt100 carries out: no private marker and no
+        // intermediate, whatever the parameters. A sub-parameter makes it
+        // no REP to xterm, which takes one only on SGR and XTMODKEYS, so
+        // that form draws nothing; vt100 would have repeated by its first
+        // value.
+        if b == b'b' && self.csi_collected[0] == 0 && !self.csi_invalid {
+            if self.csi_has_digits {
+                self.end_csi_param();
+            }
+            let ps = if self.csi_param_count == 0 {
+                0
+            } else {
+                self.csi_first_param
+            };
+            return SeqEvent::Repeat {
+                glyph: (!self.csi_colon).then(|| self.repeated()).flatten(),
+                count: u16::try_from(ps).unwrap_or(u16::MAX).max(1),
+            };
+        }
         // ED, DECSTBM, IL and DL read the first value of a parameter with
         // sub-parameters in vt100, so they act on one; nothing else does.
         if self.csi_invalid || (self.csi_colon && !matches!(b, b'J' | b'r' | b'L' | b'M')) {
@@ -1738,8 +1823,13 @@ impl SeqTracker {
         // screen clear RIS brings. xterm's is the reference (#687): what it
         // resets of the state this crate holds is reset here, and the
         // emulator is told to do the same for the state it holds (#233).
+        // xterm reaches it from `CSI !` with or without parameters, and
+        // reads none: `CSI 1 ! p` reset nothing here while the shape was
+        // taken for the tracker's (#801). The `!` must be the only
+        // intermediate, as in xterm's table; a sub-parameter it rejects,
+        // above.
         if self.csi_intermediate == b'!' {
-            if b == b'p' && self.csi_prefix == 0 && params_empty {
+            if b == b'p' && self.csi_collected == [b'!', 0] {
                 self.soft_reset();
                 return SeqEvent::SoftReset;
             }
@@ -1902,23 +1992,23 @@ impl SeqTracker {
                 self.csi_first_param
             };
             let count = u16::try_from(ps).unwrap_or(u16::MAX).max(1);
+            // The three read their first parameter and ignore the rest, as
+            // xterm does (`GetParam(0)` and `one_if_default(0)`); taking
+            // them only alone dropped `CSI 1;2 I` while the record took the
+            // shape for this tracker's (#802).
             match b {
                 // Only `0` (this column) and `3` (all) are modelled. The
                 // rest of the family clears *line* tab stops, which this
                 // crate has no notion of; ignoring them beats inventing one.
-                b'g' if self.csi_param_count <= 1 => {
+                b'g' => {
                     return match ps {
                         0 => SeqEvent::Tabs(TabOp::ClearAtCursor),
                         3 => SeqEvent::Tabs(TabOp::ClearAll),
                         _ => SeqEvent::None,
                     };
                 }
-                b'I' if self.csi_param_count <= 1 => {
-                    return SeqEvent::Tabs(TabOp::Forward(count));
-                }
-                b'Z' if self.csi_param_count <= 1 => {
-                    return SeqEvent::Tabs(TabOp::Back(count));
-                }
+                b'I' => return SeqEvent::Tabs(TabOp::Forward(count)),
+                b'Z' => return SeqEvent::Tabs(TabOp::Back(count)),
                 // ED 3, erase the saved lines. vt100 reads the first
                 // parameter alone, and so does this.
                 b'J' if ps == 3 => return SeqEvent::ScrollbackErased,
@@ -2024,7 +2114,8 @@ impl SeqTracker {
                 content => {
                     // OSC 0 (icon + title) / OSC 2 (title) set the window
                     // title — state the vt100 backend does not track.
-                    // OSC 1 (icon only) is deliberately ignored.
+                    // OSC 1 (icon only) is deliberately not modelled, and
+                    // `unhandled.rs` lists it (#760).
                     if let Some(title) = content
                         .strip_prefix(b"0;")
                         .or_else(|| content.strip_prefix(b"2;"))
@@ -2428,7 +2519,8 @@ impl SeqTracker {
     /// Feed one byte: capture it if it belongs to a sequence, then run
     /// the state machine.
     pub(crate) fn step(&mut self, b: u8) -> SeqEvent {
-        if self.state == State::Ground {
+        let in_ground = self.state == State::Ground;
+        if in_ground {
             if b == 0x1b {
                 self.seq_len = 0;
                 self.push_seq(b);
@@ -2436,7 +2528,70 @@ impl SeqTracker {
         } else if !self.passes_through(b) {
             self.push_seq(b);
         }
-        self.transition(b)
+        let event = self.transition(b);
+        // xterm's rule for the character `REP` repeats (charproc.c: set at
+        // 3370 as a character is printed, and at 6484-6485 to `thischar`,
+        // -1 when nothing was, after every byte that leaves the parser in
+        // ground). A byte inside a sequence leaves it as it was; the
+        // sequence's last byte forgets it, after a `REP` has read it.
+        if self.state == State::Ground {
+            if in_ground && b >= 0x20 && b != 0x7f {
+                self.printed(b);
+            } else {
+                self.rep = None;
+                self.rep_partial_len = 0;
+            }
+        }
+        event
+    }
+
+    /// Follow one byte of a character printed in ground: when it completes
+    /// the character, that is what `REP` repeats next. A UTF-8 character
+    /// arrives a byte at a time and is one character to xterm, so its
+    /// first bytes leave the last one as it was. A zero-width character
+    /// joins the cell before it, and xterm's combining path leaves its
+    /// `lastchar` alone (charproc.c 3099-3159), so `e`, U+0301, `REP`
+    /// repeats the `e`. A C1 control is no character printed.
+    fn printed(&mut self, b: u8) {
+        let at = usize::from(self.rep_partial_len);
+        let complete = match b {
+            0x20..=0x7e => Some(char::from(b)),
+            // A continuation byte, which the decoder before the tracker
+            // only ever hands over after a lead byte.
+            0x80..=0xbf if (1..4).contains(&at) => {
+                self.rep_partial[at] = b;
+                self.rep_partial_len += 1;
+                if self.utf8_remaining > 0 {
+                    return;
+                }
+                std::str::from_utf8(&self.rep_partial[..=at])
+                    .ok()
+                    .and_then(|text| text.chars().next())
+            }
+            0xc2..=0xf4 => {
+                self.rep_partial[0] = b;
+                self.rep_partial_len = 1;
+                return;
+            }
+            _ => None,
+        };
+        self.rep_partial_len = 0;
+        match complete.map(|c| (c, crate::width::char_columns(c))) {
+            Some((_, Some(0))) => {}
+            Some((c, Some(_))) => self.rep = Some(c),
+            _ => self.rep = None,
+        }
+    }
+
+    /// What `REP` draws: the character [`printed`](Self::printed) last,
+    /// through the set GL invokes now. A single shift covered that
+    /// character alone, and xterm's `REP` draws through `gsets[curgl]`
+    /// (charproc.c 6159-6172), so it is the locking shift's set.
+    fn repeated(&self) -> Option<char> {
+        let c = self.rep?;
+        let set = if self.shifted_out { self.g1 } else { self.g0 };
+        let glyph = u8::try_from(c).ok().and_then(|b| glyph_in(set, b));
+        Some(glyph.and_then(|glyph| glyph.chars().next()).unwrap_or(c))
     }
 
     /// Whether `b` is outside the sequence it arrived in: a C0 control

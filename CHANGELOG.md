@@ -227,6 +227,110 @@ reads that marker.
   chunk only, and named `a=T,i=5,m=1`, then `m=1,q=1`, then `m=0` as
   "the application queried the terminal (^[_Ga=T,i=5,m=1;…)". A test that
   matched that note for such an upload should expect it gone. (#758)
+- A soft reset (`DECSTR`, `CSI ! p`) at a pending wrap leaves the wrap
+  pending, as xterm's soft reset does and as 0.11.8 did: the next
+  character starts the next row, and on the last row the screen scrolls.
+  Since 0.11.9 the reset put the cursor back onto the last column, so the
+  next character overwrote it, and a wide character in the last two
+  columns was erased. A test that pinned the overwritten row should expect
+  the last column kept and the text after the reset on the next row.
+  (#753)
+- `Screen::unsupported()` no longer lists an SGR that mixes the
+  attributes the shadow parser recovers (blink, conceal, strikethrough
+  and their resets) with ones the backend draws, such as `ESC[0;5m` and
+  `ESC[0;8m`, which ncurses's `sgr` writes for blinking and for invisible
+  text under the default `TERM`. The cell showed every attribute, but
+  only an SGR made of recovered ones alone was left out of the list. A
+  parameter nobody honours still puts the whole sequence on the list
+  (`^[[5;59m`), and so does an extended colour the backend cannot read.
+  A test that expected an entry for such a mix should expect none. (#754)
+- A C0 control inside an SGR (`ESC [ 3` BEL `m`, or a BS or CR there) is
+  carried out and the SGR still applies, as vte and xterm read it, so the
+  cell gets exactly the attributes the SGR sets. The attribute shadow
+  took the backend's own attributes for blink, conceal and strikethrough
+  there: `ESC[3` BEL `m` came out italic and concealed, `ESC[8` BEL `m`
+  concealed nothing, and `ESC[58;5;1` BEL `m` was bold and blinking. A
+  DEL or a non-ASCII byte inside an SGR did the same, and is now ignored
+  there as vte ignores it. A test that pinned the extra or the missing
+  attribute should expect exactly the ones the SGR names. (#755)
+- `Screen::unsupported()` lists a query or a mode written with a
+  sub-parameter, such as `CSI ? 996:1 n`, `CSI 6:1 n`, `CSI 4:4 h` or
+  `CSI ? 1000:1000 h`. termlens answers and names no such query and sets
+  no such mode, as xterm ignores them, but the list read their values
+  alone and left them out, so they were reported nowhere; `CSI ? 996:1 n`
+  was listed until 0.11.9. A test that expected an empty list beside one
+  of these should expect its entry. (#757)
+- `Screen::unsupported()` lists `OSC 1 ; name`, which sets the icon name
+  and is modelled nowhere, as `^[]1;name`; only the form with a further
+  `;` was listed. `OSC 0`, which sets the icon name and the title at
+  once, is still not listed, since its title is read. One shape still
+  reads as an `OSC 0`: an `OSC 1` and then an `OSC 2` naming the same
+  thing in one read, with nothing listed between them. A test that
+  expected an empty list beside an `OSC 1` should expect its entry.
+  (#760)
+- `Screen::unsupported()` lists an `OSC` holding U+FFFD, or invalid UTF-8,
+  which the reader turns into U+FFFD, with U+FFFD in it, as the grid and
+  the title show it. The entry held U+FDD0, the noncharacter termlens
+  feeds its parsers in place of U+FFFD. A test that pinned `\u{fdd0}` in
+  an entry should expect `\u{fffd}`. (#761)
+- An `OSC` with more than sixteen parameters, the most the backend keeps,
+  is read whole for `Screen::unsupported()`. Its entry ends in `…` after
+  the sixteenth, where it ended there with nothing to say it was cut, so
+  two that differed only past it read as one; and a palette query for
+  eight colours or more (`OSC 4 ; 0 ; ? ; … ; 8 ; ?`) is not listed, as
+  the shorter ones are not, since the timeout already names it. It was
+  named and listed both. A test that pinned such an entry should expect
+  the `…`, or for the palette query no entry. (#762)
+- `Screen::unsupported()` lists no query the responder answers or names,
+  whatever shape the backend reads it in. A trailing `;` is a parameter to
+  the backend and none to the responder, so `CSI 18 ; t` was answered and
+  listed as `^[[18;0t`, with a `0` the application never wrote, `CSI 14 ;
+  t` likewise, and `CSI > ; q` was named in the timeout and listed as
+  `^[[>0;0q`. `CSI 18 ; 0 t`, which the responder does not take, is still
+  listed. A test that expected such an entry should expect none. (#763)
+- `Screen::unsupported()` lists a CSI with a space intermediate in its
+  own shape: SL (`CSI 2 SP @`, scroll left) as `^[[2 @`, SR
+  (`CSI 2 SP A`) as `^[[2 A`, and `CSI 2 SP t` as `^[[2 t`. The backend
+  reports every such sequence but `DECSCUSR` without its intermediate, so
+  they were listed as `^[[2@`, `^[[2A` and `^[[2t`, which name ICH, CUU
+  and a window operation, and `CSI 1 SP c` was not listed at all, taken
+  for DA1. A test that pinned the old shapes needs the new ones. (#764)
+- REP (`CSI n b`) repeats as xterm does: the character printed just
+  before it, through the character set invoked now, and nothing when any
+  other byte came between. The backend repeated the last glyph it drew,
+  whatever followed it, so `x`, `ESC[31m`, `CSI 2 b` showed `xxx` where
+  xterm shows `x`; a REP after a character-set switch repeated the old
+  glyph, and one after a single-shifted character repeated it through the
+  single shift. A screen built with REP after any non-printing sequence,
+  an SGR included, now shows what xterm shows: a test that pinned the
+  repeated characters there should expect them gone, and one after a
+  single shift should expect them in the set now invoked. (#756)
+- A soft reset written with a parameter (`CSI 1 ! p`) is a soft reset, as
+  xterm's parser takes it whatever the parameters. It reset nothing: the
+  rendition, the scroll margins and origin mode stayed as they were, and
+  nothing was listed. `CSI SP ! p`, which xterm does not take for one, no
+  longer resets either, and is listed. A test that expected `CSI Ps ! p`
+  to leave the screen's state alone should expect it reset as by
+  `CSI ! p`. (#801)
+- CHT, CBT and TBC written with more than one parameter act on the first,
+  as xterm's do: `CSI 1;2 I` moves to the next tab stop, `CSI 1;2 Z` to
+  the previous one, and `CSI 3;5 g` clears every stop. They did nothing,
+  and nothing was listed. A test that expected such a sequence to leave
+  the cursor or the stops alone should expect it to act as with its first
+  parameter alone. (#802)
+- A `DECRC` right after a soft reset taken at a pending wrap leaves the
+  next character at the start of the second row, as in xterm, whose soft
+  reset saves the cursor with its wrap flag and zeroes only the saved row
+  and column. The character overwrote the top-left cell instead. A test
+  that pinned that cell should expect the top row as it was and the
+  character on the second row. (#803)
+- `Screen::unsupported()` lists DA1 and DA2 with a parameter other than 0
+  (`CSI 1 c`, `CSI > 1 c`), TBC with one other than 0 or 3 (`CSI 1 g`),
+  and DECSCUSR with a sub-parameter (`CSI 2:1 SP q`). termlens carries
+  none of them out, and xterm does nothing for them either, so the screen
+  was right, but nothing said the sequence had been dropped. A test that
+  expected an empty list beside one of these should expect its entry.
+  (#804)
 
 ### Fixed
 

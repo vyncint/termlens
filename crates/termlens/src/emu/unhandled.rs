@@ -15,7 +15,11 @@
 //! tracks, every query the responder answers or names — and those still
 //! reach vt100's callbacks, because the bytes are fed through. They are
 //! filtered here by shape, so the list means what its name says: sequences
-//! **termlens** did not honour.
+//! **termlens** did not honour. A query the responder answers or names is
+//! also filtered on the tracker's word, which the emulator passes on just
+//! before vt100 dispatches it, since vte can read a query in a shape the
+//! tracker does not (#763); and the same way the tracker supplies the
+//! intermediates of a CSI vt100 reports without them (#764).
 //!
 //! The same callback set counts the rows vt100 drops off the front of the
 //! main screen's history, which is the one thing its history cannot tell
@@ -53,6 +57,20 @@ pub(super) struct Unhandled {
     /// Rows dropped off the front of the main screen's history since the
     /// emulator last took the count — see [`take_evicted`](Self::take_evicted).
     evicted: usize,
+    /// An icon name `set_window_icon_name` was handed and that is not on
+    /// record yet, because the call after it decides whether it is one —
+    /// see that callback.
+    icon: Option<IconName>,
+    /// What the tracker saw of the `OSC` vte dispatches next, when vte
+    /// keeps only part of it — see [`CutOsc`].
+    cut_osc: Option<CutOsc>,
+    /// The sequence vt100 reports next is a query the responder answers or
+    /// names — see [`expect_query`](Self::expect_query).
+    query: bool,
+    /// The intermediates and the final byte of the CSI vt100 reports next,
+    /// which it reports without the intermediates, or with another final —
+    /// see [`expect_spaced`](Self::expect_spaced).
+    spaced: Option<([u8; 2], u8)>,
     /// The content length of the last OSC recorded, before its entry was
     /// cut: how much of a body reached vt100, which the capture-bound
     /// tests read now that the entry no longer shows it (#694, #695).
@@ -68,6 +86,10 @@ impl Default for Unhandled {
             overflow: 0,
             visual_bells: 0,
             evicted: 0,
+            icon: None,
+            cut_osc: None,
+            query: false,
+            spaced: None,
             #[cfg(test)]
             last_osc_len: 0,
         }
@@ -103,7 +125,69 @@ impl Unhandled {
         std::mem::take(&mut self.evicted)
     }
 
+    /// What the emulator does after every feed: an icon name still held
+    /// back goes on record, since the stream may end with one, and a query
+    /// no sequence took is forgotten.
+    pub(super) fn settle(&mut self) {
+        self.query = false;
+        self.spaced = None;
+        self.settle_icon();
+    }
+
+    /// Put an icon name still held back on record: no title followed it,
+    /// so it was an `OSC 1`. Every new entry does this first, so the record
+    /// stays in stream order.
+    fn settle_icon(&mut self) {
+        if let Some(icon) = self.icon.take() {
+            self.keep(icon.shape);
+        }
+    }
+
+    /// Tell the record that the sequence vt100 reports next is a query the
+    /// responder answers or names, which is never unsupported. The emulator
+    /// says so just before it feeds the query's final byte, alone, which
+    /// is where vt100 dispatches it.
+    ///
+    /// The arms of `unhandled_csi` know the same queries by their shape,
+    /// and vte's shape can differ from the tracker's: a trailing `;` is a
+    /// parameter to vte, which hands it on as 0, and none to the tracker.
+    /// So `CSI 18 ; t` was answered and listed as `^[[18;0t`, with a 0 the
+    /// application never wrote, and `CSI > ; q` named and listed (#763).
+    pub(super) fn expect_query(&mut self) {
+        self.query = true;
+    }
+
+    /// Tell the record the intermediates vte collected for the CSI vt100
+    /// reports next, the second 0 for none, which vt100 drops: it hands a
+    /// CSI whose first intermediate is `SP` to `unhandled_csi` as if it had
+    /// none, all but DECSCUSR, which it carries out. SL (`CSI 2 SP @`) was
+    /// listed as `^[[2@`, ICH, which the grid does have, and `CSI 1 SP c`
+    /// not at all, taken for DA1 (#764). The emulator says so just before
+    /// it feeds the final byte, alone, and passes the one the application
+    /// wrote: DECSCUSR with a sub-parameter, which xterm does not take and
+    /// vt100 carries out with no callback, reaches vt100 with a final it
+    /// reports instead (#804).
+    pub(super) fn expect_spaced(&mut self, intermediates: [u8; 2], fin: u8) {
+        self.spaced = Some((intermediates, fin));
+    }
+
+    /// Tell the record what the tracker saw of the next `OSC` vte
+    /// dispatches, which vte keeps only part of. The emulator says so just
+    /// before it feeds the byte that ends the string. vte dispatches it at
+    /// that byte, or for an ESC once the rewriters let the ESC go, with the
+    /// byte after it, maybe a read later; nothing else is dispatched first
+    /// either way. With more parameters than vt100's own forms take, it
+    /// always reaches `unhandled_osc`, which takes this.
+    pub(super) fn expect_cut_osc(&mut self, cut: CutOsc) {
+        self.cut_osc = Some(cut);
+    }
+
     fn record(&mut self, shape: String) {
+        self.settle_icon();
+        self.keep(shape);
+    }
+
+    fn keep(&mut self, shape: String) {
         if self.seen.iter().any(|s| **s == *shape) {
             return;
         }
@@ -134,11 +218,38 @@ fn params_text(params: &[&[u16]]) -> String {
         .join(";")
 }
 
+/// The parameters of an `OSC` vte keeps: it stores sixteen and drops the
+/// rest of the string.
+const VTE_OSC_PARAMS: usize = 16;
+
+/// What the tracker saw of an `OSC` that vte keeps only part of, which the
+/// record is told before vte dispatches it (#762). The entry is then cut
+/// where vte stopped, and says so with `…`; it ended there with nothing
+/// to say so, and two strings that differ only past it were one entry.
+/// And a palette query is told by the whole string, as the tracker tells
+/// it: one for eight colours or more was named in a timeout and listed as
+/// well, since the record took vte's sixteenth parameter for the last.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CutOsc {
+    palette_query: bool,
+}
+
+impl CutOsc {
+    /// The `OSC` whose content is `content`, as the tracker captured it,
+    /// when vte keeps only part of it.
+    pub(super) fn of(content: &[u8]) -> Option<Self> {
+        let separators = content.iter().filter(|&&b| b == b';').count();
+        (separators >= VTE_OSC_PARAMS).then(|| Self {
+            palette_query: content.starts_with(b"4;") && content.ends_with(b"?"),
+        })
+    }
+}
+
 /// An OSC's entry: `^[]` and the parameters as written, `;` between them,
 /// kept to [`MAX_STRING_SHAPE`] bytes of content and ending in `…` when
-/// cut. A cut falls on a character boundary of the rendering, so it never
-/// leaves half a character.
-fn osc_shape(params: &[&[u8]]) -> String {
+/// cut — here, or by vte (`dropped`). A cut falls on a character boundary
+/// of the rendering, so it never leaves half a character.
+fn osc_shape(params: &[&[u8]], dropped: bool) -> String {
     // Join no more than the bound and a character's worth past it: a
     // byte the rendering cannot decode only grows (to U+FFFD), so the
     // first `MAX_STRING_SHAPE` bytes of the rendering come from at most
@@ -154,12 +265,17 @@ fn osc_shape(params: &[&[u8]]) -> String {
             content.extend_from_slice(&part[..part.len().min(room)]);
         }
     }
-    let text = String::from_utf8_lossy(&content);
+    // The parsers are fed a stand-in for U+FFFD, which vt100 would drop
+    // from the grid, and an entry shows what the application wrote, as the
+    // title and the grid do (#761). The two are the same length, so the
+    // cut below falls where it would have.
+    let lossy = String::from_utf8_lossy(&content);
+    let text = super::vt100::restore_replacement(&lossy);
     let mut shape = String::from("^[]");
-    if total == content.len() && text.len() <= MAX_STRING_SHAPE {
+    if !dropped && total == content.len() && text.len() <= MAX_STRING_SHAPE {
         shape.push_str(&text);
     } else {
-        let mut end = MAX_STRING_SHAPE;
+        let mut end = MAX_STRING_SHAPE.min(text.len());
         while !text.is_char_boundary(end) {
             end -= 1;
         }
@@ -167,6 +283,23 @@ fn osc_shape(params: &[&[u8]]) -> String {
         shape.push('…');
     }
     shape
+}
+
+/// An icon name an `OSC 1` may have set: its entry, and a digest of the
+/// whole name for the title an `OSC 0` sets with the same bytes.
+#[derive(Debug)]
+struct IconName {
+    shape: String,
+    digest: u64,
+}
+
+/// A digest of `bytes`. `DefaultHasher::new` has fixed keys, so the same
+/// bytes give the same digest every time.
+fn digest(bytes: &[u8]) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// DEC private modes the sequence tracker keeps itself, so a set or reset
@@ -195,6 +328,49 @@ const AUTOWRAP: u16 = 7;
 /// Kept in step with `shadow::sgr_substitute` by a test.
 pub(super) const SHADOW_SGR_PARAMS: &[u16] = &[5, 6, 8, 9, 25, 28, 29];
 
+/// Whether every parameter of an SGR is honoured: by vt100's own `sgr`, or
+/// by the shadow ([`SHADOW_SGR_PARAMS`]).
+///
+/// vt100 reports the whole sequence as soon as one parameter is unknown to
+/// it, so a sequence that mixes the two — `ESC[0;5m` and `ESC[0;8m`, which
+/// ncurses's `sgr` writes for blinking and for invisible text — arrives
+/// here though the cell shows all of it. Requiring every parameter to be
+/// the shadow's listed those beside the attribute they set (#754).
+///
+/// One parameter that is neither still puts the whole sequence on record:
+/// dropping it would hide a genuine gap, and `^[[5;59m` — blink recovered,
+/// underline colour modelled by nobody — is exactly that shape. A
+/// parameter with a sub-parameter is neither, whatever its values, save
+/// the extended colours vt100 reads in that form: the shadow carries none
+/// (#688), so `^[[5:6m` is a gap too. The extended colours are read as
+/// vt100 reads them, a form and its arguments together, and one vt100
+/// cannot read — no colour form, an index or a channel past 255, an
+/// argument missing — is a gap.
+fn sgr_honoured(params: &[&[u16]]) -> bool {
+    let byte = |value: u16| value <= u16::from(u8::MAX);
+    let mut rest = params;
+    while let Some((param, tail)) = rest.split_first() {
+        rest = tail;
+        match **param {
+            [0..=4 | 7 | 22..=24 | 27 | 30..=37 | 39 | 40..=47 | 49 | 90..=97 | 100..=107] => {}
+            [value] if SHADOW_SGR_PARAMS.contains(&value) => {}
+            // vt100's own two forms: the arguments as sub-parameters, or
+            // as the parameters after the one that names the form.
+            [38 | 48, 2, r, g, b] if [r, g, b].into_iter().all(byte) => {}
+            [38 | 48, 5, index] if byte(index) => {}
+            [38 | 48] => match *rest {
+                [&[2], &[r], &[g], &[b], ref after @ ..] if [r, g, b].into_iter().all(byte) => {
+                    rest = after;
+                }
+                [&[5], &[index], ref after @ ..] if byte(index) => rest = after,
+                _ => return false,
+            },
+            _ => return false,
+        }
+    }
+    true
+}
+
 impl Callbacks for Unhandled {
     fn visual_bell(&mut self, _: &mut vt100::Screen) {
         self.visual_bells = self.visual_bells.saturating_add(1);
@@ -205,6 +381,38 @@ impl Callbacks for Unhandled {
         // arrives here, and none of them is the main screen's.
         if !alternate_screen {
             self.evicted = self.evicted.saturating_add(1);
+        }
+    }
+
+    fn set_window_icon_name(&mut self, _: &mut vt100::Screen, name: &[u8]) {
+        // `OSC 1 ; name` sets the icon name, which nothing models, and
+        // vt100 hands its two-operand form here rather than to
+        // `unhandled_osc`, so it was listed nowhere (#760). vt100 also
+        // hands over the icon half of every `OSC 0`, and right after it
+        // the same bytes to `set_window_title`: that title is the
+        // tracker's, and an `OSC 0` is no gap. So the entry waits for the
+        // call after it.
+        self.settle_icon();
+        self.icon = Some(IconName {
+            shape: osc_shape(&[b"1", name], false),
+            digest: digest(name),
+        });
+    }
+
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        // The title itself is the tracker's (#625). An icon name with the
+        // same bytes just before it came from the same `OSC 0`. An `OSC 1`
+        // then an `OSC 2` naming the same thing, in one read with nothing
+        // listed between, reach here the same way and are taken for one:
+        // the callbacks are given no more to tell them apart.
+        if self
+            .icon
+            .as_ref()
+            .is_some_and(|icon| icon.digest == digest(title))
+        {
+            self.icon = None;
+        } else {
+            self.settle_icon();
         }
     }
 
@@ -250,6 +458,25 @@ impl Callbacks for Unhandled {
         params: &[&[u16]],
         c: char,
     ) {
+        let spaced = self.spaced.take();
+        if std::mem::take(&mut self.query) {
+            return;
+        }
+        // None of these is the tracker's, which reads `SP` only for
+        // DECSCUSR and not with a sub-parameter, so each is on record, as
+        // vte collected it and with the final the application wrote.
+        if let Some((intermediates, fin)) = spaced {
+            let mut shape = format!("^[[{}", params_text(params));
+            shape.extend(
+                intermediates
+                    .into_iter()
+                    .filter(|&b| b != 0)
+                    .map(char::from),
+            );
+            shape.push(char::from(fin));
+            self.record(shape);
+            return;
+        }
         // vte hands the private marker (`<`, `=`, `>`, `?`) over as the
         // first intermediate; a real intermediate (`$`, `!`, `SP`) follows
         // it or stands alone.
@@ -260,21 +487,39 @@ impl Callbacks for Unhandled {
         };
         let first = params.first().and_then(|p| p.first()).copied();
         let handled = match (prefix, intermediate, c) {
-            // Tab stops, insert mode, the queries the responder answers or
-            // names, and the window reports it answers or names.
-            (None, None, 'g' | 'I' | 'Z' | 'c' | 'n') => true,
+            // An SGR every one of whose parameters is honoured, by vt100 or
+            // by the shadow, is implemented, and naming it here would
+            // contradict the cell (#320, #754). See `sgr_honoured`, which
+            // reads the sub-parameters vt100 reads.
+            (None, None, 'm') => sgr_honoured(params),
+            // Nothing below is the tracker's with a sub-parameter: it reads
+            // one only for ED, DECSTBM, IL and DL, which vt100 carries out,
+            // and xterm ignores these forms. Read by their values alone,
+            // `CSI 6:1 n` and `CSI 4:4 h` were answered by nobody and named
+            // nowhere (#757).
+            _ if params.iter().any(|p| p.len() > 1) => false,
+            // Tab motions, by their first parameter (#802), and the DSR
+            // queries the responder answers or names.
+            (None, None, 'I' | 'Z' | 'n') => true,
+            // DA1 and DA2 as the responder answers them, `CSI c` or `CSI 0
+            // c`, which vte hands over alike; and TBC for the stop at the
+            // cursor or all of them. xterm does nothing for any other
+            // parameter (charproc.c 4098 and 4301), and neither does
+            // termlens: these arms took every parameter for the tracker's,
+            // and `CSI 1 c` and `CSI 1 g` were reported nowhere (#804).
+            (None | Some(b'>'), None, 'c') => params == [&[0][..]],
+            (None, None, 'g') => matches!(first, Some(0 | 3)),
             // The window reports the responder answers (14, 16, 18) and the
-            // ones it names in a timeout — `seq.rs`'s own predicate, which
-            // reads no sub-parameter. Everything else in the family, the
-            // title stack included, nobody honoured.
+            // ones it names in a timeout — `seq.rs`'s own predicate.
+            // Everything else in the family, the title stack included,
+            // nobody honoured.
             (None, None, 't') => {
                 let second = params.get(1).and_then(|p| p.first()).copied();
-                params.iter().all(|p| p.len() == 1)
-                    && super::seq::is_window_report(
-                        params.len(),
-                        first.map_or(0, u32::from),
-                        second.map_or(0, u32::from),
-                    )
+                super::seq::is_window_report(
+                    params.len(),
+                    first.map_or(0, u32::from),
+                    second.map_or(0, u32::from),
+                )
             }
             // Insert mode is the one ANSI mode honoured, so a list is
             // handled only when it names nothing else: `CSI 4;20 h` sets
@@ -285,9 +530,9 @@ impl Callbacks for Unhandled {
             // DECSTR, DECSCUSR, DECRQM and the mode reports.
             (None, Some(b'!'), 'p') | (None, Some(b' '), 'q') => true,
             (_, Some(b'$'), 'p' | 'y') => true,
-            // DA2, the kitty keyboard probe and XTSMGRAPHICS, all of which
-            // the responder names in a timeout (#641).
-            (Some(b'>'), None, 'c') | (Some(b'?'), None, 'u' | 'S') => true,
+            // The kitty keyboard probe and XTSMGRAPHICS, which the
+            // responder names in a timeout (#641).
+            (Some(b'?'), None, 'u' | 'S') => true,
             // The prefixed queries `seq.rs` answers or names, in the shapes
             // it claims them in: DECXCPR (`CSI ? 6 n`, answered) and every
             // other `CSI ? Ps n` or `CSI = Ps n`, DA3 (`CSI = c`), and
@@ -301,20 +546,6 @@ impl Callbacks for Unhandled {
                 .iter()
                 .flat_map(|p| p.iter())
                 .all(|m| TRACKED_PRIVATE_MODES.contains(m) || (c == 'h' && *m == AUTOWRAP)),
-            // An SGR every one of whose parameters the shadow recovers is
-            // implemented, and naming it here would contradict the cell
-            // (#320). One parameter outside the set and the whole sequence
-            // is still recorded: dropping it would hide a genuine gap, and
-            // `^[[5;59m` — blink recovered, underline colour modelled by
-            // nobody — is exactly that shape. A parameter with a
-            // sub-parameter is outside the set whatever its values: the
-            // shadow carries none (#688), so `^[[5:6m` is a gap too.
-            (None, None, 'm') => {
-                !params.is_empty()
-                    && params
-                        .iter()
-                        .all(|p| matches!(*p, [value] if SHADOW_SGR_PARAMS.contains(value)))
-            }
             _ => false,
         };
         if handled {
@@ -343,11 +574,15 @@ impl Callbacks for Unhandled {
         // `10;#ff0000;?` as set-then-query, and since the responder does
         // not answer *that*, it belongs here. A palette query is any
         // `4;…?`, which is the rule `seq.rs` applies to it.
+        let cut = self.cut_osc.take();
         let colour_query = match params.first() {
             // `12;?`, the cursor colour, is named rather than answered, and
             // in the same one shape (#691).
             Some(&b"10" | &b"11" | &b"12") => params.len() == 2 && params[1] == b"?",
-            Some(&b"4") => matches!(params.last(), Some(&b"?")),
+            Some(&b"4") => cut.map_or_else(
+                || matches!(params.last(), Some(&b"?")),
+                |cut| cut.palette_query,
+            ),
             _ => false,
         };
         // The title is the tracker's too, in every form that names one:
@@ -363,7 +598,7 @@ impl Callbacks for Unhandled {
             self.last_osc_len =
                 params.iter().map(|p| p.len()).sum::<usize>() + params.len().saturating_sub(1);
         }
-        self.record(osc_shape(params));
+        self.record(osc_shape(params, cut.is_some()));
     }
 }
 
@@ -379,6 +614,8 @@ mod tests {
             Unhandled::default(),
         );
         parser.process(bytes);
+        // What the emulator does after every feed.
+        parser.callbacks_mut().settle();
         parser
     }
 
@@ -489,6 +726,33 @@ mod tests {
         assert_eq!(shapes(b"\x1b]1;a;b\x07"), ["^[]1;a;b"]);
     }
 
+    /// `OSC 1 ; name` sets the icon name, which nothing models, and vt100
+    /// hands the two-operand form to a callback of its own, so it was
+    /// listed nowhere (#760). That callback also gets the icon half of
+    /// every `OSC 0`, whose title is the tracker's, just before the title
+    /// callback gets the same bytes — so an icon name is listed once the
+    /// call after it shows it was no `OSC 0`.
+    #[test]
+    fn an_icon_name_is_unsupported_and_an_osc_0_title_is_not() {
+        assert_eq!(shapes(b"\x1b]1;myicon\x07"), ["^[]1;myicon"]);
+        assert_eq!(shapes(b"\x1b]1;\x1b\\"), ["^[]1;"]);
+        assert!(shapes(b"\x1b]0;both\x07\x1b]0;again\x1b\\").is_empty());
+        // In stream order, before whatever is listed next, and kept when
+        // the title after it is another one.
+        assert_eq!(
+            shapes(b"\x1b]1;tab\x07\x1b[20h\x1b]2;window\x07\x1b]1;tab2\x07\x1b]2;other\x07"),
+            ["^[]1;tab", "^[[20h", "^[]1;tab2"]
+        );
+        // The one shape it cannot tell from an `OSC 0`: the same name set
+        // as the icon's and then as the title, with nothing listed
+        // between them in the same read.
+        assert!(shapes(b"\x1b]1;same\x07\x1b]2;same\x07").is_empty());
+        assert_eq!(
+            shapes(b"\x1b]1;same\x07\x1b[20h\x1b]2;same\x07"),
+            ["^[]1;same", "^[[20h"]
+        );
+    }
+
     /// A mode list is handled only when every mode in it is: insert mode
     /// with LNM is LNM dropped, in either order (#625).
     #[test]
@@ -517,6 +781,51 @@ mod tests {
         );
         // The plain forms are the shadow's, as before (#320).
         assert!(shapes(b"\x1b[5m\x1b[5;6;8;9;25;28;29m").is_empty());
+    }
+
+    /// An SGR is honoured when each of its parameters is, by vt100 or by
+    /// the shadow. ncurses's `sgr` for `xterm-256color` writes blinking
+    /// text as `ESC[0;5m` and invisible text as `ESC[0;8m`, and both were
+    /// listed beside a cell showing them, because vt100 reports the whole
+    /// sequence and its `0` is not one the shadow carries (#754).
+    #[test]
+    fn an_sgr_mixing_the_shadows_parameters_with_vt100s_is_not_recorded() {
+        let mut listed = Vec::new();
+        for sgr in [
+            &b"\x1b(B\x1b[0;5m"[..],
+            b"\x1b[0;8m",
+            b"\x1b[0;1;5m",
+            b"\x1b[31;9m",
+            b"\x1b[;5m",
+            b"\x1b[38;5;196;5m",
+            b"\x1b[38;2;1;2;255;8m",
+            b"\x1b[38:5:196;6m",
+            b"\x1b[48:2:1:2:3;29m",
+            b"\x1b[5;2;22;3;23;4;24;7;27;39;49;90;97;100;107;37;40;47m",
+        ] {
+            listed.extend(shapes(sgr));
+        }
+        assert!(listed.is_empty(), "{listed:?}");
+        // One parameter that nobody honours keeps the sequence on record:
+        // the underline colour reset, overline, and the extended colours
+        // vt100 cannot read — no colour form, an index past 255, a missing
+        // argument, a missing form.
+        for sgr in [
+            "5;59",
+            "0;5;53",
+            "38;3;5",
+            "5;38;5;300",
+            "5;38:5:300",
+            "5;48:2:1:2:256",
+            "5;38;2;1;2",
+            "5;48",
+        ] {
+            assert_eq!(
+                shapes(format!("\x1b[{sgr}m").as_bytes()),
+                [format!("^[[{sgr}m")],
+                "{sgr}"
+            );
+        }
     }
 
     #[test]
@@ -633,6 +942,60 @@ mod tests {
                      \x1b[?2026l\x1b[?1000h\x1b[?u\x1b]8;;http://x\x1b\\\x1b]52;c;aGk=\x07\
                      \x1b]11;?\x07\x0e\x0f";
         assert_eq!(shapes(ours), Vec::<String>::new());
+    }
+
+    /// What the tracker handles, it handles without a sub-parameter: it
+    /// reads one only on ED, DECSTBM, IL and DL, and xterm ignores these
+    /// forms as well, so none is answered, named or set. The arms above
+    /// read the values alone and hid every one (#757); `CSI ? 996:1 n` was
+    /// listed until #691 hid it.
+    #[test]
+    fn what_the_tracker_handles_with_a_sub_parameter_is_reported() {
+        for shape in [
+            "?996:1n",
+            "6:1n",
+            "4:4h",
+            "?1000:1000h",
+            "?7:1h",
+            "0:1c",
+            ">0:1c",
+            "=0:1c",
+            "?1:1S",
+            "?1:1u",
+            "3:1g",
+            "2:1I",
+            "1:1Z",
+            "1:2!p",
+            "7:1 q",
+            "?2026:1$p",
+            "18:1t",
+        ] {
+            assert_eq!(
+                shapes(format!("\x1b[{shape}").as_bytes()),
+                [format!("^[[{shape}")],
+                "{shape}"
+            );
+        }
+        // Written plain, each is the tracker's or the responder's, as before.
+        assert!(shapes(b"\x1b[?996n\x1b[6n\x1b[4h\x1b[?1000h\x1b[?7h\x1b[c\x1b[3g").is_empty());
+    }
+
+    /// DA1 and DA2 are answered only as `CSI c` and `CSI 0 c` (`>` for
+    /// DA2), which vte hands over alike, and TBC is carried out only for 0
+    /// and 3, by its first parameter (#802). xterm does nothing for any
+    /// other parameter (charproc.c 4098 and 4301), and neither does
+    /// termlens, but the arms took every parameter for the tracker's
+    /// (#804).
+    #[test]
+    fn da_and_tbc_with_a_parameter_nobody_takes_are_reported() {
+        for shape in ["1c", "0;1c", ">1c", "1g", "2g", "4g"] {
+            assert_eq!(
+                shapes(format!("\x1b[{shape}").as_bytes()),
+                [format!("^[[{shape}")],
+                "{shape}"
+            );
+        }
+        assert!(shapes(b"\x1b[c\x1b[0c\x1b[>c\x1b[>0c\x1b[g\x1b[0g\x1b[3g\x1b[3;5g").is_empty());
     }
 
     #[test]

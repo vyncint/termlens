@@ -262,14 +262,13 @@ fn an_sgr_nobody_models_is_still_named() -> termlens::Result<()> {
 /// `^[[5;59m` carries one parameter the shadow recovers (`5`, blink) and one
 /// nobody models (`59`). Dropping the sequence because *some* of it is
 /// implemented would hide the gap, so the rule is all-or-nothing per
-/// sequence: one unrecovered parameter keeps the whole shape.
+/// sequence: one parameter nobody honours keeps the whole shape.
 ///
-/// The cost of that rule, measured rather than assumed: `^[[1;5;31m` is
-/// still named even though bold, red *and* blink all reach the cell — `1`
-/// and `31` are vt100's to implement, and this tracker knows what the
-/// shadow recovers, not what the backend does. Narrowing it further means
-/// enumerating vt100's own SGR surface, which is a bigger claim than a
-/// patch should make.
+/// `^[[1;5;31m` is not named: bold, red *and* blink all reach the cell, `1`
+/// and `31` drawn by vt100 and `5` recovered by the shadow. It was named
+/// while the record knew only what the shadow recovers, and ncurses writes
+/// that shape (`ESC[0;5m`, `ESC[0;8m`) for every blinking or hidden field;
+/// the record now knows vt100's own SGR surface too (#754).
 #[test]
 #[cfg_attr(
     windows,
@@ -287,8 +286,8 @@ fn a_mixed_sgr_is_named_by_the_parameter_nobody_models() -> termlens::Result<()>
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());
 
-    // The documented residue: everything here was applied, and it is still
-    // named. A test says so rather than a reader discovering it.
+    // Everything here was applied, two parameters by vt100 and one by the
+    // shadow, so nothing is named.
     let mut t = emit(&["--csi", "1;5;31m", "text", "--wait"])?;
     t.wait_until(|s| s.contains("text"))?;
     let s = t.screen();
@@ -296,8 +295,8 @@ fn a_mixed_sgr_is_named_by_the_parameter_nobody_models() -> termlens::Result<()>
     assert!(style.bold && style.blink, "all three applied: {style:?}");
     assert_eq!(
         shapes(&t),
-        ["^[[1;5;31m"],
-        "still named: the tracker knows the shadow's set, not vt100's"
+        [] as [String; 0],
+        "each parameter is honoured by one parser or the other: {s}"
     );
     t.send(Key::Enter)?;
     assert!(t.wait_exit()?.success());

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use super::seq::{SeqEvent, SeqTracker, TabOp};
 use super::shadow::{AttrShadow, ColorNormalizer};
-use super::unhandled::Unhandled;
+use super::unhandled::{CutOsc, Unhandled};
 use super::{Emulator, FrameSpan, InputModes, ModeState, MouseEncoding, Processed, Stop};
 use crate::graphics::{
     kitty_cells, GraphicsAction, GraphicsPayload, GraphicsProtocol, GraphicsSeen, Placement,
@@ -310,6 +310,10 @@ impl Vt100Emulator {
         let bytes = stand_in_for_replacement(bytes);
         let normalized = self.colors.feed(&bytes);
         self.parser.process(&normalized);
+        // The record holds an icon name back until a later call shows it
+        // is no `OSC 0`'s, and the read may end with it; and what the
+        // emulator told it of a sequence this feed carried ends here.
+        self.parser.callbacks_mut().settle();
         self.shadow.feed(&bytes);
         self.capture_scrolled_rows();
     }
@@ -577,13 +581,41 @@ impl Vt100Emulator {
     /// the cursor back where the reset found it. xterm's soft reset moves
     /// no cursor, but vt100 homes it on each margin and origin reset the
     /// replay makes, and the replay homes it once more to save it there.
-    /// The move back is absolute, since origin mode is off by then. A
-    /// cursor pending wrap comes back onto the last column, not past it:
-    /// `CUP` cannot address the column past the margin.
+    /// The move back is absolute, since origin mode is off by then.
+    ///
+    /// A cursor pending wrap goes back pending, since xterm's soft reset
+    /// keeps its wrap flag. `CUP` cannot address the column past the
+    /// margin, and moving back onto the last column made the next
+    /// character overwrite it rather than start the next row (#753), so
+    /// the last column is drawn again, which is the one way to put a
+    /// cursor back there.
+    ///
+    /// The cursor the reset saves keeps the flag too: xterm's
+    /// `CursorSave` records it and the reset zeroes only the saved row and
+    /// column, so a `DECRC` after it puts back a pending wrap at the
+    /// top-left, and the next character starts the second row (#803).
+    /// vt100 keeps a pending wrap only as the column past the last, so the
+    /// save is made again at the end of the top row, drawn again to put
+    /// the cursor there: the next character starts the second row as in
+    /// xterm. An empty last cell cannot be drawn, and the save goes to the
+    /// start of the second row, where that character lands either way.
+    /// What a restore leaves differs from xterm only for a motion or a
+    /// report before the next character, which starts from the end of the
+    /// top row, not its start.
     fn soft_reset(&mut self) {
-        let (row, col) = self.cursor_position();
+        let screen = self.parser.screen();
+        let (row, col) = screen.cursor_position();
+        let (_, cols) = size(screen);
         self.feed(SOFT_RESET_REPLAY);
-        self.feed(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
+        if col < cols {
+            self.feed(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
+        } else {
+            self.feed(b"\x1b[1d");
+            self.redraw_last_column(0);
+            self.feed(b"\x1b7");
+            self.feed(format!("\x1b[{}d", row + 1).as_bytes());
+            self.redraw_last_column(row);
+        }
     }
 
     /// The cursor as a snapshot should report it: a column pending wrap
@@ -765,6 +797,15 @@ impl Vt100Emulator {
         }
     }
 
+    /// Draw `glyph` `count` times at the cursor, as `REP` does, in the
+    /// attributes in force: both parsers are fed the run, so the shadow
+    /// carries them as well.
+    fn draw_repeated(&mut self, glyph: char, count: u16) {
+        let mut one = [0; 4];
+        let run = glyph.encode_utf8(&mut one).repeat(usize::from(count));
+        self.feed(run.as_bytes());
+    }
+
     /// Draw the last column of `row` again, as it stands, leaving the cursor
     /// pending wrap after it — the one way to put a cursor back there.
     ///
@@ -804,6 +845,20 @@ impl Vt100Emulator {
         self.shadow.feed_verbatim(shadow.as_bytes());
     }
 }
+
+/// The final byte a DECSCUSR with a sub-parameter reaches vt100 with: one
+/// vt100 has no `SP` form of, so that it hands the sequence to its callback
+/// rather than carry it out by its first value, which xterm does not, and
+/// the record, told the real final, lists it (#804).
+const SPACED_STAND_IN: &[u8] = b"p";
+
+/// What ends a `REP` in place of its final byte, so that no parser carries
+/// it out: an intermediate, then a parameter byte, which vte takes for a
+/// malformed sequence and ignores up to the final byte (`CsiIntermediate`
+/// to `CsiIgnore`), with no dispatch and so no callback. The sequence's own
+/// bytes before it still go to both parsers, so its ESC still ends a string
+/// it ended, and the rewriters hold and release it as ever.
+const REP_IGNORED: &[u8] = b" 0b";
 
 /// U+FE0F as the bytes it arrives in. Its first byte is a UTF-8 lead byte,
 /// never a continuation or an ASCII byte, so matching it at a character
@@ -887,6 +942,19 @@ impl Emulator for Vt100Emulator {
                 self.feed_staged(&bytes[fed..i]);
                 fed = i + 1;
             }
+            // An `OSC` with more parameters than vte keeps is read whole by
+            // the tracker alone, so the record is told what it saw, between
+            // the bytes before the one that ends the string and that byte,
+            // which is where vte dispatches it (#762).
+            if let Some(cut) = self.tracker.osc_ending(byte).and_then(CutOsc::of) {
+                self.feed_staged(&bytes[fed..i]);
+                self.parser.callbacks_mut().expect_cut_osc(cut);
+                self.feed_staged(&bytes[i..=i]);
+                fed = i + 1;
+            }
+            // Asked before the step, which leaves the sequence, and used
+            // after it (#764).
+            let spaced = self.tracker.spaced_csi(byte);
             // Asked before the step, because whether this byte is a character
             // at all depends on the state the tracker is in before it — and
             // a designation's own final byte must not be drawn.
@@ -975,6 +1043,20 @@ impl Emulator for Vt100Emulator {
                     }
                     None
                 }
+                SeqEvent::Repeat { glyph, count } => {
+                    // vt100 would repeat the glyph it drew last, whatever
+                    // came between; xterm repeats only the character printed
+                    // just before, and the tracker says which, if any
+                    // (#756). So vt100 is handed a sequence vte ignores in
+                    // place of this one, and the repeats are drawn here.
+                    self.feed_staged(&bytes[fed..i]);
+                    self.feed(REP_IGNORED);
+                    fed = i + 1;
+                    if let Some(glyph) = glyph {
+                        self.draw_repeated(glyph, count);
+                    }
+                    None
+                }
                 SeqEvent::None => None,
                 SeqEvent::SyncBegin => {
                     // Stamped here, at the byte that opened the update,
@@ -985,8 +1067,42 @@ impl Emulator for Vt100Emulator {
                     None
                 }
             };
+            // A CSI whose first intermediate is `SP` reaches the record
+            // without it, so the record is told what vte collected, between
+            // the bytes before the final byte and that byte (#764). A query
+            // of that shape is the tracker's, below, and never listed. The
+            // one of them vt100 would carry out, DECSCUSR with a
+            // sub-parameter, gets a final it reports instead (#804).
+            if let (Some(intermediates), None) = (spaced, &stop) {
+                if fed <= i {
+                    self.feed_staged(&bytes[fed..i]);
+                    self.parser
+                        .callbacks_mut()
+                        .expect_spaced(intermediates, byte);
+                    let fin = if byte == b'q' {
+                        SPACED_STAND_IN
+                    } else {
+                        &bytes[i..=i]
+                    };
+                    self.feed_staged(fin);
+                    fed = i + 1;
+                }
+            }
             if let Some(stop) = stop {
-                self.feed_staged(&bytes[fed..=i]);
+                // A query is the responder's, answered or named, and the
+                // record is told so between the bytes before its final
+                // byte and that byte, which vt100 dispatches it on: its
+                // shape in vte need not be the tracker's (#763). Not when
+                // the byte is fed already — it ended an `OSC` vte keeps
+                // part of, or completed a kitty upload, neither of which
+                // reaches a CSI arm — or the flag would outlive it.
+                if matches!(stop, Stop::Query(_)) && fed <= i {
+                    self.feed_staged(&bytes[fed..i]);
+                    self.parser.callbacks_mut().expect_query();
+                    self.feed_staged(&bytes[i..=i]);
+                } else {
+                    self.feed_staged(&bytes[fed..=i]);
+                }
                 return Processed {
                     consumed: i + 1,
                     stop: Some(stop),
@@ -1277,8 +1393,9 @@ fn stand_in_for_replacement(bytes: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(out)
 }
 
-/// Grid text as the snapshot reports it: the stand-in reads as U+FFFD again.
-fn restore_replacement(text: &str) -> Cow<'_, str> {
+/// Grid text as the snapshot reports it, and an unsupported entry's text
+/// as the record keeps it: the stand-in reads as U+FFFD again.
+pub(super) fn restore_replacement(text: &str) -> Cow<'_, str> {
     if text.contains(STAND_IN) {
         Cow::Owned(text.replace(STAND_IN, REPLACEMENT))
     } else {
@@ -1430,6 +1547,94 @@ mod tests {
             "{}",
             screen.full_text()
         );
+    }
+
+    /// An `OSC` holding U+FFFD — or invalid UTF-8, which the reader turns
+    /// into it — is listed with U+FFFD, as the title and the grid show it,
+    /// and not with the stand-in the parsers are fed (#761). The two are
+    /// the same length, so an entry cut at the bound is cut where it was.
+    #[test]
+    fn an_osc_holding_a_replacement_character_is_listed_with_it() {
+        let s =
+            emu_with("\x1b]777;notify;caf\u{FFFD}\x07\x1b]2;caf\u{FFFD}\x07".as_bytes()).snapshot();
+        assert_eq!(s.unsupported(), ["^[]777;notify;caf\u{FFFD}"]);
+        assert_eq!(s.title(), "caf\u{FFFD}");
+        let s = emu_with("\x1b]1;\u{FFFD}\x07".as_bytes()).snapshot();
+        assert_eq!(s.unsupported(), ["^[]1;\u{FFFD}"]);
+        // Straddling the 64-byte bound, and just inside it.
+        for pad in [57, 58, 60] {
+            let content = format!("9;{}\u{FFFD}\u{FFFD}", "x".repeat(pad));
+            let s = emu_with(format!("\x1b]{content}\x07").as_bytes()).snapshot();
+            let mut end = content.len().min(super::super::unhandled::MAX_STRING_SHAPE);
+            while !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            let cut = if end < content.len() { "…" } else { "" };
+            assert_eq!(
+                s.unsupported(),
+                [format!("^[]{}{cut}", &content[..end]).as_str()],
+                "pad {pad}"
+            );
+        }
+    }
+
+    /// vte keeps sixteen of an `OSC`'s parameters and drops the rest, and
+    /// the tracker reads the whole string. A palette query for eight
+    /// colours or more was named in a timeout and listed as well, since the
+    /// record read vte's sixteenth parameter as the last; and any `OSC` cut
+    /// there was listed with no `…` to say so, so two that differ only past
+    /// it were one entry (#762). Whole, split at every character, and
+    /// terminated by BEL or ST.
+    #[test]
+    fn an_osc_past_vtes_sixteen_parameters_is_read_whole() {
+        let palette = |colours: u32| -> String {
+            (0..colours).map(|n| format!(";{n};?")).collect::<String>()
+        };
+        let numbers = |count: u32| -> String { (1..count).map(|n| format!(";{n}")).collect() };
+        let cases: Vec<(String, Vec<String>, usize)> = vec![
+            // Nine colours: named, never listed.
+            (format!("\x1b]4{}\x07", palette(9)), vec![], 1),
+            (format!("\x1b]4{}\x1b\\", palette(9)), vec![], 1),
+            // Seven: as before.
+            (format!("\x1b]4{}\x07", palette(7)), vec![], 1),
+            // Seventeen parameters that ask nothing: the sixteen vte kept,
+            // and the cut.
+            (
+                format!("\x1b]777{}\x07", numbers(17)),
+                vec![format!("^[]777{}…", numbers(16))],
+                0,
+            ),
+            // Sixteen: whole, as before.
+            (
+                format!("\x1b]777{}\x07", numbers(16)),
+                vec![format!("^[]777{}", numbers(16))],
+                0,
+            ),
+            // A palette set past the sixteenth parameter stays listed.
+            (
+                format!("\x1b]4{};9;rgb:1/2/3\x07", palette(8)),
+                vec![format!("^[]4{}…", &palette(8)[..30])],
+                0,
+            ),
+        ];
+        for (stream, listed, named) in &cases {
+            for cut in (0..stream.len()).filter(|&cut| stream.is_char_boundary(cut)) {
+                let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+                let mut stops = 0;
+                for piece in [&stream[..cut], &stream[cut..]] {
+                    let mut off = 0;
+                    while off < piece.len() {
+                        let processed = emu.process(&piece.as_bytes()[off..]);
+                        stops += usize::from(processed.stop.is_some());
+                        off += processed.consumed;
+                    }
+                }
+                let s = emu.snapshot();
+                let shapes: Vec<String> = s.unsupported().iter().map(String::from).collect();
+                assert_eq!(&shapes, listed, "{stream:?} cut at {cut}");
+                assert_eq!(stops, *named, "{stream:?} cut at {cut}");
+            }
+        }
     }
 
     #[test]
@@ -1747,6 +1952,84 @@ mod tests {
         assert_eq!(s.row_text(0).trim_end(), "after");
     }
 
+    /// A C0 control inside an SGR is executed and the SGR goes on, as vte
+    /// and xterm read it, so the screen is the one the control gives
+    /// written just ahead of the sequence: the cell gets exactly the SGR's
+    /// attributes. The shadow took the primary's attributes for its
+    /// carriers there — `ESC[3` BEL `m` was italic and concealed, `ESC[8`
+    /// BEL `m` concealed nothing — and `ESC[58;5;1` BEL `m` was bold and
+    /// blinking, #579 again (#755). The control may come right after the
+    /// ESC, after an open `OSC` that ESC ends, or in a CSI held short.
+    /// Whole, split once at every character, and a character at a time.
+    #[test]
+    fn a_control_inside_an_sgr_is_executed_and_the_sgr_applies() {
+        let long = format!("\x1b[{}8\x07m", "0".repeat(300));
+        let cases: &[(&str, &str, &str)] = &[
+            ("ab", "\x1b[3\x07m", "\x07\x1b[3m"),
+            ("ab", "\x1b[1\x07m", "\x07\x1b[1m"),
+            ("ab", "\x1b[4\x07m", "\x07\x1b[4m"),
+            ("ab", "\x1b[8\x07m", "\x07\x1b[8m"),
+            ("ab", "\x1b[9\x07m", "\x07\x1b[9m"),
+            ("ab", "\x1b[5\x07m", "\x07\x1b[5m"),
+            ("ab", "\x1b[3\rm", "\r\x1b[3m"),
+            ("ab", "\x1b[8\x08m", "\x08\x1b[8m"),
+            ("ab", "\x1b[3;\x7f5m", "\x1b[3;5m"),
+            ("ab", "\x1b\x07[8m", "\x07\x1b[8m"),
+            ("ab", "\x1b[\u{e9}9m", "\x1b[9m"),
+            ("ab", "\x1b[58;5;1\x07m", "\x07\x1b[58;5;1m"),
+            ("ab", "\x1b[38:2::1:2:3\x07;5m", "\x07\x1b[38:2::1:2:3;5m"),
+            ("ab\x1b]0;title", "\x1b[8\rm", "\x1b[39m\r\x1b[8m"),
+            ("ab", &long, "\x07\x1b[8m"),
+            ("ab", "\x1b[2\rC", "\r\x1b[2C"),
+            ("ab", "\x1b[\r?25l", "\r\x1b[?25l"),
+        ];
+        // The text, the cursor and the style of every cell that holds
+        // something, what is on record, the bells and the title.
+        let seen = |emu: &Vt100Emulator| {
+            let s = emu.snapshot();
+            let (cols, rows) = s.size();
+            let styles: Vec<(u16, u16, Style)> = (0..rows)
+                .flat_map(|row| (0..cols).map(move |col| (row, col)))
+                .filter_map(|(row, col)| {
+                    let cell = s.cell(row, col)?;
+                    (!cell.contents().is_empty()).then(|| (row, col, *cell.style()))
+                })
+                .collect();
+            let unsupported: Vec<String> = s.unsupported().iter().map(String::from).collect();
+            let title = s.title().to_owned();
+            (s.text(), s.cursor(), styles, unsupported, s.bells(), title)
+        };
+        for &(before, sgr, equivalent) in cases {
+            let stream = format!("{before}{sgr}X\x1b[0mY");
+            let expected = seen(&emu_with(
+                format!("{before}{equivalent}X\x1b[0mY").as_bytes(),
+            ));
+            let (whole, bytewise) = whole_and_bytewise(4, 10, 0, stream.as_bytes());
+            assert_eq!(seen(&whole), expected, "{stream:?}");
+            assert_eq!(
+                seen(&bytewise),
+                expected,
+                "{stream:?} a character at a time"
+            );
+            for (cut, _) in stream.char_indices().skip(1) {
+                let split = emu_fed_in_pieces(stream.as_bytes(), &[cut]);
+                assert_eq!(seen(&split), expected, "{stream:?} split at {cut}");
+            }
+        }
+        let style = |sgr: &str| {
+            *emu_with(format!("{sgr}X").as_bytes())
+                .snapshot()
+                .cell(0, 0)
+                .unwrap()
+                .style()
+        };
+        let italic = style("\x1b[3\x07m");
+        assert!(italic.italic && !italic.conceal, "{italic:?}");
+        let conceal = style("\x1b[8\x07m");
+        assert!(conceal.conceal && !conceal.italic, "{conceal:?}");
+        assert_eq!(style("\x1b[58;5;1\x07m"), Style::default());
+    }
+
     #[test]
     fn snapshot_carries_out_of_band_terminal_state() {
         let emu = emu_with(b"\x1b]0;my app\x07\x1b[?1049h\x1b[?2004h\x1b[?1h\x1b[?1002h");
@@ -1767,6 +2050,25 @@ mod tests {
         assert!(!s.bracketed_paste());
         assert!(!s.application_cursor());
         assert_eq!(s.mouse_mode(), MouseMode::None);
+    }
+
+    /// `OSC 1 ; name`, the icon name, is listed: nothing models it (#760).
+    /// The `OSC 0` that sets icon and title at once is not, since its title
+    /// is the tracker's. An icon name that ends a read is listed by that
+    /// read, whole or split at any character.
+    #[test]
+    fn an_icon_name_is_listed_and_an_osc_0_title_is_set() {
+        for stream in [
+            "\x1b]0;both\x07\x1b]1;tab\x07",
+            "\x1b]1;tab\x1b\\\x1b]0;both\x07",
+        ] {
+            for cut in (1..stream.len()).chain([0]) {
+                let emu = emu_fed_in_pieces(stream.as_bytes(), &[cut][..usize::from(cut > 0)]);
+                let s = emu.snapshot();
+                assert_eq!(s.unsupported(), ["^[]1;tab"], "{stream:?} cut at {cut}");
+                assert_eq!(s.title(), "both", "{stream:?} cut at {cut}");
+            }
+        }
     }
 
     /// That the one unsupported shape is `expected`, and that `body` bytes
@@ -2794,9 +3096,9 @@ mod tests {
     #[test]
     fn rep_repeats_the_last_character_drawn() {
         // REP (`CSI n b`), which the xterm-256color terminfo advertises and
-        // ncurses uses for runs outside a UTF-8 locale (#578): vt100 0.17
-        // implements it. The character repeated is the one drawn, so a
-        // DEC Special Graphics line repeats as the line.
+        // ncurses uses for runs outside a UTF-8 locale (#578), right after
+        // the character it repeats. A DEC Special Graphics line repeats as
+        // the line, since the set is still the one invoked.
         let emu = emu_with(b"x\x1b[5bEND");
         let s = emu.snapshot();
         assert_eq!(s.row_text(0), "xxxxxxEND ");
@@ -2808,6 +3110,71 @@ mod tests {
         );
         let emu = emu_with("\u{6f22}\x1b[2b".as_bytes());
         assert_eq!(emu.snapshot().row_text(0), "\u{6f22}\u{6f22}\u{6f22}    ");
+    }
+
+    /// REP repeats what xterm repeats (#756). xterm forgets the character
+    /// it would repeat after every byte that leaves its parser in ground
+    /// without printing one (`charproc.c` 6484-6485), so REP repeats only
+    /// the character printed just before it, and draws it through GL as
+    /// invoked now (6159-6172), with no single shift. vt100 repeated the
+    /// glyph it drew last, whatever came between: an SGR, a control, a set
+    /// switch, another REP. A combining character keeps the one it joins,
+    /// as xterm's combining path does (3099-3159); a sub-parameter makes
+    /// the sequence no REP to xterm. Whole, split once at every character,
+    /// and a character at a time; the attributes in force, the shadow's
+    /// included, reach every repeat, and nothing is listed.
+    #[test]
+    fn rep_repeats_only_the_character_printed_just_before_it() {
+        let line = "\u{2500}";
+        for (stream, row) in [
+            // The issue's table, with xterm's answers.
+            ("\x1b(0q\x1b(B\x1b[2b", line.to_owned()),
+            ("q\x1b(0\x1b[2b", "q".to_owned()),
+            ("\x1b*0\x1bNq\x1b[2b", format!("{line}qq")),
+            // Through the set GL invokes now, G1 locked in by SO.
+            ("\x1b)0\x0eq\x1b[2b", line.repeat(3)),
+            ("\x1b)0\x0eq\x0f\x1b[2b", line.to_owned()),
+            // Anything between the character and REP.
+            ("x\x1b[31m\x1b[2b", "x".to_owned()),
+            ("x\r\x1b[2b", "x".to_owned()),
+            ("x\x7f\x1b[2b", "x".to_owned()),
+            ("x\x1b[2b\x1b[2b", "xxx".to_owned()),
+            ("\x1b[2bx", "x".to_owned()),
+            // Bytes inside the REP itself are not between.
+            ("x\x1b[\x072b", "xxx".to_owned()),
+            ("x\x1b[0b", "xx".to_owned()),
+            ("x\x1b[2;9b", "xxx".to_owned()),
+            ("x\x1b[2:1b", "x".to_owned()),
+            ("e\u{301}\x1b[2b", "e\u{301}ee".to_owned()),
+            ("\u{6f22}\x1b[1b", "\u{6f22}\u{6f22}".to_owned()),
+            ("\u{FFFD}\x1b[1b", "\u{FFFD}\u{FFFD}".to_owned()),
+        ] {
+            let (whole, bytewise) = whole_and_bytewise(4, 10, 0, stream.as_bytes());
+            assert_eq!(observed(&whole), observed(&bytewise), "{stream:?}");
+            for (cut, _) in stream.char_indices().skip(1) {
+                let split = emu_fed_in_pieces(stream.as_bytes(), &[cut]);
+                assert_eq!(
+                    observed(&split),
+                    observed(&whole),
+                    "{stream:?} cut at {cut}"
+                );
+            }
+            let s = whole.snapshot();
+            assert_eq!(s.row_text(0).trim_end(), row, "{stream:?}");
+            assert!(
+                s.unsupported().is_empty(),
+                "{stream:?}: {:?}",
+                s.unsupported()
+            );
+        }
+        let s = emu_with(b"\x1b[1;5;31mx\x1b[3b").snapshot();
+        for col in 0..4 {
+            let style = *s.cell(0, col).unwrap().style();
+            assert!(
+                style.bold && style.blink && style.fg == Color::Indexed(1),
+                "column {col}: {style:?}"
+            );
+        }
     }
 
     #[test]
@@ -2894,6 +3261,193 @@ mod tests {
             assert!(style.strikethrough && !style.blink, "{seq:?}: {style:?}");
             assert_eq!(s.unsupported(), [shape], "{seq:?}");
         }
+    }
+
+    /// What ncurses's `sgr` writes for blinking and for invisible text,
+    /// and the other mixes of the shadow's parameters with vt100's: the
+    /// cell shows every attribute, so none is listed (#754). An underline
+    /// colour reset beside a blink still is: the blink shows, the reset is
+    /// nobody's.
+    #[test]
+    fn an_sgr_the_two_parsers_honour_between_them_is_not_listed() {
+        for (sgr, attribute) in [
+            ("\x1b(B\x1b[0;5m", "blink"),
+            ("\x1b[0;8m", "conceal"),
+            ("\x1b[0;1;5m", "blink"),
+            ("\x1b[31;9m", "strikethrough"),
+            ("\x1b[38;5;196;5m", "blink"),
+        ] {
+            let s = emu_with(format!("{sgr}X").as_bytes()).snapshot();
+            let style = *s.cell(0, 0).unwrap().style();
+            let shown = match attribute {
+                "blink" => style.blink,
+                "conceal" => style.conceal,
+                _ => style.strikethrough,
+            };
+            assert!(shown, "{sgr:?}: {style:?}");
+            assert!(s.unsupported().is_empty(), "{sgr:?}: {:?}", s.unsupported());
+        }
+        let s = emu_with(b"\x1b[5;59mX").snapshot();
+        assert!(s.cell(0, 0).unwrap().style().blink);
+        assert_eq!(s.unsupported(), ["^[[5;59m"]);
+    }
+
+    /// A query or a mode written with a sub-parameter is one xterm ignores
+    /// and the tracker does not read: nothing answers it, nothing names
+    /// it, no mode changes — and `unsupported()` now says so, where it
+    /// said nothing (#757).
+    #[test]
+    fn a_query_or_a_mode_with_a_sub_parameter_is_on_record_and_nothing_else() {
+        for shape in ["?996:1n", "6:1n", "4:4h", "?1000:1000h"] {
+            let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+            let stream = format!("ab\r\x1b[{shape}X");
+            let mut off = 0;
+            while off < stream.len() {
+                let processed = emu.process(&stream.as_bytes()[off..]);
+                assert_eq!(processed.stop, None, "{shape}");
+                off += processed.consumed;
+            }
+            let s = emu.snapshot();
+            assert_eq!(s.row_text(0).trim_end(), "Xb", "{shape}");
+            assert!(!s.insert_mode(), "{shape}");
+            assert_eq!(s.mouse_mode(), MouseMode::None, "{shape}");
+            assert_eq!(s.unsupported(), [format!("^[[{shape}").as_str()], "{shape}");
+        }
+    }
+
+    /// A trailing `;` is a parameter to vte, which hands it on as 0, and
+    /// none to the tracker, which classifies the query as if it were not
+    /// there, as xterm answers it: `CSI 18 ; t` was answered and listed as
+    /// `^[[18;0t`, with a 0 the application never wrote, and `CSI > ; q`
+    /// named and listed (#763). A query is never listed, whatever shape vte
+    /// gives it; an unsupported sequence on either side of one, in the
+    /// same read, still is. Whole and split at every byte.
+    #[test]
+    fn a_query_with_a_trailing_separator_is_not_listed() {
+        for (query, stop) in [
+            ("\x1b[18;t", "Query(TextAreaSize)"),
+            ("\x1b[14;t", "Query(WindowSizePixels)"),
+            ("\x1b[>;q", "Query(Unanswerable(\"^[[>;q\"))"),
+            ("\x1b[6;n", "Query(CursorPosition { private: false })"),
+            // Not a CSI at all: what it leaves the record must not hide the
+            // sequence after it.
+            (
+                "\x1b]10;?\x07",
+                "Query(OscColor { code: 10, st_terminated: false })",
+            ),
+        ] {
+            let stream = format!("\x1b[20h{query}\x1b[21h");
+            for cut in 0..stream.len() {
+                let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+                let mut stops = Vec::new();
+                for piece in [&stream[..cut], &stream[cut..]] {
+                    let mut off = 0;
+                    while off < piece.len() {
+                        let processed = emu.process(&piece.as_bytes()[off..]);
+                        stops.extend(processed.stop.map(|stop| format!("{stop:?}")));
+                        off += processed.consumed;
+                    }
+                }
+                assert_eq!(stops, [stop], "{query:?} cut at {cut}");
+                assert_eq!(
+                    emu.snapshot().unsupported(),
+                    ["^[[20h", "^[[21h"],
+                    "{query:?} cut at {cut}"
+                );
+            }
+        }
+        // A second parameter written out is no query the responder takes,
+        // and stays listed.
+        let s = emu_with(b"\x1b[18;0t").snapshot();
+        assert_eq!(s.unsupported(), ["^[[18;0t"]);
+    }
+
+    /// vt100 reports a CSI whose first intermediate is `SP` without it, all
+    /// but DECSCUSR, which it carries out: SL (`CSI 2 SP @`) was listed as
+    /// `^[[2@`, ICH, which the grid does have, SR as `^[[2A`, CUU, DECSWBV as
+    /// `^[[2t`, and `CSI 1 SP c` not at all, as if it were DA1 (#764). Each
+    /// is listed in its own shape and changes nothing on the grid — not
+    /// the ICH it was listed as. Whole and split at every byte.
+    #[test]
+    fn a_csi_with_a_space_intermediate_is_listed_with_it() {
+        for (sequence, shape) in [
+            ("\x1b[2 @", "^[[2 @"),
+            ("\x1b[2 A", "^[[2 A"),
+            ("\x1b[2 t", "^[[2 t"),
+            ("\x1b[1 c", "^[[1 c"),
+            ("\x1b[ @", "^[[ @"),
+            ("\x1b[3 !p", "^[[3 !p"),
+        ] {
+            let stream = format!("ab\r{sequence}X");
+            for cut in 0..stream.len() {
+                let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+                for piece in [&stream[..cut], &stream[cut..]] {
+                    let mut off = 0;
+                    while off < piece.len() {
+                        let processed = emu.process(&piece.as_bytes()[off..]);
+                        assert_eq!(processed.stop, None, "{sequence:?} cut at {cut}");
+                        off += processed.consumed;
+                    }
+                }
+                let s = emu.snapshot();
+                assert_eq!(s.unsupported(), [shape], "{sequence:?} cut at {cut}");
+                assert_eq!(s.text(), "Xb\n\n\n", "{sequence:?} cut at {cut}");
+            }
+        }
+        // DECSCUSR is the tracker's, as before, an undefined style
+        // included, which xterm ignores too.
+        let s = emu_with(b"\x1b[4 q\x1b[7 q").snapshot();
+        assert!(s.unsupported().is_empty(), "{:?}", s.unsupported());
+        assert_eq!(s.cursor_shape(), crate::CursorShape::Underline);
+        // A digit after the `SP` makes vte ignore the sequence, which no
+        // callback then reports; the next one keeps its own shape.
+        let s = emu_with(b"\x1b[ 1@\x1b[20h").snapshot();
+        assert_eq!(s.unsupported(), ["^[[20h"]);
+    }
+
+    /// Three sequences termlens does not carry out were listed nowhere
+    /// (#804). DA1 or DA2 with a parameter other than 0, which xterm does
+    /// not answer either (charproc.c 4098), and TBC other than 0 or 3,
+    /// which it ignores (4301): the arms took every parameter for the
+    /// tracker's. And DECSCUSR with a sub-parameter, which xterm does not
+    /// take (it reads sub-parameters only on SGR and XTMODKEYS) and vt100
+    /// carries out by its first value with no callback at all: the cursor
+    /// shape, which is the tracker's, stays, and the sequence is listed in
+    /// its own shape. Whole and split at every byte.
+    #[test]
+    fn what_termlens_does_not_carry_out_is_listed() {
+        for (sequence, shape) in [
+            ("\x1b[1c", "^[[1c"),
+            ("\x1b[>1c", "^[[>1c"),
+            ("\x1b[1g", "^[[1g"),
+            ("\x1b[2:1 q", "^[[2:1 q"),
+            ("\x1b[6:9 q", "^[[6:9 q"),
+        ] {
+            let stream = format!("ab\r{sequence}X");
+            for cut in 0..stream.len() {
+                let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+                for piece in [&stream[..cut], &stream[cut..]] {
+                    let mut off = 0;
+                    while off < piece.len() {
+                        let processed = emu.process(&piece.as_bytes()[off..]);
+                        assert_eq!(processed.stop, None, "{sequence:?} cut at {cut}");
+                        off += processed.consumed;
+                    }
+                }
+                let s = emu.snapshot();
+                assert_eq!(s.unsupported(), [shape], "{sequence:?} cut at {cut}");
+                assert_eq!(s.row_text(0).trim_end(), "Xb", "{sequence:?} cut at {cut}");
+                assert_eq!(
+                    s.cursor_shape(),
+                    crate::CursorShape::Default,
+                    "{sequence:?}"
+                );
+            }
+        }
+        // Their plain and their 0 and 3 forms are carried out, and not listed.
+        let s = emu_with(b"\x1b[c\x1b[0c\x1b[>0c\x1b[0g\x1b[3g\x1b[2 q").snapshot();
+        assert!(s.unsupported().is_empty(), "{:?}", s.unsupported());
+        assert_eq!(s.cursor_shape(), crate::CursorShape::Block);
     }
 
     #[test]
@@ -3686,6 +4240,24 @@ mod tests {
         assert_eq!(cursor_col(b"\x1b[9Z"), 0);
     }
 
+    /// CHT, CBT and TBC read their first parameter and ignore the rest, as
+    /// xterm does (`CASE_CHT` and `CASE_CBT` count with `one_if_default(0)`,
+    /// charproc.c 3760 and 3751, and `CASE_TBC` reads `GetParam(0)`, 4301).
+    /// A second parameter made termlens drop the sequence, and the arm that
+    /// takes the three shapes for the tracker's hid it: the cursor stayed,
+    /// the stops stayed, and nothing was on record (#802).
+    #[test]
+    fn a_second_tab_parameter_is_ignored_not_the_sequence() {
+        assert_eq!(cursor_col(b"\x1b[1;2I"), 8);
+        assert_eq!(cursor_col(b"\x1b[2;5I"), 16);
+        assert_eq!(cursor_col(b"\x1b[0;9I"), 8);
+        assert_eq!(cursor_col(b"\t\t\x1b[1;2Z"), 8);
+        assert_eq!(cursor_col(b"\x1b[9G\x1b[0;1g\x1b[1G\t"), 16);
+        assert_eq!(cursor_col(b"\x1b[3;5g\t"), 23);
+        let emu = wide_emu(b"\x1b[1;2I\x1b[1;2Z\x1b[3;5g");
+        assert!(emu.snapshot().unsupported().is_empty());
+    }
+
     /// Through the grid: `RIS` restores the default stops, and `DECSTR`
     /// keeps the custom one, as xterm's soft reset does (#687).
     #[test]
@@ -4084,6 +4656,113 @@ mod tests {
     fn a_soft_reset_homes_the_saved_cursor() {
         let s = emu_with(b"\x1b(0\x1b[3;5H\x1b7\x1b[!p\x1b[2;2H\x1b8q").snapshot();
         assert_eq!(s.find("q"), Some((0, 0)), "{s}");
+    }
+
+    /// `DECSTR` at a pending wrap leaves it pending: xterm's soft reset
+    /// never clears its wrap flag, so the next character starts the next
+    /// row, scrolling on the last one, and a wide character in the last
+    /// two columns stays whole. The replay's `CUP` cannot address the
+    /// column past the margin, and the next character overwrote the last
+    /// one (#753). Whole and a character at a time; the last column keeps
+    /// its attributes, the shadow's included, and the text after the reset
+    /// is plain.
+    #[test]
+    fn a_soft_reset_keeps_a_pending_wrap() {
+        for (stream, text, cursor) in [
+            ("abcde\x1b[!pX", "abcde\nX\n\n", (1, 1)),
+            ("abc\u{6f22}\x1b[!pX", "abc\u{6f22}\nX\n\n", (1, 1)),
+            ("\x1b[4;1Habcde\x1b[!pX", "\n\nabcde\nX", (3, 1)),
+            ("\x1b[4;1Habc\u{6f22}\x1b[!pX", "\n\nabc\u{6f22}\nX", (3, 1)),
+            ("\x1b[1;5;9mabcde\x1b[!pX", "abcde\nX\n\n", (1, 1)),
+        ] {
+            let (whole, bytewise) = whole_and_bytewise(4, 5, 0, stream.as_bytes());
+            assert_eq!(observed(&whole), observed(&bytewise), "{stream:?}");
+            let s = whole.snapshot();
+            assert_eq!(s.text(), text, "{stream:?}: {s}");
+            let (row, col) = cursor;
+            assert_eq!(s.cursor(), (row, col, true), "{stream:?}: {s}");
+            assert!(s.row_wrapped(row - 1), "{stream:?}: {s}");
+            assert_eq!(
+                *s.cell(row, 0).unwrap().style(),
+                Style::default(),
+                "{stream:?}: {s}"
+            );
+        }
+        let s = emu_with_size(4, 5, b"\x1b[1;5;9mabcde\x1b[!pX").snapshot();
+        let last = *s.cell(0, 4).unwrap().style();
+        assert!(last.bold && last.blink && last.strikethrough, "{last:?}");
+    }
+
+    /// The cursor `DECSTR` saves keeps a pending wrap. xterm's soft reset
+    /// calls `CursorSave`, which records the wrap flag (cursor.c 408), and
+    /// zeroes only the saved row and column (charproc.c 14559-14561);
+    /// `CursorRestore` puts the flag back after the position (cursor.c
+    /// 494). So a `DECRC` right after a reset taken at a pending wrap
+    /// leaves the next character to start the second row, where termlens
+    /// drew it over the top-left cell (#803). Whatever the top row holds,
+    /// the reset's row included; whole and a character at a time; the top
+    /// row's last cell keeps its attributes, the shadow's included.
+    #[test]
+    fn a_restore_after_a_soft_reset_at_a_pending_wrap_wraps() {
+        for (stream, text) in [
+            ("abcde\x1b[!p\x1b8X", "abcde\nX\n\n"),
+            ("\x1b[3;1Habcde\x1b[!p\x1b8X", "\nX\nabcde\n"),
+            ("fghij\x1b[3;1Habcde\x1b[!p\x1b8X", "fghij\nX\nabcde\n"),
+            (
+                "\x1b[5mfgh\x1b[0mij\x1b[3;1Habcde\x1b[!p\x1b8X",
+                "fghij\nX\nabcde\n",
+            ),
+        ] {
+            let (whole, bytewise) = whole_and_bytewise(4, 5, 0, stream.as_bytes());
+            assert_eq!(observed(&whole), observed(&bytewise), "{stream:?}");
+            let s = whole.snapshot();
+            assert_eq!(s.text(), text, "{stream:?}: {s}");
+            assert_eq!(s.cursor(), (1, 1, true), "{stream:?}: {s}");
+            assert_eq!(
+                *s.cell(1, 0).unwrap().style(),
+                Style::default(),
+                "{stream:?}"
+            );
+        }
+        let s = emu_with_size(4, 5, b"\x1b[5mfghij\x1b[0m\x1b[3;1Habcde\x1b[!p\x1b8X").snapshot();
+        assert!(s.cell(0, 4).unwrap().style().blink, "{s}");
+        // Not at a pending wrap, the restore is to the top-left, as before.
+        let s = emu_with_size(4, 5, b"abcd\x1b[!p\x1b8X").snapshot();
+        assert_eq!(s.text(), "Xbcd\n\n\n", "{s}");
+    }
+
+    /// `DECSTR` written with a parameter is `DECSTR`: xterm's parse table
+    /// reaches `CASE_DECSTR` (charproc.c 6154) from `CSI !` with or without
+    /// parameters, and resets whatever they are. termlens took the reset
+    /// only with none, so `CSI 1 ! p` reset nothing, the rendition and
+    /// origin mode included, and nothing was on record (#801). A
+    /// sub-parameter is rejected there, and a `SP` before the `!` makes it
+    /// another sequence.
+    #[test]
+    fn a_soft_reset_written_with_a_parameter_is_one() {
+        for reset in ["\x1b[1!p", "\x1b[0!p", "\x1b[1;2!p"] {
+            let s = emu_with(format!("\x1b[1;5;9m{reset}X").as_bytes()).snapshot();
+            assert_eq!(
+                *s.cell(0, 0).unwrap().style(),
+                Style::default(),
+                "{reset:?}"
+            );
+            assert!(
+                s.unsupported().is_empty(),
+                "{reset:?}: {:?}",
+                s.unsupported()
+            );
+            // Origin mode off and the cursor where it was: the report
+            // counts from the top of the screen.
+            let emu = emu_with(format!("\x1b[2;4r\x1b[?6h\x1b[2;5H{reset}").as_bytes());
+            assert_eq!(emu.snapshot().cursor(), (2, 4, true), "{reset:?}");
+            assert_eq!(emu.reported_position(), (2, 4), "{reset:?}");
+        }
+        for (other, shape) in [("\x1b[1:2!p", "^[[1:2!p"), ("\x1b[ !p", "^[[ !p")] {
+            let s = emu_with(format!("\x1b[1m{other}X").as_bytes()).snapshot();
+            assert!(s.cell(0, 0).unwrap().style().bold, "{other:?}");
+            assert_eq!(s.unsupported(), [shape], "{other:?}");
+        }
     }
 
     /// The tracker follows vt100's margins and origin mode, which vt100
