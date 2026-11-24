@@ -195,6 +195,49 @@ const AUTOWRAP: u16 = 7;
 /// Kept in step with `shadow::sgr_substitute` by a test.
 pub(super) const SHADOW_SGR_PARAMS: &[u16] = &[5, 6, 8, 9, 25, 28, 29];
 
+/// Whether every parameter of an SGR is honoured: by vt100's own `sgr`, or
+/// by the shadow ([`SHADOW_SGR_PARAMS`]).
+///
+/// vt100 reports the whole sequence as soon as one parameter is unknown to
+/// it, so a sequence that mixes the two — `ESC[0;5m` and `ESC[0;8m`, which
+/// ncurses's `sgr` writes for blinking and for invisible text — arrives
+/// here though the cell shows all of it. Requiring every parameter to be
+/// the shadow's listed those beside the attribute they set (#754).
+///
+/// One parameter that is neither still puts the whole sequence on record:
+/// dropping it would hide a genuine gap, and `^[[5;59m` — blink recovered,
+/// underline colour modelled by nobody — is exactly that shape. A
+/// parameter with a sub-parameter is neither, whatever its values, save
+/// the extended colours vt100 reads in that form: the shadow carries none
+/// (#688), so `^[[5:6m` is a gap too. The extended colours are read as
+/// vt100 reads them, a form and its arguments together, and one vt100
+/// cannot read — no colour form, an index or a channel past 255, an
+/// argument missing — is a gap.
+fn sgr_honoured(params: &[&[u16]]) -> bool {
+    let byte = |value: u16| value <= u16::from(u8::MAX);
+    let mut rest = params;
+    while let Some((param, tail)) = rest.split_first() {
+        rest = tail;
+        match **param {
+            [0..=4 | 7 | 22..=24 | 27 | 30..=37 | 39 | 40..=47 | 49 | 90..=97 | 100..=107] => {}
+            [value] if SHADOW_SGR_PARAMS.contains(&value) => {}
+            // vt100's own two forms: the arguments as sub-parameters, or
+            // as the parameters after the one that names the form.
+            [38 | 48, 2, r, g, b] if [r, g, b].into_iter().all(byte) => {}
+            [38 | 48, 5, index] if byte(index) => {}
+            [38 | 48] => match *rest {
+                [&[2], &[r], &[g], &[b], ref after @ ..] if [r, g, b].into_iter().all(byte) => {
+                    rest = after;
+                }
+                [&[5], &[index], ref after @ ..] if byte(index) => rest = after,
+                _ => return false,
+            },
+            _ => return false,
+        }
+    }
+    true
+}
+
 impl Callbacks for Unhandled {
     fn visual_bell(&mut self, _: &mut vt100::Screen) {
         self.visual_bells = self.visual_bells.saturating_add(1);
@@ -301,20 +344,10 @@ impl Callbacks for Unhandled {
                 .iter()
                 .flat_map(|p| p.iter())
                 .all(|m| TRACKED_PRIVATE_MODES.contains(m) || (c == 'h' && *m == AUTOWRAP)),
-            // An SGR every one of whose parameters the shadow recovers is
-            // implemented, and naming it here would contradict the cell
-            // (#320). One parameter outside the set and the whole sequence
-            // is still recorded: dropping it would hide a genuine gap, and
-            // `^[[5;59m` — blink recovered, underline colour modelled by
-            // nobody — is exactly that shape. A parameter with a
-            // sub-parameter is outside the set whatever its values: the
-            // shadow carries none (#688), so `^[[5:6m` is a gap too.
-            (None, None, 'm') => {
-                !params.is_empty()
-                    && params
-                        .iter()
-                        .all(|p| matches!(*p, [value] if SHADOW_SGR_PARAMS.contains(value)))
-            }
+            // An SGR every one of whose parameters is honoured, by vt100 or
+            // by the shadow, is implemented, and naming it here would
+            // contradict the cell (#320, #754). See `sgr_honoured`.
+            (None, None, 'm') => sgr_honoured(params),
             _ => false,
         };
         if handled {
@@ -517,6 +550,51 @@ mod tests {
         );
         // The plain forms are the shadow's, as before (#320).
         assert!(shapes(b"\x1b[5m\x1b[5;6;8;9;25;28;29m").is_empty());
+    }
+
+    /// An SGR is honoured when each of its parameters is, by vt100 or by
+    /// the shadow. ncurses's `sgr` for `xterm-256color` writes blinking
+    /// text as `ESC[0;5m` and invisible text as `ESC[0;8m`, and both were
+    /// listed beside a cell showing them, because vt100 reports the whole
+    /// sequence and its `0` is not one the shadow carries (#754).
+    #[test]
+    fn an_sgr_mixing_the_shadows_parameters_with_vt100s_is_not_recorded() {
+        let mut listed = Vec::new();
+        for sgr in [
+            &b"\x1b(B\x1b[0;5m"[..],
+            b"\x1b[0;8m",
+            b"\x1b[0;1;5m",
+            b"\x1b[31;9m",
+            b"\x1b[;5m",
+            b"\x1b[38;5;196;5m",
+            b"\x1b[38;2;1;2;255;8m",
+            b"\x1b[38:5:196;6m",
+            b"\x1b[48:2:1:2:3;29m",
+            b"\x1b[5;2;22;3;23;4;24;7;27;39;49;90;97;100;107;37;40;47m",
+        ] {
+            listed.extend(shapes(sgr));
+        }
+        assert!(listed.is_empty(), "{listed:?}");
+        // One parameter that nobody honours keeps the sequence on record:
+        // the underline colour reset, overline, and the extended colours
+        // vt100 cannot read — no colour form, an index past 255, a missing
+        // argument, a missing form.
+        for sgr in [
+            "5;59",
+            "0;5;53",
+            "38;3;5",
+            "5;38;5;300",
+            "5;38:5:300",
+            "5;48:2:1:2:256",
+            "5;38;2;1;2",
+            "5;48",
+        ] {
+            assert_eq!(
+                shapes(format!("\x1b[{sgr}m").as_bytes()),
+                [format!("^[[{sgr}m")],
+                "{sgr}"
+            );
+        }
     }
 
     #[test]

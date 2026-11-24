@@ -32,6 +32,15 @@ reads that marker.
   columns was erased. A test that pinned the overwritten row should expect
   the last column kept and the text after the reset on the next row.
   (#753)
+- `Screen::unsupported()` no longer lists an SGR that mixes the
+  attributes the shadow parser recovers (blink, conceal, strikethrough
+  and their resets) with ones the backend draws, such as `ESC[0;5m` and
+  `ESC[0;8m`, which ncurses's `sgr` writes for blinking and for invisible
+  text under the default `TERM`. The cell showed every attribute, but
+  only an SGR made of recovered ones alone was left out of the list. A
+  parameter nobody honours still puts the whole sequence on the list
+  (`^[[5;59m`), and so does an extended colour the backend cannot read.
+  A test that expected an entry for such a mix should expect none. (#754)
 
 ### Fixed
 

@@ -2896,6 +2896,35 @@ mod tests {
         }
     }
 
+    /// What ncurses's `sgr` writes for blinking and for invisible text,
+    /// and the other mixes of the shadow's parameters with vt100's: the
+    /// cell shows every attribute, so none is listed (#754). An underline
+    /// colour reset beside a blink still is: the blink shows, the reset is
+    /// nobody's.
+    #[test]
+    fn an_sgr_the_two_parsers_honour_between_them_is_not_listed() {
+        for (sgr, attribute) in [
+            ("\x1b(B\x1b[0;5m", "blink"),
+            ("\x1b[0;8m", "conceal"),
+            ("\x1b[0;1;5m", "blink"),
+            ("\x1b[31;9m", "strikethrough"),
+            ("\x1b[38;5;196;5m", "blink"),
+        ] {
+            let s = emu_with(format!("{sgr}X").as_bytes()).snapshot();
+            let style = *s.cell(0, 0).unwrap().style();
+            let shown = match attribute {
+                "blink" => style.blink,
+                "conceal" => style.conceal,
+                _ => style.strikethrough,
+            };
+            assert!(shown, "{sgr:?}: {style:?}");
+            assert!(s.unsupported().is_empty(), "{sgr:?}: {:?}", s.unsupported());
+        }
+        let s = emu_with(b"\x1b[5;59mX").snapshot();
+        assert!(s.cell(0, 0).unwrap().style().blink);
+        assert_eq!(s.unsupported(), ["^[[5;59m"]);
+    }
+
     #[test]
     fn insert_mode_reserves_the_columns_the_grid_gives_the_run() {
         // The reservation was the run's string width, and the grid lays a
