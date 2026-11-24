@@ -342,5 +342,12 @@ fn a_send_to_an_application_that_never_reads_returns_by_its_deadline() -> termle
         Err(Error::Write { what, .. }) => assert!(what.contains("not reading its input"), "{what}"),
         Err(other) => panic!("a send that cannot be written fails as Error::Write: {other}"),
     }
+    // The send returns within a slice of its deadline, whatever the writer
+    // thread is doing. Ten deadlines leave a loaded runner room, and still
+    // fail a write that was merely slow, made on this thread as it was.
+    assert!(
+        took < DEADLINE * 10,
+        "the send took {took:?} against a {DEADLINE:?} deadline"
+    );
     Ok(())
 }

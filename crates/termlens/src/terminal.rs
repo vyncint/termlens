@@ -383,8 +383,8 @@ impl<T: Write> Write for MasterDup<T> {
 /// has just opened, which is what the lock exists to prevent (#589).
 struct Opening {
     pair: Option<PtyPair>,
-    /// The terminal's writer, once there is one: the PTY layer's writer is
-    /// taken out of it on failure, since the reader thread keeps the cell.
+    /// The terminal's writer cell, once there is one: the PTY layer's writer
+    /// in it is taken out and closed here on failure.
     writer: Option<SharedWriter>,
     lifecycle: Option<LifecycleGuard>,
 }
@@ -470,9 +470,11 @@ pub(crate) fn open_pty(size: PtySize) -> Result<(PtyPair, LifecycleGuard)> {
     )))
 }
 
-/// The PTY writer, shared between `Terminal` (typed input) and the reader
-/// thread (query replies). `None` after teardown. Locked briefly per write;
-/// never while the emulator state lock is held.
+/// The PTY layer's own writer, held by the terminal, and by a spawn until it
+/// succeeds, only so that it is closed under the lifecycle lock: every write
+/// goes through the writer thread, which writes through a duplicate of the
+/// master. `None` after teardown, and from the start where there is no
+/// duplicate and the writer thread was handed this writer instead (#771).
 type SharedWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
 
 /// Open a second writer onto the same PTY master, for the responder
@@ -1230,6 +1232,12 @@ thread_local! {
     /// the only way to drive the public API down that path (#702).
     static WRAP_EMULATOR: std::cell::RefCell<Option<WrapEmulator>> =
         const { std::cell::RefCell::new(None) };
+
+    /// The next spawn on this thread goes without a duplicate of the
+    /// master, as every spawn does on Windows, where portable-pty exposes no
+    /// descriptor: that path then runs where a test can fill an input queue
+    /// (#771).
+    static NO_MASTER_DUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Shared between the test thread and the PTY reader thread.
@@ -2346,9 +2354,6 @@ impl TerminalBuilder {
             },
             Arc::clone(&replies_pending),
         )));
-        let writer: SharedWriter = Arc::new(Mutex::new(Some(writer)));
-        opening.writer = Some(Arc::clone(&writer));
-
         // Everything written *to* the child goes through a thread of its
         // own: query replies from the drain, and typed input from the
         // test. A write into the PTY blocks whenever the application has
@@ -2356,26 +2361,38 @@ impl TerminalBuilder {
         // would deadlock the harness (the child then blocks writing into
         // a full output buffer), and the test thread would hang with no
         // deadline and no diagnosis.
-        let write_tx = match dup_writer(opening.pair().master.as_ref()) {
-            Some(pty_writer) => {
-                let mut pty_writer = MasterDup(Some(pty_writer));
-                let (tx, rx) = mpsc::channel::<WriteRequest>();
-                let written = Arc::clone(&replies_pending);
-                let drained = Arc::clone(&queued_bytes);
-                let busy = Arc::clone(&writer_busy);
-                thread::Builder::new()
-                    .name("termlens-pty-writer".into())
-                    .spawn(move || writer_loop(&mut pty_writer, &rx, &written, &drained, &busy))
-                    .map_err(Error::Io)?;
-                Some(tx)
-            }
-            // No descriptor to duplicate: fall back to writing inline,
-            // as before.
-            None => None,
+        //
+        // The thread writes through a duplicate of the master where there is
+        // one, and the PTY layer's writer stays here, to be closed under the
+        // lifecycle lock with the master. Where there is none — Windows,
+        // where portable-pty exposes no descriptor — the thread is handed
+        // the PTY layer's writer itself. It used not to be started at all
+        // there, and every send and reply was written inline, with no
+        // deadline and under one lock (#771).
+        let dup = dup_writer(opening.pair().master.as_ref());
+        #[cfg(test)]
+        let dup = if NO_MASTER_DUP.with(std::cell::Cell::take) {
+            None
+        } else {
+            dup
         };
+        let (pty_writer, writer): (Box<dyn Write + Send>, _) = match dup {
+            Some(dup) => (Box::new(dup), Some(writer)),
+            None => (writer, None),
+        };
+        let writer: SharedWriter = Arc::new(Mutex::new(writer));
+        opening.writer = Some(Arc::clone(&writer));
+        let mut pty_writer = MasterDup(Some(pty_writer));
+        let (write_tx, write_rx) = mpsc::channel::<WriteRequest>();
+        let written = Arc::clone(&replies_pending);
+        let drained = Arc::clone(&queued_bytes);
+        let busy = Arc::clone(&writer_busy);
+        thread::Builder::new()
+            .name("termlens-pty-writer".into())
+            .spawn(move || writer_loop(&mut pty_writer, &write_rx, &written, &drained, &busy))
+            .map_err(Error::Io)?;
 
         let reader_shared = Arc::clone(&shared);
-        let reader_writer = Arc::clone(&writer);
         let reader_tx = write_tx.clone();
         let reader_pending = Arc::clone(&replies_pending);
         let reader_queued = Arc::clone(&queued_bytes);
@@ -2385,8 +2402,7 @@ impl TerminalBuilder {
                 reader_loop(
                     reader,
                     &reader_shared,
-                    &reader_writer,
-                    reader_tx.as_ref(),
+                    &reader_tx,
                     &reader_pending,
                     &reader_queued,
                 )
@@ -2756,12 +2772,12 @@ fn writer_loop(
     }
 }
 
-/// Drain the PTY into the emulator until EOF. Runs on a dedicated thread.
+/// Drain the PTY into the emulator until EOF, handing query replies to the
+/// writer thread through `replies_to`. Runs on a dedicated thread.
 fn reader_loop(
     mut reader: Box<dyn Read + Send>,
     shared: &Monitor<EmuState>,
-    writer: &SharedWriter,
-    replies_to: Option<&mpsc::Sender<WriteRequest>>,
+    replies_to: &mpsc::Sender<WriteRequest>,
     pending: &AtomicUsize,
     queued_bytes: &AtomicUsize,
 ) {
@@ -2797,14 +2813,14 @@ fn reader_loop(
             // writer thread under the state lock, and written after it
             // is released; the state lock and the writer lock are never
             // held together.
-            let replies = shared.mutate(|state| {
+            shared.mutate(|state| {
                 // A panicked emulator is never fed again: its grid is in
                 // whatever state the panic left it. The loop still runs, so
                 // the PTY keeps draining and the child does not block
                 // writing into a full buffer — the same reason the reply
                 // queue never backpressures the reader.
                 if state.emu_panic.is_some() {
-                    return Vec::new();
+                    return;
                 }
                 // Counted before the chunk is processed, so a query
                 // inside it is recorded against *this* read: output
@@ -2885,32 +2901,8 @@ fn reader_loop(
                 // tick — and types in response must find the replies ahead
                 // of its input in the writer's queue, as a terminal answers
                 // a query before it shows anything after it (#591).
-                if let Some(tx) = replies_to {
-                    queue_replies(tx, &mut replies, state, pending, queued_bytes);
-                }
-                replies
+                queue_replies(replies_to, &mut replies, state, pending, queued_bytes);
             });
-            // One queue entry per *read*, not per reply. A single read
-            // can carry dozens of queries — a startup batch is a
-            // legitimate pattern — and enqueueing each answer separately
-            // made the reader outrun the writer, which issues one
-            // `write(2)` per entry. The queue then filled and answers
-            // were discarded although nothing was blocked: measured at
-            // 173 of 200 delivered back-to-back, and 200 of 200 with a
-            // millisecond between the queries. Batching is what removes
-            // that mismatch; ordering is unchanged, since the bytes are
-            // concatenated in the order they were built.
-            // No responder thread (no descriptor to duplicate): the
-            // replies are still here, and are written inline, as before —
-            // after the state lock is released, since writing needs the
-            // writer lock.
-            if !replies.is_empty() {
-                let batch: Vec<u8> = replies.concat();
-                let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
-                if let Some(writer) = writer.as_mut() {
-                    let _ = writer.write_all(&batch).and_then(|()| writer.flush());
-                }
-            }
         }
         if at_eof {
             break;
@@ -2983,11 +2975,12 @@ pub struct Terminal {
     // Option only so Drop can close it under the PTY lifecycle lock;
     // Some for the entire life of the value outside Drop.
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
-    /// Shared with the reader thread, which writes query replies.
+    /// The PTY layer's own writer, closed under the lifecycle lock by
+    /// `Drop`; nothing writes through it. Empty where the writer thread was
+    /// handed it for want of a duplicate of the master (Windows).
     writer: SharedWriter,
-    /// Queue to the writer thread. `None` only when no descriptor could
-    /// be duplicated, in which case writes go through `writer` directly.
-    write_tx: Option<mpsc::Sender<WriteRequest>>,
+    /// Queue to the writer thread, which makes every write into the PTY.
+    write_tx: mpsc::Sender<WriteRequest>,
     /// Set by the writer thread while it is inside `write(2)`.
     writer_busy: Arc<AtomicBool>,
     shared: Arc<Monitor<EmuState>>,
@@ -3717,20 +3710,6 @@ impl Terminal {
     /// gets a screen-carrying failure naming the real cause instead of
     /// the six-hour CI job `docs/DESIGN.md` §2 exists to prevent.
     fn write_within_deadline(&mut self, bytes: &[u8]) -> std::result::Result<(), String> {
-        let Some(tx) = &self.write_tx else {
-            // No writer thread (no descriptor to duplicate): the original
-            // synchronous path, which can block — better than not being
-            // able to type at all.
-            let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-            return match writer.as_mut() {
-                Some(writer) => writer
-                    .write_all(bytes)
-                    .and_then(|()| writer.flush())
-                    .map_err(|e| e.to_string()),
-                None => Err("the terminal is closed".to_owned()),
-            };
-        };
-
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
         let request = WriteRequest {
             bytes: bytes.to_vec(),
@@ -3743,7 +3722,7 @@ impl Terminal {
         // no full-queue case to retry. The deadline that matters is the
         // acknowledgement below: it is the write itself that can stall, when
         // the application has stopped reading and the PTY buffer is full.
-        if tx.send(request).is_err() {
+        if self.write_tx.send(request).is_err() {
             return Err("the terminal is closed".to_owned());
         }
         let mut waited = self.default_timeout.max(ACK_FLOOR);
@@ -5742,12 +5721,10 @@ mod tests {
         let (tx, rx) = mpsc::channel::<super::WriteRequest>();
         let reader_shared = Arc::clone(&shared);
         let reader = std::thread::spawn(move || {
-            let writer: super::SharedWriter = Arc::new(std::sync::Mutex::new(None));
             reader_loop(
                 Box::new(std::io::Cursor::new(b"ready\x1b[6n".to_vec())),
                 &reader_shared,
-                &writer,
-                Some(&tx),
+                &tx,
                 &AtomicUsize::new(0),
                 &AtomicUsize::new(0),
             );
@@ -5919,6 +5896,65 @@ mod tests {
             .expect("the writer ends when its queue closes");
     }
 
+    /// Where the master cannot be duplicated, as on Windows, a send keeps
+    /// its deadline all the same (#771). The writer thread was started only
+    /// with a duplicate; without one a send wrote on the calling thread with
+    /// no deadline at all, under the lock the reader wrote its replies
+    /// under. Forced here, where a raw-mode program that never reads fills
+    /// its input queue and a write into it blocks, as a write into ConPTY's
+    /// input pipe may; the watchdog turns a send that never returns into a
+    /// failure, and the thread it is stuck on is left behind.
+    #[cfg(unix)]
+    #[test]
+    fn without_a_duplicate_of_the_master_a_send_keeps_its_deadline() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        const DEADLINE: Duration = Duration::from_millis(500);
+        // Far past the deadline, and past the drop's reap grace.
+        const WATCHDOG: Duration = Duration::from_secs(30);
+
+        super::NO_MASTER_DUP.with(|no| no.set(true));
+        let mut t = crate::Terminal::builder()
+            .size(40, 5)
+            .timeout(DEADLINE)
+            .args(["-c", "stty raw -echo; printf ready; exec sleep 60"])
+            .spawn("sh")
+            .expect("spawns");
+        assert!(
+            !super::NO_MASTER_DUP.with(std::cell::Cell::get),
+            "the spawn went without a duplicate"
+        );
+        t.wait_until_for(|s| s.contains("ready"), Duration::from_secs(10))
+            .expect("the program is up, and reads nothing");
+        let (sent_tx, sent) = mpsc::channel();
+        let (dropped_tx, dropped) = mpsc::channel();
+        std::thread::spawn(move || {
+            let start = Instant::now();
+            let outcome = t.send_str(&"x".repeat(1 << 20));
+            let _ = sent_tx.send((start.elapsed(), outcome));
+            drop(t);
+            let _ = dropped_tx.send(());
+        });
+        match sent.recv_timeout(WATCHDOG) {
+            Ok((_, Err(Error::Write { what, .. }))) => {
+                assert!(what.contains("not reading its input"), "{what}");
+            }
+            Ok((took, other)) => {
+                panic!("1 MiB into a full input queue gives up: {other:?} after {took:?}")
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                "the send did not return in {WATCHDOG:?}: without a duplicate of the master \
+                 it has no deadline (#771)"
+            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the send panicked; see above"),
+        }
+        assert!(
+            dropped.recv_timeout(WATCHDOG).is_ok(),
+            "the drop did not return in {WATCHDOG:?}"
+        );
+    }
+
     /// A reply to a cursor or size query costs the same on any grid. Each
     /// used to snapshot the whole screen to read two numbers, so 2000
     /// cursor-position queries at 200x50 took ten seconds in a debug build
@@ -6030,7 +6066,7 @@ mod tests {
     #[test]
     fn an_emulator_panic_is_recorded_rather_than_lost() {
         let shared = panicking_state();
-        let writer: super::SharedWriter = Arc::new(std::sync::Mutex::new(None));
+        let (replies, _) = std::sync::mpsc::channel();
         let pending = AtomicUsize::new(0);
         let queued = AtomicUsize::new(0);
 
@@ -6047,8 +6083,7 @@ mod tests {
         reader_loop(
             Box::new(std::io::Cursor::new(b"first\nsecond\n".to_vec())),
             &shared,
-            &writer,
-            None,
+            &replies,
             &pending,
             &queued,
         );
@@ -6359,7 +6394,7 @@ mod tests {
             use std::sync::atomic::AtomicUsize;
 
             use super::super::{
-                reader_loop, EmuState, Graphics, Monitor, Responder, SharedWriter, Vt100Emulator,
+                reader_loop, EmuState, Graphics, Monitor, Responder, Vt100Emulator,
             };
 
             /// As many one-byte reads as it is given, then end of stream.
@@ -6405,14 +6440,13 @@ mod tests {
                 },
                 Arc::new(AtomicUsize::new(0)),
             ));
-            let writer: SharedWriter = Arc::new(Mutex::new(None));
+            let (replies, _) = std::sync::mpsc::channel();
             // On this thread, as the reader thread runs it: the duplicate
             // is the loop's, and closes as the loop returns.
             reader_loop(
                 Box::new(MasterDup(Some(Reads(2, Arc::clone(&log))))),
                 &shared,
-                &writer,
-                None,
+                &replies,
                 &AtomicUsize::new(0),
                 &AtomicUsize::new(0),
             );

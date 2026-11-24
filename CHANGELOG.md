@@ -42,6 +42,14 @@ reads that marker.
 - Saved JSON screens with leading spaces, tabs or carriage returns are
   recognized as JSON by `render` and `diff`, rather than rejected as text
   snapshots with a missing `size:` header. (#786)
+- On Windows every write into the terminal goes through the writer
+  thread, so a send keeps the terminal's deadline there as it does on Unix.
+  The thread was started only with a duplicate of the master, which
+  portable-pty does not expose on Windows, so there every send was written
+  on the test thread with no deadline, and every query reply on the reader
+  thread under the same lock: a full ConPTY input pipe would have hung the
+  test and stopped the drain behind it. The thread is now handed the PTY
+  layer's own writer where there is no duplicate. (#771)
 
 ## [0.11.10] - 2026-11-17
 

@@ -142,6 +142,15 @@ side closes. Such a send fails as the terminal closes and names the exit,
 rather than blaming a program that is gone for not reading (#770). How much
 of it went is not said, since a blocked `write(2)` reports no count.
 
+The thread writes through a duplicate of the master, so that the PTY
+layer's own writer can stay with the terminal and close under the
+lifecycle lock (§2). Where there is no descriptor to duplicate — Windows,
+where portable-pty exposes none — the thread is handed that writer itself.
+It used not to be started there at all, so every send was written on the
+test thread with no deadline, and every reply on the reader thread, under
+one lock; a full ConPTY input pipe would have hung the test and stopped
+the drain behind it (#771).
+
 Which failures are errors and which are panics is a deliberate split, not
 an accident of history. `send`/`send_str`/`paste`/`click`/`drag`/`scroll`
 all return `Result`, because *whether the child is still there to receive
