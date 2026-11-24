@@ -250,7 +250,10 @@ CHANGELOG entry.
   `ResizePseudoConsole` on its own thread, so a program's output written
   right after a resize can be laid out at the old width — after `resize()`
   on Windows, wait for the program's own repaint before asserting on
-  layout — and its re-render never forwards the program's HT); and bytes
+  layout — and its re-render never forwards the program's HT); a timeout
+  that names the escape sequence or character a quiet program stopped
+  inside (ConPTY keeps the unfinished sequence to itself, so `wait_idle`
+  and `wait_stable` see a terminal that is simply quiet); and bytes
   that are not UTF-8 (Rust's console stdio refuses to write them). The
   tests for each are `#[cfg_attr(windows, ignore = "…")]` with
   the reason in the attribute; the probe that measured all of this is

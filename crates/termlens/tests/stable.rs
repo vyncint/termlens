@@ -162,6 +162,61 @@ fn wait_stable_does_not_settle_inside_an_open_synchronized_update() -> termlens:
     Ok(())
 }
 
+/// A terminal that went quiet inside an escape sequence, or a character,
+/// the application never finished is neither idle nor settled, and the
+/// timeout says why (#772). Both waits refused rightly, then said only
+/// "waiting for 50ms of output silence" or "for the screen to hold still"
+/// about a terminal that had been silent and still all along. An open DEC
+/// 2026 update already named itself; these are the other things a quiet
+/// stream can end inside. A sequence past the 24 bytes captured of it is
+/// shown cut, and says so.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY re-renders the program's output, so a sequence or character the program leaves unfinished never reaches the emulator (#149)"
+)]
+fn a_quiet_terminal_inside_an_unfinished_sequence_says_so() -> termlens::Result<()> {
+    let quiet = Duration::from_millis(50);
+    for (spec, inside) in [
+        (
+            r"ready \e]0;title",
+            "an unfinished escape sequence (`^[]0;title`)",
+        ),
+        (r"ready \e[", "an unfinished escape sequence (`^[[`)"),
+        (
+            r"ready \e]0;a title longer than the capture",
+            "an unfinished escape sequence (`^[]0;a title longer than …`)",
+        ),
+        (r"ready \xe6\xbc", "an incomplete UTF-8 character"),
+    ] {
+        // One write, so the bytes after the marker are read with it.
+        let mut t = emit(&["--raw", spec, "--wait"])?;
+        t.wait_until(|s| s.contains("ready"))?;
+        match t.wait_idle_for(quiet, Duration::from_millis(400)) {
+            Err(Error::Timeout { waiting_for, .. }) => assert!(
+                waiting_for.contains(&format!(
+                    "silent that long, but it stopped inside {inside}, and the terminal \
+                     is still waiting for the rest of it"
+                )),
+                "{spec}: {waiting_for}"
+            ),
+            other => panic!("{spec}: a stream that stopped inside it is not idle: {other:?}"),
+        }
+        match t.wait_stable_for(quiet, Duration::from_millis(400)) {
+            Err(Error::Timeout { waiting_for, .. }) => assert!(
+                waiting_for.contains(&format!(
+                    "held still that long, but the output is inside {inside}"
+                )),
+                "{spec}: {waiting_for}"
+            ),
+            other => panic!("{spec}: a stream that stopped inside it is not settled: {other:?}"),
+        }
+        t.send(Key::Enter)?;
+        assert!(t.wait_exit()?.success());
+    }
+    Ok(())
+}
+
 /// RIS is the "start over" sequence, and it ends an update the application
 /// had begun: left open, every later `wait_stable` timed out naming an
 /// unfinished update that no longer existed (#623). It ends focus reporting

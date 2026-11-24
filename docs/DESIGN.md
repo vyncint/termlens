@@ -410,7 +410,10 @@ screen dump** — a CI log alone answers "what was the app showing?".
   "did the stream stop inside an update?". EOF counts as idle. An
   application that opens an update and never closes it therefore times out
   here, and the message says exactly that instead of "waiting for 100ms of
-  output silence", which reads as nonsense against a quiet terminal.
+  output silence", which reads as nonsense against a quiet terminal. A
+  stream that went silent inside an escape sequence or a UTF-8 character
+  is named the same way, the sequence as the tracker captured it, its
+  first 24 bytes (#772).
   **This is a heuristic**: silence is evidence of a finished render, not
   proof. Prefer `wait_until` on visible content, or `wait_frame` where the
   app uses synchronized output.

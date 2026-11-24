@@ -1659,6 +1659,18 @@ impl EmuState {
         })
     }
 
+    /// What the stream ends inside, when it ends inside something a quiet
+    /// terminal is not settled in: an escape sequence, named as received,
+    /// or a character whose remaining bytes the reader is holding back for.
+    /// The DEC 2026 update is the third such thing, named on its own.
+    fn unfinished(&self) -> Option<String> {
+        if let Some(sequence) = self.emu.open_sequence() {
+            return Some(format!("an unfinished escape sequence (`{sequence}`)"));
+        }
+        self.utf8_pending
+            .then(|| "an incomplete UTF-8 character".to_owned())
+    }
+
     /// One-line diagnosis when a query went unanswered, appended to every
     /// wait's error — a probing app blocked on a reply is otherwise
     /// indistinguishable from a hung one.
@@ -4187,7 +4199,9 @@ impl Terminal {
     /// whole-screen snapshots" rule work — after `wait_idle` returns, a
     /// [`screen`](Self::screen) snapshot cannot be a torn frame. An
     /// application that opens an update and never closes it therefore times
-    /// out here, and the error says so.
+    /// out here, and the error says so. So does one whose output goes silent
+    /// inside an escape sequence or a UTF-8 character it never finishes,
+    /// and the error names that too, with the sequence's first bytes.
     ///
     /// This is a heuristic: "no output for N ms" is evidence, not proof,
     /// that the application finished rendering. Prefer
@@ -4258,8 +4272,14 @@ impl Terminal {
                 // time out "waiting for 100ms of output silence", which
                 // reads as nonsense to someone looking at a quiet terminal.
                 // Name the real state: the application is inside a repaint
-                // it never finished.
+                // it never finished, or the output went silent inside a
+                // sequence or a character it never finished (#772).
                 let stuck_mid_frame = guard.emu.in_sync_update();
+                let unfinished = if elapsed >= quiet {
+                    guard.unfinished()
+                } else {
+                    None
+                };
                 let screen = guard.peek_snapshot();
                 let note = guard.query_note();
                 drop(guard);
@@ -4268,6 +4288,12 @@ impl Terminal {
                         "{quiet:?} of output silence — the application is inside an \
                          unfinished DEC 2026 synchronized update (Begin with no End), so \
                          the screen below is a half-painted frame{note}"
+                    )
+                } else if let Some(unfinished) = unfinished {
+                    format!(
+                        "{quiet:?} of output silence — the output has been silent that \
+                         long, but it stopped inside {unfinished}, and the terminal is \
+                         still waiting for the rest of it{note}"
                     )
                 } else {
                     format!("{quiet:?} of output silence{note}")
@@ -4395,8 +4421,9 @@ impl Terminal {
     ///
     /// [`Error::Timeout`] when the deadline (builder `timeout`) expires
     /// first — the picture kept changing, `quiet` exceeds the timeout, or
-    /// the application is inside an unfinished synchronized update, which
-    /// the message names. [`Error::Emulator`] if the emulation failed.
+    /// the application is inside an unfinished synchronized update, escape
+    /// sequence or UTF-8 character, which the message names.
+    /// [`Error::Emulator`] if the emulation failed.
     pub fn wait_stable(&mut self, quiet: Duration) -> Result<Screen> {
         self.wait_stable_deadline(quiet, self.default_timeout)
     }
@@ -4456,6 +4483,13 @@ impl Terminal {
             let now = Instant::now();
             if now >= deadline {
                 let stuck_mid_frame = guard.emu.in_sync_update();
+                // Still, and still not settled: the stream ended inside a
+                // sequence or a character it never finished (#772).
+                let unfinished = if held >= quiet {
+                    guard.unfinished()
+                } else {
+                    None
+                };
                 let screen = guard.peek_snapshot();
                 let note = format!("{}{}", guard.query_note(), history_note(&screen));
                 drop(guard);
@@ -4464,6 +4498,12 @@ impl Terminal {
                         "the screen to hold still for {quiet:?} — the application is inside \
                          an unfinished DEC 2026 synchronized update (Begin with no End), so \
                          the screen below is a half-painted frame{note}"
+                    )
+                } else if let Some(unfinished) = unfinished {
+                    format!(
+                        "the screen to hold still for {quiet:?} — it has held still that \
+                         long, but the output is inside {unfinished}, and the terminal is \
+                         still waiting for the rest of it{note}"
                     )
                 } else {
                     format!("the screen to hold still for {quiet:?}{note}")
@@ -5320,6 +5360,9 @@ mod tests {
         fn mid_sequence(&self) -> bool {
             false
         }
+        fn open_sequence(&self) -> Option<String> {
+            None
+        }
         fn in_sync_update(&self) -> bool {
             false
         }
@@ -5383,6 +5426,10 @@ mod tests {
         fn mid_sequence(&self) -> bool {
             self.called();
             self.inner.mid_sequence()
+        }
+        fn open_sequence(&self) -> Option<String> {
+            self.called();
+            self.inner.open_sequence()
         }
         fn in_sync_update(&self) -> bool {
             self.called();

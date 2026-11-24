@@ -36,6 +36,18 @@ reads that marker.
   blocking, is reported the same way. A test that matched "not reading its
   input" on a send into an application that exits during it should match
   "released the terminal (EOF) before this write" instead. (#770)
+- A `wait_idle` or `wait_stable` timeout on a terminal whose output went
+  quiet inside an escape sequence or a UTF-8 character it never finished
+  names it, as an open DEC 2026 update was already named: "…while waiting
+  for 100ms of output silence — the output has been silent that long, but
+  it stopped inside an unfinished escape sequence (`^[]0;title`), and the
+  terminal is still waiting for the rest of it", or "…inside an incomplete
+  UTF-8 character…". The sequence is shown as received, its first 24
+  bytes. Both waits refused such a terminal before too, and said only
+  "100ms of output silence" or "the screen to hold still for 100ms" about
+  one that had been silent all along; `snapshot_after`'s settle says the
+  same now. A test that matched the whole message, not a part of it,
+  should expect the added clause. (#772)
 
 ### Fixed
 
