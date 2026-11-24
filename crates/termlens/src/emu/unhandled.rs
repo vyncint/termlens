@@ -250,11 +250,11 @@ impl Callbacks for Unhandled {
         params: &[&[u16]],
         c: char,
     ) {
-        // vte hands the private marker (`?`, `>`, `=`) over as the first
-        // intermediate; a real intermediate (`$`, `!`, `SP`) follows it or
-        // stands alone.
+        // vte hands the private marker (`<`, `=`, `>`, `?`) over as the
+        // first intermediate; a real intermediate (`$`, `!`, `SP`) follows
+        // it or stands alone.
         let (prefix, intermediate) = match (i1, i2) {
-            (Some(p @ (b'?' | b'>' | b'=')), other) => (Some(p), other),
+            (Some(p @ (b'<' | b'=' | b'>' | b'?')), other) => (Some(p), other),
             (other, None) => (None, other),
             (a, b) => (a, b),
         };
@@ -454,6 +454,19 @@ mod tests {
         assert_eq!(shapes(b"\x1b[18;0t"), ["^[[18;0t"]);
         // The screen's pixel size and the `; 2` reports, named since #692.
         assert!(shapes(b"\x1b[15t\x1b[14;2t\x1b[13;2t").is_empty());
+    }
+
+    /// The kitty keyboard protocol's push is `CSI > flags u` and its pop is
+    /// `CSI < n u`. Both are private markers, written before the parameters,
+    /// and the pop (crossterm's `PopKeyboardEnhancementFlags`) was listed
+    /// as `^[[1<u`, a sequence that does not exist (#759).
+    #[test]
+    fn a_kitty_keyboard_pop_is_listed_with_its_marker_before_the_parameters() {
+        assert_eq!(shapes(b"\x1b[>1u"), ["^[[>1u"]);
+        assert_eq!(shapes(b"\x1b[<1u"), ["^[[<1u"]);
+        assert_eq!(shapes(b"\x1b[<u"), ["^[[<u"]);
+        // The query form is answered by the responder, so it stays out.
+        assert!(shapes(b"\x1b[?u").is_empty());
     }
 
     /// XTMODKEYS's "disable" (`CSI > Ps n`) is a setting nobody honours,
