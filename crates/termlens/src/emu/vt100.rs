@@ -773,6 +773,15 @@ impl Vt100Emulator {
         }
     }
 
+    /// Draw `glyph` `count` times at the cursor, as `REP` does, in the
+    /// attributes in force: both parsers are fed the run, so the shadow
+    /// carries them as well.
+    fn draw_repeated(&mut self, glyph: char, count: u16) {
+        let mut one = [0; 4];
+        let run = glyph.encode_utf8(&mut one).repeat(usize::from(count));
+        self.feed(run.as_bytes());
+    }
+
     /// Draw the last column of `row` again, as it stands, leaving the cursor
     /// pending wrap after it — the one way to put a cursor back there.
     ///
@@ -812,6 +821,14 @@ impl Vt100Emulator {
         self.shadow.feed_verbatim(shadow.as_bytes());
     }
 }
+
+/// What ends a `REP` in place of its final byte, so that no parser carries
+/// it out: an intermediate, then a parameter byte, which vte takes for a
+/// malformed sequence and ignores up to the final byte (`CsiIntermediate`
+/// to `CsiIgnore`), with no dispatch and so no callback. The sequence's own
+/// bytes before it still go to both parsers, so its ESC still ends a string
+/// it ended, and the rewriters hold and release it as ever.
+const REP_IGNORED: &[u8] = b" 0b";
 
 /// U+FE0F as the bytes it arrives in. Its first byte is a UTF-8 lead byte,
 /// never a continuation or an ASCII byte, so matching it at a character
@@ -993,6 +1010,20 @@ impl Emulator for Vt100Emulator {
                     let row = self.parser.screen().cursor_position().0;
                     if self.tracker.in_scroll_region(row) {
                         self.feed(b"\r");
+                    }
+                    None
+                }
+                SeqEvent::Repeat { glyph, count } => {
+                    // vt100 would repeat the glyph it drew last, whatever
+                    // came between; xterm repeats only the character printed
+                    // just before, and the tracker says which, if any
+                    // (#756). So vt100 is handed a sequence vte ignores in
+                    // place of this one, and the repeats are drawn here.
+                    self.feed_staged(&bytes[fed..i]);
+                    self.feed(REP_IGNORED);
+                    fed = i + 1;
+                    if let Some(glyph) = glyph {
+                        self.draw_repeated(glyph, count);
                     }
                     None
                 }
@@ -3022,9 +3053,9 @@ mod tests {
     #[test]
     fn rep_repeats_the_last_character_drawn() {
         // REP (`CSI n b`), which the xterm-256color terminfo advertises and
-        // ncurses uses for runs outside a UTF-8 locale (#578): vt100 0.17
-        // implements it. The character repeated is the one drawn, so a
-        // DEC Special Graphics line repeats as the line.
+        // ncurses uses for runs outside a UTF-8 locale (#578), right after
+        // the character it repeats. A DEC Special Graphics line repeats as
+        // the line, since the set is still the one invoked.
         let emu = emu_with(b"x\x1b[5bEND");
         let s = emu.snapshot();
         assert_eq!(s.row_text(0), "xxxxxxEND ");
@@ -3036,6 +3067,71 @@ mod tests {
         );
         let emu = emu_with("\u{6f22}\x1b[2b".as_bytes());
         assert_eq!(emu.snapshot().row_text(0), "\u{6f22}\u{6f22}\u{6f22}    ");
+    }
+
+    /// REP repeats what xterm repeats (#756). xterm forgets the character
+    /// it would repeat after every byte that leaves its parser in ground
+    /// without printing one (`charproc.c` 6484-6485), so REP repeats only
+    /// the character printed just before it, and draws it through GL as
+    /// invoked now (6159-6172), with no single shift. vt100 repeated the
+    /// glyph it drew last, whatever came between: an SGR, a control, a set
+    /// switch, another REP. A combining character keeps the one it joins,
+    /// as xterm's combining path does (3099-3159); a sub-parameter makes
+    /// the sequence no REP to xterm. Whole, split once at every character,
+    /// and a character at a time; the attributes in force, the shadow's
+    /// included, reach every repeat, and nothing is listed.
+    #[test]
+    fn rep_repeats_only_the_character_printed_just_before_it() {
+        let line = "\u{2500}";
+        for (stream, row) in [
+            // The issue's table, with xterm's answers.
+            ("\x1b(0q\x1b(B\x1b[2b", line.to_owned()),
+            ("q\x1b(0\x1b[2b", "q".to_owned()),
+            ("\x1b*0\x1bNq\x1b[2b", format!("{line}qq")),
+            // Through the set GL invokes now, G1 locked in by SO.
+            ("\x1b)0\x0eq\x1b[2b", line.repeat(3)),
+            ("\x1b)0\x0eq\x0f\x1b[2b", line.to_owned()),
+            // Anything between the character and REP.
+            ("x\x1b[31m\x1b[2b", "x".to_owned()),
+            ("x\r\x1b[2b", "x".to_owned()),
+            ("x\x7f\x1b[2b", "x".to_owned()),
+            ("x\x1b[2b\x1b[2b", "xxx".to_owned()),
+            ("\x1b[2bx", "x".to_owned()),
+            // Bytes inside the REP itself are not between.
+            ("x\x1b[\x072b", "xxx".to_owned()),
+            ("x\x1b[0b", "xx".to_owned()),
+            ("x\x1b[2;9b", "xxx".to_owned()),
+            ("x\x1b[2:1b", "x".to_owned()),
+            ("e\u{301}\x1b[2b", "e\u{301}ee".to_owned()),
+            ("\u{6f22}\x1b[1b", "\u{6f22}\u{6f22}".to_owned()),
+            ("\u{FFFD}\x1b[1b", "\u{FFFD}\u{FFFD}".to_owned()),
+        ] {
+            let (whole, bytewise) = whole_and_bytewise(4, 10, 0, stream.as_bytes());
+            assert_eq!(observed(&whole), observed(&bytewise), "{stream:?}");
+            for (cut, _) in stream.char_indices().skip(1) {
+                let split = emu_fed_in_pieces(stream.as_bytes(), &[cut]);
+                assert_eq!(
+                    observed(&split),
+                    observed(&whole),
+                    "{stream:?} cut at {cut}"
+                );
+            }
+            let s = whole.snapshot();
+            assert_eq!(s.row_text(0).trim_end(), row, "{stream:?}");
+            assert!(
+                s.unsupported().is_empty(),
+                "{stream:?}: {:?}",
+                s.unsupported()
+            );
+        }
+        let s = emu_with(b"\x1b[1;5;31mx\x1b[3b").snapshot();
+        for col in 0..4 {
+            let style = *s.cell(0, col).unwrap().style();
+            assert!(
+                style.bold && style.blink && style.fg == Color::Indexed(1),
+                "column {col}: {style:?}"
+            );
+        }
     }
 
     #[test]

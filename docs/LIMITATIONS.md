@@ -67,6 +67,15 @@ CHANGELOG entry.
   first 64 bytes of its content and at most its first sixteen parameters,
   ending in `…` where it was cut, so an iTerm2 inline image
   (`OSC 1337 ; File=…`) is named there, not kept.
+- **REP (`CSI n b`) repeats what xterm repeats**: the character printed
+  just before it, drawn through the character set invoked now, and
+  nothing when any other byte came between — a control, an SGR, a
+  character-set switch, another REP. So `x`, `ESC[31m`, `CSI 2 b` shows
+  `x`, as in xterm. kitty (0.49.2, `screen_repeat_character`) remembers
+  the last character it drew through every other sequence until a reset,
+  and shows `xxx` there: an application tried only on kitty can rely on
+  that and show less here. A REP written with a sub-parameter, which
+  xterm does not take for one, draws nothing.
 - **A soft-wrapped line is two rows.** `contains` and `find` read the grid
   row by row and do not span the wrap; `Screen::row_wrapped(row)` reports
   the backend's record of where a line wrapped, and

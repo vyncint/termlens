@@ -92,6 +92,16 @@ reads that marker.
   they were listed as `^[[2@`, `^[[2A` and `^[[2t`, which name ICH, CUU
   and a window operation, and `CSI 1 SP c` was not listed at all, taken
   for DA1. A test that pinned the old shapes needs the new ones. (#764)
+- REP (`CSI n b`) repeats as xterm does: the character printed just
+  before it, through the character set invoked now, and nothing when any
+  other byte came between. The backend repeated the last glyph it drew,
+  whatever followed it, so `x`, `ESC[31m`, `CSI 2 b` showed `xxx` where
+  xterm shows `x`; a REP after a character-set switch repeated the old
+  glyph, and one after a single-shifted character repeated it through the
+  single shift. A screen built with REP after any non-printing sequence,
+  an SGR included, now shows what xterm shows: a test that pinned the
+  repeated characters there should expect them gone, and one after a
+  single shift should expect them in the set now invoked. (#756)
 
 ### Fixed
 

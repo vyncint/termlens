@@ -357,6 +357,15 @@ struct ScreenFrame {
     saved_charsets: Option<SavedCharsets>,
 }
 
+/// The glyph `b` draws in `set`, when the set redefines it.
+fn glyph_in(set: Charset, b: u8) -> Option<&'static str> {
+    match set {
+        Charset::Ascii => None,
+        Charset::Uk => (b == b'#').then_some("\u{a3}"),
+        Charset::DecSpecialGraphics => dec_special_graphics(b),
+    }
+}
+
 /// The glyph a byte draws in DEC Special Graphics, where it differs from
 /// ASCII: the 32 bytes `0x5f..=0x7e`. Everything below `_` draws as itself.
 /// The mapping is xterm's, which is also what every terminfo `acsc` string
@@ -479,6 +488,13 @@ pub(crate) enum SeqEvent {
     /// a pending wrap when the cursor is inside the scroll region, which
     /// only the emulator can check, since the row is the grid's (#686).
     LinesMoved,
+    /// `REP` (`CSI Ps b`) completed, any form vt100 would carry out. vt100
+    /// repeats the glyph it drew last, whatever came after it; xterm
+    /// repeats the character printed just before the sequence, if one was,
+    /// through GL as invoked now (#756) — see
+    /// [`printed`](SeqTracker::printed). The emulator takes the sequence
+    /// from vt100 and draws `glyph` `count` times, or nothing for `None`.
+    Repeat { glyph: Option<char>, count: u16 },
 }
 
 /// A terminal query the application issued. The tracker classifies;
@@ -1034,6 +1050,14 @@ pub(crate) struct SeqTracker {
     tabs: TabStops,
     /// `IRM` (`CSI 4 h`) is set — see [`insert_mode`](Self::insert_mode).
     insert_mode: bool,
+    /// The character `REP` would repeat, xterm's `lastchar`: the last one
+    /// printed, forgotten by every byte that leaves the parser in ground
+    /// without printing one — see [`printed`](Self::printed).
+    rep: Option<char>,
+    /// The bytes of the character being printed, while its UTF-8 sequence
+    /// is incomplete.
+    rep_partial: [u8; 4],
+    rep_partial_len: u8,
 }
 
 impl SeqTracker {
@@ -1112,6 +1136,9 @@ impl SeqTracker {
             sixel_meter: SixelMeter::default(),
             tabs: TabStops::new(cols),
             insert_mode: false,
+            rep: None,
+            rep_partial: [0; 4],
+            rep_partial_len: 0,
         }
     }
 
@@ -1496,11 +1523,7 @@ impl SeqTracker {
         if self.state != State::Ground {
             return None;
         }
-        match self.invoked_charset() {
-            Charset::Ascii => None,
-            Charset::Uk => (b == b'#').then_some("\u{a3}"),
-            Charset::DecSpecialGraphics => dec_special_graphics(b),
-        }
+        glyph_in(self.invoked_charset(), b)
     }
 
     fn invoked_charset(&self) -> Charset {
@@ -1724,6 +1747,25 @@ impl SeqTracker {
 
     /// The event (if any) implied by a CSI final byte.
     fn csi_final(&mut self, b: u8) -> SeqEvent {
+        // REP, every form vt100 carries out: no private marker and no
+        // intermediate, whatever the parameters. A sub-parameter makes it
+        // no REP to xterm, which takes one only on SGR and XTMODKEYS, so
+        // that form draws nothing; vt100 would have repeated by its first
+        // value.
+        if b == b'b' && self.csi_collected[0] == 0 && !self.csi_invalid {
+            if self.csi_has_digits {
+                self.end_csi_param();
+            }
+            let ps = if self.csi_param_count == 0 {
+                0
+            } else {
+                self.csi_first_param
+            };
+            return SeqEvent::Repeat {
+                glyph: (!self.csi_colon).then(|| self.repeated()).flatten(),
+                count: u16::try_from(ps).unwrap_or(u16::MAX).max(1),
+            };
+        }
         // ED, DECSTBM, IL and DL read the first value of a parameter with
         // sub-parameters in vt100, so they act on one; nothing else does.
         if self.csi_invalid || (self.csi_colon && !matches!(b, b'J' | b'r' | b'L' | b'M')) {
@@ -2433,7 +2475,8 @@ impl SeqTracker {
     /// Feed one byte: capture it if it belongs to a sequence, then run
     /// the state machine.
     pub(crate) fn step(&mut self, b: u8) -> SeqEvent {
-        if self.state == State::Ground {
+        let in_ground = self.state == State::Ground;
+        if in_ground {
             if b == 0x1b {
                 self.seq_len = 0;
                 self.push_seq(b);
@@ -2441,7 +2484,70 @@ impl SeqTracker {
         } else if !self.passes_through(b) {
             self.push_seq(b);
         }
-        self.transition(b)
+        let event = self.transition(b);
+        // xterm's rule for the character `REP` repeats (charproc.c: set at
+        // 3370 as a character is printed, and at 6484-6485 to `thischar`,
+        // -1 when nothing was, after every byte that leaves the parser in
+        // ground). A byte inside a sequence leaves it as it was; the
+        // sequence's last byte forgets it, after a `REP` has read it.
+        if self.state == State::Ground {
+            if in_ground && b >= 0x20 && b != 0x7f {
+                self.printed(b);
+            } else {
+                self.rep = None;
+                self.rep_partial_len = 0;
+            }
+        }
+        event
+    }
+
+    /// Follow one byte of a character printed in ground: when it completes
+    /// the character, that is what `REP` repeats next. A UTF-8 character
+    /// arrives a byte at a time and is one character to xterm, so its
+    /// first bytes leave the last one as it was. A zero-width character
+    /// joins the cell before it, and xterm's combining path leaves its
+    /// `lastchar` alone (charproc.c 3099-3159), so `e`, U+0301, `REP`
+    /// repeats the `e`. A C1 control is no character printed.
+    fn printed(&mut self, b: u8) {
+        let at = usize::from(self.rep_partial_len);
+        let complete = match b {
+            0x20..=0x7e => Some(char::from(b)),
+            // A continuation byte, which the decoder before the tracker
+            // only ever hands over after a lead byte.
+            0x80..=0xbf if (1..4).contains(&at) => {
+                self.rep_partial[at] = b;
+                self.rep_partial_len += 1;
+                if self.utf8_remaining > 0 {
+                    return;
+                }
+                std::str::from_utf8(&self.rep_partial[..=at])
+                    .ok()
+                    .and_then(|text| text.chars().next())
+            }
+            0xc2..=0xf4 => {
+                self.rep_partial[0] = b;
+                self.rep_partial_len = 1;
+                return;
+            }
+            _ => None,
+        };
+        self.rep_partial_len = 0;
+        match complete.map(|c| (c, crate::width::char_columns(c))) {
+            Some((_, Some(0))) => {}
+            Some((c, Some(_))) => self.rep = Some(c),
+            _ => self.rep = None,
+        }
+    }
+
+    /// What `REP` draws: the character [`printed`](Self::printed) last,
+    /// through the set GL invokes now. A single shift covered that
+    /// character alone, and xterm's `REP` draws through `gsets[curgl]`
+    /// (charproc.c 6159-6172), so it is the locking shift's set.
+    fn repeated(&self) -> Option<char> {
+        let c = self.rep?;
+        let set = if self.shifted_out { self.g1 } else { self.g0 };
+        let glyph = u8::try_from(c).ok().and_then(|b| glyph_in(set, b));
+        Some(glyph.and_then(|glyph| glyph.chars().next()).unwrap_or(c))
     }
 
     /// Whether `b` is outside the sequence it arrived in: a C0 control
