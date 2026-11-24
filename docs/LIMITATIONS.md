@@ -228,7 +228,10 @@ CHANGELOG entry.
   and so does the cursor it saves, as in xterm: after a `DECRC` the next
   character starts the second row. The backend holds that save at the
   end of the top row rather than its start, so a cursor motion or a
-  position report made before that character starts from there.
+  position report made before that character starts from there. An erase
+  (`CSI K`, `CSI J`) at a pending wrap leaves the wrap pending where
+  xterm's erase cancels it, so a soft reset right after one keeps the
+  wrap (#809).
 - **Two SGR style attributes are not modelled.** Overline (`SGR 53`) and
   double underline (`SGR 21`) do not reach [`Style`](https://docs.rs/termlens/latest/termlens/struct.Style.html),
   so `with_styles()` cannot distinguish those attributes from a plain cell.
