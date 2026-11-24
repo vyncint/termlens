@@ -708,6 +708,254 @@ fn drag_is_refused_when_the_mode_cannot_express_it() -> termlens::Result<()> {
     Ok(())
 }
 
+/// A hover, a press, a step of a drag and a release, each its own call, in
+/// each of the four encodings (#789). One program reads the wire for each
+/// encoding in turn, its marker written after its mode is set. A motion
+/// with no button is code 35 (3 + 32), with the left button held 32, and
+/// with ctrl+left held 48: the held press's modifiers ride on it, as they
+/// do on `drag`'s motions. The release is the encoding's own, 3 plus the
+/// modifier bits outside SGR and the button with a final `m` in it.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "the wire is read in raw mode, a tcsetattr, and ConPTY turns typed bytes into console events rather than forwarding them (#149)"
+)]
+fn mouse_moves_presses_and_releases_in_every_encoding() -> termlens::Result<()> {
+    use termlens::{MouseButton, MouseChord};
+
+    let mut t = util::spawn_emit(
+        Terminal::builder()
+            .size(120, 24)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\e[?1003h",
+            "LEGACY ",
+            "--read-hex",
+            "24",
+            "NL",
+            "--raw",
+            r"\e[?1015h",
+            "URXVT ",
+            "--read-hex",
+            "36",
+            "NL",
+            "--raw",
+            r"\e[?1015l\e[?1005h",
+            "UTF8 ",
+            "--read-hex",
+            "28",
+            "NL",
+            "--raw",
+            r"\e[?1005l\e[?1006h",
+            "SGR ",
+            "--read-hex",
+            "40",
+            " WIRE-EOF",
+            "--wait",
+        ],
+    )?;
+    // A hover, then a press there, a step right and the release.
+    let gesture = |t: &mut Terminal, button: MouseChord, col: u16, row: u16| {
+        t.mouse_move(col, row)?;
+        t.mouse_down(button, col, row)?;
+        t.mouse_move(col + 1, row)?;
+        t.mouse_up(button, col + 1, row)
+    };
+    t.wait_until(|s| s.contains("LEGACY"))?;
+    gesture(&mut t, MouseButton::Left.into(), 4, 2)?;
+    t.wait_until(|s| s.contains("URXVT"))?;
+    gesture(&mut t, MouseButton::Left.into(), 4, 2)?;
+    // Past column 94, where UTF-8 writes a coordinate as two bytes.
+    t.wait_until(|s| s.contains("UTF8"))?;
+    gesture(&mut t, MouseButton::Left.into(), 100, 3)?;
+    t.wait_until(|s| s.contains("SGR"))?;
+    gesture(&mut t, MouseButton::Left.ctrl(), 4, 2)?;
+    t.wait_until(|s| s.contains("WIRE-EOF"))?;
+    let screen = t.screen();
+
+    // All four rows in one comparison, so a failure shows every encoding.
+    let wire: Vec<String> = (0..4)
+        .map(|row| screen.row_text(row).trim_end().to_owned())
+        .collect();
+    assert_eq!(
+        wire,
+        [
+            "LEGACY 1b5b4d4325231b5b4d2025231b5b4d4026231b5b4d232623",
+            "URXVT 1b5b36373b353b334d1b5b33323b353b334d1b5b36343b363b334d1b5b33353b363b334d",
+            "UTF8 1b5b4d43c285241b5b4d20c285241b5b4d40c286241b5b4d23c28624",
+            "SGR 1b5b3c33353b353b334d1b5b3c31363b353b334d1b5b3c34383b363b334d\
+             1b5b3c31363b363b336d WIRE-EOF",
+        ]
+    );
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// Which tracking mode carries which of the three (#789): X10 (`?9`) a
+/// press, the button alone, and neither a motion nor a release; `?1000` a
+/// press and a release and no motion, a button held or not; `?1002` motion
+/// only while a button is held; `?1003` motion with none. Each refusal is
+/// a typed error naming the mode, and it sends nothing: the wire holds only
+/// what was allowed, mode by mode.
+///
+/// In each mode the refusals come before the call that completes the
+/// program's read: past it, the program moves on to the next mode, and a
+/// refusal made then would meet that mode instead.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "the wire is read in raw mode, a tcsetattr, and ConPTY turns typed bytes into console events rather than forwarding them (#149)"
+)]
+fn each_tracking_mode_carries_only_the_mouse_events_it_reports() -> termlens::Result<()> {
+    use termlens::MouseButton;
+
+    let refused = |result: termlens::Result<()>, mentions: &str| match result {
+        Err(Error::Input(message)) => {
+            assert!(
+                message.contains(mentions),
+                "not naming {mentions}: {message}"
+            );
+        }
+        other => panic!("expected Error::Input naming {mentions}, got {other:?}"),
+    };
+    let mut t = util::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\e[?9h",
+            "X10 ",
+            "--read-hex",
+            "6",
+            "NL",
+            "--raw",
+            r"\e[?9l\e[?1000h",
+            "VT200 ",
+            "--read-hex",
+            "12",
+            "NL",
+            "--raw",
+            r"\e[?1000l\e[?1002h",
+            "BUTTON ",
+            "--read-hex",
+            "24",
+            "NL",
+            "--raw",
+            r"\e[?1002l\e[?1003h",
+            "ANY ",
+            "--read-hex",
+            "12",
+            " WIRE-EOF",
+            "--wait",
+        ],
+    )?;
+
+    t.wait_until(|s| s.contains("X10"))?;
+    refused(t.mouse_move(4, 2), "X10");
+    refused(t.mouse_up(MouseButton::Left, 4, 2), "X10");
+    // Ctrl is dropped: X10 reports the button alone.
+    t.mouse_down(MouseButton::Left.ctrl(), 4, 2)?;
+
+    t.wait_until(|s| s.contains("VT200"))?;
+    t.mouse_down(MouseButton::Left, 4, 2)?;
+    refused(t.mouse_move(5, 2), "?1000");
+    t.mouse_up(MouseButton::Left, 4, 2)?;
+
+    // A move is refused with no button held, carried with one, and
+    // refused again once it is released.
+    t.wait_until(|s| s.contains("BUTTON"))?;
+    refused(t.mouse_move(5, 2), "?1003");
+    t.mouse_down(MouseButton::Left, 4, 2)?;
+    t.mouse_move(5, 2)?;
+    t.mouse_up(MouseButton::Left, 5, 2)?;
+    refused(t.mouse_move(6, 2), "?1003");
+    t.mouse_down(MouseButton::Left, 6, 2)?;
+
+    // Released here, under ?1003, and then a move with none held.
+    t.wait_until(|s| s.contains("ANY"))?;
+    refused(t.mouse_move(80, 2), "outside the 80x24 grid");
+    t.mouse_up(MouseButton::Left, 6, 2)?;
+    t.mouse_move(7, 2)?;
+
+    t.wait_until(|s| s.contains("WIRE-EOF"))?;
+    let screen = t.screen();
+    let wire: Vec<String> = (0..4)
+        .map(|row| screen.row_text(row).trim_end().to_owned())
+        .collect();
+    assert_eq!(
+        wire,
+        [
+            "X10 1b5b4d202523",
+            "VT200 1b5b4d2025231b5b4d232523",
+            "BUTTON 1b5b4d2025231b5b4d4026231b5b4d2326231b5b4d202723",
+            "ANY 1b5b4d2327231b5b4d432823 WIRE-EOF",
+        ]
+    );
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// With no tracking mode in force, a move, a press and a release are each
+/// refused as `click` is: bytes the application never asked for would be
+/// read as keys.
+#[test]
+fn mouse_moves_presses_and_releases_need_mouse_tracking() -> termlens::Result<()> {
+    use termlens::MouseButton;
+
+    let mut t = util::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &["READY", "--wait"],
+    )?;
+    t.wait_until(|s| s.contains("READY"))?;
+    for result in [
+        t.mouse_move(1, 1),
+        t.mouse_down(MouseButton::Left, 1, 1),
+        t.mouse_up(MouseButton::Left, 1, 1),
+    ] {
+        match result {
+            Err(Error::Input(message)) => {
+                assert!(message.contains("not enabled mouse tracking"), "{message}");
+            }
+            other => panic!("expected Error::Input, got {other:?}"),
+        }
+    }
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// crossterm reads the three as it reads a real terminal's: a hover as
+/// `Moved`, a move with the left button held as `Drag`, and the press and
+/// release around it. A hover highlight could only be tested before with
+/// hand-written SGR bytes (#789).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
+fn crossterm_reads_a_hover_and_a_drag_driven_by_hand() -> termlens::Result<()> {
+    use termlens::MouseButton;
+
+    let mut t = spawn_form_echo()?;
+    t.wait_frame(|s| s.contains("form-echo ready"))?;
+    t.mouse_move(10, 5)?;
+    t.wait_frame(|s| s.contains("last: mouse:moved:10,5"))?;
+    t.mouse_down(MouseButton::Left, 10, 5)?;
+    t.wait_frame(|s| s.contains("last: mouse:down:10,5"))?;
+    t.mouse_move(12, 5)?;
+    t.wait_frame(|s| s.contains("last: mouse:drag:12,5"))?;
+    t.mouse_up(MouseButton::Left, 12, 5)?;
+    t.wait_frame(|s| s.contains("last: mouse:up:12,5"))?;
+
+    t.send(Key::Esc)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 #[test]
 #[cfg_attr(
     windows,

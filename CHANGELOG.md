@@ -28,6 +28,18 @@ reads that marker.
   selected row of a list, what an error colour covers. A wide character
   is judged by the cell that holds it and counts both of its columns.
   Several outside test suites carried a helper for this. (#787)
+- `Terminal::mouse_move(col, row)`, `mouse_down(button, col, row)` and
+  `mouse_up(button, col, row)` send a pointer move, a press and a release
+  as calls of their own: a hover, which crossterm reads as `Moved`, and a
+  drag driven a step at a time, with the screen asserted in the middle of
+  it. They encode as `click` does, in every encoding, and refuse with
+  `Error::Input` what the application's tracking mode would not report: a
+  move needs `?1003`, or `?1002` while a button is held, so the terminal
+  keeps which buttons `mouse_down` pressed until `mouse_up` releases them,
+  and X10 reports neither a move nor a release. A motion carries the held
+  press's button and modifiers, so a press, a move per cell and a release
+  send what `drag` sends. Only hand-written bytes (`\x1b[<35;10;5M`)
+  produced a hover before. (#789)
 
 ### Changed
 

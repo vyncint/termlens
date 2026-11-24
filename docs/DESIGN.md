@@ -153,13 +153,13 @@ the drain behind it (#771).
 
 Which failures are errors and which are panics is a deliberate split, not
 an accident of history. `send`/`send_str`/`paste`/`click`/`drag`/`scroll`
-all return `Result`, because *whether the child is still there to receive
-input* is a fact about the run, discovered at runtime, and a test may
-legitimately want to handle it. `Key::F(13)` still panics, because there
-is no thirteenth function key on any terminal and never will be: that is a
-mistake in the test's own source, and the same category as indexing a
-slice out of bounds. Environmental failures are errors; impossible
-arguments are panics.
+and the mouse's step-by-step calls all return `Result`, because *whether
+the child is still there to receive input* is a fact about the run,
+discovered at runtime, and a test may legitimately want to handle it.
+`Key::F(13)` still panics, because there is no thirteenth function key on
+any terminal and never will be: that is a mistake in the test's own
+source, and the same category as indexing a slice out of bounds.
+Environmental failures are errors; impossible arguments are panics.
 
 Replies go to that same thread, fire-and-forget: writing them from the
 reader thread would block whenever the application stopped reading its
@@ -1288,6 +1288,19 @@ that acts *along* the path: a drawing surface painting each crossed cell, a
 selection highlighting incrementally, a drag that must cross a pane edge to
 register. A real pointer's exact path is not reproducible and does not need
 to be; every intervening cell being reported is the property that matters.
+
+**A gesture can also be driven a step at a time.** `mouse_down` presses
+a button and holds it, `mouse_move` reports motion, and `mouse_up`
+releases the button: a hover, and a drag whose middle a test can see. The
+terminal keeps which buttons are held between the press and the release,
+because whether a motion is reported at all depends on it: any-event
+tracking (`?1003`) reports every motion, button-event tracking (`?1002`)
+only while a button is down, and `?1000` and X10 none. A move the mode
+cannot carry is a typed error, as a click without tracking is. A motion
+carries the code of the button pressed last and still held, with the
+modifiers it was pressed with, or `3` with none held, plus 32 — xterm's
+arithmetic — so a hover is SGR `35` and a step of a left drag `32`, and a
+press, a move per cell and a release send the bytes `drag` sends.
 
 **Focus events** (`ESC [ I` / `ESC [ O`) follow the same mode-aware contract
 as the mouse: sent only when the application enabled mode 1004, refused with

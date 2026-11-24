@@ -56,6 +56,8 @@ fn describe_mouse(mouse: &MouseEvent) -> Option<String> {
     let kind = match mouse.kind {
         MouseEventKind::Down(_) => "down",
         MouseEventKind::Up(_) => "up",
+        MouseEventKind::Drag(_) => "drag",
+        MouseEventKind::Moved => "moved",
         MouseEventKind::ScrollUp => "scrollup",
         MouseEventKind::ScrollDown => "scrolldown",
         _ => return None,

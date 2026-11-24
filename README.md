@@ -191,10 +191,11 @@ header — is also its input format. The `termlens` command reads a whole
 | Did the emulator understand everything it was sent? | `unsupported()` — every sequence it did not implement, so a plausible grid can be told from a right one |
 
 **Input is mode-aware.** `send(Key)`, modifier chords, `paste`, `click`,
-`drag` (one motion per cell crossed), `scroll` with modifiers, `focus_in`
-/`focus_out`, `resize` and `signal` are encoded exactly as the application
-configured its terminal — SGR mouse, bracketed paste, DECCKM — because the
-emulator knows which modes it enabled.
+`drag` (one motion per cell crossed), `mouse_move` (a hover) with
+`mouse_down`/`mouse_up` (a gesture a step at a time), `scroll` with
+modifiers, `focus_in`/`focus_out`, `resize` and `signal` are encoded
+exactly as the application configured its terminal — SGR mouse, bracketed
+paste, DECCKM — because the emulator knows which modes it enabled.
 
 **Images are captured, not composited.** `graphics()` reports every kitty
 and sixel transmission — placement, declared size and cell extent, format,

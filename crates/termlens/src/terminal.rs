@@ -649,7 +649,8 @@ impl ScrollChord {
     }
 }
 
-/// A mouse button, for [`Terminal::click_with`] and [`Terminal::drag`].
+/// A mouse button, for [`Terminal::click_with`], [`Terminal::drag`],
+/// [`Terminal::mouse_down`] and [`Terminal::mouse_up`].
 ///
 /// Add modifiers the same way [`Key`](crate::Key) does:
 /// `MouseButton::Left.ctrl()`.
@@ -2459,6 +2460,7 @@ impl TerminalBuilder {
             last_frame: None,
             record_budget: self.record_budget,
             cell_size: self.cell_size,
+            mouse_held: Vec::new(),
         })
     }
 }
@@ -3041,6 +3043,12 @@ pub struct Terminal {
     /// Declared pixels per cell, kept so a resize can recompute the PTY's
     /// pixel geometry rather than silently dropping it.
     cell_size: Option<(u16, u16)>,
+    /// The buttons [`mouse_down`](Terminal::mouse_down) pressed and
+    /// [`mouse_up`](Terminal::mouse_up) has not released, each with the
+    /// modifiers it went down with, in the order they went down. A motion
+    /// reports the last of them, and `?1002` reports motion only while there
+    /// is one.
+    mouse_held: Vec<MouseChord>,
 }
 
 impl Terminal {
@@ -3184,8 +3192,10 @@ impl Terminal {
     /// and reported on another.
     ///
     /// [`send_str`](Self::send_str), [`paste`](Self::paste),
-    /// [`click`](Self::click), [`drag`](Self::drag) and
-    /// [`scroll`](Self::scroll) share this contract.
+    /// [`click`](Self::click), [`drag`](Self::drag),
+    /// [`scroll`](Self::scroll), [`mouse_move`](Self::mouse_move),
+    /// [`mouse_down`](Self::mouse_down) and [`mouse_up`](Self::mouse_up)
+    /// share this contract.
     pub fn send(&mut self, key: impl Input + fmt::Debug) -> Result<()> {
         let what = format!("{key:?}");
         self.ensure_deliverable(&what)?;
@@ -3523,6 +3533,172 @@ impl Terminal {
         }
         bytes.extend(self.mouse_report(&modes, chord.code(), to.0, to.1, false)?);
         self.write_input(&bytes, "a mouse drag")
+    }
+
+    /// Move the pointer to `(col, row)` — columns first, like
+    /// [`click`](Self::click) — with no button held: a hover. Or, with a
+    /// button [`mouse_down`](Self::mouse_down) pressed and not yet released,
+    /// one step of a drag driven by hand.
+    ///
+    /// ```no_run
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// t.mouse_move(10, 4)?;                          // hover over a button
+    /// t.wait_until(|s| s.contains("Save (ctrl+s)"))?; // its tooltip
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// The report is the motion a terminal sends: the button code of the
+    /// press still held — the last one, with its modifiers, if there are
+    /// several — or `3`, no button, plus 32, as xterm writes it. With no
+    /// button that is SGR `CSI < 35 ; col ; row M`, which crossterm reads as
+    /// `Moved`; with the left button held, `CSI < 32 ; … M`, `Drag(Left)`.
+    /// It is encoded as `click` encodes, in the encoding the application
+    /// enabled.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Write`] when the child is gone, checked first as on `click`.
+    /// Then [`Error::Input`] when the application's tracking mode does not
+    /// report this motion, as a terminal would not: a move with no button
+    /// held needs any-event tracking (`CSI ? 1003 h`), and one with a button
+    /// held that or button-event tracking (`?1002`); press-and-release
+    /// tracking (`?1000`) and X10 (`?9`) report no motion at all. Then, as
+    /// on `click`, when no tracking is enabled, when `(col, row)` is outside
+    /// the current grid, or when the position is unrepresentable in the
+    /// legacy encoding (columns/rows beyond 222).
+    pub fn mouse_move(&mut self, col: u16, row: u16) -> Result<()> {
+        self.ensure_deliverable("a mouse move")?;
+        let modes = self.input_modes();
+        let held = self.mouse_held.last().copied();
+        match (modes.mouse, held) {
+            (MouseMode::None, _) => return Err(no_mouse_tracking()),
+            (MouseMode::Press, _) => {
+                return Err(Error::Input(
+                    "the application enabled X10 mouse tracking (CSI ?9 h), which \
+                     reports presses only — a terminal sends no motion in that mode"
+                        .into(),
+                ))
+            }
+            (MouseMode::PressRelease, _) => {
+                return Err(Error::Input(
+                    "the application enabled press-and-release mouse tracking \
+                     (CSI ?1000 h), which reports no motion — a move needs \
+                     button-event tracking (?1002) with a button held, or any-event \
+                     tracking (?1003)"
+                        .into(),
+                ))
+            }
+            (MouseMode::ButtonMotion, None) => {
+                return Err(Error::Input(
+                    "the application enabled button-event mouse tracking (CSI ?1002 h), \
+                     which reports motion only while a button is held, and no \
+                     mouse_down holds one — a move with no button needs any-event \
+                     tracking (?1003)"
+                        .into(),
+                ))
+            }
+            (MouseMode::ButtonMotion, Some(_)) | (MouseMode::AnyMotion, _) => {}
+        }
+        let (cols, rows) = self.screen().size();
+        check_mouse_in_grid(col, row, cols, rows)?;
+        // A motion report is the button code plus 32, and with no button
+        // held the code is 3, the one a release carries: xterm's `BtnCode`.
+        let code = held.map_or(3, MouseChord::code) + 32;
+        let bytes = self.mouse_report(&modes, code, col, row, true)?;
+        self.write_input(&bytes, "a mouse move")
+    }
+
+    /// Press `button` at `(col, row)` and hold it: the first half of
+    /// [`click_with`](Self::click_with), for a gesture a test drives step
+    /// by step — press, [`mouse_move`](Self::mouse_move), look at the
+    /// screen mid-drag, [`mouse_up`](Self::mouse_up):
+    ///
+    /// ```no_run
+    /// # use termlens::MouseButton;
+    /// # fn main() -> termlens::Result<()> {
+    /// # let mut t = termlens::Terminal::builder().spawn("true")?;
+    /// t.mouse_down(MouseButton::Left, 2, 5)?;          // grab the splitter
+    /// t.mouse_move(20, 5)?;                            // Drag(Left)
+    /// t.wait_until(|s| s.contains("width: 20"))?;      // mid-gesture
+    /// t.mouse_up(MouseButton::Left, 20, 5)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// The press is encoded as `click_with` encodes its press, and under
+    /// X10 (`CSI ? 9 h`) it carries the button alone, as xterm's does. The
+    /// button counts as held, with these modifiers, until `mouse_up`
+    /// releases it: a motion in between reports it. Under `?1002` or
+    /// `?1003`, a press, a move to each cell on the way and a release of
+    /// the same chord send exactly what [`drag`](Self::drag) sends. A
+    /// button pressed again while held is pressed again, as written, and
+    /// is held from then on with the new modifiers.
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`click`](Self::click). A press whose write gave
+    /// up is held all the same: [`Error::Write`] says its bytes stay queued
+    /// for the application.
+    pub fn mouse_down(&mut self, button: impl Into<MouseChord>, col: u16, row: u16) -> Result<()> {
+        self.ensure_deliverable("a mouse press")?;
+        let chord = button.into();
+        let modes = self.input_modes();
+        // X10 reports the button alone, as `click_with` sends it (#642).
+        let code = match modes.mouse {
+            MouseMode::None => return Err(no_mouse_tracking()),
+            MouseMode::Press => chord.button.code(),
+            MouseMode::PressRelease | MouseMode::ButtonMotion | MouseMode::AnyMotion => {
+                chord.code()
+            }
+        };
+        let (cols, rows) = self.screen().size();
+        check_mouse_in_grid(col, row, cols, rows)?;
+        let bytes = self.mouse_report(&modes, code, col, row, true)?;
+        self.mouse_held.retain(|held| held.button != chord.button);
+        self.mouse_held.push(chord);
+        self.write_input(&bytes, "a mouse press")
+    }
+
+    /// Release `button` at `(col, row)`: the second half of
+    /// [`click_with`](Self::click_with), ending a gesture
+    /// [`mouse_down`](Self::mouse_down) began, wherever the pointer has
+    /// moved since. See `mouse_down` for an example.
+    ///
+    /// The release is encoded as `click_with` encodes its release: SGR
+    /// repeats the button code with a final `m`, and the other encodings
+    /// send button `3` plus the modifier bits, which is why the button
+    /// released is not on the wire there. The modifiers are the ones given
+    /// here. A button that is not held is released all the same, as
+    /// written; a motion after the release reports the press still held, if
+    /// any.
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`click`](Self::click), and [`Error::Input`] under
+    /// X10 tracking (`CSI ? 9 h`), in which a terminal reports no release.
+    /// The button is then still held.
+    pub fn mouse_up(&mut self, button: impl Into<MouseChord>, col: u16, row: u16) -> Result<()> {
+        self.ensure_deliverable("a mouse release")?;
+        let chord = button.into();
+        let modes = self.input_modes();
+        match modes.mouse {
+            MouseMode::None => return Err(no_mouse_tracking()),
+            MouseMode::Press => {
+                return Err(Error::Input(
+                    "the application enabled X10 mouse tracking (CSI ?9 h), which \
+                     reports presses only — a terminal sends no release in that mode"
+                        .into(),
+                ))
+            }
+            MouseMode::PressRelease | MouseMode::ButtonMotion | MouseMode::AnyMotion => {}
+        }
+        let (cols, rows) = self.screen().size();
+        check_mouse_in_grid(col, row, cols, rows)?;
+        let bytes = self.mouse_report(&modes, chord.code(), col, row, false)?;
+        self.mouse_held.retain(|held| held.button != chord.button);
+        self.write_input(&bytes, "a mouse release")
     }
 
     /// Scroll the wheel one notch at `(col, row)` (0-based).

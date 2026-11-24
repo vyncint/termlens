@@ -109,8 +109,8 @@ your test ── send(Key) · click · paste · resize ──▶ PTY     └─�
    `cursor_visible()` for the flag alone). Everything
    that speaks of terminal geometry or a pointer is **column-first**:
    `size()` → `(cols, rows)`, `resize(cols, rows)`, `click(col, row)`,
-   `scroll(col, row, …)`, `drag(button, from_col, from_row, to_col,
-   to_row)`. The four drag arguments make a transposed `find` result
+   `mouse_move(col, row)`, `scroll(col, row, …)`, `drag(button, from_col,
+   from_row, to_col, to_row)`. The four drag arguments make a transposed `find` result
    unwritable without explicitly choosing the coordinate order.
 
 7. **Always finish the process.** Send the quit key, `wait_exit()?` and
@@ -433,6 +433,7 @@ included in `X`, and `terminal closed (EOF) while waiting for X` is
 | `--- last returned frame → live screen ---` under a `wait_frame` timeout | the app repainted, but never into the predicate | the diff shows what did change; the predicate is looking at the wrong thing |
 | `input not receivable: the application has not enabled mouse tracking` | `click`/`drag`/`scroll` before the app enabled the mouse, or after it reset a tracking mode: `CSI ? 1000 l` ends reporting whichever of `?9`, `?1000`, `?1002`, `?1003` was set, as in xterm | `wait_until(|s| s.mouse_mode() != MouseMode::None)` first; an app that resets one mode to keep another must set that one again |
 | `input not receivable: mouse at (50, 2) is outside the 20x5 grid` | coordinates swapped or out of range | rule 6 |
+| `input not receivable: the application enabled button-event mouse tracking (CSI ?1002 h), which reports motion only while a button is held` | `mouse_move` with no button held, which only `?1003` reports; `?1000` and X10 report no motion at all | `mouse_down` first for a drag; a hover needs an app that enables `?1003` (crossterm's `EnableMouseCapture` does) |
 | `failed to spawn \`sh\`: \`sh\` is a bare program name and env_clear() removed PATH` | bare program name under `env_clear` | absolute path, `bin!`, or `.env("PATH", …)` |
 | ``failed to spawn `./x`: cannot execute …: its #! interpreter "…" does not exist`` | the script's `#!` line names a file that is not there, or with `is not an executable file` one that cannot be run; a `\r` at the end of the quoted name means CRLF line endings | install the interpreter, point the `#!` line at one that exists, or save the script with LF endings |
 | `invalid terminal size: a terminal needs at least 2 columns and 2 rows` | geometry below 2x2 (past 1000 has its own message) | rule 5 |
@@ -473,7 +474,10 @@ included in `X`, and `terminal closed (EOF) while waiting for X` is
 yourself; `"\n"` would send LF, not CR), `paste("text")` (bracketed if the
 app enabled it), `send_after(delay, Key)`, `click(col, row)`,
 `click_with(MouseButton::Right, col, row)`, `drag(MouseButton::Left, from_c,
-from_r, to_c, to_r)`, `scroll(col, row, Scroll::Down)`, `resize(cols, rows)`,
+from_r, to_c, to_r)`, `mouse_move(col, row)` (a hover; the app must have
+enabled `?1003`, or `?1002` with a button held), `mouse_down(MouseButton::Left,
+col, row)` / `mouse_up(…)` (a press held across moves, so a test can assert
+mid-drag), `scroll(col, row, Scroll::Down)`, `resize(cols, rows)`,
 `focus_in()` / `focus_out()`, `signal(Signal::Term)` (Unix), `pid()`.
 
 **Keys**: `Key::Char('j')`, `Enter`, `Esc`, `Tab`, `BackTab`, `Backspace`,
