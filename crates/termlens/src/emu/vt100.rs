@@ -905,6 +905,9 @@ impl Emulator for Vt100Emulator {
                 self.feed_staged(&bytes[i..=i]);
                 fed = i + 1;
             }
+            // Asked before the step, which leaves the sequence, and used
+            // after it (#764).
+            let spaced = self.tracker.spaced_csi(byte);
             // Asked before the step, because whether this byte is a character
             // at all depends on the state the tracker is in before it — and
             // a designation's own final byte must not be drawn.
@@ -1003,6 +1006,18 @@ impl Emulator for Vt100Emulator {
                     None
                 }
             };
+            // A CSI whose first intermediate is `SP` reaches the record
+            // without it, so the record is told what vte collected, between
+            // the bytes before the final byte and that byte (#764). A query
+            // of that shape is the tracker's, below, and never listed.
+            if let (Some(intermediates), None) = (spaced, &stop) {
+                if fed <= i {
+                    self.feed_staged(&bytes[fed..i]);
+                    self.parser.callbacks_mut().expect_spaced(intermediates);
+                    self.feed_staged(&bytes[i..=i]);
+                    fed = i + 1;
+                }
+            }
             if let Some(stop) = stop {
                 // A query is the responder's, answered or named, and the
                 // record is told so between the bytes before its final
@@ -3206,6 +3221,49 @@ mod tests {
         // and stays listed.
         let s = emu_with(b"\x1b[18;0t").snapshot();
         assert_eq!(s.unsupported(), ["^[[18;0t"]);
+    }
+
+    /// vt100 reports a CSI whose first intermediate is `SP` without it, all
+    /// but DECSCUSR, which it carries out: SL (`CSI 2 SP @`) was listed as
+    /// `^[[2@`, ICH, which the grid does have, SR as `^[[2A`, CUU, DECSWBV as
+    /// `^[[2t`, and `CSI 1 SP c` not at all, as if it were DA1 (#764). Each
+    /// is listed in its own shape and changes nothing on the grid — not
+    /// the ICH it was listed as. Whole and split at every byte.
+    #[test]
+    fn a_csi_with_a_space_intermediate_is_listed_with_it() {
+        for (sequence, shape) in [
+            ("\x1b[2 @", "^[[2 @"),
+            ("\x1b[2 A", "^[[2 A"),
+            ("\x1b[2 t", "^[[2 t"),
+            ("\x1b[1 c", "^[[1 c"),
+            ("\x1b[ @", "^[[ @"),
+            ("\x1b[3 !p", "^[[3 !p"),
+        ] {
+            let stream = format!("ab\r{sequence}X");
+            for cut in 0..stream.len() {
+                let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+                for piece in [&stream[..cut], &stream[cut..]] {
+                    let mut off = 0;
+                    while off < piece.len() {
+                        let processed = emu.process(&piece.as_bytes()[off..]);
+                        assert_eq!(processed.stop, None, "{sequence:?} cut at {cut}");
+                        off += processed.consumed;
+                    }
+                }
+                let s = emu.snapshot();
+                assert_eq!(s.unsupported(), [shape], "{sequence:?} cut at {cut}");
+                assert_eq!(s.text(), "Xb\n\n\n", "{sequence:?} cut at {cut}");
+            }
+        }
+        // DECSCUSR is the tracker's, as before, an undefined style
+        // included, which xterm ignores too.
+        let s = emu_with(b"\x1b[4 q\x1b[7 q").snapshot();
+        assert!(s.unsupported().is_empty(), "{:?}", s.unsupported());
+        assert_eq!(s.cursor_shape(), crate::CursorShape::Underline);
+        // A digit after the `SP` makes vte ignore the sequence, which no
+        // callback then reports; the next one keeps its own shape.
+        let s = emu_with(b"\x1b[ 1@\x1b[20h").snapshot();
+        assert_eq!(s.unsupported(), ["^[[20h"]);
     }
 
     #[test]

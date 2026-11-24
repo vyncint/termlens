@@ -85,6 +85,13 @@ reads that marker.
   t` likewise, and `CSI > ; q` was named in the timeout and listed as
   `^[[>0;0q`. `CSI 18 ; 0 t`, which the responder does not take, is still
   listed. A test that expected such an entry should expect none. (#763)
+- `Screen::unsupported()` lists a CSI with a space intermediate in its
+  own shape: SL (`CSI 2 SP @`, scroll left) as `^[[2 @`, SR
+  (`CSI 2 SP A`) as `^[[2 A`, and `CSI 2 SP t` as `^[[2 t`. The backend
+  reports every such sequence but `DECSCUSR` without its intermediate, so
+  they were listed as `^[[2@`, `^[[2A` and `^[[2t`, which name ICH, CUU
+  and a window operation, and `CSI 1 SP c` was not listed at all, taken
+  for DA1. A test that pinned the old shapes needs the new ones. (#764)
 
 ### Fixed
 

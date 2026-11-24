@@ -18,7 +18,8 @@
 //! **termlens** did not honour. A query the responder answers or names is
 //! also filtered on the tracker's word, which the emulator passes on just
 //! before vt100 dispatches it, since vte can read a query in a shape the
-//! tracker does not (#763).
+//! tracker does not (#763); and the same way the tracker supplies the
+//! intermediates of a CSI vt100 reports without them (#764).
 //!
 //! The same callback set counts the rows vt100 drops off the front of the
 //! main screen's history, which is the one thing its history cannot tell
@@ -66,6 +67,9 @@ pub(super) struct Unhandled {
     /// The sequence vt100 reports next is a query the responder answers or
     /// names — see [`expect_query`](Self::expect_query).
     query: bool,
+    /// The intermediates of the CSI vt100 reports next, which it reports
+    /// without them — see [`expect_spaced`](Self::expect_spaced).
+    spaced: Option<[u8; 2]>,
     /// The content length of the last OSC recorded, before its entry was
     /// cut: how much of a body reached vt100, which the capture-bound
     /// tests read now that the entry no longer shows it (#694, #695).
@@ -84,6 +88,7 @@ impl Default for Unhandled {
             icon: None,
             cut_osc: None,
             query: false,
+            spaced: None,
             #[cfg(test)]
             last_osc_len: 0,
         }
@@ -124,6 +129,7 @@ impl Unhandled {
     /// no sequence took is forgotten.
     pub(super) fn settle(&mut self) {
         self.query = false;
+        self.spaced = None;
         self.settle_icon();
     }
 
@@ -148,6 +154,17 @@ impl Unhandled {
     /// application never wrote, and `CSI > ; q` named and listed (#763).
     pub(super) fn expect_query(&mut self) {
         self.query = true;
+    }
+
+    /// Tell the record the intermediates vte collected for the CSI vt100
+    /// reports next, the second 0 for none, which vt100 drops: it hands a
+    /// CSI whose first intermediate is `SP` to `unhandled_csi` as if it had
+    /// none, all but DECSCUSR, which it carries out. SL (`CSI 2 SP @`) was
+    /// listed as `^[[2@`, ICH, which the grid does have, and `CSI 1 SP c`
+    /// not at all, taken for DA1 (#764). The emulator says so just before
+    /// it feeds the final byte, alone.
+    pub(super) fn expect_spaced(&mut self, intermediates: [u8; 2]) {
+        self.spaced = Some(intermediates);
     }
 
     /// Tell the record what the tracker saw of the next `OSC` vte
@@ -437,7 +454,22 @@ impl Callbacks for Unhandled {
         params: &[&[u16]],
         c: char,
     ) {
+        let spaced = self.spaced.take();
         if std::mem::take(&mut self.query) {
+            return;
+        }
+        // None of these is the tracker's, which reads `SP` only for
+        // DECSCUSR, so each is on record, as vte collected it.
+        if let Some(intermediates) = spaced {
+            let mut shape = format!("^[[{}", params_text(params));
+            shape.extend(
+                intermediates
+                    .into_iter()
+                    .filter(|&b| b != 0)
+                    .map(char::from),
+            );
+            shape.push(c);
+            self.record(shape);
             return;
         }
         // vte hands the private marker (`<`, `=`, `>`, `?`) over as the

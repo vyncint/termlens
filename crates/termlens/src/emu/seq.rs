@@ -806,6 +806,11 @@ pub(crate) struct SeqTracker {
     csi_prefix: u8,
     /// Intermediate byte seen in the current CSI (only `$` matters).
     csi_intermediate: u8,
+    /// The intermediates of the current CSI as vte collects them — a
+    /// private marker that opens it, then the bytes 0x20–0x2F — the first
+    /// two, as many as vte keeps, and 0 for none. vt100 drops them for a
+    /// `SP` first; see [`spaced_csi`](Self::spaced_csi).
+    csi_collected: [u8; 2],
     csi_invalid: bool,
     /// The current CSI wrote a sub-parameter (`:`). Only ED reads one —
     /// see [`scan_csi_byte`](Self::scan_csi_byte) — so for every other
@@ -1041,6 +1046,7 @@ impl SeqTracker {
             sync_update: false,
             csi_prefix: 0,
             csi_intermediate: 0,
+            csi_collected: [0; 2],
             csi_invalid: false,
             csi_colon: false,
             csi_in_subparam: false,
@@ -1460,6 +1466,21 @@ impl SeqTracker {
             .then_some(self.osc_buf.as_slice())
     }
 
+    /// The intermediates vte collected for the CSI `b` ends, when vt100
+    /// reports that CSI without them: one whose first intermediate is `SP`,
+    /// which vt100 carries out only for DECSCUSR (`q`) and hands every
+    /// other one to its callback as if it had none — SL (`CSI 2 SP @`) as
+    /// ICH (#764). The second is 0 when there is none.
+    ///
+    /// Consulted **before** the byte is stepped.
+    pub(crate) fn spaced_csi(&self, b: u8) -> Option<[u8; 2]> {
+        (self.state == State::Csi
+            && (0x40..=0x7e).contains(&b)
+            && b != b'q'
+            && self.csi_collected[0] == b' ')
+            .then_some(self.csi_collected)
+    }
+
     /// The glyph `b` draws in the invoked character set, when that set
     /// redefines `b` — the 32 bytes DEC Special Graphics redraws, or `#` in
     /// the UK set — or `None` when the byte draws as itself, or is not a
@@ -1580,6 +1601,7 @@ impl SeqTracker {
     fn reset_csi_scanner(&mut self) {
         self.csi_prefix = 0;
         self.csi_intermediate = 0;
+        self.csi_collected = [0; 2];
         self.csi_invalid = false;
         self.csi_colon = false;
         self.csi_in_subparam = false;
@@ -1661,6 +1683,11 @@ impl SeqTracker {
 
     /// Track one CSI parameter/intermediate byte.
     fn scan_csi_byte(&mut self, b: u8) {
+        if (0x20..=0x2f).contains(&b) || ((0x3c..=0x3f).contains(&b) && self.csi_first) {
+            if let Some(slot) = self.csi_collected.iter_mut().find(|slot| **slot == 0) {
+                *slot = b;
+            }
+        }
         match b {
             b'?' | b'>' | b'=' if self.csi_first => self.csi_prefix = b,
             // A sub-parameter's digits are not the parameter's.
