@@ -144,6 +144,7 @@ returns either the thing you asked for or a timeout carrying the screen.
 | `wait_frame(pred)` | a **complete** DEC 2026 frame satisfies `pred`; returns that frame, and each call sees a frame no earlier call did | the application brackets repaints in synchronized updates (crossterm's `BeginSynchronizedUpdate`) |
 | `snapshot_after(pred)` | `pred` holds and the picture has then held still; returns that screen | a whole-screen snapshot — what `assert_screen_snapshot!` uses |
 | `wait_stable(quiet)` | no cell, cursor or size change for `quiet`; returns the screen | settling after a resize, or without a predicate |
+| `resize_and_wait(cols, rows, pred)` | after the resize, `pred` holds on output read since; returns that screen | a resize: the old screen, still on the grid at the new size, cannot satisfy it |
 | `wait_idle(quiet)` | no **bytes** for `quiet`, not mid-sequence, no update open | output silence is itself the fact; a heuristic, and documented as one |
 | `wait_exit()` | the process ended; returns its `ExitStatus` | the end of every test |
 
@@ -271,7 +272,7 @@ termlens assertion that does:
 | Invisible to `TestBackend` | The assertion that sees it |
 | --- | --- |
 | raw-mode entry and exit, the alternate screen | `t.wait_until(\|s\| s.alternate_screen())`, and `!alternate_screen()` after `q` |
-| a resize reaching the application | `t.resize(60, 14)?; t.wait_until(\|s\| s.contains("60x14"))?` |
+| a resize reaching the application | `t.resize_and_wait(60, 14, \|s\| s.contains("60x14"))?` |
 | output outside ratatui — a `println!`, a logger, a panic | `s.contains("panicked")`, or a snapshot of the whole grid |
 | a torn frame, in an application that emits DEC 2026 synchronized updates (stock ratatui does not) | `wait_frame` returns complete DEC 2026 frames only |
 | capability probes and the modes they turn on | `answer_queries` replies as a terminal would; `s.mouse_mode()`, `s.bracketed_paste()` say what was asked for |

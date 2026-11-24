@@ -2995,6 +2995,15 @@ fn queue_replies(
     }
 }
 
+/// A resize that changed the size, as a wait after it needs it: how many
+/// reads had been processed when the grid took the size, and the size.
+#[derive(Debug, Clone, Copy)]
+struct Resized {
+    reads: u64,
+    cols: u16,
+    rows: u16,
+}
+
 /// A program running inside a real PTY, observed through an emulated screen.
 ///
 /// See the crate-level docs for a full example. Dropping a `Terminal` kills
@@ -4071,10 +4080,31 @@ impl Terminal {
 
     fn wait_until_deadline(
         &mut self,
-        mut predicate: impl FnMut(&Screen) -> bool,
+        predicate: impl FnMut(&Screen) -> bool,
         timeout: Duration,
     ) -> Result<()> {
-        const WHAT: &str = "the screen predicate to hold";
+        self.wait_screen_deadline(predicate, timeout, None)
+            .map(drop)
+    }
+
+    /// `wait_until`'s wait, returning the screen the predicate held on.
+    ///
+    /// After a resize (`resized`), the predicate is asked only about screens
+    /// that output processed after the resize produced: the screen the
+    /// resize left behind is the old frame at the new size, and the
+    /// predicate may well hold on that (#788).
+    fn wait_screen_deadline(
+        &mut self,
+        mut predicate: impl FnMut(&Screen) -> bool,
+        timeout: Duration,
+        resized: Option<Resized>,
+    ) -> Result<Screen> {
+        let what = match resized {
+            None => "the screen predicate to hold".to_owned(),
+            Some(Resized { cols, rows, .. }) => format!(
+                "the screen predicate to hold on output read after the resize to {cols}x{rows}"
+            ),
+        };
         let deadline = deadline_after(timeout);
         let mut seen_generation = None;
         let outcome = self.shared.wait_until(deadline, |state| {
@@ -4094,13 +4124,19 @@ impl Terminal {
             if let Some(failure) = state.emulator_failure() {
                 return Some(Err(failure));
             }
-            let screen = state.snapshot();
-            if predicate(&screen) {
-                return Some(Ok(()));
+            // A read counts once it has been processed, and the resize took
+            // its count under the lock that processes them, so no read falls
+            // between the two.
+            if resized.is_none_or(|resized| state.reads > resized.reads) {
+                let screen = state.snapshot();
+                if predicate(&screen) {
+                    return Some(Ok(screen));
+                }
             }
             if state.eof {
+                let screen = state.snapshot();
                 return Some(Err(Error::Eof {
-                    waiting_for: format!("{WHAT}{}{}", state.query_note(), history_note(&screen)),
+                    waiting_for: format!("{what}{}{}", state.query_note(), history_note(&screen)),
                     screen,
                 }
                 .recorded()));
@@ -4111,9 +4147,23 @@ impl Terminal {
             Ok(inner) => inner,
             Err(Expired) => {
                 let screen = self.screen();
-                let note = self.shared.lock().query_note();
+                let (note, silent) = {
+                    let state = self.shared.lock();
+                    let silent = resized.is_some_and(|resized| state.reads == resized.reads);
+                    (state.query_note(), silent)
+                };
+                // Nothing at all since the resize is a different failure
+                // from a predicate that held on none of it, and the one an
+                // application that ignores the resize produces.
+                let silent = if silent {
+                    " — no output has been read since the resize, so the application has \
+                     not repainted; if it does not repaint when resized, wait with \
+                     wait_until on the screen as it is"
+                } else {
+                    ""
+                };
                 Err(Error::Timeout {
-                    waiting_for: format!("{WHAT}{note}{}", history_note(&screen)),
+                    waiting_for: format!("{what}{silent}{note}{}", history_note(&screen)),
                     timeout,
                     screen,
                 }
@@ -4902,7 +4952,9 @@ impl Terminal {
     /// row — or use [`wait_frame`](Self::wait_frame) where the app emits
     /// synchronized updates, which is safe here when the size actually
     /// changes: the frame cursor advances, so only a frame completed
-    /// *after* it can satisfy the wait. A resize to the size the grid
+    /// *after* it can satisfy the wait. For any application,
+    /// [`resize_and_wait`](Self::resize_and_wait) resizes and asks its
+    /// predicate only about output read after the resize. A resize to the size the grid
     /// already has is a no-op — `TIOCSWINSZ` raises no `SIGWINCH` for an
     /// unchanged size, so there is no repaint and the cursor stays put —
     /// and the frame the application last drew is the current truth.
@@ -4969,6 +5021,13 @@ impl Terminal {
     /// released the terminal, carrying the final screen; [`Error::Pty`] if
     /// the ioctl fails.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        self.resize_counted(cols, rows).map(drop)
+    }
+
+    /// [`resize`](Self::resize), and what a wait after it needs to know:
+    /// `None` for a resize to the size the grid already has, which nothing
+    /// answers.
+    fn resize_counted(&mut self, cols: u16, rows: u16) -> Result<Option<Resized>> {
         check_size(cols, rows)?;
         // Ahead of the refusal after an exit, as in the waits: a reader that
         // drained to EOF behind a panicked emulator is not why this failed.
@@ -5000,7 +5059,11 @@ impl Terminal {
         // The cursor is what makes the advice in the stale-frame trap above
         // hold for `wait_frame`: a frame drawn at the old size cannot be the
         // repaint that answers this resize, so it stops being offered.
-        let cursor = self.shared.mutate(|state| {
+        //
+        // The read count is taken under the same lock for the same reason:
+        // `resize_and_wait` asks its predicate only about reads past it, and
+        // no read can be processed between the resize and the count.
+        let taken = self.shared.mutate(|state| {
             // Again under the lock that resizes, since the reader may have
             // panicked since the check above. A panicked emulator is never
             // called again (#211), and resizing the PTY alone is no better:
@@ -5029,13 +5092,97 @@ impl Terminal {
                 return Err(Error::Pty(format!("resize failed: {e}")));
             }
             state.touch();
-            Ok(Some(state.frames_seen))
+            Ok(Some((state.frames_seen, state.reads)))
         })?;
-        if let Some(cursor) = cursor {
-            self.frame_cursor = cursor;
-            self.frame_cursor_resize = Some((cols, rows));
-        }
-        Ok(())
+        let Some((cursor, reads)) = taken else {
+            return Ok(None);
+        };
+        self.frame_cursor = cursor;
+        self.frame_cursor_resize = Some((cols, rows));
+        Ok(Some(Resized { reads, cols, rows }))
+    }
+
+    /// Resize, then wait until `predicate` holds on output read after the
+    /// resize, and return the screen it held on: [`resize`](Self::resize)
+    /// and a wait that cannot pass on the screen the resize left behind.
+    ///
+    /// `resize` gives the grid the new size at once and keeps the old
+    /// content until the application repaints, the stale-frame trap of
+    /// `docs/DESIGN.md` §2: after `resize(100, 30)`,
+    /// `wait_until(|s| s.contains("ready"))` returns at once on a screen
+    /// still reading `size 80x24 ready`. Here the predicate is not asked
+    /// about that screen at all, only about the screens that output read
+    /// after the resize produced:
+    ///
+    /// ```
+    /// # fn main() -> termlens::Result<()> {
+    /// # #[cfg(unix)] {
+    /// let mut t = termlens::Terminal::builder()
+    ///     .size(80, 24)
+    ///     .timeout(std::time::Duration::from_secs(10))
+    ///     .args(["-c", r#"show() { printf '\r\033[Ksize %s ready' "$(stty size)"; }
+    ///                     trap show WINCH; show; while :; do sleep 0.05; done"#])
+    ///     .spawn("sh")?;
+    /// t.wait_until(|s| s.contains("size 24 80 ready"))?;
+    /// // `ready` is on the screen already; what is waited for is the repaint.
+    /// let s = t.resize_and_wait(100, 30, |s| s.contains("ready"))?;
+    /// assert!(s.contains("size 30 100 ready"), "{s}");
+    /// # }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Assert on the returned `Screen`, as with
+    /// [`snapshot_after`](Self::snapshot_after): the live grid may have
+    /// moved on since. A resize to the size the grid already has sends the
+    /// application nothing and nothing repaints, so there the screen as it
+    /// is answers the predicate, as `wait_until` would.
+    ///
+    /// The wait is `wait_until`'s otherwise, and so is what it cannot know.
+    /// A predicate can hold on a repaint drawn halfway, so name the last
+    /// thing the repaint draws (rule 2 of `docs/DESIGN.md` §2). And output
+    /// read after the resize is not always drawn for it: an application that
+    /// paints on its own, a clock or a spinner, can paint the old layout
+    /// before it handles the resize. **On Windows** that has a second
+    /// source: ConPTY applies a resize on a thread of its own, so output the
+    /// application writes after this call can still be laid out at the old
+    /// width when it arrives (#499). Where either can happen, name what only
+    /// the new layout shows — the new size, or text that needs the new width
+    /// — as the stale-frame trap advises for every resize.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`resize`](Self::resize) returns, before anything is waited
+    /// for. Then [`Error::Timeout`] at the deadline (builder `timeout`) and
+    /// [`Error::Eof`] as soon as the terminal closes with the predicate
+    /// false, each carrying the screen, as from `wait_until`; a timeout says
+    /// when nothing at all was read after the resize, which is what an
+    /// application that does not repaint when resized produces.
+    pub fn resize_and_wait(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        predicate: impl FnMut(&Screen) -> bool,
+    ) -> Result<Screen> {
+        self.resize_and_wait_for(cols, rows, predicate, self.default_timeout)
+    }
+
+    /// [`resize_and_wait`](Self::resize_and_wait) with a per-call timeout,
+    /// for the one repaint slower than the rest of the suite's waits.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`resize_and_wait`](Self::resize_and_wait), against
+    /// `timeout`.
+    pub fn resize_and_wait_for(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        predicate: impl FnMut(&Screen) -> bool,
+        timeout: Duration,
+    ) -> Result<Screen> {
+        let resized = self.resize_counted(cols, rows)?;
+        self.wait_screen_deadline(predicate, timeout, resized)
     }
 }
 

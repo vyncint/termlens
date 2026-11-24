@@ -3,6 +3,11 @@
 //! TIOCSWINSZ; crossterm surfaces it as `Event::Resize`). Exits on `q`.
 //!
 //! Proves that `Terminal::resize()` really reaches the child.
+//!
+//! Each draw clears the whole screen first and writes `press q to quit`
+//! last, so that line is on the screen before a resize and again once the
+//! repaint is complete, and on no screen in between. That is what lets
+//! `resize_and_wait`'s test wait on it and know which of the two it got.
 
 use std::io::{self, Write};
 
@@ -18,11 +23,10 @@ use crossterm::{execute, queue};
 fn draw(out: &mut impl Write, cols: u16, rows: u16) -> io::Result<()> {
     queue!(
         out,
+        Clear(ClearType::All),
         MoveTo(0, 0),
-        Clear(ClearType::CurrentLine),
         Print(format!("size: {cols}x{rows}")),
         MoveTo(0, 1),
-        Clear(ClearType::CurrentLine),
         Print("press q to quit")
     )?;
     out.flush()

@@ -354,7 +354,8 @@ Every wait runs under the terminal's **default deadline** (builder
 `timeout`, 5s default) or a per-call one: each `wait_*` has a `_for` twin
 (`wait_until_for`, `wait_frame_for`, `wait_idle_for`, `wait_stable_for`,
 `wait_exit_for`, and `wait_until_matches_for` with the `regex` feature), as
-does `snapshot_after` (`snapshot_after_for`), so one known-slow step does not
+do `snapshot_after` (`snapshot_after_for`) and `resize_and_wait`
+(`resize_and_wait_for`), so one known-slow step does not
 force its deadline on the whole suite. There
 is deliberately no unbounded wait: a hung TUI in CI must produce a readable
 failure, not a 6-hour job timeout. On expiry the error **embeds the full
@@ -566,6 +567,20 @@ actually changes: `resize` advances the frame cursor, so only a frame
 completed *after* the resize can satisfy the wait. A resize to the size
 the grid already has is a no-op, and the frame the application last drew
 is still the current truth.
+
+`resize_and_wait(cols, rows, pred)` is the resize and the wait in one call,
+for any application: its predicate is asked only about screens that output
+read after the resize produced, so the stale frame cannot satisfy it. The
+read count it compares against is taken under the lock that resizes, as the
+frame cursor is, so no read falls between the two (#788). After a no-op
+resize the screen as it is answers, as for `wait_frame`. It does not make
+the rule above optional. Output read after the resize is not always drawn
+for it: an application that paints on its own can paint the old layout
+before it handles `SIGWINCH`, and on Windows ConPTY applies the resize on a
+thread of its own and lays out what it relays at the old width until it has
+(#499). A predicate naming what only the new layout shows holds on every
+platform; one the stale frame also satisfies holds only where the
+application paints in answer to the resize.
 
 ### The instant-exit caveat (macOS PTY teardown)
 

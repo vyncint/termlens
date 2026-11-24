@@ -298,6 +298,11 @@ fn honours_no_color_at_a_custom_size() -> termlens::Result<()> {
 
     assert_eq!(s.size(), (100, 30), "{s}");
 
+    // A resize, and a wait that cannot pass on the screen the resize left
+    // behind: the predicate is asked only about what is drawn after it.
+    let narrow = t.resize_and_wait(60, 30, |s| s.contains("Ready"))?;
+    assert_eq!(narrow.size(), (60, 30), "{narrow}");
+
     // With NO_COLOR the title is drawn in the default colour, not cyan.
     let (row, col) = s.find("myapp").expect("title is on screen");
     let title = s.cell(row, col).expect("in range");
@@ -465,6 +470,7 @@ included in `X`, and `terminal closed (EOF) while waiting for X` is
 | `wait_stable(quiet)` | `Screen` | the picture unchanged for `quiet`; bells and no-op repaints do not reset it |
 | `wait_idle(quiet)` | `()` | no *bytes* for `quiet` — a weaker, older sibling of `wait_stable` |
 | `wait_frame(\|s\| bool)` | `Screen` | complete DEC 2026 frames only (rule 8) |
+| `resize_and_wait(cols, rows, \|s\| bool)` | `Screen` | a resize: the predicate is asked only about output read after it, so the old screen at the new size cannot pass it; still name what only the new layout shows where the app paints on its own, or on Windows |
 | `wait_exit()` | `ExitStatus` | the child's exit; `success()`, `code() -> Option<u32>`, `signal() -> Option<&str>` |
 | `wait_until_matches(&Regex)` | `Screen` | feature `regex`: a pattern over a row of the screen — the expect-style wait, on the grid |
 | `record()` … `.stop()` | `Recording` | every complete DEC 2026 frame with its time; `frames()`, `duration()` (to the last frame), `write_asciicast(path)` for a file `asciinema` plays — its header carries when and what was recorded |
@@ -535,6 +541,7 @@ directory (see §9b).
 | `t.send_str("quit\n")` | `t.send_str("quit")?; t.send(Key::Enter)?;` |
 | `t.wait_frame(…)` against a ratatui app | `t.snapshot_after(…)` unless the app emits synchronized updates |
 | `t.click(3, 4)?` as the first thing after spawn | `t.wait_until(\|s\| s.mouse_mode() != MouseMode::None)?;` first |
+| `t.resize(100, 30)?; t.wait_until(\|s\| s.contains("Ready"))?;` | `t.resize_and_wait(100, 30, \|s\| s.contains("Ready"))?;` — the plain wait passes on the old screen, which has the new size at once |
 | `.timeout(Duration::from_secs(60))` to stop a flake | find the race (rules 2 and 3); use `_for` on the one slow step |
 | `insta::assert_snapshot!(t.screen().text())` | `insta::assert_snapshot!(t.screen())` or `.with_styles()` |
 | `assert!(t.screen().contains("done"))` after the app printed a lot | `t.screen().full_text().contains("done")` — it scrolled |

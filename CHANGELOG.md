@@ -40,6 +40,20 @@ reads that marker.
   press's button and modifiers, so a press, a move per cell and a release
   send what `drag` sends. Only hand-written bytes (`\x1b[<35;10;5M`)
   produced a hover before. (#789)
+- `Terminal::resize_and_wait(cols, rows, predicate)` and
+  `resize_and_wait_for(cols, rows, predicate, timeout)` resize, then wait
+  until the predicate holds on output read after the resize, and return
+  that screen. `resize` gives the grid the new size at once and keeps the
+  old content until the application repaints, so
+  `wait_until(|s| s.contains("ready"))` after `resize(100, 30)` returned at
+  once on a screen still reading `size 80x24 ready`; outside suites wrote
+  the same helper to avoid it. A resize to the size the grid has reaches
+  no one, and the screen as it is answers. A timeout says when nothing was
+  read after the resize at all. Output read after the resize can still be
+  the old layout where an application paints on its own, and on Windows,
+  where ConPTY applies a resize on its own thread and lays out what it
+  relays at the old width until it has; there a predicate should name
+  what only the new layout shows. (#788)
 
 ### Changed
 
