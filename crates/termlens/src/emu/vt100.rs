@@ -1747,6 +1747,84 @@ mod tests {
         assert_eq!(s.row_text(0).trim_end(), "after");
     }
 
+    /// A C0 control inside an SGR is executed and the SGR goes on, as vte
+    /// and xterm read it, so the screen is the one the control gives
+    /// written just ahead of the sequence: the cell gets exactly the SGR's
+    /// attributes. The shadow took the primary's attributes for its
+    /// carriers there — `ESC[3` BEL `m` was italic and concealed, `ESC[8`
+    /// BEL `m` concealed nothing — and `ESC[58;5;1` BEL `m` was bold and
+    /// blinking, #579 again (#755). The control may come right after the
+    /// ESC, after an open `OSC` that ESC ends, or in a CSI held short.
+    /// Whole, split once at every character, and a character at a time.
+    #[test]
+    fn a_control_inside_an_sgr_is_executed_and_the_sgr_applies() {
+        let long = format!("\x1b[{}8\x07m", "0".repeat(300));
+        let cases: &[(&str, &str, &str)] = &[
+            ("ab", "\x1b[3\x07m", "\x07\x1b[3m"),
+            ("ab", "\x1b[1\x07m", "\x07\x1b[1m"),
+            ("ab", "\x1b[4\x07m", "\x07\x1b[4m"),
+            ("ab", "\x1b[8\x07m", "\x07\x1b[8m"),
+            ("ab", "\x1b[9\x07m", "\x07\x1b[9m"),
+            ("ab", "\x1b[5\x07m", "\x07\x1b[5m"),
+            ("ab", "\x1b[3\rm", "\r\x1b[3m"),
+            ("ab", "\x1b[8\x08m", "\x08\x1b[8m"),
+            ("ab", "\x1b[3;\x7f5m", "\x1b[3;5m"),
+            ("ab", "\x1b\x07[8m", "\x07\x1b[8m"),
+            ("ab", "\x1b[\u{e9}9m", "\x1b[9m"),
+            ("ab", "\x1b[58;5;1\x07m", "\x07\x1b[58;5;1m"),
+            ("ab", "\x1b[38:2::1:2:3\x07;5m", "\x07\x1b[38:2::1:2:3;5m"),
+            ("ab\x1b]0;title", "\x1b[8\rm", "\x1b[39m\r\x1b[8m"),
+            ("ab", &long, "\x07\x1b[8m"),
+            ("ab", "\x1b[2\rC", "\r\x1b[2C"),
+            ("ab", "\x1b[\r?25l", "\r\x1b[?25l"),
+        ];
+        // The text, the cursor and the style of every cell that holds
+        // something, what is on record, the bells and the title.
+        let seen = |emu: &Vt100Emulator| {
+            let s = emu.snapshot();
+            let (cols, rows) = s.size();
+            let styles: Vec<(u16, u16, Style)> = (0..rows)
+                .flat_map(|row| (0..cols).map(move |col| (row, col)))
+                .filter_map(|(row, col)| {
+                    let cell = s.cell(row, col)?;
+                    (!cell.contents().is_empty()).then(|| (row, col, *cell.style()))
+                })
+                .collect();
+            let unsupported: Vec<String> = s.unsupported().iter().map(String::from).collect();
+            let title = s.title().to_owned();
+            (s.text(), s.cursor(), styles, unsupported, s.bells(), title)
+        };
+        for &(before, sgr, equivalent) in cases {
+            let stream = format!("{before}{sgr}X\x1b[0mY");
+            let expected = seen(&emu_with(
+                format!("{before}{equivalent}X\x1b[0mY").as_bytes(),
+            ));
+            let (whole, bytewise) = whole_and_bytewise(4, 10, 0, stream.as_bytes());
+            assert_eq!(seen(&whole), expected, "{stream:?}");
+            assert_eq!(
+                seen(&bytewise),
+                expected,
+                "{stream:?} a character at a time"
+            );
+            for (cut, _) in stream.char_indices().skip(1) {
+                let split = emu_fed_in_pieces(stream.as_bytes(), &[cut]);
+                assert_eq!(seen(&split), expected, "{stream:?} split at {cut}");
+            }
+        }
+        let style = |sgr: &str| {
+            *emu_with(format!("{sgr}X").as_bytes())
+                .snapshot()
+                .cell(0, 0)
+                .unwrap()
+                .style()
+        };
+        let italic = style("\x1b[3\x07m");
+        assert!(italic.italic && !italic.conceal, "{italic:?}");
+        let conceal = style("\x1b[8\x07m");
+        assert!(conceal.conceal && !conceal.italic, "{conceal:?}");
+        assert_eq!(style("\x1b[58;5;1\x07m"), Style::default());
+    }
+
     #[test]
     fn snapshot_carries_out_of_band_terminal_state() {
         let emu = emu_with(b"\x1b]0;my app\x07\x1b[?1049h\x1b[?2004h\x1b[?1h\x1b[?1002h");

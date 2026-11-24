@@ -50,7 +50,9 @@
 //! without, and 284ms vs 282ms when every line carries four SGR sequences.
 
 /// Where the rewriter is in the byte stream. Only enough to recognize a
-/// complete plain SGR; everything else passes through untouched.
+/// complete plain SGR; everything else passes through untouched, but for
+/// what arrives inside an escape and is no part of it — see
+/// [`rewrite_stream`].
 #[derive(Debug, PartialEq, Eq)]
 enum State {
     Ground,
@@ -172,6 +174,8 @@ impl LongParams {
 pub(super) struct ColorNormalizer {
     state: State,
     pending: Vec<u8>,
+    /// See [`AttrShadow`]'s.
+    sent: usize,
 }
 
 impl ColorNormalizer {
@@ -179,6 +183,7 @@ impl ColorNormalizer {
         Self {
             state: State::Ground,
             pending: Vec::new(),
+            sent: 0,
         }
     }
 
@@ -186,6 +191,7 @@ impl ColorNormalizer {
         rewrite_stream(
             &mut self.state,
             &mut self.pending,
+            &mut self.sent,
             bytes,
             normalize_for_grid,
         )
@@ -201,6 +207,11 @@ pub(super) struct AttrShadow {
     /// shadow can never lose a byte that shapes the grid. Never more than
     /// [`CSI_HOLD_MAX`] of them.
     pending: Vec<u8>,
+    /// How many bytes at the front of `pending` have gone out already: the
+    /// introducer, `ESC` or `ESC [`, emitted ahead of a C0 control that
+    /// arrived inside the sequence (see [`rewrite_stream`]). Never more
+    /// than two.
+    sent: usize,
 }
 
 impl AttrShadow {
@@ -218,6 +229,7 @@ impl AttrShadow {
             ),
             state: State::Ground,
             pending: Vec::new(),
+            sent: 0,
         }
     }
 
@@ -286,16 +298,35 @@ impl AttrShadow {
     /// over to the next call, so a sequence split across chunks is neither
     /// lost nor half-applied.
     fn rewrite_stream(&mut self, bytes: &[u8]) -> Vec<u8> {
-        rewrite_stream(&mut self.state, &mut self.pending, bytes, rewrite_sgr)
+        rewrite_stream(
+            &mut self.state,
+            &mut self.pending,
+            &mut self.sent,
+            bytes,
+            rewrite_sgr,
+        )
     }
 }
 
 /// `bytes` with every complete plain SGR replaced by what `rewrite` makes
 /// of it, and everything else as it came, but for the parameters of a CSI
-/// past [`CSI_HOLD_MAX`], which are written short ([`LongParams`]).
+/// past [`CSI_HOLD_MAX`], which are written short ([`LongParams`]), and for
+/// what arrives inside an escape and is no part of it.
+///
+/// That is a C0 control, which vte executes where it stands and then goes
+/// on with the escape, as xterm does; only CAN, SUB and ESC end one. The
+/// rewriters used to pass the held sequence through unrewritten at the
+/// control, so the shadow's parser read the primary's own attributes as
+/// carriers: `ESC [ 3 BEL m` was italic and concealed (#755). A control
+/// goes out at once, so its effect is as soon as vte's, but behind the
+/// introducer, whose `ESC` may be ending a string the parsers are in and
+/// must reach them first; `sent` counts the introducer bytes that went out
+/// with it, and the rest of the sequence is held and rewritten as ever.
+/// DEL and the bytes from 0x80 are ignored inside an escape, and left out.
 fn rewrite_stream(
     state: &mut State,
     pending: &mut Vec<u8>,
+    sent: &mut usize,
     bytes: &[u8],
     rewrite: fn(&[u8]) -> Option<Vec<u8>>,
 ) -> Vec<u8> {
@@ -307,10 +338,27 @@ fn rewrite_stream(
             if let State::CsiLong(long) = *state {
                 long.flush(pending);
             }
-            out.append(pending);
+            release(pending, sent, &mut out);
             pending.push(b);
             *state = State::Esc;
             continue;
+        }
+        if *state != State::Ground {
+            match b {
+                // CAN and SUB end the sequence, below.
+                0x18 | 0x1a => {}
+                // Any other control is carried out where it stands.
+                0x00..=0x1f => {
+                    let introducer = pending.len().min(2);
+                    out.extend_from_slice(&pending[*sent..introducer]);
+                    *sent = introducer;
+                    out.push(b);
+                    continue;
+                }
+                // DEL and the bytes from 0x80, which vte ignores there.
+                0x7f..=0xff => continue,
+                _ => {}
+            }
         }
         match state {
             State::Ground => out.push(b),
@@ -319,7 +367,7 @@ fn rewrite_stream(
                 if b == b'[' {
                     *state = State::Csi;
                 } else {
-                    out.append(pending);
+                    release(pending, sent, &mut out);
                     *state = State::Ground;
                 }
             }
@@ -335,7 +383,7 @@ fn rewrite_stream(
                             } else {
                                 // Not an SGR, whatever ends it: the rest
                                 // passes through as it comes.
-                                out.append(pending);
+                                release(pending, sent, &mut out);
                                 *state = State::Ground;
                             }
                         }
@@ -344,12 +392,12 @@ fn rewrite_stream(
                     // through.
                     0x40..=0x7e => {
                         *state = State::Ground;
-                        dispatch(pending, b, rewrite, &mut out);
+                        dispatch(pending, sent, b, rewrite, &mut out);
                     }
-                    // A control byte inside a CSI (CAN, SUB, …). vte decides
-                    // what that means; preserve it rather than guessing.
+                    // CAN or SUB, which abort the sequence: what was held
+                    // goes out as it came, and vte ends it there.
                     _ => {
-                        out.append(pending);
+                        release(pending, sent, &mut out);
                         *state = State::Ground;
                     }
                 }
@@ -364,7 +412,7 @@ fn rewrite_stream(
                 if (0x40..=0x7e).contains(&b) {
                     long.finish(pending);
                     pending.push(b);
-                    dispatch(pending, b, rewrite, &mut out);
+                    dispatch(pending, sent, b, rewrite, &mut out);
                 } else {
                     // As in a CSI held whole: what was read goes out, and the
                     // rest of the sequence passes through as it comes. The
@@ -372,7 +420,7 @@ fn rewrite_stream(
                     // short form holds the same parameters.
                     long.flush(pending);
                     pending.push(b);
-                    out.append(pending);
+                    release(pending, sent, &mut out);
                 }
             }
         }
@@ -380,18 +428,29 @@ fn rewrite_stream(
     out
 }
 
+/// Emit what `pending` holds and has not sent, as it stands, and start
+/// over.
+fn release(pending: &mut Vec<u8>, sent: &mut usize, out: &mut Vec<u8>) {
+    out.extend_from_slice(&pending[std::mem::take(sent)..]);
+    pending.clear();
+}
+
 /// Emit the CSI in `pending`, whose final byte is `fin`: rewritten if it is
-/// an SGR `rewrite` has a form for, as it stands otherwise.
+/// an SGR `rewrite` has a form for, as it stands otherwise, either way but
+/// for the `sent` bytes of its introducer that are out already. Every
+/// rewritten form begins with the same `ESC [`.
 fn dispatch(
     pending: &mut Vec<u8>,
+    sent: &mut usize,
     fin: u8,
     rewrite: fn(&[u8]) -> Option<Vec<u8>>,
     out: &mut Vec<u8>,
 ) {
     let seq = std::mem::take(pending);
+    let sent = std::mem::take(sent);
     match (fin == b'm').then(|| rewrite(&seq)).flatten() {
-        Some(rewritten) => out.extend_from_slice(&rewritten),
-        None => out.extend_from_slice(&seq),
+        Some(rewritten) => out.extend_from_slice(&rewritten[sent..]),
+        None => out.extend_from_slice(&seq[sent..]),
     }
 }
 
@@ -612,7 +671,7 @@ mod tests {
         let mut shadow = AttrShadow::new(4, 20, 0);
         let mut out = shadow.rewrite_stream(bytes);
         // Anything still held at the end of the stream is not an SGR.
-        out.append(&mut shadow.pending);
+        out.extend_from_slice(&shadow.pending[shadow.sent..]);
         String::from_utf8_lossy(&out).replace('\x1b', "E")
     }
 
@@ -621,7 +680,7 @@ mod tests {
         let mut colors = ColorNormalizer::new();
         let mut out = colors.feed(bytes);
         // Anything still held at the end of the stream is not a complete SGR.
-        out.append(&mut colors.pending);
+        out.extend_from_slice(&colors.pending[colors.sent..]);
         String::from_utf8_lossy(&out).replace('\x1b', "E")
     }
 
@@ -932,12 +991,14 @@ mod tests {
     }
 
     #[test]
-    fn a_long_csi_left_to_the_parser_leaves_it_as_full_as_it_was() {
-        // A BEL inside the CSI is executed and the sequence goes on, past
-        // the rewriters, to the parser. With 32 values stored vte ignores
-        // the `0` after it, so the 32nd value is still the italic `3`; the
-        // short form must leave the parser as full, or the `0` is appended
-        // to that value and makes it `30`, a foreground colour.
+    fn a_control_inside_a_long_csi_leaves_it_held_and_read_as_vte_reads_it() {
+        // A BEL inside the CSI is executed and the sequence goes on, held
+        // in the short form and rewritten (#755); it used to pass through
+        // to the parser from there. With 32 values stored vte ignores the
+        // `0` after the BEL, so the 32nd value is still the italic `3`,
+        // which the primary shows and the shadow, for which italic is
+        // conceal, must not. Appended to that value the `0` would make it
+        // `30`, a foreground colour.
         let mut seq = padded_csi(CSI_HOLD_MAX, b"0");
         seq.extend_from_slice(";0".repeat(30).as_bytes());
         seq.extend_from_slice(b";3;\x070mX");
@@ -957,7 +1018,15 @@ mod tests {
                 shadowed.extend(shadow.rewrite_stream(chunk));
             }
             assert!(italic(&normalized), "{}", readable(&normalized));
-            assert!(italic(&shadowed), "{}", readable(&shadowed));
+            assert_eq!(
+                readable(&normalized),
+                format!("E[\u{7}{}3mX", "0;".repeat(31))
+            );
+            assert_eq!(
+                readable(&shadowed),
+                format!("E[\u{7}{}0mX", "0;".repeat(30))
+            );
+            assert!(!italic(&shadowed), "{}", readable(&shadowed));
         }
     }
 
@@ -998,5 +1067,36 @@ mod tests {
         assert_eq!(shadowed(b"\x1b[31\x18\x1b[9mX"), "E[31\u{18}E[4mX");
         // An ESC inside a CSI abandons it and starts over.
         assert_eq!(shadowed(b"\x1b[31\x1b[9mX"), "E[31E[4mX");
+    }
+
+    /// A C0 control inside an escape is executed there and the escape goes
+    /// on, in vte as in xterm; only CAN, SUB and ESC end it. The rewriters
+    /// passed the sequence through unrewritten at the control, so the
+    /// shadow read the primary's own attributes as its carriers: `3` BEL
+    /// `m` was italic and concealed, and `8` BEL `m` concealed nothing
+    /// (#755). The control goes out at once, behind the introducer, and
+    /// the sequence is still held and rewritten. DEL and the bytes from
+    /// 0x80 are ignored there, and left out.
+    #[test]
+    fn a_control_inside_an_sgr_is_carried_out_and_the_sgr_still_rewritten() {
+        assert_eq!(shadowed(b"\x1b[3\x07mX"), "E[\u{7}39mX");
+        assert_eq!(shadowed(b"\x1b[8\x07mX"), "E[\u{7}3mX");
+        assert_eq!(shadowed(b"\x1b[1;\r\x089mX"), "E[\r\u{8}4mX");
+        assert_eq!(shadowed(b"\x1b\x07[5mX"), "E\u{7}[1mX");
+        assert_eq!(shadowed(b"\x1b[3\x7fmX"), "E[39mX");
+        assert_eq!(shadowed("\x1b[\u{e9}8mX".as_bytes()), "E[3mX");
+        assert_eq!(normalized(b"\x1b[58;5;1\x07mX"), "E[\u{7}58:5:1mX");
+        assert_eq!(normalized(b"\x1b[38:5:9\rmX"), "E[\r38;5;9mX");
+        // Not an SGR: the same bytes, the control moved up behind the
+        // introducer, which vte cannot tell apart.
+        assert_eq!(shadowed(b"\x1b[?25\rlX"), "E[\r?25lX");
+        // CAN after one still aborts the sequence.
+        assert_eq!(shadowed(b"\x1b[3\x07\x18mX"), "E[\u{7}3\u{18}mX");
+        // Held across feeds, with the control already out.
+        let mut shadow = AttrShadow::new(2, 10, 0);
+        shadow.feed(b"ab\x1b[8\r");
+        shadow.feed(b"mX");
+        assert!(shadow.cell(0, 0).is_some_and(::vt100::Cell::italic));
+        assert_eq!(shadow.contents(), "Xb");
     }
 }

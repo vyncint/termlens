@@ -41,6 +41,15 @@ reads that marker.
   parameter nobody honours still puts the whole sequence on the list
   (`^[[5;59m`), and so does an extended colour the backend cannot read.
   A test that expected an entry for such a mix should expect none. (#754)
+- A C0 control inside an SGR (`ESC [ 3` BEL `m`, or a BS or CR there) is
+  carried out and the SGR still applies, as vte and xterm read it, so the
+  cell gets exactly the attributes the SGR sets. The attribute shadow
+  took the backend's own attributes for blink, conceal and strikethrough
+  there: `ESC[3` BEL `m` came out italic and concealed, `ESC[8` BEL `m`
+  concealed nothing, and `ESC[58;5;1` BEL `m` was bold and blinking. A
+  DEL or a non-ASCII byte inside an SGR did the same, and is now ignored
+  there as vte ignores it. A test that pinned the extra or the missing
+  attribute should expect exactly the ones the SGR names. (#755)
 
 ### Fixed
 
