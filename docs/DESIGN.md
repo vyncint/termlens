@@ -135,7 +135,12 @@ thread applies the terminal's deadline and returns `Error::Write` with the
 screen ("the application is not reading its input") instead of blocking
 forever; there is no portable way to ask whether a PTY write *would*
 block, since `POLLOUT` on a macOS master reports writable and then blocks
-anyway.
+anyway. The acknowledgement is waited for in `POLL_CAP` slices with the
+terminal looked at between them, because nothing else ends a write the
+application exits under: Linux leaves a master write asleep when the other
+side closes. Such a send fails as the terminal closes and names the exit,
+rather than blaming a program that is gone for not reading (#770). How much
+of it went is not said, since a blocked `write(2)` reports no count.
 
 Which failures are errors and which are panics is a deliberate split, not
 an accident of history. `send`/`send_str`/`paste`/`click`/`drag`/`scroll`

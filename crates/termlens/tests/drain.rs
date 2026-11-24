@@ -203,6 +203,55 @@ fn a_send_that_gives_up_at_the_deadline_is_still_delivered() -> termlens::Result
     Ok(())
 }
 
+/// A send blocked on a full input queue ends when the application exits,
+/// and says so (#770). The write was waited for in one piece, and Linux
+/// does not wake a master write when the other side closes, so the send
+/// waited out the whole deadline and then reported "the application is not
+/// reading its input … reaches the application if it reads again" about an
+/// application that was gone. macOS fails such a write with EIO instead,
+/// which said nothing of the exit either.
+///
+/// The application reads one byte of what is typed and exits with the rest
+/// unread, so the send is under way when it goes, and a mebibyte is past
+/// what either kernel's input queue holds: the write cannot finish.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY buffers typed input on its own side, so a full queue is not reached the same way (#149)"
+)]
+fn a_send_blocked_on_a_full_queue_ends_when_the_application_exits() -> termlens::Result<()> {
+    const N: usize = 1 << 20;
+    // The deadline the send must not wait out; the waits name their own.
+    const DEADLINE: Duration = Duration::from_secs(20);
+    let mut t = common::spawn_emit(
+        Terminal::builder().timeout(DEADLINE),
+        &["--raw-mode", "ready", "--skip", "1"],
+    )?;
+    t.wait_until_for(|s| s.contains("ready"), Duration::from_secs(10))?;
+    let start = Instant::now();
+    let sent = t.send_str(&"x".repeat(N));
+    let took = start.elapsed();
+    match sent {
+        Err(Error::Write { what, .. }) => assert!(
+            what.contains(&format!(
+                "released the terminal (EOF) before this write of {N} bytes finished"
+            )),
+            "{what}"
+        ),
+        other => panic!("the application exited mid-send: {other:?}"),
+    }
+    assert!(
+        took < DEADLINE / 2,
+        "the send outlived the application by {took:?}, near its {DEADLINE:?} deadline"
+    );
+    // The next one is refused at once, as it was.
+    match t.send_str("y") {
+        Err(Error::Write { what, .. }) => assert!(what.contains("(EOF)"), "{what}"),
+        other => panic!("the terminal is closed: {other:?}"),
+    }
+    Ok(())
+}
+
 /// A zero deadline does not make a send to an application that is reading
 /// fail (#632). Every send waited for the writer thread's acknowledgement
 /// for exactly the deadline, so with `Duration::ZERO` each one failed,

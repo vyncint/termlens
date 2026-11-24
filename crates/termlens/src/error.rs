@@ -145,7 +145,9 @@ pub enum Error {
     /// it ever reads again, and input sent afterwards waits behind them —
     /// failing the same way while the queue does not move. So a retry types
     /// its input twice, and "the application never got these bytes" is not
-    /// what this error says (#590).
+    /// what this error says (#590). A write the child released the terminal
+    /// under is the exception: it fails as the terminal closes, and nothing
+    /// can read what it had not written (#770).
     #[error("failed to send {what}\n--- screen at the failed write ---\n{screen}")]
     Write {
         /// What was being sent, which command it was going to, and why the

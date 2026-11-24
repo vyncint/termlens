@@ -1846,7 +1846,9 @@ impl TerminalBuilder {
     /// It is also how long a send waits for its bytes to be written before
     /// it reports the application as not reading, though never less than a
     /// tenth of a second: the write happens on another thread, and a
-    /// shorter wait reported writes that were merely not yet done (#632).
+    /// shorter wait reported writes that were merely not yet done (#632). A
+    /// send whose application releases the terminal meanwhile fails then,
+    /// without waiting the rest (#770).
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -3147,10 +3149,12 @@ impl Terminal {
     ///
     /// [`Error::Write`] when the bytes cannot be handed to the child — it
     /// released the terminal, or it stopped reading its input and the write
-    /// gave up at the terminal's deadline rather than blocking forever. The
-    /// error embeds the screen, so a CI log shows what the application was
-    /// displaying when the keystroke had nowhere to go. A write that gave
-    /// up is not withdrawn: [`Error::Write`] says what happens to its bytes.
+    /// gave up at the terminal's deadline rather than blocking forever. A
+    /// write still blocked when the child releases the terminal fails then,
+    /// naming the exit, rather than at the deadline. The error embeds the
+    /// screen, so a CI log shows what the application was displaying when
+    /// the keystroke had nowhere to go. A write that gave up is not
+    /// withdrawn: [`Error::Write`] says what happens to its bytes.
     ///
     /// This is the same answer on every platform. A raw write to a closed
     /// terminal fails with `EIO` on macOS and *succeeds* on Linux, where
@@ -3659,15 +3663,8 @@ impl Terminal {
     /// never reports EOF while it is open, so there the reaped child is
     /// the signal (see [`EXIT_CLOSES_THE_TERMINAL`]).
     fn ensure_deliverable(&mut self, what: &str) -> Result<()> {
-        {
-            let mut state = self.shared.lock();
-            // Where a reaped child is the terminal closing, a send asks too:
-            // input long after the exit must not need a wait to be refused.
-            self.exit_watch
-                .tick(&mut self.child, &mut self.exit_status, &mut state);
-            if !state.eof {
-                return Ok(());
-            }
+        if !self.terminal_closed() {
+            return Ok(());
         }
         let reason = match &self.exit_status {
             Some(status) => format!("the child is gone ({status}) and the terminal is closed"),
@@ -3678,6 +3675,36 @@ impl Terminal {
             screen: self.screen(),
         }
         .recorded())
+    }
+
+    /// Whether the terminal has closed, by the signal
+    /// [`ensure_deliverable`](Self::ensure_deliverable) describes: EOF, or
+    /// where a reaped child is the terminal closing, that.
+    fn terminal_closed(&mut self) -> bool {
+        let mut state = self.shared.lock();
+        // Where a reaped child is the terminal closing, a send asks too:
+        // input long after the exit must not need a wait to be refused.
+        self.exit_watch
+            .tick(&mut self.child, &mut self.exit_status, &mut state);
+        state.eof
+    }
+
+    /// Why a send of `len` bytes failed when the terminal closed while its
+    /// write was still going.
+    ///
+    /// How much of it went is not said, because it is not known: a blocked
+    /// `write(2)` into a PTY reports no count until it returns, Linux leaves
+    /// this one asleep in the kernel until teardown, and macOS fails it with
+    /// EIO, which carries none.
+    fn closed_mid_write(&self, len: usize) -> String {
+        let closed = match &self.exit_status {
+            Some(status) => format!("the child is gone ({status}) and the terminal closed"),
+            None => "the child released the terminal (EOF)".to_owned(),
+        };
+        format!(
+            "{closed} before this write of {len} bytes finished; nothing can read \
+             what it had not written"
+        )
     }
 
     /// Write to the child, bounded by the default deadline.
@@ -3720,18 +3747,64 @@ impl Terminal {
             return Err("the terminal is closed".to_owned());
         }
         let mut waited = self.default_timeout.max(ACK_FLOOR);
+        let mut deadline = deadline_after(waited);
+        let mut floor_given = false;
+        // Waited for in slices, with the terminal looked at between them. An
+        // application that exits while the write is blocked leaves nothing to
+        // end it: Linux does not wake a master write when the other side
+        // closes, so a send waited out its whole deadline and then blamed an
+        // application that was gone for not reading (#770).
+        let outcome = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match ack_rx.recv_timeout(left.min(POLL_CAP)) {
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                outcome => break outcome,
+            }
+            if self.terminal_closed() {
+                // The write may have finished in the meantime: then the
+                // bytes are out, as they would be had the ack come sooner.
+                return match ack_rx.try_recv() {
+                    Ok(Ok(())) => Ok(()),
+                    _ => Err(self.closed_mid_write(bytes.len())),
+                };
+            }
+            if Instant::now() >= deadline {
+                // No write blocked means nothing stands between these bytes
+                // and the application but the writer thread getting to run,
+                // so it is given the floor once more before anything is
+                // reported.
+                if floor_given || self.writer_busy.load(Ordering::Relaxed) {
+                    break Err(mpsc::RecvTimeoutError::Timeout);
+                }
+                floor_given = true;
+                deadline = deadline.checked_add(ACK_FLOOR).unwrap_or(deadline);
+                waited += ACK_FLOOR;
+            }
+        };
         let busy = || self.writer_busy.load(Ordering::Relaxed);
-        let mut outcome = ack_rx.recv_timeout(waited);
-        // No write blocked means nothing stands between these bytes and the
-        // application but the writer thread getting to run, so it is given
-        // the floor once more before anything is reported.
-        if matches!(outcome, Err(mpsc::RecvTimeoutError::Timeout)) && !busy() {
-            outcome = ack_rx.recv_timeout(ACK_FLOOR);
-            waited += ACK_FLOOR;
-        }
         match outcome {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(e.to_string()),
+            // A write into a terminal whose other side has closed fails on
+            // macOS (EIO) where Linux leaves it blocked. The reader is about
+            // to read the EOF that close caused, and the send then says what
+            // it says on Linux (#770); any other failure is reported as is.
+            // The close is waited for as long as the send would have waited
+            // anyway, and never less than the drain grace, which is what
+            // the reaped child takes to count as the terminal closing where
+            // there is no EOF.
+            Ok(Err(e)) => {
+                let closes = deadline.max(Instant::now() + DRAIN_GRACE);
+                let closed = self.shared.wait_until(closes, |state| {
+                    self.exit_watch
+                        .tick(&mut self.child, &mut self.exit_status, state);
+                    state.eof.then_some(())
+                });
+                if closed.is_ok() {
+                    Err(self.closed_mid_write(bytes.len()))
+                } else {
+                    Err(e.to_string())
+                }
+            }
             // The write is not withdrawn: it is mid-`write(2)` on the writer
             // thread, which no portable call can interrupt, and the rest of
             // it follows once the application reads again (#590). A full

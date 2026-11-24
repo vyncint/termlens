@@ -24,6 +24,18 @@ reads that marker.
   kitty keyboard pop that crossterm sends (`CSI < 1 u`) was listed as
   `^[[1<u`, which is not a sequence; it is now `^[[<1u`. A test that pins
   the old spelling needs the new one. (#759)
+- A send blocked on a full input queue fails as soon as the application
+  releases the terminal, and names the exit: "the child released the
+  terminal (EOF) before this write of 1048576 bytes finished; nothing can
+  read what it had not written". It waited out the whole deadline, since
+  Linux does not wake a master write when the other side closes, and then
+  reported "the application is not reading its input … reaches the
+  application if it reads again" about an application that was gone. The
+  send now waits for its write in 50 ms slices and looks at the terminal
+  between them; a write that fails as the terminal closes, rather than
+  blocking, is reported the same way. A test that matched "not reading its
+  input" on a send into an application that exits during it should match
+  "released the terminal (EOF) before this write" instead. (#770)
 
 ### Fixed
 
