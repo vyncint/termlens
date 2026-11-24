@@ -123,15 +123,23 @@ CHANGELOG entry.
   probes is truthfully told there is none. Decoding also refuses anything
   above 4096x4096: every size in a payload is chosen by the program under
   test, and a sixel `!n` repeat or a declared `65535x65535` would otherwise
-  set the allocation directly.
+  set the allocation directly. A sixel decodes with the background its
+  header selects, as xterm and Windows Terminal draw it: with a background
+  select (`P2`) of 0 or 2, or none (`ESC P q`), the area its leading raster
+  attributes declare is filled with colour register 0 first, so a pixel no
+  sixel painted there decodes as that colour, opaque black unless the image
+  redefines it, and only `P2 = 1` leaves it transparent. A sixel without
+  raster attributes is filled nowhere, as in xterm, where Windows Terminal
+  fills to the edge of the screen. A JSON screen saved by a release before
+  0.11.11 did not record `P2`, and its sixels decode as `P2 = 0`.
 - **The cursor moves past an image as the declared terminal moves it**,
   and only as far as the escape says. A `Graphics::Kitty` terminal moves
   it for a placement whose size in cells is known: from `c=` and `r=`, or
   from the pixel size and `cell_size()` — for `a=p`, the pixel size of the
   newest transmission of that image id, or, for one that names its image
   by number (`I=`) alone, of the newest transmission with that number. A
-  PNG (`f=100`) placed without `c=` and `r=`, a placement of an image whose
-  transmission has left the payload log, or one that names neither an id
+  PNG (`f=100`) or an image whose transmission has left the payload log,
+  placed without `c=` and `r=`, or a placement that names neither an id
   nor a number, does not move it. Whether kitty would have loaded the
   image at all is not knowable here, so a placement is taken to succeed.
   Past the bottom of a scroll region the protocol leaves the cursor's
@@ -144,7 +152,10 @@ CHANGELOG entry.
   region then too, and termlens moves the cursor as line feeds would there,
   scrolling nothing. A
   `Graphics::Sixel` terminal with a `cell_size()` moves it to the image's
-  last text row, as xterm does with sixel scrolling on. Sixel display mode
+  last text row, as xterm does with sixel scrolling on. No image scrolls
+  the screen further than its height, which is kitty's cap: xterm goes on
+  scrolling under a sixel that ends more than a screen below the bottom
+  margin, pushing the blank rows under it into history. Sixel display mode
   (`CSI ? 80 h`), xterm's extra scroll for a trailing `-` on the bottom row,
   and its sixel-scrolls-right mode (`CSI ? 8452 h`) are not modelled. A
   `Graphics::None` terminal, the default, moves nothing: it ignores both
@@ -166,8 +177,9 @@ CHANGELOG entry.
   under test points at, and decodes only with the `decode` feature. Such a
   command is **named in the next timeout** instead, as an unanswered query
   is — an upload at its last chunk, by its first — unless it asked for
-  quiet (#680). Frames (`a=f`) and composes (`a=c`), which kitty answers
-  too, are neither answered nor named. A command naming both `i=` and `I=`
+  quiet, an upload in any of its chunks (#680, #758). Frames (`a=f`) and
+  composes (`a=c`), which kitty answers too, are neither answered nor
+  named. A command naming both `i=` and `I=`
   is refused by kitty whatever its action; termlens answers a query so, but
   still captures, counts and places a transmission or placement that does,
   and names it unless `q=2` silenced kitty's error. An upload interrupted

@@ -243,8 +243,12 @@ impl Vt100Emulator {
     /// feed at a time, so the bottom margin scrolls and the rows it pushes
     /// out reach history as any other scroll does — then, for kitty, one
     /// column past its right edge, or to the start of the next row when that
-    /// is past the screen's. No count scrolls further than the screen is
-    /// tall: past that every row it pushed out was blank.
+    /// is past the screen's. No image scrolls further than the screen is
+    /// tall, as kitty's `screen_scroll` caps it (`MIN(count, lines)`): past
+    /// that every row it pushed out was blank. The cap is on the scroll,
+    /// not on the line feeds, which first walk the cursor down to the
+    /// margin: capped there, an image taller than the screen scrolled it by
+    /// that walk too little (#765).
     ///
     /// Past the bottom margin of a scroll region, kitty does not leave the
     /// cursor on the margin, as line feeds do: `screen_handle_graphics_command`
@@ -264,7 +268,11 @@ impl Vt100Emulator {
             ImageStep::Sixel { rows } => (rows, None),
         };
         let wrap = across.is_some_and(|x| x >= u32::from(screen_cols));
-        let down = (rows.saturating_sub(1) + u32::from(wrap)).min(u32::from(screen_rows));
+        // Below the region the walk ends on the screen's last row, and no
+        // line feed there scrolls.
+        let walk = self.tracker.bottom_margin().saturating_sub(row);
+        let down = (rows.saturating_sub(1) + u32::from(wrap))
+            .min(u32::from(walk) + u32::from(screen_rows));
         let mut bytes = vec![b'\n'; down as usize];
         match across {
             Some(_) if wrap => bytes.push(b'\r'),
@@ -3085,6 +3093,64 @@ mod tests {
         assert_eq!(place("\x1b[?6h"), (Some((9, 0)), Some((1, 0))));
     }
 
+    /// 24 numbered rows, `L00` to `L23`, on a 20x24 screen with 10x20-pixel
+    /// cells; then `region`, the cursor to row 2, `image`, and an `X`.
+    fn under_a_tall_image(support: Graphics, region: &str, image: &str) -> Screen {
+        let wire = format!("{}{region}\x1b[3;1H{image}X", numbered(24).join("\r\n"));
+        graphics_emu(support, 24, 20, wire.as_bytes()).snapshot()
+    }
+
+    /// `L00`, `L01`, … for the first `rows` rows.
+    fn numbered(rows: usize) -> Vec<String> {
+        (0..rows).map(|row| format!("L{row:02}")).collect()
+    }
+
+    /// A kitty image taller than the screen scrolls it by as many rows as
+    /// its last row is past the bottom margin, and by no more than the
+    /// screen is tall, as kitty scrolls it (#765). The cap applied to the
+    /// line feeds, the first of which only walk the cursor down to the
+    /// margin: from row 2 of 24, a 30-row image scrolled the screen by 3
+    /// where kitty scrolls it by 8.
+    #[test]
+    fn a_kitty_image_taller_than_the_screen_scrolls_it_as_kitty_does() {
+        let history = |rows: usize| numbered(rows).join("\n");
+        // The cursor goes to row 2 + 29 = 31, and
+        // `screen_handle_graphics_command` scrolls by 31 - 23 = 8.
+        let image = "\x1b_Ga=T,f=24,s=1,v=1,c=1,r=30;AAAA\x1b\\";
+        let screen = under_a_tall_image(Graphics::Kitty, "", image);
+        assert_eq!(screen.find("L08"), Some((0, 0)));
+        assert_eq!(screen.scrollback_text(), history(8));
+        assert_eq!(screen.find("X"), Some((23, 1)));
+        // No further than the screen is tall (`MIN(count, lines)` in
+        // `screen_scroll`): 100 rows push the whole screen out and nothing
+        // more.
+        let tall = "\x1b_Ga=T,f=24,s=1,v=1,c=1,r=100;AAAA\x1b\\";
+        let screen = under_a_tall_image(Graphics::Kitty, "", tall);
+        assert_eq!(screen.scrollback_text(), history(24));
+        assert_eq!(screen.find("X"), Some((23, 1)));
+        // Counted from the region's bottom margin, not the screen's: rows
+        // 0-9, which send their rows to history as the screen does, scroll
+        // by 24 as well — ten numbered rows and 14 blank ones — and the rows
+        // below the region stay where they were.
+        let screen = under_a_tall_image(Graphics::Kitty, "\x1b[1;10r", tall);
+        assert_eq!(screen.scrollback_rows(), 24);
+        assert!(screen.scrollback_text().starts_with(&history(10)));
+        assert_eq!(screen.find("L10"), Some((10, 0)));
+        assert_eq!(screen.find("X"), Some((23, 1)));
+    }
+
+    /// The same for a sixel, as xterm scrolls it (#765): 600 px is 30 rows
+    /// of 20 px, and `finished_parsing` scrolls while row 2 - 1 + 30 is past
+    /// row 23, 8 times. termlens scrolled 3.
+    #[test]
+    fn a_sixel_taller_than_the_screen_scrolls_it_as_xterm_does() {
+        let sixel = format!("\x1bPq#1;2;100;0;0#1~{}\x1b\\", "-~".repeat(99));
+        let screen = under_a_tall_image(Graphics::Sixel, "", &sixel);
+        assert_eq!(screen.find("L08"), Some((0, 0)));
+        assert_eq!(screen.scrollback_text(), numbered(8).join("\n"));
+        assert_eq!(screen.find("X"), Some((23, 0)));
+    }
+
     #[test]
     fn a_kitty_placement_without_cells_is_sized_from_pixels_and_the_cell_size() {
         // A 20x40 image in 10x20 cells: 2x2. `a=p` of it, by id, later.
@@ -3292,6 +3358,21 @@ mod tests {
         let emu = graphics_emu(Graphics::Kitty, 6, 10, &wire);
         assert_eq!(x_at(&emu), Some((1, 2)));
         assert_eq!(emu.graphics.len(), emu.graphics_named.len());
+    }
+
+    /// A placement of an image whose transmission has left the payload log
+    /// has no size to be moved by but its own `c=` and `r=`, by which it
+    /// moves the cursor, taken to succeed as every placement is. Without
+    /// them it does not move. `docs/LIMITATIONS.md` said such a placement
+    /// never moved (#769). 30x50 px in 10x20-pixel cells is 3x3.
+    #[test]
+    fn a_placement_of_an_image_the_log_dropped_moves_only_by_its_cells() {
+        let sent = "\x1b_Ga=t,i=5,f=24,s=30,v=50;AAAA\x1b\\";
+        let evict = "\x1b_Ga=d,d=i,i=6\x1b\\".repeat(HISTORY + 8);
+        assert_eq!(x_after(&format!("{sent}\x1b_Ga=p,i=5\x1b\\")), Some((2, 3)));
+        let dropped = format!("{sent}{evict}\x1b_Ga=p,i=5");
+        assert_eq!(x_after(&format!("{dropped}\x1b\\")), Some((0, 0)));
+        assert_eq!(x_after(&format!("{dropped},c=2,r=3\x1b\\")), Some((2, 2)));
     }
 
     /// A query that kitty took as an upload's last chunk completes the

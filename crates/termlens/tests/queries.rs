@@ -426,6 +426,56 @@ fn a_kitty_transmission_waiting_for_its_reply_is_named() {
     assert_eq!(t.screen().graphics().kitty(), 2, "{}", t.screen());
 }
 
+/// A chunked upload whose middle chunk asks for quiet is not named (#758):
+/// kitty copies the nonzero `q=` of every chunk onto the command that
+/// started the load, so the upload's last chunk is answered with nothing.
+/// The chunks are three writes 200 ms apart, as a program streaming an
+/// image sends them. A transmission after them that waits for its `OK` is
+/// named, so the note is known to have been written after all three.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY answers or eats the child's queries itself, so they never reach the responder (#149)"
+)]
+fn a_chunked_upload_quieted_in_its_middle_chunk_is_not_named() {
+    let mut t = alive_then_blocked(
+        Terminal::builder()
+            .graphics(termlens::Graphics::Kitty)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw",
+            r"\e_Gi=5,a=T,f=24,s=3,v=1,m=1;AAAA\e\\",
+            "--sleep",
+            "200ms",
+            "--raw",
+            r"\e_Gm=1,q=1;AAAA\e\\",
+            "--sleep",
+            "200ms",
+            "--raw",
+            r"\e_Gm=0;AAAA\e\\",
+            "--raw",
+            r"\e_Gi=9,a=T,f=24,s=1,v=1;QUJD\e\\",
+            "--wait",
+            "never",
+        ],
+    );
+    let msg = expire_until_named(&["^[_Gi=9"], || {
+        t.wait_until_for(|s| s.contains("never"), Duration::from_millis(400))
+            .unwrap_err()
+            .to_string()
+    });
+    assert!(
+        !msg.contains("^[_Gi=5"),
+        "the quieted upload is named: {msg}"
+    );
+    assert!(
+        msg.contains("queried the terminal (^[_Gi=9,a=T,f=24,s=1,v=1;)"),
+        "the transmission waiting for its reply is not named: {msg}"
+    );
+    // Both still captured, the upload as one image.
+    assert_eq!(t.screen().graphics().kitty(), 2, "{}", t.screen());
+}
+
 /// Every unanswered query is named, not just the most recent one.
 #[test]
 fn all_unanswered_queries_are_named() {

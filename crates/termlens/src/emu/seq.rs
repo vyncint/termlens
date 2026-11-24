@@ -647,7 +647,8 @@ struct KittyAsk {
     /// The `i=` and `I=` of the command that started the load, nonzero.
     id: bool,
     number: bool,
-    /// Its `q=`, 0 when absent.
+    /// Its `q=`, 0 when absent, and then the nonzero `q=` of each later
+    /// chunk of its upload as the chunk arrives (#758).
     quiet: u32,
     /// Its printable rendering, for the timeout note.
     shape: String,
@@ -680,8 +681,9 @@ impl KittyAsk {
     }
 
     /// The `OK` kitty sends once the data has loaded. `quiet` is the last
-    /// escape's `q=`: a nonzero one overrides the first's, as kitty's `if
-    /// (g->quiet) lg->quiet = g->quiet` does for a continuation chunk.
+    /// escape's `q=`: a nonzero one overrides the one kept, as kitty's `if
+    /// (g->quiet) lg->quiet = g->quiet` does for every chunk, the middle
+    /// ones included.
     fn answered(&self, quiet: u32) -> bool {
         let quiet = if quiet != 0 { quiet } else { self.quiet };
         !(self.id && self.number) && (self.id || self.number) && quiet == 0
@@ -1151,6 +1153,13 @@ impl SeqTracker {
     pub(crate) fn in_scroll_region(&self, row: u16) -> bool {
         let frame = self.frame();
         (frame.top..=frame.bottom.unwrap_or(self.rows - 1)).contains(&row)
+    }
+
+    /// The bottom margin of the screen on display, 0-based: the region's
+    /// last row, or the screen's with no region set. Where a line feed
+    /// starts to scroll, for an image that moves the cursor (#765).
+    pub(crate) fn bottom_margin(&self) -> u16 {
+        self.frame().bottom.unwrap_or(self.rows - 1)
     }
 
     /// Whether origin mode (`DECOM`) is set on the screen on display.
@@ -2086,7 +2095,11 @@ impl SeqTracker {
         // as kitty does; it used to be taken as the upload's next chunk.
         // The first byte captured, not slot 0: a reset zeroes only the
         // length, so an empty APC found the last escape's `G` there (#735).
+        // And two bytes at least: kitty's `dispatch_apc` drops a shorter
+        // APC before it reads it, so a lone `G` is nothing, and leaves an
+        // upload where it was too (#768).
         if self.dcs_introducer == b'_'
+            && self.dcs_data_len >= 2
             && self.dcs_head[..usize::from(self.dcs_head_len)].first() == Some(&b'G')
         {
             let control = self.kitty_control.clone();
@@ -2150,7 +2163,10 @@ impl SeqTracker {
                 // The reply kitty owes this escape at once, and the one it
                 // owes the load this escape starts once the load completes
                 // (#680): see `KittyAsk`. A continuation asks nothing of its
-                // own; it only finishes what the first chunk asked.
+                // own; it only finishes what the first chunk asked, and may
+                // ask for quiet: kitty copies the nonzero `q=` of every
+                // chunk onto the command that started the load, so a middle
+                // chunk's holds at the last (#758).
                 let mut unanswered = None;
                 if !self.building.in_progress() {
                     let ask = KittyAsk::of(keys, self.seq_printable());
@@ -2158,6 +2174,10 @@ impl SeqTracker {
                         unanswered = Some(ask.shape.clone());
                     }
                     self.upload_ask = ask.filter(|ask| !ask.refused());
+                } else if let Some(ask) = self.upload_ask.as_mut() {
+                    if let Some(quiet) = kitty_key(keys, b"q=").filter(|&quiet| quiet != 0) {
+                        ask.quiet = quiet;
+                    }
                 }
                 // One image, however many escapes it took. `m=1` says
                 // another follows; the transmission is not an image until
@@ -2378,8 +2398,10 @@ impl SeqTracker {
         }
         if self.dcs_introducer != b'_' && self.dcs_final == 0 {
             match b {
-                // Parameter and private bytes stay in the header.
-                0x30..=0x3f => {}
+                // Parameter and private bytes stay in the header. A sixel's
+                // second one is its background select, which the meter
+                // keeps for the decode (#766); no other DCS reads it.
+                0x30..=0x3f => self.sixel_meter.header(b),
                 // Intermediates: `+` (XTGETTCAP) and `$` (DECRQSS).
                 0x20..=0x2f => self.dcs_intermediate = b,
                 // Final byte closes the header; the rest is payload.
@@ -3139,6 +3161,19 @@ mod tests {
             ]
             .concat(),
         );
+        // A middle chunk's quiet holds at the last as well: kitty copies the
+        // nonzero `q=` of every chunk onto the command that started the
+        // load (#758). A `q=0` changes nothing.
+        unnamed(&[first, b"\x1b_Gm=1,q=1;AAAA\x1b\\", last].concat());
+        unnamed(&[first, b"\x1b_Gm=1,q=2;AAAA\x1b\\", last].concat());
+        unnamed(
+            &[
+                b"\x1b_Ga=T,f=32,s=2,v=1,i=5,q=1,m=1;AAAA\x1b\\".as_slice(),
+                b"\x1b_Gm=1,q=0;AAAA\x1b\\",
+                last,
+            ]
+            .concat(),
+        );
         // A placement in the middle of an upload is answered for itself.
         let (_, queries, _) = kitty_events(&[first, b"\x1b_Ga=p,i=9\x1b\\"].concat());
         assert_eq!(queries, [Query::Unanswerable("^[_Ga=p,i=9^[\\".into())]);
@@ -3186,6 +3221,31 @@ mod tests {
             assert_eq!(seen[0].data(), Some(&b"AAAACCCC"[..]), "{shown}");
             assert_eq!(tracker.graphics().kitty, 1, "{shown}");
         }
+    }
+
+    /// kitty's `dispatch_apc` drops an APC shorter than two bytes before it
+    /// reads it (`if (bufsz < 2) return;`), so a lone `G` is no kitty
+    /// escape: no image, and an upload in progress goes on to its real last
+    /// chunk. It was counted as a kitty transmission of one byte, and in an
+    /// upload taken as its last chunk, which made the real last chunk a
+    /// second image (#768). Two bytes reach kitty's parser: `G;` is a chunk
+    /// with no keys, and ends the upload.
+    #[test]
+    fn a_lone_g_apc_is_no_kitty_escape() {
+        let lone: &[u8] = b"\x1b_G\x1b\\";
+        let (seen, _, tracker) = kitty_events(lone);
+        assert_eq!(seen, []);
+        assert_eq!((tracker.graphics().kitty, tracker.graphics().bytes), (0, 0));
+        let last: &[u8] = b"\x1b_Gm=0;CCCC\x1b\\";
+        let (seen, _, tracker) = kitty_events(&[UPLOAD_OF_5, lone, last].concat());
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].chunks(), 2);
+        assert_eq!(seen[0].data(), Some(&b"AAAACCCC"[..]));
+        assert_eq!(tracker.graphics().kitty, 1);
+        let (seen, _, tracker) = kitty_events(&[UPLOAD_OF_5, b"\x1b_G;\x1b\\", last].concat());
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[0].chunks(), 2);
+        assert_eq!(tracker.graphics().kitty, 2);
     }
 
     /// A control block naming every key a transmission and its placement
@@ -3543,6 +3603,47 @@ mod tests {
         let sixel = payloads(b"\x1bP0;1;0q\"1;1;2;6#0;2;100;0;0~~\x1b\\");
         assert_eq!(sixel[0].data(), Some(&b"\"1;1;2;6#0;2;100;0;0~~"[..]));
         assert_eq!(sixel[0].size(), Some((2, 6)));
+    }
+
+    /// A sixel's header selects its background with its second parameter,
+    /// `P2` (#766): 0, 2 or none fill the declared raster area with colour
+    /// register 0 — opaque black in the VT340 map — and 1 alone leaves what
+    /// no sixel paints transparent. xterm (`parse_sixel_init`, "0 or 2 =
+    /// opaque, 1 = transparent", and `init_sixel_background`) and Windows
+    /// Terminal (`_initRasterAttributes`, `_fillImageBackground`) fill it.
+    /// The parameter never reached the decoder, and every header decoded
+    /// transparent. The header is read as it arrives, so a parameter past
+    /// the 128 bytes the head buffer keeps is read too.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn a_sixel_header_selects_the_background_of_its_raster_area() {
+        const BLACK: [u8; 4] = [0, 0, 0, 255];
+        const CLEAR: [u8; 4] = [0, 0, 0, 0];
+        let long = format!("{};1q", "0".repeat(200));
+        for (header, unpainted) in [
+            ("q", BLACK),
+            ("0;0;0q", BLACK),
+            ("0;2;0q", BLACK),
+            ("0;1;0q", CLEAR),
+            // Only the second parameter, however it is spelled, and only
+            // its number: a sub-parameter is not part of it, as Windows
+            // Terminal's parser reads one.
+            ("1q", BLACK),
+            (";1q", CLEAR),
+            ("0;01q", CLEAR),
+            ("0;1:0;0q", CLEAR),
+            (long.as_str(), CLEAR),
+        ] {
+            let wire = format!("\x1bP{header}\"1;1;4;12#1;2;100;0;0~~\x1b\\");
+            let seen = payloads(wire.as_bytes());
+            assert_eq!(seen.len(), 1, "{header}");
+            let bitmap = seen[0].decode().expect("decodes");
+            assert_eq!((bitmap.width(), bitmap.height()), (4, 12), "{header}");
+            assert_eq!(bitmap.pixel(0, 0), Some([255, 0, 0, 255]), "{header}");
+            // Beside the painting, and in the band below it.
+            assert_eq!(bitmap.pixel(3, 0), Some(unpainted), "{header}");
+            assert_eq!(bitmap.pixel(0, 8), Some(unpainted), "{header}");
+        }
     }
 
     /// The kitty graphics *query* was the one probe of the startup set that

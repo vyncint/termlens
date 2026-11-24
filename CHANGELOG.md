@@ -126,6 +126,58 @@ reads that marker.
   have the helper leave the group (`setsid`), as it already had to under
   the default disposition. (#774)
 
+- An image taller than the screen scrolls it as far as kitty and xterm
+  scroll it: by as many rows as its last row is past the bottom margin, and,
+  as kitty caps it, by no more than the screen is tall. The cap applied to
+  the line feeds that move the cursor past the image, the first of which
+  only walk it down to the margin, so the screen scrolled short by that
+  walk: under `Graphics::Kitty` with `cell_size(10, 20)`, 24 numbered rows
+  on a 20x24 screen and the cursor on row 2, `a=T,c=1,r=30` left `L03` on
+  row 0 and 3 rows of history where kitty leaves `L08` and 8, and a 600 px
+  sixel under `Graphics::Sixel` did the same where xterm scrolls 8. The
+  cursor lands where it did. A test that reads the screen or the history
+  after such an image should expect it scrolled by the whole overshoot, up
+  to a screenful. (#765)
+- A sixel decodes with the background its header selects. With the
+  default header (`ESC P q`) or a background select (`P2`) of 0 or 2, the
+  area its leading raster attributes declare is filled with colour
+  register 0 before anything is painted, as xterm and Windows Terminal
+  fill it, so a pixel no sixel painted there decodes as register 0, opaque
+  black in the VT340 colour map unless the image redefines it. Only
+  `P2 = 1` (`ESC P 0;1;0 q`) leaves it `[0, 0, 0, 0]`. `P2` never reached
+  the decoder, so the three headers decoded alike, and an application that
+  forgot `P2=1` passed an assertion that its corners were transparent
+  while those terminals drew them black. The payload keeps `P2` under a
+  new JSON key, `background_select`, written only where it is not 0: a
+  JSON screen saved by an earlier release still reads, and its sixels,
+  whose `P2` it never recorded, decode as `P2 = 0`; 0.11.10 reads a newer
+  file, skipping the key. A test that expected a transparent pixel inside
+  a sixel's declared area should expect register 0's colour there, or the
+  application should send `P2 = 1`. (#766)
+- A raw kitty RGB or RGBA payload (`f=24`, `f=32`) holding more bytes
+  than its `s=` and `v=` declare is refused with `DecodeError::Malformed`,
+  as kitty refuses it ("Image dimensions … do not match data size") and
+  as termlens already refused the same bytes zlib-compressed. It decoded
+  `Ok` as its first `s=` x `v=` pixels: two RGBA pixels sent as `f=24`,
+  the RGB/RGBA mix-up, gave a 2x1 image whose second pixel was magenta. A
+  test that decoded such a payload should expect `Malformed`, or the
+  application should send exactly the declared size. (#767)
+- An APC holding only `G` (`ESC _ G ESC \`) is no kitty escape, as kitty
+  drops an APC shorter than two bytes before reading it. It was counted
+  as a kitty transmission of one byte, so `graphics().kitty()` counted an
+  image the application never sent, and in a chunked upload it was taken
+  as the last chunk, which made the real last chunk a second image. #735
+  fixed the empty APC only. A test that counted such an APC should expect
+  one image fewer, and an upload it interrupted to be one image of all its
+  chunks. (#768)
+- A chunked kitty upload that asks for quiet (`q=1` or `q=2`) in a middle
+  chunk is no longer named in the next timeout. kitty copies the nonzero
+  `q=` of every chunk onto the command that started the upload, so it
+  sends no `OK` at the end; termlens read `q=` off the first and the last
+  chunk only, and named `a=T,i=5,m=1`, then `m=1,q=1`, then `m=0` as
+  "the application queried the terminal (^[_Ga=T,i=5,m=1;…)". A test that
+  matched that note for such an upload should expect it gone. (#758)
+
 ### Fixed
 
 - Saved JSON screens with leading spaces, tabs or carriage returns are
@@ -191,6 +243,12 @@ reads that marker.
   frames recorded before the panic it returned `Ok`, a recording cut at
   the panic with nothing to say so. Found by fault injection: no input is
   known to make the emulator panic. (#776)
+
+- `docs/LIMITATIONS.md` says which kitty placements leave the cursor
+  where it is. It said a placement of an image whose transmission has
+  left the payload log does, but given `c=` and `r=` one moves it by
+  those, taken to succeed as every placement is; only without them does
+  it stay, as a PNG placed without them does. (#769)
 
 ## [0.11.10] - 2026-11-17
 

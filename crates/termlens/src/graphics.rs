@@ -228,6 +228,25 @@ pub struct GraphicsPayload {
     bytes: u64,
     at: (u16, u16),
     data: Option<Arc<[u8]>>,
+    /// sixel's background select, the second parameter of its DCS header
+    /// (`P2`), 0 where the header leaves it out; always 0 for kitty. 1 has
+    /// a decode leave what no sixel painted transparent, and anything else
+    /// has it fill the declared raster area with colour register 0 first,
+    /// as xterm and Windows Terminal draw it (#766). `data` starts after the
+    /// header, and this is the one fact of the header a decode needs.
+    ///
+    /// In the JSON only where it is not 0: a payload with the default header
+    /// writes the document earlier releases wrote, one they wrote — which
+    /// never recorded it — reads as 0, and their reader, a derive that skips
+    /// a key it does not know, reads one that has it.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "is_zero"))]
+    background_select: u32,
+}
+
+/// Whether a serialized number is its default, 0, and so left out.
+#[cfg(feature = "serde")]
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl fmt::Debug for GraphicsPayload {
@@ -390,15 +409,22 @@ impl GraphicsPayload {
     /// image, and [`DecodeError::Unsupported`] when its format is not
     /// supported. [`DecodeError::Malformed`] covers contradictory or invalid
     /// payload data, including data that cannot be decoded within its declared
-    /// size. [`DecodeError::TooLarge`] covers declared dimensions or sixel
-    /// commands beyond the 4096-pixel and related safety limits.
+    /// size, and kitty pixel data longer or shorter than that size, which
+    /// kitty refuses too. [`DecodeError::TooLarge`] covers declared
+    /// dimensions or sixel commands beyond the 4096-pixel and related safety
+    /// limits.
     #[cfg(feature = "decode")]
     #[cfg_attr(docsrs, doc(cfg(feature = "decode")))]
     pub fn decode(&self) -> Result<Bitmap, DecodeError> {
         let data = self.data.as_deref().ok_or(DecodeError::NotCaptured)?;
         match self.protocol {
             GraphicsProtocol::Kitty => self.decode_kitty(data),
-            GraphicsProtocol::Sixel => decode_sixel(data),
+            // The area the leading raster attributes declare, `size()`:
+            // xterm fills what they set before the first sixel arrives,
+            // and so does Windows Terminal.
+            GraphicsProtocol::Sixel => {
+                decode_sixel(data, self.size.filter(|_| self.background_select != 1))
+            }
         }
     }
 
@@ -472,8 +498,17 @@ impl GraphicsPayload {
                 "fewer bytes than the declared size needs",
             ));
         }
+        // A surplus is refused too, as kitty refuses it (`data_sz !=
+        // required_sz` in `handle_add_command`) and as the zlib form above
+        // already was: it is the RGB/RGBA mix-up, not padding, and its
+        // prefix decoded into a plausible wrong picture (#767).
+        if raw.len() > wanted {
+            return Err(DecodeError::Malformed(
+                "more bytes than the declared size holds",
+            ));
+        }
         let mut pixels = Vec::with_capacity(wanted / channels);
-        for chunk in raw[..wanted].chunks_exact(channels) {
+        for chunk in raw.chunks_exact(channels) {
             pixels.push([
                 chunk[0],
                 chunk[1],
@@ -533,10 +568,17 @@ impl Bitmap {
 
     /// The pixel at `(x, y)` as RGBA, or `None` when out of bounds.
     ///
-    /// Alpha is `0` for a sixel pixel no colour was ever written to — sixel
-    /// has no alpha channel, so "transparent" there means "left as the
-    /// terminal found it", which is exactly the distinction an assertion
-    /// about a rounded corner needs.
+    /// Alpha is `0` for a sixel pixel the terminal leaves as it found it —
+    /// sixel has no alpha channel, so "transparent" there means "left as
+    /// the terminal found it", which is exactly the distinction an
+    /// assertion about a rounded corner needs. Which pixels those are is
+    /// the header's choice, its background select (`P2`) (#766). At 1
+    /// (`ESC P 0;1;0 q`), every pixel no sixel painted. Otherwise, as in
+    /// `ESC P q`, xterm and Windows Terminal first fill the area that the
+    /// raster attributes at the head of the data declare with colour
+    /// register 0 — opaque black unless the image redefines it — and only
+    /// what no sixel painted outside that area is left. An application
+    /// that forgets `P2=1` has its corners drawn, and decoded, black.
     #[must_use]
     pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 4]> {
         if x >= self.width || y >= self.height {
@@ -683,8 +725,12 @@ fn decode_chunked_base64(data: &[u8]) -> Option<Vec<u8>> {
 /// `n` in percent; `#n` selects it; a byte `?`..`~` paints the six pixels of
 /// the current band whose bits it sets; `!<count>` repeats the next such
 /// byte; `$` returns to the left margin within the band; `-` ends the band.
+///
+/// `background` is the area the header's background select has filled
+/// with colour register 0 before anything is painted, `None` for none
+/// (#766).
 #[cfg(feature = "decode")]
-fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
+fn decode_sixel(data: &[u8], background: Option<(u32, u32)>) -> Result<Bitmap, DecodeError> {
     /// The VT340's colour map in percent, registers 0 to 15, as vt340test
     /// measured it on the hardware (`colormap/colormap.md`) and xterm seeds
     /// it (`graphics.c`, `case 340`). A sixel that never defines a register
@@ -905,6 +951,10 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
             "a sixel declaring more than 4096x4096",
         ));
     }
+    // Register 0 as the image left it: xterm and Windows Terminal fill the
+    // area with the register itself, not its colour, and draw it through
+    // the palette.
+    let background = background.map(|(width, height)| (width as usize, height as usize));
     let mut pixels = Vec::with_capacity((width as usize).saturating_mul(height as usize));
     for y in 0..height as usize {
         for x in 0..width as usize {
@@ -913,10 +963,13 @@ fn decode_sixel(data: &[u8]) -> Result<Bitmap, DecodeError> {
                     .and_then(|row| row.get(x))
                     .copied()
                     .flatten()
-                    // Untouched: sixel has no alpha, so a pixel never
-                    // painted is the terminal's own background showing
-                    // through, which is not a colour we may invent.
-                    .unwrap_or([0, 0, 0, 0]),
+                    .unwrap_or_else(|| match background {
+                        Some((width, height)) if x < width && y < height => registers[0],
+                        // Untouched: sixel has no alpha, so a pixel never
+                        // painted is the terminal's own background showing
+                        // through, which is not a colour we may invent.
+                        _ => [0, 0, 0, 0],
+                    }),
             );
         }
     }
@@ -1127,6 +1180,8 @@ pub(crate) struct GraphicsBuilder {
     /// reports no data at all rather than a prefix of one.
     dropped: bool,
     placement: Placement,
+    /// sixel's `P2`, from its header (#766).
+    background_select: u32,
 }
 
 impl Default for GraphicsBuilder {
@@ -1145,6 +1200,7 @@ impl Default for GraphicsBuilder {
             data: Vec::new(),
             dropped: false,
             placement: Placement::default(),
+            background_select: 0,
         }
     }
 }
@@ -1222,6 +1278,7 @@ impl GraphicsBuilder {
         self.action = GraphicsAction::TransmitAndPlace;
         self.format = GraphicsFormat::Sixel;
         self.size = meter.raster();
+        self.background_select = meter.background_select();
         // xterm's height: the larger of the raster attributes' and the
         // painted rows'.
         let declared = self.size.map_or(0, |(_, height)| height);
@@ -1290,6 +1347,7 @@ impl GraphicsBuilder {
             at: (0, 0),
             data: (!self.dropped)
                 .then(|| Arc::from(std::mem::take(&mut self.data).into_boxed_slice())),
+            background_select: self.background_select,
         };
         *self = Self::default();
         Some((payload, placement))
@@ -1319,6 +1377,10 @@ impl GraphicsBuilder {
 /// retained data, so a payload past the bound lost its size and stopped
 /// moving the cursor. Fixed-size, so measuring costs the same whatever the
 /// stream's length.
+///
+/// And one fact of the DCS header before the stream: its background select,
+/// `P2`, which decides what a decode fills (#766). Read from the parameter
+/// bytes as they arrive too, so a header of any length is read whole.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct SixelMeter {
     raster: Raster,
@@ -1326,6 +1388,13 @@ pub(crate) struct SixelMeter {
     band: u32,
     /// Down to the lowest pixel set, in pixels.
     height: u32,
+    /// Which header parameter is arriving, counted by `;`: index 1 is `P2`.
+    parameter: u8,
+    /// Set by a byte other than a digit inside a parameter — a sub-parameter
+    /// or a marker — after which nothing up to the next `;` is its number.
+    past_number: bool,
+    /// The background select, `P2`: 0 where the header leaves it out.
+    background_select: u32,
 }
 
 /// How far into the leading raster record a [`SixelMeter`] is.
@@ -1359,6 +1428,30 @@ impl SixelMeter {
             meter.feed(byte);
         }
         meter
+    }
+
+    /// Take one parameter byte of the DCS header, before the `q`. Only the
+    /// background select is kept.
+    pub(crate) fn header(&mut self, byte: u8) {
+        match byte {
+            b';' => {
+                self.parameter = self.parameter.saturating_add(1);
+                self.past_number = false;
+            }
+            b'0'..=b'9' if self.parameter == 1 && !self.past_number => {
+                self.background_select = self
+                    .background_select
+                    .saturating_mul(10)
+                    .saturating_add(u32::from(byte - b'0'));
+            }
+            b'0'..=b'9' => {}
+            _ => self.past_number = true,
+        }
+    }
+
+    /// The header's background select, `P2`: 0 where it leaves it out.
+    pub(crate) fn background_select(&self) -> u32 {
+        self.background_select
     }
 
     /// Take one byte of the stream.
@@ -1819,7 +1912,8 @@ mod tests {
         assert_eq!(bitmap.pixel(5, 0), Some([255, 0, 0, 255]));
         assert_eq!(bitmap.pixel(0, 8), Some([255, 0, 0, 255]));
         // A declared size larger than the painting is kept, as before, the
-        // unpainted rest transparent; and painting that only advances the
+        // unpainted rest of it the background the default header fills in
+        // register 0, red here (#766); and painting that only advances the
         // cursor (`?` sets no pixel) grows nothing.
         let mut builder = GraphicsBuilder::default();
         builder.sixel_chunk(30, b"\"1;1;4;12#0;2;100;0;0~~????", true, usize::MAX);
@@ -1829,7 +1923,7 @@ mod tests {
             .decode()
             .expect("decodes");
         assert_eq!((bitmap.width(), bitmap.height()), (4, 12));
-        assert_eq!(bitmap.pixel(3, 11), Some([0, 0, 0, 0]));
+        assert_eq!(bitmap.pixel(3, 11), Some([255, 0, 0, 255]));
         // Still under the cap: a painting past 4096 is refused as before.
         let mut builder = GraphicsBuilder::default();
         builder.sixel_chunk(30, b"\"1;1;2;6#0;2;100;0;0!4097~", true, usize::MAX);
@@ -1939,6 +2033,19 @@ mod tests {
     fn sixel_payload(data: &[u8]) -> GraphicsPayload {
         let mut builder = GraphicsBuilder::default();
         builder.sixel_chunk(data.len() as u64, data, true, usize::MAX);
+        builder.finish().expect("a payload")
+    }
+
+    /// A sixel whose DCS header carried `head`, the parameter bytes before
+    /// its `q`, as the tracker hands them to the meter.
+    #[cfg(feature = "decode")]
+    fn sixel_under_header(head: &[u8], data: &[u8]) -> GraphicsPayload {
+        let mut meter = SixelMeter::default();
+        head.iter().for_each(|&byte| meter.header(byte));
+        data.iter().for_each(|&byte| meter.feed(byte));
+        let mut builder = GraphicsBuilder::default();
+        builder.sixel(&meter);
+        builder.chunk(data.len() as u64, data, true, usize::MAX);
         builder.finish().expect("a payload")
     }
 
@@ -2057,6 +2164,46 @@ mod tests {
         }
     }
 
+    /// kitty refuses an image whose data is not exactly `s=` x `v=` pixels,
+    /// compressed or not: `handle_add_command` (`graphics.c`) aborts with
+    /// `EINVAL`, "Image dimensions: %ux%u do not match data size", unless
+    /// `data_sz == required_sz`. Raw data with bytes to spare decoded `Ok`
+    /// as its prefix (#767): two RGBA pixels sent as `f=24`, the RGB/RGBA
+    /// mix-up, came out as two pixels with the second one magenta, while
+    /// the same bytes compressed were refused.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn kitty_data_must_be_exactly_the_declared_size() {
+        // Red, then green, as RGBA: 8 bytes.
+        let rgba = [0xff, 0, 0, 0xff, 0, 0xff, 0, 0xff];
+        for (control, raw) in [
+            // 6 bytes needed, then 4: a surplus. 8 needed, 6 sent: short.
+            ("a=T,f=24,s=2,v=1", &rgba[..]),
+            ("a=T,f=32,s=1,v=1", &rgba[..]),
+            ("a=T,f=32,s=2,v=1", &rgba[..6]),
+        ] {
+            for compressed in [false, true] {
+                let (control, data) = if compressed {
+                    let deflated = miniz_oxide::deflate::compress_to_vec_zlib(raw, 6);
+                    (format!("{control},o=z"), deflated)
+                } else {
+                    (control.to_owned(), raw.to_vec())
+                };
+                let payload = kitty_payload(control.as_bytes(), base64(&data).as_bytes());
+                assert!(
+                    matches!(payload.decode(), Err(DecodeError::Malformed(_))),
+                    "{control} with {} bytes: {:?}",
+                    raw.len(),
+                    payload.decode()
+                );
+            }
+        }
+        // Exactly the declared size decodes.
+        let exact = kitty_payload(b"a=T,f=32,s=2,v=1", base64(&rgba).as_bytes());
+        let bitmap = exact.decode().expect("decodes");
+        assert_eq!(bitmap.pixel(1, 0), Some([0, 0xff, 0, 0xff]));
+    }
+
     #[cfg(feature = "decode")]
     #[test]
     fn non_direct_kitty_transmissions_are_not_decoded_as_pixels() {
@@ -2128,16 +2275,76 @@ mod tests {
     #[test]
     fn a_sixel_pixel_nothing_painted_is_transparent_rather_than_black() {
         // `@` sets only the top row of the band; the five below it were
-        // never written, and sixel has no alpha to say so with.
-        let mut builder = GraphicsBuilder::default();
-        builder.sixel_chunk(30, b"\"1;1;1;6#0;2;0;100;0@-", true, usize::MAX);
-        let bitmap = builder
-            .finish()
-            .expect("a payload")
+        // never written, and sixel has no alpha to say so with. Under a
+        // header that selects no background (`P2 = 1`): the default one
+        // fills them with register 0 (#766).
+        let bitmap = sixel_under_header(b"0;1;0", b"\"1;1;1;6#0;2;0;100;0@-")
             .decode()
             .expect("decodes");
         assert_eq!(bitmap.pixel(0, 0), Some([0, 255, 0, 255]));
         assert_eq!(bitmap.pixel(0, 1), Some([0, 0, 0, 0]));
+    }
+
+    /// The default header's background fills the area the leading raster
+    /// attributes declare — the payload's `size()` — and nothing else, as
+    /// xterm's `init_sixel_background` and Windows Terminal's
+    /// `_fillImageBackground` fill it when the first sixel arrives (#766): a
+    /// sixel painted past the area is not filled around, and raster
+    /// attributes after the first sixel, which are no `size()` either, fill
+    /// nothing. Both fill with the register itself and draw it through the
+    /// palette, so the colour is register 0's as the image leaves it. Raster
+    /// attributes with no sixel at all are filled, as Windows Terminal fills
+    /// them at the terminator.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn the_default_background_fills_the_declared_area_in_register_0() {
+        const RED: [u8; 4] = [255, 0, 0, 255];
+        const BLUE: [u8; 4] = [0, 0, 255, 255];
+        const CLEAR: [u8; 4] = [0, 0, 0, 0];
+        // 2x6 declared. `@` paints the top pixel of column 0, a run on
+        // column 4 paints past the area, and register 0 is blue at the end.
+        let bitmap = sixel_payload(b"\"1;1;2;6#1;2;100;0;0@!3?~#0;2;0;0;100")
+            .decode()
+            .expect("decodes");
+        assert_eq!((bitmap.width(), bitmap.height()), (5, 6));
+        assert_eq!(bitmap.pixel(0, 0), Some(RED));
+        assert_eq!(bitmap.pixel(0, 1), Some(BLUE), "under the painting");
+        assert_eq!(bitmap.pixel(1, 5), Some(BLUE), "beside it");
+        assert_eq!(bitmap.pixel(2, 0), Some(CLEAR), "past the area");
+        assert_eq!(bitmap.pixel(4, 5), Some(RED));
+        // Raster attributes after the first sixel.
+        let payload = sixel_payload(b"#1;2;100;0;0@\"1;1;2;6");
+        assert_eq!(payload.size(), None);
+        let bitmap = payload.decode().expect("decodes");
+        assert_eq!((bitmap.width(), bitmap.height()), (2, 6));
+        assert_eq!(bitmap.pixel(0, 1), Some(CLEAR));
+        // Raster attributes alone: the background, in the VT340's black.
+        let bitmap = sixel_payload(b"\"1;1;2;6").decode().expect("decodes");
+        assert_eq!(bitmap.colours(), vec![([0, 0, 0, 255], 12)]);
+    }
+
+    /// The background select is in the JSON only where it is not 0 (#766). A
+    /// payload with the default header writes the document earlier releases
+    /// wrote, and one they wrote, which never recorded `P2`, reads back as 0
+    /// and decodes with the background. One with `P2 = 1` keeps it through
+    /// the round trip.
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    #[test]
+    fn the_background_select_is_in_json_only_where_it_is_not_zero() {
+        let data = b"\"1;1;4;12#1;2;100;0;0~~";
+        let opaque = sixel_payload(data);
+        let json = serde_json::to_string(&opaque).unwrap();
+        assert!(!json.contains("background_select"), "{json}");
+        let transparent = sixel_under_header(b"0;1;0", data);
+        let json = serde_json::to_string(&transparent).unwrap();
+        assert!(json.ends_with(",\"background_select\":1}"), "{json}");
+        let back: GraphicsPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, transparent);
+        assert_eq!(back.decode().unwrap().pixel(3, 0), Some([0, 0, 0, 0]));
+        let earlier = json.replace(",\"background_select\":1", "");
+        let back: GraphicsPayload = serde_json::from_str(&earlier).unwrap();
+        assert_eq!(back, opaque);
+        assert_eq!(back.decode().unwrap().pixel(3, 0), Some([0, 0, 0, 255]));
     }
 
     /// A VT340 starts with its colour map in registers 0 to 15 and draws in
@@ -2215,17 +2422,9 @@ mod tests {
     #[test]
     fn sixel_bands_stack_downwards_and_carriage_returns_overprint() {
         // Two bands, and a `$` that goes back to paint the second colour
-        // over the first band's second column.
-        let mut builder = GraphicsBuilder::default();
-        builder.sixel_chunk(
-            60,
-            b"\"1;1;2;12#0;2;100;0;0~~$#1;2;0;0;100?~-#0??-",
-            true,
-            usize::MAX,
-        );
-        let bitmap = builder
-            .finish()
-            .expect("a payload")
+        // over the first band's second column. With no background (`P2 =
+        // 1`), so that the second band shows it was not painted (#766).
+        let bitmap = sixel_under_header(b"0;1;0", b"\"1;1;2;12#0;2;100;0;0~~$#1;2;0;0;100?~-#0??-")
             .decode()
             .expect("decodes");
         assert_eq!((bitmap.width(), bitmap.height()), (2, 12));
