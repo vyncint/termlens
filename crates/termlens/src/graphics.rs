@@ -214,7 +214,7 @@ impl fmt::Display for GraphicsTransmission {
 /// application stated or the wire carried — nothing here is inferred from a
 /// rendering, because there is no rendering.
 #[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
 pub struct GraphicsPayload {
     protocol: GraphicsProtocol,
     action: GraphicsAction,
@@ -238,15 +238,45 @@ pub struct GraphicsPayload {
     /// In the JSON only where it is not 0: a payload with the default header
     /// writes the document earlier releases wrote, one they wrote — which
     /// never recorded it — reads as 0, and their reader, a derive that skips
-    /// a key it does not know, reads one that has it.
-    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "is_zero"))]
+    /// a key it does not know, reads one that has it. Everywhere else it is
+    /// always written: see the `Serialize` impl.
+    #[cfg_attr(feature = "serde", serde(default))]
     background_select: u32,
 }
 
-/// Whether a serialized number is its default, 0, and so left out.
+/// The derive's shape, field for field, but for the background select:
+/// left out at 0 only by a human-readable serializer, the JSON's, and
+/// written everywhere else. A format without field names, postcard or
+/// bincode, reads a struct's fields by position, and the derive's
+/// `skip_serializing_if` left that one out of the sequence, so a `Screen`
+/// holding any payload no longer read back from its own bytes there,
+/// where 0.11.10's did.
 #[cfg(feature = "serde")]
-fn is_zero(value: &u32) -> bool {
-    *value == 0
+impl serde::Serialize for GraphicsPayload {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+        let skip = serializer.is_human_readable() && self.background_select == 0;
+        let mut payload =
+            serializer.serialize_struct("GraphicsPayload", if skip { 12 } else { 13 })?;
+        payload.serialize_field("protocol", &self.protocol)?;
+        payload.serialize_field("action", &self.action)?;
+        payload.serialize_field("format", &self.format)?;
+        payload.serialize_field("compressed", &self.compressed)?;
+        payload.serialize_field("transmission", &self.transmission)?;
+        payload.serialize_field("id", &self.id)?;
+        payload.serialize_field("size", &self.size)?;
+        payload.serialize_field("cells", &self.cells)?;
+        payload.serialize_field("chunks", &self.chunks)?;
+        payload.serialize_field("bytes", &self.bytes)?;
+        payload.serialize_field("at", &self.at)?;
+        payload.serialize_field("data", &self.data)?;
+        if skip {
+            payload.skip_field("background_select")?;
+        } else {
+            payload.serialize_field("background_select", &self.background_select)?;
+        }
+        payload.end()
+    }
 }
 
 impl fmt::Debug for GraphicsPayload {
@@ -2426,6 +2456,174 @@ mod tests {
         let back: GraphicsPayload = serde_json::from_str(&earlier).unwrap();
         assert_eq!(back, opaque);
         assert_eq!(back.decode().unwrap().pixel(3, 0), Some([0, 0, 0, 255]));
+    }
+
+    /// The fields a struct hands a serializer that is not human-readable,
+    /// by name, in order, and nothing else: what a format without field
+    /// names, postcard or bincode, writes, and reads back by position.
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    struct FieldNames(Vec<&'static str>);
+
+    /// Anything [`FieldNames`] is handed but a struct.
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    #[derive(Debug)]
+    struct NotAStruct;
+
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    impl fmt::Display for NotAStruct {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("only a struct's field names are recorded")
+        }
+    }
+
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    impl std::error::Error for NotAStruct {}
+
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    impl serde::ser::Error for NotAStruct {
+        fn custom<T: fmt::Display>(_: T) -> Self {
+            NotAStruct
+        }
+    }
+
+    /// The methods [`FieldNames`] refuses, each with the arguments it takes.
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    macro_rules! not_a_struct {
+        ($($method:ident($($arg:ty),*) -> $ok:ty;)*) => {$(
+            fn $method(self, $(_: $arg),*) -> Result<$ok, NotAStruct> {
+                Err(NotAStruct)
+            }
+        )*};
+    }
+
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    impl serde::Serializer for &mut FieldNames {
+        type Ok = ();
+        type Error = NotAStruct;
+        type SerializeSeq = serde::ser::Impossible<(), NotAStruct>;
+        type SerializeTuple = serde::ser::Impossible<(), NotAStruct>;
+        type SerializeTupleStruct = serde::ser::Impossible<(), NotAStruct>;
+        type SerializeTupleVariant = serde::ser::Impossible<(), NotAStruct>;
+        type SerializeMap = serde::ser::Impossible<(), NotAStruct>;
+        type SerializeStruct = Self;
+        type SerializeStructVariant = serde::ser::Impossible<(), NotAStruct>;
+
+        fn is_human_readable(&self) -> bool {
+            false
+        }
+
+        fn serialize_struct(self, _: &'static str, _: usize) -> Result<Self, NotAStruct> {
+            Ok(self)
+        }
+
+        not_a_struct! {
+            serialize_bool(bool) -> (); serialize_i8(i8) -> (); serialize_i16(i16) -> ();
+            serialize_i32(i32) -> (); serialize_i64(i64) -> (); serialize_u8(u8) -> ();
+            serialize_u16(u16) -> (); serialize_u32(u32) -> (); serialize_u64(u64) -> ();
+            serialize_f32(f32) -> (); serialize_f64(f64) -> (); serialize_char(char) -> ();
+            serialize_str(&str) -> (); serialize_bytes(&[u8]) -> (); serialize_none() -> ();
+            serialize_unit() -> (); serialize_unit_struct(&'static str) -> ();
+            serialize_unit_variant(&'static str, u32, &'static str) -> ();
+            serialize_seq(Option<usize>) -> Self::SerializeSeq;
+            serialize_tuple(usize) -> Self::SerializeTuple;
+            serialize_tuple_struct(&'static str, usize) -> Self::SerializeTupleStruct;
+            serialize_tuple_variant(&'static str, u32, &'static str, usize)
+                -> Self::SerializeTupleVariant;
+            serialize_map(Option<usize>) -> Self::SerializeMap;
+            serialize_struct_variant(&'static str, u32, &'static str, usize)
+                -> Self::SerializeStructVariant;
+        }
+
+        fn serialize_some<T: ?Sized + serde::Serialize>(self, _: &T) -> Result<(), NotAStruct> {
+            Err(NotAStruct)
+        }
+
+        fn serialize_newtype_struct<T: ?Sized + serde::Serialize>(
+            self,
+            _: &'static str,
+            _: &T,
+        ) -> Result<(), NotAStruct> {
+            Err(NotAStruct)
+        }
+
+        fn serialize_newtype_variant<T: ?Sized + serde::Serialize>(
+            self,
+            _: &'static str,
+            _: u32,
+            _: &'static str,
+            _: &T,
+        ) -> Result<(), NotAStruct> {
+            Err(NotAStruct)
+        }
+    }
+
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    impl serde::ser::SerializeStruct for &mut FieldNames {
+        type Ok = ();
+        type Error = NotAStruct;
+
+        // The value is not serialized: its name is what is recorded.
+        fn serialize_field<T: ?Sized + serde::Serialize>(
+            &mut self,
+            name: &'static str,
+            _: &T,
+        ) -> Result<(), NotAStruct> {
+            self.0.push(name);
+            Ok(())
+        }
+
+        fn end(self) -> Result<(), NotAStruct> {
+            Ok(())
+        }
+    }
+
+    /// A format without field names reads a struct's fields by position, so
+    /// the background select is written there whatever its value, 0
+    /// included (#766). The derive's `skip_serializing_if` left it out at
+    /// 0, as the JSON does, and such a format then read the next field in
+    /// its place: a `Screen` holding any payload, default header or kitty,
+    /// stopped reading back from its own bytes, where 0.11.10's did. Every
+    /// field is written, in the order the derived `Deserialize` reads them.
+    /// The JSON leaves the field out at 0 alone.
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    #[test]
+    fn the_background_select_is_always_written_without_field_names() {
+        use serde::Serialize as _;
+        const ALL: [&str; 13] = [
+            "protocol",
+            "action",
+            "format",
+            "compressed",
+            "transmission",
+            "id",
+            "size",
+            "cells",
+            "chunks",
+            "bytes",
+            "at",
+            "data",
+            "background_select",
+        ];
+        let data = b"\"1;1;4;12#1;2;100;0;0~~";
+        let kitty = kitty_payload(b"a=T,f=24,s=2,v=1", base64(&[0; 6]).as_bytes());
+        for (payload, select) in [
+            (sixel_payload(data), 0),
+            (sixel_under_header(b"0;1;0", data), 1),
+            (sixel_under_header(b"0;2;0", data), 2),
+            (kitty, 0),
+        ] {
+            assert_eq!(payload.background_select, select);
+            let mut names = FieldNames(Vec::new());
+            payload.serialize(&mut names).expect("a struct");
+            assert_eq!(names.0, ALL, "P2 = {select}, not human-readable");
+            let json = serde_json::to_string(&payload).unwrap();
+            if select == 0 {
+                assert!(!json.contains("background_select"), "{json}");
+            } else {
+                let written = format!(",\"background_select\":{select}}}");
+                assert!(json.ends_with(&written), "{json}");
+            }
+        }
     }
 
     /// A VT340 starts with its colour map in registers 0 to 15 and draws in
