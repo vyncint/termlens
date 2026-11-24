@@ -1074,7 +1074,9 @@ fn colored(before: &Screen, after: &Screen, diff: &ScreenDiff) -> String {
     for row in changed_rows {
         // The row's cells in the overlap, each as `(text, changed)`. A wide
         // character whose second column falls past the overlap does not fit
-        // in it and is one blank, as in the plain rendering.
+        // in it and is one blank, as in the plain rendering — and so is one
+        // with no second column at all, stranded by a resize in a file
+        // 0.11.6 or earlier wrote (#781).
         let cells = |screen: &Screen| -> Vec<(String, bool)> {
             let mut cells = Vec::new();
             for col in 0..cols {
@@ -1084,7 +1086,12 @@ fn colored(before: &Screen, after: &Screen, diff: &ScreenDiff) -> String {
                 if cell.is_wide_continuation() {
                     continue;
                 }
-                let text = if cell.contents().is_empty() || (cell.is_wide() && col + 1 >= cols) {
+                let stranded = cell.is_wide()
+                    && (col + 1 >= cols
+                        || !screen
+                            .cell(row, col + 1)
+                            .is_some_and(termlens::Cell::is_wide_continuation));
+                let text = if cell.contents().is_empty() || stranded {
                     " "
                 } else {
                     cell.contents()

@@ -143,6 +143,12 @@ fn escape_xml(text: &str, out: &mut String) {
 /// One row as runs of consecutive cells sharing a style, wide
 /// continuations folded into the cell before them: `(start col, width
 /// in columns, style, text)`.
+///
+/// A stranded wide character is one blank in the text: it has one column,
+/// and its glyph takes two in any font, so printing it pushed the rest of
+/// its row a column right in the ANSI and HTML renderings (#781). The SVG
+/// takes its text from [`text_pieces`] instead, which fits the glyph to the
+/// one cell.
 fn runs(screen: &Screen, row: u16) -> Vec<(u16, u16, Style, String)> {
     let mut runs: Vec<(u16, u16, Style, String)> = Vec::new();
     for col in 0..screen.cols() {
@@ -156,12 +162,17 @@ fn runs(screen: &Screen, row: u16) -> Vec<(u16, u16, Style, String)> {
             continue;
         }
         let style = *cell.style();
+        let text = if screen.stranded(row, col) {
+            " "
+        } else {
+            glyph(cell)
+        };
         match runs.last_mut() {
             Some(last) if last.2 == style => {
                 last.1 += 1;
-                last.3.push_str(glyph(cell));
+                last.3.push_str(text);
             }
-            _ => runs.push((col, 1, style, glyph(cell).to_owned())),
+            _ => runs.push((col, 1, style, text.to_owned())),
         }
     }
     runs

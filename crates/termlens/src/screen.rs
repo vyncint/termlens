@@ -1989,6 +1989,19 @@ impl Screen {
         self.apply_mask(hits, Some(fill))
     }
 
+    /// Whether the cell at `(row, col)` is a stranded wide character: wide,
+    /// with no second column after it. vt100 0.16, behind every release up
+    /// to 0.11.6, narrowed a row by cutting it, so files those releases
+    /// wrote can hold one at the edge or, redrawn after, before other text
+    /// (DESIGN §3). It is one column on the grid and two in any font that
+    /// draws its glyph.
+    fn stranded(&self, row: u16, col: u16) -> bool {
+        self.cell(row, col).is_some_and(Cell::is_wide)
+            && !self
+                .cell(row, col.saturating_add(1))
+                .is_some_and(Cell::is_wide_continuation)
+    }
+
     fn apply_mask(&self, mut hits: Vec<bool>, fill: Option<char>) -> Screen {
         if let Some(fill) = fill {
             assert_eq!(

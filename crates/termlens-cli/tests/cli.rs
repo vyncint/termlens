@@ -192,6 +192,59 @@ fn diff_across_sizes_keeps_every_separator_in_one_column() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A wide character stranded before other text — the shape 0.11.6 wrote,
+/// in the corpus — is one column, and the coloured diff prints it as one
+/// blank, as the plain one does (#781). It printed the glyph whole, two
+/// columns, and the second `│` of the row stood a column right of every
+/// other frame. The columns are counted on the terminal's terms: the
+/// corpus row is ASCII and one CJK character.
+#[test]
+fn diff_color_keeps_a_stranded_wide_character_in_its_column() {
+    use std::process::Command;
+    let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../termlens/tests/compat/0.11.6/stranded-wide-redrawn.txt");
+    let text = std::fs::read_to_string(&corpus).expect("the corpus file");
+    let dir = std::env::temp_dir().join(format!("termlens-stranded-diff-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let changed = dir.join("changed.txt");
+    std::fs::write(&changed, text.replacen("abcd東Zyw", "abcd東Xyw", 1)).expect("write");
+    let columns = |line: &str| -> Vec<usize> {
+        let mut plain = String::new();
+        let mut rest = line;
+        while let Some(at) = rest.find('\x1b') {
+            plain.push_str(&rest[..at]);
+            let end = rest[at..].find('m').expect("an SGR run ends") + at + 1;
+            rest = &rest[end..];
+        }
+        plain.push_str(rest);
+        plain
+            .match_indices('│')
+            .map(|(at, _)| {
+                plain[..at]
+                    .chars()
+                    .map(|ch| if ch.is_ascii() || ch == '│' { 1 } else { 2 })
+                    .sum()
+            })
+            .collect()
+    };
+    for color in ["never", "always"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_termlens"))
+            .args(["diff", "--color", color])
+            .arg(&corpus)
+            .arg(&changed)
+            .output()
+            .expect("run termlens");
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        let printed = String::from_utf8(out.stdout).expect("UTF-8");
+        let row = printed
+            .lines()
+            .find(|line| line.starts_with("  0 │"))
+            .expect("row 0 changed");
+        assert_eq!(columns(row), [4, 13], "--color {color}:\n{printed}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A text save and a JSON save of one screen are the same picture, a row
 /// ending in a no-break space or an ideographic space included (#724). The
 /// text form trims both with the padding and the JSON keeps them, so the

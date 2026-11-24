@@ -1071,7 +1071,10 @@ stranded, the leftmost first (#683). A row that fits reads with every wide
 character whole, since the text does not say one lost its second half; the
 JSON twin of such a row, which carries the flags, can then hold the text
 after a stranded character one column further left than the text reads it.
-Both render back to the same text.
+Both render back to the same text. A picture of the grid — the ANSI and
+HTML renderings, the diff's frame — draws a stranded character as the one
+blank its column holds, since its glyph takes two columns in any font, and
+the SVG fits the glyph to its one cell (#781).
 
 The compatibility corpus under `crates/termlens/tests/compat/` holds both
 formats as written by each release since 0.10.1, and `tests/compat.rs`

@@ -44,6 +44,14 @@ reads that marker.
   It now reads `abcd#Zyw`; a whole wide character still masks both of its
   columns. A snapshot of such a masked screen shows the character after
   the stranded one again. (#780)
+- A stranded wide character keeps its row on the grid in `to_ansi`,
+  `to_html`, the diff and `termlens diff --color`. Those printed its glyph
+  whole, two columns for a cell of one, so `render --ansi` of a 5-column
+  0.11.6 file wrote a 6-column row and the diff's frame and `^` marker
+  stood a column right of the cell that changed. Each now prints it as
+  the one blank its column holds, as the diff already did at a screen's
+  edge; the SVG still fits the glyph to its cell. A snapshot of such a
+  rendering shows a blank where the glyph was. (#781)
 
 ### Fixed
 

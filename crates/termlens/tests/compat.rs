@@ -299,6 +299,90 @@ fn masks_one_cell(screen: &Screen) {
     assert_eq!(whole.mask_rect(5..6, 0..1).row_text(0), "abcd  yw");
 }
 
+/// The columns `text` takes on a terminal, for the stranded files' rows
+/// and the diff's frame around them: ASCII, the frame's `│`, and the one
+/// CJK character the rows hold, which is the one wide character.
+fn columns(text: &str) -> usize {
+    text.chars()
+        .map(|ch| if ch.is_ascii() || ch == '│' { 1 } else { 2 })
+        .sum()
+}
+
+/// `line` without its SGR runs.
+fn without_sgr(line: &str) -> String {
+    let mut plain = String::new();
+    let mut rest = line;
+    while let Some(at) = rest.find('\x1b') {
+        plain.push_str(&rest[..at]);
+        let end = rest[at..].find('m').expect("an SGR run ends") + at + 1;
+        rest = &rest[end..];
+    }
+    plain.push_str(rest);
+    plain
+}
+
+/// A stranded wide character is one column, and every picture of the
+/// screen keeps it one (#781): the ANSI and HTML rows are as wide as the
+/// screen, and the diff's frame and marker stay in their columns, for
+/// both 0.11.6 files that hold one — stranded at the edge and before
+/// other text. Each printed the glyph whole, two columns, and pushed the
+/// rest of its row one right. The SVG already drew it in its one cell.
+#[test]
+fn a_stranded_wide_character_keeps_every_rendering_on_the_grid() {
+    for shape in ["stranded-wide", "stranded-wide-redrawn"] {
+        let (screen, _) = round_trip(&read(&extra("0.11.6", shape, "txt")));
+        keeps_the_grid(shape, &screen);
+    }
+}
+
+/// What [`a_stranded_wide_character_keeps_every_rendering_on_the_grid`]
+/// holds a stranded screen to, from either twin.
+fn keeps_the_grid(shape: &str, screen: &Screen) {
+    let cols = usize::from(screen.cols());
+    for line in screen.to_ansi().lines() {
+        assert_eq!(columns(&without_sgr(line)), cols, "{shape} ANSI {line:?}");
+    }
+    let html = screen.to_html();
+    let pre = &html[html.find('>').unwrap() + 1..html.rfind("</pre>").unwrap()];
+    let mut text = String::new();
+    let mut tag = false;
+    for ch in pre.chars() {
+        match ch {
+            '<' => tag = true,
+            '>' => tag = false,
+            _ if !tag => text.push(ch),
+            _ => {}
+        }
+    }
+    for line in text.lines() {
+        assert_eq!(columns(line), cols, "{shape} HTML {line:?}");
+    }
+
+    // One character of the stranded row changed: before the stranded one
+    // at the edge, after the one stranded mid-row. Row 0 is ASCII up to
+    // there, so the character's index is its column.
+    let col: usize = if shape == "stranded-wide" { 1 } else { 5 };
+    let mut changed = screen.with_styles().to_string();
+    let line = changed.lines().nth(1).unwrap().to_owned();
+    let edited: String = line
+        .chars()
+        .enumerate()
+        .map(|(at, ch)| if at == col { 'X' } else { ch })
+        .collect();
+    changed = changed.replacen(&line, &edited, 1);
+    let diff = screen.diff(&Screen::parse(&changed).unwrap()).to_string();
+    let mut lines = diff.lines().skip_while(|l| !l.contains('│'));
+    let (text, marks) = (lines.next().unwrap(), lines.next().unwrap());
+    let frame = |line: &str| -> Vec<usize> {
+        line.match_indices('│')
+            .map(|(at, _)| columns(&line[..at]))
+            .collect()
+    };
+    assert_eq!(frame(text), frame(marks), "{shape}:\n{diff}");
+    let caret = marks.find('^').map(|at| columns(&marks[..at]));
+    assert_eq!(caret, Some(5 + col), "{shape}, under the change:\n{diff}");
+}
+
 /// `printf '⚠️\033[31mERR\033[0m ok'` on 10x2, written by the published
 /// 0.11.6 (a scratch crate on `termlens = "=0.11.6"`, vt100 0.16), which
 /// drew `⚠️` one column wide. It is not in [`EXTRA_SHAPES`]: that list
@@ -544,6 +628,18 @@ mod json {
         let screen: Screen = serde_json::from_str(&read(&path))
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         masks_one_cell(&screen);
+    }
+
+    /// [`keeps_the_grid`] from the JSON twins, which carry the stranded
+    /// cells' flags (#781).
+    #[test]
+    fn a_stranded_wide_character_keeps_every_rendering_on_the_grid_in_json() {
+        for shape in ["stranded-wide", "stranded-wide-redrawn"] {
+            let path = extra("0.11.6", shape, "json");
+            let screen: Screen = serde_json::from_str(&read(&path))
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            keeps_the_grid(shape, &screen);
+        }
     }
 
     #[test]
