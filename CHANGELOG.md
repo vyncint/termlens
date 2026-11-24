@@ -126,6 +126,19 @@ reads that marker.
   have the helper leave the group (`setsid`), as it already had to under
   the default disposition. (#774)
 
+- An image taller than the screen scrolls it as far as kitty and xterm
+  scroll it: by as many rows as its last row is past the bottom margin, and,
+  as kitty caps it, by no more than the screen is tall. The cap applied to
+  the line feeds that move the cursor past the image, the first of which
+  only walk it down to the margin, so the screen scrolled short by that
+  walk: under `Graphics::Kitty` with `cell_size(10, 20)`, 24 numbered rows
+  on a 20x24 screen and the cursor on row 2, `a=T,c=1,r=30` left `L03` on
+  row 0 and 3 rows of history where kitty leaves `L08` and 8, and a 600 px
+  sixel under `Graphics::Sixel` did the same where xterm scrolls 8. The
+  cursor lands where it did. A test that reads the screen or the history
+  after such an image should expect it scrolled by the whole overshoot, up
+  to a screenful. (#765)
+
 ### Fixed
 
 - Saved JSON screens with leading spaces, tabs or carriage returns are

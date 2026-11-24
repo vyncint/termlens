@@ -144,7 +144,10 @@ CHANGELOG entry.
   region then too, and termlens moves the cursor as line feeds would there,
   scrolling nothing. A
   `Graphics::Sixel` terminal with a `cell_size()` moves it to the image's
-  last text row, as xterm does with sixel scrolling on. Sixel display mode
+  last text row, as xterm does with sixel scrolling on. No image scrolls
+  the screen further than its height, which is kitty's cap: xterm goes on
+  scrolling under a sixel that ends more than a screen below the bottom
+  margin, pushing the blank rows under it into history. Sixel display mode
   (`CSI ? 80 h`), xterm's extra scroll for a trailing `-` on the bottom row,
   and its sixel-scrolls-right mode (`CSI ? 8452 h`) are not modelled. A
   `Graphics::None` terminal, the default, moves nothing: it ignores both

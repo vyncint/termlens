@@ -1153,6 +1153,13 @@ impl SeqTracker {
         (frame.top..=frame.bottom.unwrap_or(self.rows - 1)).contains(&row)
     }
 
+    /// The bottom margin of the screen on display, 0-based: the region's
+    /// last row, or the screen's with no region set. Where a line feed
+    /// starts to scroll, for an image that moves the cursor (#765).
+    pub(crate) fn bottom_margin(&self) -> u16 {
+        self.frame().bottom.unwrap_or(self.rows - 1)
+    }
+
     /// Whether origin mode (`DECOM`) is set on the screen on display.
     pub(crate) fn origin_mode(&self) -> bool {
         self.frame().origin
