@@ -899,6 +899,68 @@ fn each_tracking_mode_carries_only_the_mouse_events_it_reports() -> termlens::Re
     Ok(())
 }
 
+/// With the left and the right button held together, a motion reports the
+/// left one, whichever went down first, as xterm reports the
+/// lowest-numbered button it holds (`FirstBitN` in its `button.c`). The
+/// one pressed last was reported, so the step after a right press made
+/// while the left was held went out as `34`, a right-button drag. Once the
+/// left is released, the right is the one held, and the motion says so.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "the wire is read in raw mode, a tcsetattr, and ConPTY turns typed bytes into console events rather than forwarding them (#149)"
+)]
+fn a_motion_with_two_buttons_held_reports_the_lower_one() -> termlens::Result<()> {
+    use termlens::MouseButton::{Left, Right};
+
+    let mut t = util::spawn_emit(
+        Terminal::builder().timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\e[?1002h\e[?1006h",
+            "LR ",
+            "--read",
+            "46",
+            "NL",
+            "RL ",
+            "--read",
+            "56",
+            " WIRE-EOF",
+            "--wait",
+        ],
+    )?;
+    t.wait_until(|s| s.contains("LR"))?;
+    t.mouse_down(Left, 4, 2)?;
+    t.mouse_down(Right, 5, 2)?;
+    t.mouse_move(6, 2)?;
+    t.mouse_up(Right, 6, 2)?;
+    t.mouse_up(Left, 6, 2)?;
+    t.wait_until(|s| s.contains("RL"))?;
+    t.mouse_down(Right, 4, 2)?;
+    t.mouse_down(Left, 5, 2)?;
+    t.mouse_move(6, 2)?;
+    t.mouse_up(Left, 6, 2)?;
+    t.mouse_move(7, 2)?;
+    t.mouse_up(Right, 7, 2)?;
+    t.wait_until(|s| s.contains("WIRE-EOF"))?;
+
+    let screen = t.screen();
+    let wire: Vec<String> = (0..2)
+        .map(|row| screen.row_text(row).trim_end().to_owned())
+        .collect();
+    assert_eq!(
+        wire,
+        [
+            "LR E[<0;5;3ME[<2;6;3ME[<32;7;3ME[<2;7;3mE[<0;7;3m",
+            "RL E[<2;5;3ME[<0;6;3ME[<32;7;3ME[<0;7;3mE[<34;8;3ME[<2;8;3m WIRE-EOF",
+        ]
+    );
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// With no tracking mode in force, a move, a press and a release are each
 /// refused as `click` is: bytes the application never asked for would be
 /// read as keys.

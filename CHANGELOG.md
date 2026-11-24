@@ -38,8 +38,10 @@ reads that marker.
   keeps which buttons `mouse_down` pressed until `mouse_up` releases them,
   and X10 reports neither a move nor a release. A motion carries the held
   press's button and modifiers, so a press, a move per cell and a release
-  send what `drag` sends. Only hand-written bytes (`\x1b[<35;10;5M`)
-  produced a hover before. (#789)
+  send what `drag` sends; with several buttons held, it carries the
+  lowest-numbered one, left before middle before right, as xterm reports
+  it. Only hand-written bytes (`\x1b[<35;10;5M`) produced a hover before.
+  (#789)
 - `Terminal::resize_and_wait(cols, rows, predicate)` and
   `resize_and_wait_for(cols, rows, predicate, timeout)` resize, then wait
   until the predicate holds once the application has drawn after the

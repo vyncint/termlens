@@ -1359,10 +1359,14 @@ because whether a motion is reported at all depends on it: any-event
 tracking (`?1003`) reports every motion, button-event tracking (`?1002`)
 only while a button is down, and `?1000` and X10 none. A move the mode
 cannot carry is a typed error, as a click without tracking is. A motion
-carries the code of the button pressed last and still held, with the
-modifiers it was pressed with, or `3` with none held, plus 32 — xterm's
-arithmetic — so a hover is SGR `35` and a step of a left drag `32`, and a
-press, a move per cell and a release send the bytes `drag` sends.
+carries the code of the button held, with the modifiers it was pressed
+with, or `3` with none held, plus 32 — xterm's arithmetic — so a hover is
+SGR `35` and a step of a left drag `32`, and a press, a move per cell and a
+release send the bytes `drag` sends. With several buttons held, the code is
+the lowest-numbered one's, left before middle before right, as xterm picks
+it (`FirstBitN` over the buttons it holds, in `button.c`): reporting the
+one pressed last turned a left drag into a right drag the moment the right
+button went down as well.
 
 **Focus events** (`ESC [ I` / `ESC [ O`) follow the same mode-aware contract
 as the mouse: sent only when the application enabled mode 1004, refused with

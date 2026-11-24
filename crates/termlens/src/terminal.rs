@@ -3099,9 +3099,9 @@ pub struct Terminal {
     cell_size: Option<(u16, u16)>,
     /// The buttons [`mouse_down`](Terminal::mouse_down) pressed and
     /// [`mouse_up`](Terminal::mouse_up) has not released, each with the
-    /// modifiers it went down with, in the order they went down. A motion
-    /// reports the last of them, and `?1002` reports motion only while there
-    /// is one.
+    /// modifiers it went down with, each button once. A motion reports the
+    /// lowest-numbered of them, as xterm does, and `?1002` reports motion
+    /// only while there is one.
     mouse_held: Vec<MouseChord>,
 }
 
@@ -3604,12 +3604,14 @@ impl Terminal {
     /// ```
     ///
     /// The report is the motion a terminal sends: the button code of the
-    /// press still held — the last one, with its modifiers, if there are
-    /// several — or `3`, no button, plus 32, as xterm writes it. With no
-    /// button that is SGR `CSI < 35 ; col ; row M`, which crossterm reads as
-    /// `Moved`; with the left button held, `CSI < 32 ; … M`, `Drag(Left)`.
-    /// It is encoded as `click` encodes, in the encoding the application
-    /// enabled.
+    /// press still held, with the modifiers it went down with, or `3`, no
+    /// button, plus 32, as xterm writes it. With several held, the button is
+    /// the lowest-numbered of them, left before middle before right, which
+    /// is the one xterm reports (`FirstBitN` over the buttons it holds, in
+    /// its `button.c`): the encodings cannot name two. With no button that
+    /// is SGR `CSI < 35 ; col ; row M`, which crossterm reads as `Moved`;
+    /// with the left button held, `CSI < 32 ; … M`, `Drag(Left)`. It is
+    /// encoded as `click` encodes, in the encoding the application enabled.
     ///
     /// # Errors
     ///
@@ -3625,7 +3627,14 @@ impl Terminal {
     pub fn mouse_move(&mut self, col: u16, row: u16) -> Result<()> {
         self.ensure_deliverable("a mouse move")?;
         let modes = self.input_modes();
-        let held = self.mouse_held.last().copied();
+        // The lowest-numbered held button, as xterm's `FirstBitN` picks it.
+        // The last one pressed was reported, so a right press made while the
+        // left was held turned every later step into a right-button drag.
+        let held = self
+            .mouse_held
+            .iter()
+            .min_by_key(|held| held.button.code())
+            .copied();
         match (modes.mouse, held) {
             (MouseMode::None, _) => return Err(no_mouse_tracking()),
             (MouseMode::Press, _) => {
@@ -3684,7 +3693,9 @@ impl Terminal {
     /// The press is encoded as `click_with` encodes its press, and under
     /// X10 (`CSI ? 9 h`) it carries the button alone, as xterm's does. The
     /// button counts as held, with these modifiers, until `mouse_up`
-    /// releases it: a motion in between reports it. Under `?1002` or
+    /// releases it: a motion in between reports it, or, with buttons held
+    /// together, the lowest-numbered of them (see
+    /// [`mouse_move`](Self::mouse_move)). Under `?1002` or
     /// `?1003`, a press, a move to each cell on the way and a release of
     /// the same chord send exactly what [`drag`](Self::drag) sends. A
     /// button pressed again while held is pressed again, as written, and
