@@ -16,8 +16,10 @@ What the project does continuously, enforced by required CI on every change:
   thread's second writer. `access(2)` resolves the program the way the PTY
   layer does. `kill(2)` sits behind `Terminal::signal` and `Drop`'s teardown,
   which signals the child and the process group it leads, and only while
-  the child is unreaped (#714). The fourth asks `sigaction(2)` whether the
-  kernel reaps this process's children. The fifth asks `waitid(2)` with
+  the child is unreaped (#714), or just after the kernel reaped it during
+  the stop, while a member of the group still holds the group's id (#774).
+  The fourth asks `sigaction(2)` whether the kernel reaps this process's
+  children. The fifth asks `waitid(2)` with
   `WNOWAIT` whether a child has exited, or has already been reaped (#630),
   without reaping it. The sixth and seventh unblock teardown (#628): `fcntl(2)`
   sets the master descriptor non-blocking, and `tcflush(2)` flushes unread
