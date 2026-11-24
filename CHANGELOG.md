@@ -17,6 +17,18 @@ reads that marker.
 
 ## [Unreleased]
 
+### Added
+
+- `Screen::find_all_styled(needle, style)` and `Screen::runs_where(style)`
+  find text by its style. `find_all_styled` matches as `find_all` does,
+  counting only the occurrences whose every cell passes `style`, so "which
+  `beta` is the selected one" is one call where `find_all` found both and
+  `find_by` named one cell and no text. `runs_where` returns each stretch of a row
+  whose cells pass, as a `Run` with its row, its columns and its text: the
+  selected row of a list, what an error colour covers. A wide character
+  is judged by the cell that holds it and counts both of its columns.
+  Several outside test suites carried a helper for this. (#787)
+
 ### Changed
 
 - `Screen::unsupported()` lists a CSI with a `<` private marker with the

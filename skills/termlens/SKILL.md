@@ -335,6 +335,12 @@ fn cells_styles_and_wide_characters() -> termlens::Result<()> {
 
     // Find a cell by a property of the cell rather than by its text.
     assert_eq!(s.find_by(|c| c.style().reverse), Some((row, col)));
+    // Find text by its style rather than its spelling: of every "Alpha" on
+    // screen, the one the highlight covers. And the stretch the highlight
+    // covers, with its text: `runs_where` gives one `Run` per stretch.
+    assert_eq!(s.find_all_styled("Alpha", |c| c.style().reverse), [(row, col + 2)]);
+    let highlight = &s.runs_where(|c| c.style().reverse)[0];
+    assert_eq!((highlight.row, highlight.text.as_str()), (row, "> Alpha"), "{}", s.with_styles());
 
     // Wide characters: one glyph, two cells, real columns reported.
     let (crow, ccol) = s.find("東京").expect("CJK item");
@@ -483,6 +489,7 @@ from_r, to_c, to_r)`, `scroll(col, row, Scroll::Down)`, `resize(cols, rows)`,
 | `locate(&str)` | `Option<Location>`: `Screen { row, col }` or `History { row, col }`, with `is_on_screen()`, `is_in_history()` and `col()` — and deliberately **no** `row()`: a grid row and a history row are different things, so match on the variant when the row matters |
 | `logical_text()` / `row_wrapped(row)` | wrapped rows joined back into lines / where the backend wrapped |
 | `find_by(\|&Cell\| bool)` | `Option<(row, col)>` |
+| `find_all_styled(&str, \|&Cell\| bool)` / `runs_where(\|&Cell\| bool)` | `Vec<(row, col)>`: the matches every cell of which passes, as `find_all` matches / `Vec<Run>`: each stretch of a row whose cells pass — `row`, `cols` (a range), `text` |
 | `cell(row, col)` | `Option<&Cell>`: `contents()`, `style()`, `is_wide()`, `is_wide_continuation()` |
 | `row_text(row)` / `text()` / `rect_text(cols, rows)` | `String` |
 | `full_text()` / `scrollback_text()` / `scrollback_rows()` | history + screen / history / count |

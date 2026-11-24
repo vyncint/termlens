@@ -182,7 +182,7 @@ header — is also its input format. The `termlens` command reads a whole
 | Question | Accessors |
 | --- | --- |
 | What does the user see? | `text()`, `row_text(row)`, `cell(row, col)`, `contains`, `find`, `find_all`; with `regex`: `matches`, `find_match`, `wait_until_matches` |
-| Is it styled as claimed? | `cell(..).style()` — colours, bold/dim, italic, underline, reverse, **blink**, **conceal**, **strikethrough** |
+| Is it styled as claimed? | `cell(..).style()` — colours, bold/dim, italic, underline, reverse, **blink**, **conceal**, **strikethrough**; `find_all_styled(needle, pred)` finds text by its style (which `beta` is the selected one), `runs_where(pred)` the stretches a style covers, with their text |
 | Where is the cursor, and what shape? | `cursor()`, `cursor_visible()`, `cursor_shape()`, `cursor_blink()` |
 | Which modes did the application turn on? | `alternate_screen()`, `bracketed_paste()`, `mouse_mode()`, `focus_events()`, `application_cursor()`, `insert_mode()` |
 | What did it tell the terminal out of band? | `title()`, `clipboard()` (`OSC 52`), `links()` (`OSC 8`) |
