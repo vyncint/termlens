@@ -78,6 +78,13 @@ reads that marker.
   the shorter ones are not, since the timeout already names it. It was
   named and listed both. A test that pinned such an entry should expect
   the `…`, or for the palette query no entry. (#762)
+- `Screen::unsupported()` lists no query the responder answers or names,
+  whatever shape the backend reads it in. A trailing `;` is a parameter to
+  the backend and none to the responder, so `CSI 18 ; t` was answered and
+  listed as `^[[18;0t`, with a `0` the application never wrote, `CSI 14 ;
+  t` likewise, and `CSI > ; q` was named in the timeout and listed as
+  `^[[>0;0q`. `CSI 18 ; 0 t`, which the responder does not take, is still
+  listed. A test that expected such an entry should expect none. (#763)
 
 ### Fixed
 

@@ -15,7 +15,10 @@
 //! tracks, every query the responder answers or names — and those still
 //! reach vt100's callbacks, because the bytes are fed through. They are
 //! filtered here by shape, so the list means what its name says: sequences
-//! **termlens** did not honour.
+//! **termlens** did not honour. A query the responder answers or names is
+//! also filtered on the tracker's word, which the emulator passes on just
+//! before vt100 dispatches it, since vte can read a query in a shape the
+//! tracker does not (#763).
 //!
 //! The same callback set counts the rows vt100 drops off the front of the
 //! main screen's history, which is the one thing its history cannot tell
@@ -60,6 +63,9 @@ pub(super) struct Unhandled {
     /// What the tracker saw of the `OSC` vte dispatches next, when vte
     /// keeps only part of it — see [`CutOsc`].
     cut_osc: Option<CutOsc>,
+    /// The sequence vt100 reports next is a query the responder answers or
+    /// names — see [`expect_query`](Self::expect_query).
+    query: bool,
     /// The content length of the last OSC recorded, before its entry was
     /// cut: how much of a body reached vt100, which the capture-bound
     /// tests read now that the entry no longer shows it (#694, #695).
@@ -77,6 +83,7 @@ impl Default for Unhandled {
             evicted: 0,
             icon: None,
             cut_osc: None,
+            query: false,
             #[cfg(test)]
             last_osc_len: 0,
         }
@@ -112,14 +119,35 @@ impl Unhandled {
         std::mem::take(&mut self.evicted)
     }
 
+    /// What the emulator does after every feed: an icon name still held
+    /// back goes on record, since the stream may end with one, and a query
+    /// no sequence took is forgotten.
+    pub(super) fn settle(&mut self) {
+        self.query = false;
+        self.settle_icon();
+    }
+
     /// Put an icon name still held back on record: no title followed it,
     /// so it was an `OSC 1`. Every new entry does this first, so the record
-    /// stays in stream order, and the emulator does it after every feed,
-    /// since the stream may end with one.
-    pub(super) fn settle(&mut self) {
+    /// stays in stream order.
+    fn settle_icon(&mut self) {
         if let Some(icon) = self.icon.take() {
             self.keep(icon.shape);
         }
+    }
+
+    /// Tell the record that the sequence vt100 reports next is a query the
+    /// responder answers or names, which is never unsupported. The emulator
+    /// says so just before it feeds the query's final byte, alone, which
+    /// is where vt100 dispatches it.
+    ///
+    /// The arms of `unhandled_csi` know the same queries by their shape,
+    /// and vte's shape can differ from the tracker's: a trailing `;` is a
+    /// parameter to vte, which hands it on as 0, and none to the tracker.
+    /// So `CSI 18 ; t` was answered and listed as `^[[18;0t`, with a 0 the
+    /// application never wrote, and `CSI > ; q` named and listed (#763).
+    pub(super) fn expect_query(&mut self) {
+        self.query = true;
     }
 
     /// Tell the record what the tracker saw of the next `OSC` vte
@@ -134,7 +162,7 @@ impl Unhandled {
     }
 
     fn record(&mut self, shape: String) {
-        self.settle();
+        self.settle_icon();
         self.keep(shape);
     }
 
@@ -343,7 +371,7 @@ impl Callbacks for Unhandled {
         // the same bytes to `set_window_title`: that title is the
         // tracker's, and an `OSC 0` is no gap. So the entry waits for the
         // call after it.
-        self.settle();
+        self.settle_icon();
         self.icon = Some(IconName {
             shape: osc_shape(&[b"1", name], false),
             digest: digest(name),
@@ -363,7 +391,7 @@ impl Callbacks for Unhandled {
         {
             self.icon = None;
         } else {
-            self.settle();
+            self.settle_icon();
         }
     }
 
@@ -409,6 +437,9 @@ impl Callbacks for Unhandled {
         params: &[&[u16]],
         c: char,
     ) {
+        if std::mem::take(&mut self.query) {
+            return;
+        }
         // vte hands the private marker (`<`, `=`, `>`, `?`) over as the
         // first intermediate; a real intermediate (`$`, `!`, `SP`) follows
         // it or stands alone.

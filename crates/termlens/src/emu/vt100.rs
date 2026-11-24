@@ -302,8 +302,9 @@ impl Vt100Emulator {
         let bytes = stand_in_for_replacement(bytes);
         let normalized = self.colors.feed(&bytes);
         self.parser.process(&normalized);
-        // An icon name the parser handed over last is held back until a
-        // later call shows it is no `OSC 0`'s; the read may end with it.
+        // The record holds an icon name back until a later call shows it
+        // is no `OSC 0`'s, and the read may end with it; and what the
+        // emulator told it of a sequence this feed carried ends here.
         self.parser.callbacks_mut().settle();
         self.shadow.feed(&bytes);
         self.capture_scrolled_rows();
@@ -1003,7 +1004,20 @@ impl Emulator for Vt100Emulator {
                 }
             };
             if let Some(stop) = stop {
-                self.feed_staged(&bytes[fed..=i]);
+                // A query is the responder's, answered or named, and the
+                // record is told so between the bytes before its final
+                // byte and that byte, which vt100 dispatches it on: its
+                // shape in vte need not be the tracker's (#763). Not when
+                // the byte is fed already — it ended an `OSC` vte keeps
+                // part of, or completed a kitty upload, neither of which
+                // reaches a CSI arm — or the flag would outlive it.
+                if matches!(stop, Stop::Query(_)) && fed <= i {
+                    self.feed_staged(&bytes[fed..i]);
+                    self.parser.callbacks_mut().expect_query();
+                    self.feed_staged(&bytes[i..=i]);
+                } else {
+                    self.feed_staged(&bytes[fed..=i]);
+                }
                 return Processed {
                     consumed: i + 1,
                     stop: Some(stop),
@@ -3145,6 +3159,53 @@ mod tests {
             assert_eq!(s.mouse_mode(), MouseMode::None, "{shape}");
             assert_eq!(s.unsupported(), [format!("^[[{shape}").as_str()], "{shape}");
         }
+    }
+
+    /// A trailing `;` is a parameter to vte, which hands it on as 0, and
+    /// none to the tracker, which classifies the query as if it were not
+    /// there, as xterm answers it: `CSI 18 ; t` was answered and listed as
+    /// `^[[18;0t`, with a 0 the application never wrote, and `CSI > ; q`
+    /// named and listed (#763). A query is never listed, whatever shape vte
+    /// gives it; an unsupported sequence on either side of one, in the
+    /// same read, still is. Whole and split at every byte.
+    #[test]
+    fn a_query_with_a_trailing_separator_is_not_listed() {
+        for (query, stop) in [
+            ("\x1b[18;t", "Query(TextAreaSize)"),
+            ("\x1b[14;t", "Query(WindowSizePixels)"),
+            ("\x1b[>;q", "Query(Unanswerable(\"^[[>;q\"))"),
+            ("\x1b[6;n", "Query(CursorPosition { private: false })"),
+            // Not a CSI at all: what it leaves the record must not hide the
+            // sequence after it.
+            (
+                "\x1b]10;?\x07",
+                "Query(OscColor { code: 10, st_terminated: false })",
+            ),
+        ] {
+            let stream = format!("\x1b[20h{query}\x1b[21h");
+            for cut in 0..stream.len() {
+                let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+                let mut stops = Vec::new();
+                for piece in [&stream[..cut], &stream[cut..]] {
+                    let mut off = 0;
+                    while off < piece.len() {
+                        let processed = emu.process(&piece.as_bytes()[off..]);
+                        stops.extend(processed.stop.map(|stop| format!("{stop:?}")));
+                        off += processed.consumed;
+                    }
+                }
+                assert_eq!(stops, [stop], "{query:?} cut at {cut}");
+                assert_eq!(
+                    emu.snapshot().unsupported(),
+                    ["^[[20h", "^[[21h"],
+                    "{query:?} cut at {cut}"
+                );
+            }
+        }
+        // A second parameter written out is no query the responder takes,
+        // and stays listed.
+        let s = emu_with(b"\x1b[18;0t").snapshot();
+        assert_eq!(s.unsupported(), ["^[[18;0t"]);
     }
 
     #[test]
