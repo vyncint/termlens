@@ -1797,8 +1797,13 @@ impl SeqTracker {
         // screen clear RIS brings. xterm's is the reference (#687): what it
         // resets of the state this crate holds is reset here, and the
         // emulator is told to do the same for the state it holds (#233).
+        // xterm reaches it from `CSI !` with or without parameters, and
+        // reads none: `CSI 1 ! p` reset nothing here while the shape was
+        // taken for the tracker's (#801). The `!` must be the only
+        // intermediate, as in xterm's table; a sub-parameter it rejects,
+        // above.
         if self.csi_intermediate == b'!' {
-            if b == b'p' && self.csi_prefix == 0 && params_empty {
+            if b == b'p' && self.csi_collected == [b'!', 0] {
                 self.soft_reset();
                 return SeqEvent::SoftReset;
             }

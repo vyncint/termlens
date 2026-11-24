@@ -4514,6 +4514,40 @@ mod tests {
         assert!(last.bold && last.blink && last.strikethrough, "{last:?}");
     }
 
+    /// `DECSTR` written with a parameter is `DECSTR`: xterm's parse table
+    /// reaches `CASE_DECSTR` (charproc.c 6154) from `CSI !` with or without
+    /// parameters, and resets whatever they are. termlens took the reset
+    /// only with none, so `CSI 1 ! p` reset nothing, the rendition and
+    /// origin mode included, and nothing was on record (#801). A
+    /// sub-parameter is rejected there, and a `SP` before the `!` makes it
+    /// another sequence.
+    #[test]
+    fn a_soft_reset_written_with_a_parameter_is_one() {
+        for reset in ["\x1b[1!p", "\x1b[0!p", "\x1b[1;2!p"] {
+            let s = emu_with(format!("\x1b[1;5;9m{reset}X").as_bytes()).snapshot();
+            assert_eq!(
+                *s.cell(0, 0).unwrap().style(),
+                Style::default(),
+                "{reset:?}"
+            );
+            assert!(
+                s.unsupported().is_empty(),
+                "{reset:?}: {:?}",
+                s.unsupported()
+            );
+            // Origin mode off and the cursor where it was: the report
+            // counts from the top of the screen.
+            let emu = emu_with(format!("\x1b[2;4r\x1b[?6h\x1b[2;5H{reset}").as_bytes());
+            assert_eq!(emu.snapshot().cursor(), (2, 4, true), "{reset:?}");
+            assert_eq!(emu.reported_position(), (2, 4), "{reset:?}");
+        }
+        for (other, shape) in [("\x1b[1:2!p", "^[[1:2!p"), ("\x1b[ !p", "^[[ !p")] {
+            let s = emu_with(format!("\x1b[1m{other}X").as_bytes()).snapshot();
+            assert!(s.cell(0, 0).unwrap().style().bold, "{other:?}");
+            assert_eq!(s.unsupported(), [shape], "{other:?}");
+        }
+    }
+
     /// The tracker follows vt100's margins and origin mode, which vt100
     /// keeps per grid and does not expose, so a report is checked here
     /// against what vt100 does with the `CUP` an application sends back:

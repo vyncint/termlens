@@ -102,6 +102,13 @@ reads that marker.
   an SGR included, now shows what xterm shows: a test that pinned the
   repeated characters there should expect them gone, and one after a
   single shift should expect them in the set now invoked. (#756)
+- A soft reset written with a parameter (`CSI 1 ! p`) is a soft reset, as
+  xterm's parser takes it whatever the parameters. It reset nothing: the
+  rendition, the scroll margins and origin mode stayed as they were, and
+  nothing was listed. `CSI SP ! p`, which xterm does not take for one, no
+  longer resets either, and is listed. A test that expected `CSI Ps ! p`
+  to leave the screen's state alone should expect it reset as by
+  `CSI ! p`. (#801)
 
 ### Fixed
 
