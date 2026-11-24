@@ -171,6 +171,13 @@ cargo insta review            # inspect and accept/reject each diff
 - Snapshot updates must be **reviewed diffs**: run `cargo insta review` and
   look at every change. Never blind-accept with `cargo insta accept` or
   `INSTA_UPDATE=always`. A snapshot diff you can't explain is a bug report.
+- **The next compilers run once a week.** `canary.yml` runs clippy with
+  `-D warnings`, the suite and rustdoc with `-D warnings` on beta and
+  nightly every Monday, and on demand from the Actions tab. It is not
+  required, so it never blocks a pull request; a red canary means the next
+  toolchain breaks something here. Look at its latest run before a release,
+  and open an issue for a failure on beta, which becomes stable within six
+  weeks (Rust 1.100 broke every pull request on the day it shipped, #749).
 
 ## 4. Commit conventions
 

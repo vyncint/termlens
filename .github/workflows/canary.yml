@@ -1,0 +1,52 @@
+name: canary
+
+# The next compilers, ahead of time (#792).
+#
+# Rust 1.100.0 moved test executables out of `target/<profile>/deps` and broke
+# every pull request on 2026-11-16 (#749), with no warning; six weeks of beta
+# would have shown it. This runs the gates a new compiler is most likely to
+# break (clippy with -D warnings, the whole suite, rustdoc with -D warnings) on
+# beta and nightly, once a week and on demand.
+#
+# It is not required and never blocks a merge: a red canary is news about the
+# next toolchain, not about a pull request. Its status is on the Actions tab
+# (CONTRIBUTING §3 says where to look and what to do about a failure).
+
+on:
+  schedule:
+    - cron: "23 5 * * 1" # Mondays, 05:23 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: canary-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  canary:
+    name: canary (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [beta, nightly]
+    env:
+      # rust-toolchain.toml pins stable, and rustup honours that file over the
+      # toolchain the action installs; the variable wins over both (#213).
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - run: rustc --version --verbose
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+      - run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings

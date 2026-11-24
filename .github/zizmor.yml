@@ -14,6 +14,7 @@ rules:
       - release.yml
       - install.yml
       - windows.yml
+      - canary.yml
 
   # The wider `.github/` scope reaches dependabot.yml, which the workflow-only
   # glob never parsed. No cooldown is configured there (GitHub's built-in
