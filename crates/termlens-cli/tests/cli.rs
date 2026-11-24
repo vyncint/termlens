@@ -2865,3 +2865,51 @@ fn render_reads_json_as_it_arrives() {
         format!("{}\n", screen.with_styles())
     );
 }
+
+/// The text reader walks the lines after the grid rather than gathering
+/// them (#779): a 1x1 screen followed by 8 MB of blank lines, with or
+/// without a `styles:` line in front of them, kept a 16-byte pointer for
+/// every line, 128 MiB, and aborted `render` under a 96 MiB cap. It now
+/// renders there, in the memory the input and the declared 1x1 take.
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "`ulimit -v` caps the child's address space only on Linux"
+)]
+fn render_walks_the_lines_after_the_grid() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    for head in [
+        "size: 1x1  cursor: 0,0\nx\n",
+        "size: 1x1  cursor: 0,0\nx\n\nstyles:\n",
+    ] {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(r#"ulimit -v 98304 && exec "$0" "$@""#)
+            .arg(env!("CARGO_BIN_EXE_termlens"))
+            .args(["render", "--text", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("sh runs");
+        let mut stdin = child.stdin.take().expect("a stdin pipe");
+        let writer = std::thread::spawn(move || {
+            let blank = vec![b'\n'; 1 << 20];
+            // A refusal before the end of the input closes the pipe; that
+            // is a result, not a failure of the writer.
+            let _ = stdin.write_all(head.as_bytes());
+            for _ in 0..8 {
+                let _ = stdin.write_all(&blank);
+            }
+        });
+        let out = child.wait_with_output().expect("termlens runs");
+        writer.join().expect("the writer thread");
+        assert_eq!(out.status.code(), Some(0), "{head:?}: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "size: 1x1  cursor: 0,0\nx\n\nstyles:\n(none)\n",
+            "{head:?}"
+        );
+    }
+}

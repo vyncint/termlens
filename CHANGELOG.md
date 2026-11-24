@@ -54,6 +54,12 @@ reads that marker.
   it. The unsupported sequences and the links are read to the 32 and 64 a
   terminal keeps. Every file a release wrote reads as before; the JSON
   format does not change. (#778)
+- `Screen::parse` walks the lines after the grid instead of gathering
+  every line of its input first. It kept a 16-byte pointer for each, so a
+  1x1 screen followed by 20 MB of blank lines took 351 MB to read and one
+  followed by 200 MB aborted `termlens render` with exit 134 under a
+  2 GB cap. Both now read in the memory the input and the declared grid
+  take, with or without a `styles:` block. (#779)
 
 ## [0.11.10] - 2026-11-17
 

@@ -92,7 +92,6 @@ impl Screen {
             .next()
             .ok_or_else(|| Error::Parse("empty input; expected a `size: …` header".into()))?;
         let (cols, rows, cursor) = parse_header(header)?;
-        let body: Vec<&str> = lines.collect();
 
         // The grid is the number of lines the header declares, and nothing
         // else decides that. `Display` writes every row — blank ones
@@ -108,20 +107,24 @@ impl Screen {
         // block, the block's lines are within the declared row count and are
         // read as grid content. Content wins ties, on purpose — a wrong row
         // of text is visible in a diff, a silently dropped one is not.
-        let split = body.len().min(usize::from(rows));
-        let (grid, rest) = body.split_at(split);
-
+        //
+        // The lines are walked, never gathered: a 1x1 screen followed by
+        // 200 MB of blank lines kept a pointer for each, 17 times the text,
+        // and aborted `termlens render` (#779). What the parse holds is the
+        // grid the header declares.
         let mut cells = vec![
             Cell::new(String::new(), Style::default(), false, false);
             usize::from(cols) * usize::from(rows)
         ];
-        for (index, line) in grid.iter().enumerate() {
+        let mut grid = 0;
+        for (index, line) in lines.by_ref().take(usize::from(rows)).enumerate() {
             parse_row(
                 line,
                 index + 2,
                 cols,
                 &mut cells[index * usize::from(cols)..][..usize::from(cols)],
             )?;
+            grid = index + 1;
         }
 
         let mut screen = Screen::from_parts(
@@ -135,16 +138,17 @@ impl Screen {
         );
 
         // After the grid: blank separator lines, then `styles:` and its
-        // spans, or nothing at all.
-        if let Some(at) = rest.iter().position(|line| !line.trim().is_empty()) {
-            let number = split + at + 2;
-            if rest[at].trim_end() != "styles:" {
+        // spans, or nothing at all. Each line with its 1-based number.
+        let mut rest = lines
+            .enumerate()
+            .map(|(offset, line)| (grid + offset + 2, line));
+        if let Some((number, line)) = rest.find(|(_, line)| !line.trim().is_empty()) {
+            if line.trim_end() != "styles:" {
                 return Err(Error::Parse(format!(
-                    "line {number}: expected `styles:` or the end of the text after the {rows}-row grid, got {:?}",
-                    rest[at]
+                    "line {number}: expected `styles:` or the end of the text after the {rows}-row grid, got {line:?}"
                 )));
             }
-            parse_styles(&rest[at + 1..], number + 1, &mut screen)?;
+            parse_styles(rest, &mut screen)?;
         }
         Ok(screen)
     }
@@ -364,16 +368,15 @@ fn lay_out_row(
 }
 
 /// The span lines after `styles:` — `(none)`, or `<row>: <spans>` — applied
-/// onto `screen`'s cells. `first_line` is the 1-based number of the first,
-/// for the errors.
-fn parse_styles(lines: &[&str], first_line: usize, screen: &mut Screen) -> Result<()> {
-    if lines.is_empty() {
-        return Ok(());
-    }
+/// onto `screen`'s cells, each with its 1-based number for the errors.
+fn parse_styles<'a>(
+    lines: impl Iterator<Item = (usize, &'a str)>,
+    screen: &mut Screen,
+) -> Result<()> {
     let cols = screen.cols;
-    let mut cells: Vec<Cell> = screen.cells.to_vec();
-    for (offset, line) in lines.iter().enumerate() {
-        let number = first_line + offset;
+    // Copied at the first span, so a block of `(none)` copies nothing.
+    let mut styled: Option<Vec<Cell>> = None;
+    for (number, line) in lines {
         let line = line.trim_end();
         if line.is_empty() || line == "(none)" {
             continue;
@@ -422,12 +425,15 @@ fn parse_styles(lines: &[&str], first_line: usize, screen: &mut Screen) -> Resul
                     }
                 }
             }
+            let cells = styled.get_or_insert_with(|| screen.cells.to_vec());
             for col in start..=end {
                 cells[usize::from(row) * usize::from(cols) + usize::from(col)].style = style;
             }
         }
     }
-    screen.cells = cells.into();
+    if let Some(cells) = styled {
+        screen.cells = cells.into();
+    }
     Ok(())
 }
 
@@ -754,6 +760,25 @@ mod tests {
         let junk = Screen::parse("size: 2x1  cursor: 0,0\nab\nextra\n")
             .unwrap_err()
             .to_string();
-        assert!(junk.contains("expected `styles:`"), "{junk}");
+        assert!(junk.contains("line 3: expected `styles:`"), "{junk}");
+        // The lines after the grid are walked, not gathered (#779), and keep
+        // their numbers past blank lines and a block of `(none)`.
+        let late = Screen::parse("size: 2x1  cursor: 0,0\nab\n\n\n\nbogus")
+            .unwrap_err()
+            .to_string();
+        assert!(late.contains("line 6: expected `styles:`"), "{late}");
+        let span =
+            Screen::parse("size: 2x3  cursor: 0,0\nab\ncd\nef\n\nstyles:\n(none)\n\n0: 0 shiny")
+                .unwrap_err()
+                .to_string();
+        assert!(
+            span.contains("line 9") && span.contains("unknown style token"),
+            "{span}"
+        );
+        let trimmed = Screen::parse("size: 2x3  cursor: 0,0\nab\n")
+            .expect("a trimmed grid")
+            .with_styles()
+            .to_string();
+        assert_eq!(trimmed, "size: 2x3  cursor: 0,0\nab\n\n\n\nstyles:\n(none)");
     }
 }
