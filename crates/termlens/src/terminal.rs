@@ -5165,21 +5165,33 @@ impl Terminal {
     /// thing the repaint draws (rule 2 of `docs/DESIGN.md` §2). And output
     /// read after the resize is not always drawn for it: an application that
     /// paints on its own, a clock or a spinner, can paint the old layout
-    /// before it handles the resize. **On Windows** that has a second
-    /// source: ConPTY applies a resize on a thread of its own, so output the
-    /// application writes after this call can still be laid out at the old
-    /// width when it arrives (#499). Where either can happen, name what only
-    /// the new layout shows — the new size, or text that needs the new width
-    /// — as the stale-frame trap advises for every resize.
+    /// before it handles the resize. Where that can happen, name what only
+    /// the new layout shows — the size as the application reports it, or
+    /// text that needs the new width; `s.size()` is new at once, so it
+    /// tells nothing apart — as the stale-frame trap advises for every
+    /// resize.
+    ///
+    /// # On Windows
+    ///
+    /// **Name something only the new layout has.** ConPTY repaints the
+    /// screen itself after a resize, so output arrives after this call even
+    /// when the application draws nothing at all, and a predicate the
+    /// content from before the resize satisfies can pass on that repaint:
+    /// measured on `windows-latest` (run 45393517904), where a program that
+    /// ignores the resize satisfied `contains("READY")` with the text it had
+    /// drawn before it. ConPTY also applies the resize on a thread of its
+    /// own, so what the application writes right after this call can still
+    /// be laid out at the old width (#499).
     ///
     /// # Errors
     ///
     /// Whatever [`resize`](Self::resize) returns, before anything is waited
     /// for. Then [`Error::Timeout`] at the deadline (builder `timeout`) and
     /// [`Error::Eof`] as soon as the terminal closes with the predicate
-    /// false, each carrying the screen, as from `wait_until`; a timeout says
-    /// when nothing at all was read after the resize, which is what an
-    /// application that does not repaint when resized produces.
+    /// false, each carrying the screen, as from `wait_until`. On Linux and
+    /// macOS a timeout says when nothing at all was read after the resize,
+    /// which is what an application that does not repaint when resized
+    /// produces; on Windows ConPTY's own repaint arrives regardless.
     pub fn resize_and_wait(
         &mut self,
         cols: u16,

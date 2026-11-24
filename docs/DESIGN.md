@@ -589,17 +589,25 @@ is still the current truth.
 
 `resize_and_wait(cols, rows, pred)` is the resize and the wait in one call,
 for any application: its predicate is asked only about screens that output
-read after the resize produced, so the stale frame cannot satisfy it. The
-read count it compares against is taken under the lock that resizes, as the
-frame cursor is, so no read falls between the two (#788). After a no-op
-resize the screen as it is answers, as for `wait_frame`. It does not make
-the rule above optional. Output read after the resize is not always drawn
-for it: an application that paints on its own can paint the old layout
-before it handles `SIGWINCH`, and on Windows ConPTY applies the resize on a
-thread of its own and lays out what it relays at the old width until it has
-(#499). A predicate naming what only the new layout shows holds on every
-platform; one the stale frame also satisfies holds only where the
-application paints in answer to the resize.
+read after the resize produced, so on Linux and macOS the stale frame cannot
+satisfy it. The read count it compares against is taken under the lock that
+resizes, as the frame cursor is, so no read falls between the two (#788).
+After a no-op resize the screen as it is answers, as for `wait_frame`. It
+does not make the rule above optional. Output read after the resize is not
+always drawn for it: an application that paints on its own can paint the old
+layout before it handles `SIGWINCH`.
+
+On Windows the stale frame comes back as output. ConPTY repaints the screen
+itself after a resize, so output arrives even when the application draws
+nothing, and a predicate the content from before the resize satisfies passes
+on that repaint. Measured on `windows-latest` (run 45393517904): a program
+that ignores the resize satisfied `contains("READY")` with the text it had
+drawn before it, where Linux and macOS time out. ConPTY also applies the
+resize on a thread of its own and lays out what it relays at the old width
+until it has (#499). A predicate naming what only the new layout shows holds
+on every platform; one the stale frame also satisfies holds only on Linux
+and macOS, and there only where the application paints in answer to the
+resize.
 
 ### The instant-exit caveat (macOS PTY teardown)
 

@@ -155,7 +155,16 @@ fn resize_and_wait_to_the_size_it_has_answers_from_the_screen() -> termlens::Res
 /// wait, even with a predicate the screen left behind satisfies, and the
 /// timeout says that nothing was read after the resize rather than
 /// blaming the predicate. `emit` leaves SIGWINCH at its default, ignored.
+///
+/// Not on Windows: ConPTY repaints the screen itself after a resize, so
+/// output arrives though the program draws nothing, and the old `READY`
+/// satisfies the predicate (run 45393517904). That is why the rustdoc tells
+/// a Windows test to name something only the new layout has.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY repaints the screen itself after a resize, so output arrives though the program draws nothing and the old text satisfies the predicate (run 45393517904)"
+)]
 fn resize_and_wait_times_out_naming_the_resize_when_nothing_repaints() -> termlens::Result<()> {
     let mut t = util::spawn_emit(
         Terminal::builder()

@@ -50,10 +50,11 @@ reads that marker.
   the same helper to avoid it. A resize to the size the grid has reaches
   no one, and the screen as it is answers. A timeout says when nothing was
   read after the resize at all. Output read after the resize can still be
-  the old layout where an application paints on its own, and on Windows,
-  where ConPTY applies a resize on its own thread and lays out what it
-  relays at the old width until it has; there a predicate should name
-  what only the new layout shows. (#788)
+  the old layout where an application paints on its own. On Windows
+  ConPTY repaints the screen itself after a resize, measured, so a
+  predicate the old content satisfies can pass with nothing drawn by the
+  application: there the predicate must name something only the new
+  layout has. (#788)
 
 ### Changed
 

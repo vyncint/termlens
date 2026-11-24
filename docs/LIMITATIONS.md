@@ -258,9 +258,8 @@ CHANGELOG entry.
   `ResizePseudoConsole` on its own thread, so a program's output written
   right after a resize can be laid out at the old width — after `resize()`
   on Windows, wait for the program's own repaint before asserting on
-  layout, with a predicate naming what only the new layout shows, which
-  `resize_and_wait` does in one call — and its re-render never forwards
-  the program's HT); a timeout
+  layout, with a predicate naming what only the new layout shows — and its
+  re-render never forwards the program's HT); a timeout
   that names the escape sequence or character a quiet program stopped
   inside (ConPTY keeps the unfinished sequence to itself, so `wait_idle`
   and `wait_stable` see a terminal that is simply quiet); a timeout's count
@@ -272,6 +271,18 @@ CHANGELOG entry.
   `tests/conpty_probe.rs`, and the `windows` workflow re-runs it on demand.
   The `windows-latest` leg is a required check. This is decision 1 of
   [STABILITY.md](STABILITY.md).
+- **On Windows, a wait after a resize must name something only the new
+  layout has.** ConPTY repaints the screen itself after a resize, so output
+  arrives even when the program draws nothing, and a predicate the content
+  from before the resize satisfies passes on that repaint. Measured on
+  `windows-latest` (run 45393517904): `resize_and_wait` with
+  `contains("READY")`, against a program that ignores the resize, returned
+  on the text it had drawn before, where Linux and macOS time out. So
+  `resize_and_wait` keeps the old screen from answering only on Linux and
+  macOS; on Windows the predicate has to tell the layouts apart — the size
+  as the program reports it, or text that needs the new width, never
+  `Screen::size`, which is new at once — and the test that pins the
+  timeout is Windows-ignored for it.
 - **`termlens inspect` on Windows learns of an exit from the reap, not the
   terminal.** ConPTY never reports the terminal closing, so a program that
   has just exited ends inspect's wait by the silence window rather than an
