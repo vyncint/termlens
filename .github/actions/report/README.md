@@ -11,7 +11,7 @@ as SVG/HTML in an uploaded artifact.
   env:
     TERMLENS_ARTIFACT_DIR: ${{ runner.temp }}/termlens
     INSTA_UPDATE: new
-- uses: vyncint/termlens/.github/actions/report@v0.11.10
+- uses: vyncint/termlens/.github/actions/report@v0.11.11
   if: failure()
   with:
     artifact-dir: ${{ runner.temp }}/termlens   # a step's env: reaches that step only
