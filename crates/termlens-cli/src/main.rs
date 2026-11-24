@@ -586,7 +586,7 @@ fn read_json(
 ) -> Result<Screen, String> {
     let input = io::Cursor::new(head).chain(rest);
     let mut text: Box<dyn Read + '_> = match encoding {
-        Encoding::Utf8 | Encoding::Utf32 => Box::new(input),
+        Encoding::Utf8 | Encoding::Utf32 => Box::new(Utf8Text::new(input)),
         Encoding::Utf16 { big_endian } => Box::new(Utf16Text::new(input, big_endian)),
     };
     io::copy(&mut text.by_ref().take(skip as u64), &mut io::sink())
@@ -683,6 +683,99 @@ impl<R: Read> Read for JsonText<R> {
             }
         }
         Ok(read)
+    }
+}
+
+/// UTF-8 checked as it streams to the parser, a buffer at a time, and
+/// refused in the words [`decode`]'s refusal is reported in, as every input
+/// was before JSON streamed (#777). serde_json checks only what it reads as
+/// a string, and names what is not UTF-8 there "invalid unicode code
+/// point", after which the CLI called the input "not a termlens Screen";
+/// a byte after the document it calls "trailing characters". A saved
+/// screen in a code page — Windows PowerShell's `Set-Content` writes ANSI,
+/// so `é` is the byte `E9` — is told apart as text is, by its encoding.
+struct Utf8Text<R> {
+    inner: R,
+    /// The start of a character the last read ended inside: at most three
+    /// bytes, handed on with the bytes that finish it.
+    carry: [u8; 3],
+    carried: usize,
+    /// Checked text not yet handed out, and how much of it has been.
+    out: Vec<u8>,
+    at: usize,
+}
+
+impl<R: Read> Utf8Text<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            carry: [0; 3],
+            carried: 0,
+            out: Vec::new(),
+            at: 0,
+        }
+    }
+
+    fn invalid() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        )
+    }
+
+    /// Read and check the next bytes of `inner` into `out`; `false` at its
+    /// end.
+    fn fill(&mut self) -> io::Result<bool> {
+        let mut raw = [0; 8 * 1024];
+        let mut have = self.carried;
+        raw[..have].copy_from_slice(&self.carry[..have]);
+        loop {
+            let read = loop {
+                match self.inner.read(&mut raw[have..]) {
+                    Ok(read) => break read,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            };
+            if read == 0 {
+                // The input ended inside a character.
+                return if have > 0 {
+                    Err(Self::invalid())
+                } else {
+                    Ok(false)
+                };
+            }
+            have += read;
+            let valid = match std::str::from_utf8(&raw[..have]) {
+                Ok(_) => have,
+                // A character the read split: the rest is in the next one.
+                Err(e) if e.error_len().is_none() => e.valid_up_to(),
+                Err(_) => return Err(Self::invalid()),
+            };
+            if valid == 0 {
+                continue;
+            }
+            self.carried = have - valid;
+            self.carry[..self.carried].copy_from_slice(&raw[valid..have]);
+            self.out.clear();
+            self.out.extend_from_slice(&raw[..valid]);
+            self.at = 0;
+            return Ok(true);
+        }
+    }
+}
+
+impl<R: Read> Read for Utf8Text<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        while self.at == self.out.len() {
+            if !self.fill()? {
+                return Ok(0);
+            }
+        }
+        let n = buf.len().min(self.out.len() - self.at);
+        buf[..n].copy_from_slice(&self.out[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
     }
 }
 
@@ -1569,7 +1662,7 @@ mod tests {
 
     use super::{
         decode, json_body, open, read, read_bounded, Encoding, Head, JsonText, NotText, Source,
-        Utf16Text, MAX_DEPTH, MAX_STRING,
+        Utf16Text, Utf8Text, MAX_DEPTH, MAX_STRING,
     };
     use termlens::Screen;
 
@@ -1947,5 +2040,58 @@ mod tests {
             read(source(json, 4096), 1 << 30),
             Err("t: stream did not contain valid UTF-16".into())
         );
+    }
+
+    /// UTF-8 streams to the parser as it is checked, a character split
+    /// across reads carried whole to the next, and bytes that are not
+    /// UTF-8 anywhere in the input — inside a string, after the document,
+    /// cut off by its end — are the error a text-format input gets, as
+    /// they were before JSON streamed (#777): serde_json named one inside a
+    /// string "invalid unicode code point" and called the input "not a
+    /// termlens Screen", and named one after the document "trailing
+    /// characters".
+    #[test]
+    fn utf8_text_streams_checked() {
+        let text = "{\"汉字\": \"\u{1f600} é ok\"}";
+        for chunk in [1, 2, 3, 5, 4096] {
+            let mut out = Vec::new();
+            Utf8Text::new(source(text.as_bytes().to_vec(), chunk).input)
+                .read_to_end(&mut out)
+                .expect("valid UTF-8");
+            assert_eq!(out, text.as_bytes(), "chunk {chunk}");
+        }
+        let emoji = "\u{1f600}".as_bytes();
+        for bytes in [
+            // Latin-1's é, a lone continuation byte, an overlong `/`, a
+            // surrogate, and an emoji cut off by the end of the input.
+            &b"{\"t\": \"caf\xe9\"}"[..],
+            &b"{\"t\": \"\x80\"}"[..],
+            &b"{\"t\": \"\xc0\xaf\"}"[..],
+            &b"{\"t\": \"\xed\xa0\x80\"}"[..],
+            &[b"{} ".as_slice(), &emoji[..3]].concat(),
+        ] {
+            for chunk in [1, 4096] {
+                let err = Utf8Text::new(source(bytes.to_vec(), chunk).input)
+                    .read_to_end(&mut Vec::new())
+                    .unwrap_err();
+                assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+                assert_eq!(err.to_string(), "stream did not contain valid UTF-8");
+            }
+        }
+        for tail in [&b"\xe9\n"[..], b""] {
+            let json = screen_json().replacen("\"title\": \"\"", "\"title\": \"caf\u{e9}\"", 1);
+            let mut bytes = json.into_bytes();
+            if tail.is_empty() {
+                // The é, recoded as Latin-1, inside the document.
+                let at = bytes.windows(2).position(|w| w == b"\xc3\xa9").unwrap();
+                bytes.splice(at..at + 2, [0xe9]);
+            } else {
+                bytes.extend_from_slice(tail);
+            }
+            assert_eq!(
+                read(source(bytes, 4096), 1 << 30),
+                Err("t: stream did not contain valid UTF-8".into())
+            );
+        }
     }
 }

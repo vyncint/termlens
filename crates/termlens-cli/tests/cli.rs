@@ -859,6 +859,64 @@ fn render_refuses_utf32_by_name() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A JSON screen that is not UTF-8 is refused in the words 0.11.10 used and
+/// the text format still uses, "stream did not contain valid UTF-8", by
+/// `render` and `diff`, as a file and on a pipe. What Windows PowerShell's
+/// `Set-Content` writes is the ANSI code page: an `é` in a title is the
+/// one byte `E9`. Once JSON streamed (#777), serde_json met that byte
+/// before anything checked the input, and the refusal read "not a termlens
+/// Screen: invalid unicode code point at line 83 column 18" here, or
+/// "trailing characters" for a byte after the document.
+#[test]
+fn render_and_diff_refuse_json_that_is_not_utf8_in_the_old_words() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("termlens-latin1-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let before = data("before.snap");
+    let json = String::from_utf8(
+        with_stdin(&["render", "--json", "-"], "size: 4x1  cursor: 0,0\nhi").stdout,
+    )
+    .unwrap()
+    .replacen("\"title\": \"\"", "\"title\": \"caf\u{e9}\"", 1);
+    // The é as Set-Content writes it, inside the document, and after it.
+    let mut inside = json.clone().into_bytes();
+    let at = inside
+        .windows(2)
+        .position(|w| w == "\u{e9}".as_bytes())
+        .expect("the é is written");
+    inside.splice(at..at + 2, [0xe9]);
+    let mut after = json.into_bytes();
+    after.extend_from_slice(b"\xe9\n");
+    for (name, bytes) in [("inside.json", inside), ("after.json", after)] {
+        let path = dir.join(name);
+        std::fs::write(&path, &bytes).expect("the file is written");
+        let path = path.to_str().unwrap();
+        let run = |args: &[&str]| {
+            Command::new(env!("CARGO_BIN_EXE_termlens"))
+                .args(args)
+                .output()
+                .expect("termlens runs")
+        };
+        for (what, out, shown) in [
+            ("render", run(&["render", "--text", path]), path),
+            ("diff", run(&["diff", path, &before]), path),
+            (
+                "render on a pipe",
+                with_stdin(&["render", "--text", "-"], &bytes),
+                "<stdin>",
+            ),
+        ] {
+            assert_eq!(out.status.code(), Some(2), "{name}, {what}: {out:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stderr),
+                format!("termlens: {shown}: stream did not contain valid UTF-8\n"),
+                "{name}, {what}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 #[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
 fn inspect_prints_the_screen_and_the_exit_trailer() -> termlens::Result<()> {
