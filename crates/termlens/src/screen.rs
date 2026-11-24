@@ -2416,6 +2416,9 @@ mod search_work {
     use std::cell::Cell;
 
     thread_local! {
+        // Already `const`; see HOLDS_LIFECYCLE in terminal.rs for why the
+        // lint still fires on illumos (#791).
+        #[allow(clippy::missing_const_for_thread_local)]
         static WORK: Cell<usize> = const { Cell::new(0) };
     }
 

@@ -36,7 +36,7 @@ pushing and nothing in CI should surprise you.
 [`tools/preflight.sh`](tools/preflight.sh) runs the whole list below in order
 and prints one line per gate; `--fast` narrows it to fmt, clippy and the test
 suite. A gate whose optional tooling is not installed — `cargo-deny`,
-`cargo-semver-checks`, `pipx`, the 1.85 toolchain, the Windows target — is
+`cargo-semver-checks`, `pipx`, the 1.85 toolchain, the Windows or illumos target — is
 skipped by name rather than failed.
 
 ```sh
@@ -69,6 +69,7 @@ cargo +1.85 check --workspace --exclude ratatui-app --locked --all-targets    # 
 cargo +1.85 check -p termlens --all-features --all-targets --locked           # …and every optional feature at the same floor
 cargo +1.85 check -p termlens --no-default-features --all-targets --locked
 cargo clippy --workspace --all-targets --all-features --target x86_64-pc-windows-msvc -- -D warnings   # the Windows build, from any host: `rustup target add x86_64-pc-windows-msvc` once
+cargo clippy --workspace --all-targets --all-features --target x86_64-unknown-illumos -- -D warnings   # …and illumos (#748), likewise: `rustup target add x86_64-unknown-illumos` once
 tools/semver-gate-selftest/run.sh                       # the semver gate can fail (cargo install cargo-semver-checks)…
 tools/link-gate-selftest/run.sh                         # …and so can the link gate, with no extra tooling
 tools/report-pin-gate-selftest/run.sh                   # …and the report-pin gate, likewise
