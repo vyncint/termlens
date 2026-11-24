@@ -294,6 +294,10 @@ pub(crate) struct LifecycleGuard(Option<std::sync::MutexGuard<'static, ()>>);
 #[cfg(unix)]
 thread_local! {
     /// Whether this thread holds [`PTY_LIFECYCLE`].
+    // Already `const`: clippy 1.100's `missing_const_for_thread_local`
+    // still fires on x86_64-unknown-illumos, where `thread_local!` expands
+    // differently, and the illumos gate (#791) runs clippy with -D warnings.
+    #[allow(clippy::missing_const_for_thread_local)]
     static HOLDS_LIFECYCLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
