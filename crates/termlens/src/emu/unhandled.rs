@@ -67,9 +67,10 @@ pub(super) struct Unhandled {
     /// The sequence vt100 reports next is a query the responder answers or
     /// names — see [`expect_query`](Self::expect_query).
     query: bool,
-    /// The intermediates of the CSI vt100 reports next, which it reports
-    /// without them — see [`expect_spaced`](Self::expect_spaced).
-    spaced: Option<[u8; 2]>,
+    /// The intermediates and the final byte of the CSI vt100 reports next,
+    /// which it reports without the intermediates, or with another final —
+    /// see [`expect_spaced`](Self::expect_spaced).
+    spaced: Option<([u8; 2], u8)>,
     /// The content length of the last OSC recorded, before its entry was
     /// cut: how much of a body reached vt100, which the capture-bound
     /// tests read now that the entry no longer shows it (#694, #695).
@@ -162,9 +163,12 @@ impl Unhandled {
     /// none, all but DECSCUSR, which it carries out. SL (`CSI 2 SP @`) was
     /// listed as `^[[2@`, ICH, which the grid does have, and `CSI 1 SP c`
     /// not at all, taken for DA1 (#764). The emulator says so just before
-    /// it feeds the final byte, alone.
-    pub(super) fn expect_spaced(&mut self, intermediates: [u8; 2]) {
-        self.spaced = Some(intermediates);
+    /// it feeds the final byte, alone, and passes the one the application
+    /// wrote: DECSCUSR with a sub-parameter, which xterm does not take and
+    /// vt100 carries out with no callback, reaches vt100 with a final it
+    /// reports instead (#804).
+    pub(super) fn expect_spaced(&mut self, intermediates: [u8; 2], fin: u8) {
+        self.spaced = Some((intermediates, fin));
     }
 
     /// Tell the record what the tracker saw of the next `OSC` vte
@@ -459,8 +463,9 @@ impl Callbacks for Unhandled {
             return;
         }
         // None of these is the tracker's, which reads `SP` only for
-        // DECSCUSR, so each is on record, as vte collected it.
-        if let Some(intermediates) = spaced {
+        // DECSCUSR and not with a sub-parameter, so each is on record, as
+        // vte collected it and with the final the application wrote.
+        if let Some((intermediates, fin)) = spaced {
             let mut shape = format!("^[[{}", params_text(params));
             shape.extend(
                 intermediates
@@ -468,7 +473,7 @@ impl Callbacks for Unhandled {
                     .filter(|&b| b != 0)
                     .map(char::from),
             );
-            shape.push(c);
+            shape.push(char::from(fin));
             self.record(shape);
             return;
         }
@@ -493,9 +498,17 @@ impl Callbacks for Unhandled {
             // `CSI 6:1 n` and `CSI 4:4 h` were answered by nobody and named
             // nowhere (#757).
             _ if params.iter().any(|p| p.len() > 1) => false,
-            // Tab stops, insert mode, the queries the responder answers or
-            // names, and the window reports it answers or names.
-            (None, None, 'g' | 'I' | 'Z' | 'c' | 'n') => true,
+            // Tab motions, by their first parameter (#802), and the DSR
+            // queries the responder answers or names.
+            (None, None, 'I' | 'Z' | 'n') => true,
+            // DA1 and DA2 as the responder answers them, `CSI c` or `CSI 0
+            // c`, which vte hands over alike; and TBC for the stop at the
+            // cursor or all of them. xterm does nothing for any other
+            // parameter (charproc.c 4098 and 4301), and neither does
+            // termlens: these arms took every parameter for the tracker's,
+            // and `CSI 1 c` and `CSI 1 g` were reported nowhere (#804).
+            (None | Some(b'>'), None, 'c') => params == [&[0][..]],
+            (None, None, 'g') => matches!(first, Some(0 | 3)),
             // The window reports the responder answers (14, 16, 18) and the
             // ones it names in a timeout — `seq.rs`'s own predicate.
             // Everything else in the family, the title stack included,
@@ -517,9 +530,9 @@ impl Callbacks for Unhandled {
             // DECSTR, DECSCUSR, DECRQM and the mode reports.
             (None, Some(b'!'), 'p') | (None, Some(b' '), 'q') => true,
             (_, Some(b'$'), 'p' | 'y') => true,
-            // DA2, the kitty keyboard probe and XTSMGRAPHICS, all of which
-            // the responder names in a timeout (#641).
-            (Some(b'>'), None, 'c') | (Some(b'?'), None, 'u' | 'S') => true,
+            // The kitty keyboard probe and XTSMGRAPHICS, which the
+            // responder names in a timeout (#641).
+            (Some(b'?'), None, 'u' | 'S') => true,
             // The prefixed queries `seq.rs` answers or names, in the shapes
             // it claims them in: DECXCPR (`CSI ? 6 n`, answered) and every
             // other `CSI ? Ps n` or `CSI = Ps n`, DA3 (`CSI = c`), and
@@ -965,6 +978,24 @@ mod tests {
         }
         // Written plain, each is the tracker's or the responder's, as before.
         assert!(shapes(b"\x1b[?996n\x1b[6n\x1b[4h\x1b[?1000h\x1b[?7h\x1b[c\x1b[3g").is_empty());
+    }
+
+    /// DA1 and DA2 are answered only as `CSI c` and `CSI 0 c` (`>` for
+    /// DA2), which vte hands over alike, and TBC is carried out only for 0
+    /// and 3, by its first parameter (#802). xterm does nothing for any
+    /// other parameter (charproc.c 4098 and 4301), and neither does
+    /// termlens, but the arms took every parameter for the tracker's
+    /// (#804).
+    #[test]
+    fn da_and_tbc_with_a_parameter_nobody_takes_are_reported() {
+        for shape in ["1c", "0;1c", ">1c", "1g", "2g", "4g"] {
+            assert_eq!(
+                shapes(format!("\x1b[{shape}").as_bytes()),
+                [format!("^[[{shape}")],
+                "{shape}"
+            );
+        }
+        assert!(shapes(b"\x1b[c\x1b[0c\x1b[>c\x1b[>0c\x1b[g\x1b[0g\x1b[3g\x1b[3;5g").is_empty());
     }
 
     #[test]

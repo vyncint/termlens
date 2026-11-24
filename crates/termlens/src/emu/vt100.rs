@@ -838,6 +838,12 @@ impl Vt100Emulator {
     }
 }
 
+/// The final byte a DECSCUSR with a sub-parameter reaches vt100 with: one
+/// vt100 has no `SP` form of, so that it hands the sequence to its callback
+/// rather than carry it out by its first value, which xterm does not, and
+/// the record, told the real final, lists it (#804).
+const SPACED_STAND_IN: &[u8] = b"p";
+
 /// What ends a `REP` in place of its final byte, so that no parser carries
 /// it out: an intermediate, then a parameter byte, which vte takes for a
 /// malformed sequence and ignores up to the final byte (`CsiIntermediate`
@@ -1056,12 +1062,21 @@ impl Emulator for Vt100Emulator {
             // A CSI whose first intermediate is `SP` reaches the record
             // without it, so the record is told what vte collected, between
             // the bytes before the final byte and that byte (#764). A query
-            // of that shape is the tracker's, below, and never listed.
+            // of that shape is the tracker's, below, and never listed. The
+            // one of them vt100 would carry out, DECSCUSR with a
+            // sub-parameter, gets a final it reports instead (#804).
             if let (Some(intermediates), None) = (spaced, &stop) {
                 if fed <= i {
                     self.feed_staged(&bytes[fed..i]);
-                    self.parser.callbacks_mut().expect_spaced(intermediates);
-                    self.feed_staged(&bytes[i..=i]);
+                    self.parser
+                        .callbacks_mut()
+                        .expect_spaced(intermediates, byte);
+                    let fin = if byte == b'q' {
+                        SPACED_STAND_IN
+                    } else {
+                        &bytes[i..=i]
+                    };
+                    self.feed_staged(fin);
                     fed = i + 1;
                 }
             }
@@ -3376,6 +3391,51 @@ mod tests {
         // callback then reports; the next one keeps its own shape.
         let s = emu_with(b"\x1b[ 1@\x1b[20h").snapshot();
         assert_eq!(s.unsupported(), ["^[[20h"]);
+    }
+
+    /// Three sequences termlens does not carry out were listed nowhere
+    /// (#804). DA1 or DA2 with a parameter other than 0, which xterm does
+    /// not answer either (charproc.c 4098), and TBC other than 0 or 3,
+    /// which it ignores (4301): the arms took every parameter for the
+    /// tracker's. And DECSCUSR with a sub-parameter, which xterm does not
+    /// take (it reads sub-parameters only on SGR and XTMODKEYS) and vt100
+    /// carries out by its first value with no callback at all: the cursor
+    /// shape, which is the tracker's, stays, and the sequence is listed in
+    /// its own shape. Whole and split at every byte.
+    #[test]
+    fn what_termlens_does_not_carry_out_is_listed() {
+        for (sequence, shape) in [
+            ("\x1b[1c", "^[[1c"),
+            ("\x1b[>1c", "^[[>1c"),
+            ("\x1b[1g", "^[[1g"),
+            ("\x1b[2:1 q", "^[[2:1 q"),
+            ("\x1b[6:9 q", "^[[6:9 q"),
+        ] {
+            let stream = format!("ab\r{sequence}X");
+            for cut in 0..stream.len() {
+                let mut emu = Vt100Emulator::new(4, 10, 0, crate::graphics::DEFAULT_CAPTURE, false);
+                for piece in [&stream[..cut], &stream[cut..]] {
+                    let mut off = 0;
+                    while off < piece.len() {
+                        let processed = emu.process(&piece.as_bytes()[off..]);
+                        assert_eq!(processed.stop, None, "{sequence:?} cut at {cut}");
+                        off += processed.consumed;
+                    }
+                }
+                let s = emu.snapshot();
+                assert_eq!(s.unsupported(), [shape], "{sequence:?} cut at {cut}");
+                assert_eq!(s.row_text(0).trim_end(), "Xb", "{sequence:?} cut at {cut}");
+                assert_eq!(
+                    s.cursor_shape(),
+                    crate::CursorShape::Default,
+                    "{sequence:?}"
+                );
+            }
+        }
+        // Their plain and their 0 and 3 forms are carried out, and not listed.
+        let s = emu_with(b"\x1b[c\x1b[0c\x1b[>0c\x1b[0g\x1b[3g\x1b[2 q").snapshot();
+        assert!(s.unsupported().is_empty(), "{:?}", s.unsupported());
+        assert_eq!(s.cursor_shape(), crate::CursorShape::Block);
     }
 
     #[test]

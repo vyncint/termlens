@@ -121,6 +121,13 @@ reads that marker.
   and column. The character overwrote the top-left cell instead. A test
   that pinned that cell should expect the top row as it was and the
   character on the second row. (#803)
+- `Screen::unsupported()` lists DA1 and DA2 with a parameter other than 0
+  (`CSI 1 c`, `CSI > 1 c`), TBC with one other than 0 or 3 (`CSI 1 g`),
+  and DECSCUSR with a sub-parameter (`CSI 2:1 SP q`). termlens carries
+  none of them out, and xterm does nothing for them either, so the screen
+  was right, but nothing said the sequence had been dropped. A test that
+  expected an empty list beside one of these should expect its entry.
+  (#804)
 
 ### Fixed
 

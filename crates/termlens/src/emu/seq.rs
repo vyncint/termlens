@@ -1494,16 +1494,18 @@ impl SeqTracker {
     }
 
     /// The intermediates vte collected for the CSI `b` ends, when vt100
-    /// reports that CSI without them: one whose first intermediate is `SP`,
-    /// which vt100 carries out only for DECSCUSR (`q`) and hands every
-    /// other one to its callback as if it had none — SL (`CSI 2 SP @`) as
-    /// ICH (#764). The second is 0 when there is none.
+    /// would not report that CSI as written: one whose first intermediate
+    /// is `SP`, which vt100 carries out only for DECSCUSR (`q`) and hands
+    /// every other one to its callback as if it had none — SL
+    /// (`CSI 2 SP @`) as ICH (#764) — and DECSCUSR with a sub-parameter,
+    /// which xterm does not take and vt100 carries out by its first value,
+    /// with no callback at all (#804). The second is 0 when there is none.
     ///
     /// Consulted **before** the byte is stepped.
     pub(crate) fn spaced_csi(&self, b: u8) -> Option<[u8; 2]> {
         (self.state == State::Csi
             && (0x40..=0x7e).contains(&b)
-            && b != b'q'
+            && (b != b'q' || self.csi_colon)
             && self.csi_collected[0] == b' ')
             .then_some(self.csi_collected)
     }
