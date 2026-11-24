@@ -1247,6 +1247,9 @@ thread_local! {
     /// master, as every spawn does on Windows, where portable-pty exposes no
     /// descriptor: that path then runs where a test can fill an input queue
     /// (#771).
+    // Already `const`; see HOLDS_LIFECYCLE for why the lint still fires on
+    // illumos (#791).
+    #[allow(clippy::missing_const_for_thread_local)]
     static NO_MASTER_DUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
