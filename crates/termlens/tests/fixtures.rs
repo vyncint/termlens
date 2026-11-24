@@ -197,6 +197,113 @@ fn resize_and_wait_times_out_naming_the_resize_when_nothing_repaints() -> termle
     Ok(())
 }
 
+/// `resize-echo` told what to do when resized (`--on-resize`, see its
+/// module header), at 80x24 and with its first screen drawn.
+fn spawn_resize_echo(on_resize: &str) -> termlens::Result<Terminal> {
+    let mut t = Terminal::builder()
+        .size(80, 24)
+        .timeout(Duration::from_secs(30))
+        .env_clear()
+        .args(["--on-resize", on_resize])
+        .spawn(util::fixture_bin("resize-echo"))?;
+    t.wait_until(|s| s.contains("size: 80x24") && s.contains("press q to quit"))?;
+    Ok(t)
+}
+
+/// Output that draws nothing does not answer `resize_and_wait` (#788).
+/// `resize-echo` writes, in a write of its own a moment before its
+/// repaint, a cursor hide (`hide-first`), or a cursor position query whose
+/// reply it reads (`query-first`). The predicate was asked about the
+/// screen as soon as that output was read: the old frame at the new size,
+/// which still says `press q to quit`. So the wait returned it, with row 0
+/// reading `size: 80x24`, every time.
+///
+/// Not on Windows: ConPTY repaints the screen itself after a resize, with
+/// the text from before it, so there the old frame arrives as output that
+/// draws (run 45393517904).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY repaints the screen itself after a resize, so the old text arrives as drawn output and satisfies the predicate (run 45393517904)"
+)]
+fn resize_and_wait_is_not_answered_by_output_that_draws_nothing() -> termlens::Result<()> {
+    for first in ["hide-first", "query-first"] {
+        let mut t = spawn_resize_echo(first)?;
+        let s = t.resize_and_wait(100, 30, |s| s.contains("press q to quit"))?;
+        assert!(
+            s.contains("size: 100x30"),
+            "{first}: the repaint, not the screen the resize left:\n{s}"
+        );
+        t.send(Key::Char('q'))?;
+        assert!(t.wait_exit()?.success(), "{first}");
+    }
+    Ok(())
+}
+
+/// An application that answers a resize only with output that draws
+/// nothing never satisfies the wait, even with a predicate the old frame
+/// satisfies, and the timeout says what was read drew nothing, where the
+/// application that wrote nothing at all is told that nothing was read
+/// (#788). The deadline is the wait that must expire, and long enough for
+/// the cursor hide to be read before it on a loaded machine.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY repaints the screen itself after a resize, so the old text arrives as drawn output and satisfies the predicate (run 45393517904)"
+)]
+fn resize_and_wait_times_out_naming_output_that_drew_nothing() -> termlens::Result<()> {
+    let mut t = spawn_resize_echo("hide-only")?;
+    let expired = t.resize_and_wait_for(
+        100,
+        30,
+        |s| s.contains("press q to quit"),
+        Duration::from_secs(2),
+    );
+    match expired {
+        Err(err @ termlens::Error::Timeout { .. }) => {
+            let message = err.to_string();
+            assert!(
+                message.contains("after the resize to 100x30")
+                    && message.contains(
+                        "output has been read since the resize, but none of it drew anything"
+                    ),
+                "{message}"
+            );
+        }
+        other => panic!("nothing drew, so the wait must time out: {other:?}"),
+    }
+    t.send(Key::Char('q'))?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// A repaint of exactly what was there answers `resize_and_wait`: it wrote
+/// printable characters, though no cell changed (#788). `same` rewrites
+/// `press q to quit` where it already is and nothing else, so row 0 keeps
+/// the old size.
+#[test]
+fn resize_and_wait_is_answered_by_an_identical_repaint() -> termlens::Result<()> {
+    let mut t = spawn_resize_echo("same")?;
+    let s = t.resize_and_wait(100, 30, |s| s.contains("press q to quit"))?;
+    assert_eq!(s.size(), (100, 30), "{s}");
+    assert!(s.contains("size: 80x24"), "only row 1 is repainted:\n{s}");
+    t.send(Key::Char('q'))?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
+/// A repaint that only clears answers `resize_and_wait`: no printable
+/// character, but every cell that held text changed (#788).
+#[test]
+fn resize_and_wait_is_answered_by_a_repaint_that_only_clears() -> termlens::Result<()> {
+    let mut t = spawn_resize_echo("clear-only")?;
+    let s = t.resize_and_wait(100, 30, |s| s.text().trim().is_empty())?;
+    assert_eq!(s.size(), (100, 30), "{s}");
+    t.send(Key::Char('q'))?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// Normalization folding against real vt100 output rather than a
 /// hand-built grid — one form on screen, the other in the needle, so the
 /// match can only come from folding.

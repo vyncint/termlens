@@ -299,9 +299,10 @@ fn honours_no_color_at_a_custom_size() -> termlens::Result<()> {
     assert_eq!(s.size(), (100, 30), "{s}");
 
     // A resize, and a wait that cannot pass on the screen the resize left
-    // behind: the predicate is asked only about what is drawn after it. On
-    // Windows ConPTY repaints the old screen after a resize, so there name
-    // something only the new layout has.
+    // behind: the predicate is asked only once the app has drawn after it,
+    // and a cursor hide or a query alone is not drawing. On Windows ConPTY
+    // repaints the old screen after a resize, so there name something only
+    // the new layout has.
     let narrow = t.resize_and_wait(60, 30, |s| s.contains("Ready"))?;
     assert_eq!(narrow.size(), (60, 30), "{narrow}");
 
@@ -436,7 +437,7 @@ included in `X`, and `terminal closed (EOF) while waiting for X` is
 | ``failed to send Char('x') to `…` (the child is gone (exit code 7) and the terminal is closed)`` | input was sent after the child exited | check `wait_exit()` first and inspect the screen embedded under `--- screen at the failed write ---` |
 | ``failed to send … to `…` (the application is not reading its input, and the PTY buffer is full — a write into it was still blocked after 5s; …)`` | the child is alive but has stopped draining terminal input; the unwritten bytes stay queued, so do not retry the send | wait for the application to draw the state that is ready for input before typing |
 | ``failed to send … to `…` (the child released the terminal (EOF) before this write of 4096 bytes finished; …)`` | the child exited while the send was blocked on input it had stopped reading | the embedded screen is its last; if the exit is expected, `wait_exit()` instead of typing into it |
-| `… note: the application left 100 bytes of input unread` (Linux, macOS) | the app has stopped reading: what you sent sits in the terminal's input queue — in canonical mode, complete lines only | find why it stopped reading (a blocking call, a stalled read loop: crossterm 0.29 can stall after 1,024 bytes arrive at once, crossterm#1142) rather than lengthening the wait |
+| `… note: the application left 100 bytes of input unread` (Linux, macOS) | the app has stopped reading: what you sent sits in the terminal's input queue — in canonical mode, complete lines only; `at least 4095 bytes` on Linux means the 4 KiB read buffer is full and more may wait behind it | find why it stopped reading (a blocking call, a stalled read loop: crossterm 0.29 can stall after 1,024 bytes arrive at once, crossterm#1142) rather than lengthening the wait |
 | `the application never emitted a DEC 2026 synchronized update` | `wait_frame` or `record().stop()` against an app without synchronized output | use `snapshot_after` / `wait_until` (rule 8) |
 | `--- last returned frame → live screen ---` under a `wait_frame` timeout | the app repainted, but never into the predicate | the diff shows what did change; the predicate is looking at the wrong thing |
 | `input not receivable: the application has not enabled mouse tracking` | `click`/`drag`/`scroll` before the app enabled the mouse, or after it reset a tracking mode: `CSI ? 1000 l` ends reporting whichever of `?9`, `?1000`, `?1002`, `?1003` was set, as in xterm | `wait_until(|s| s.mouse_mode() != MouseMode::None)` first; an app that resets one mode to keep another must set that one again |
@@ -473,7 +474,7 @@ included in `X`, and `terminal closed (EOF) while waiting for X` is
 | `wait_stable(quiet)` | `Screen` | the picture unchanged for `quiet`; bells and no-op repaints do not reset it |
 | `wait_idle(quiet)` | `()` | no *bytes* for `quiet` — a weaker, older sibling of `wait_stable` |
 | `wait_frame(\|s\| bool)` | `Screen` | complete DEC 2026 frames only (rule 8) |
-| `resize_and_wait(cols, rows, \|s\| bool)` | `Screen` | a resize: the predicate is asked only about output read after it, so on Linux and macOS the old screen at the new size cannot pass it. On Windows ConPTY repaints the old screen after a resize, so there, and where the app paints on its own, name what only the new layout has |
+| `resize_and_wait(cols, rows, \|s\| bool)` | `Screen` | a resize: the predicate is asked only once the app has drawn after it (a printable character, or a changed cell; a cursor hide, a mode or a query alone does not count), so on Linux and macOS the old screen at the new size cannot pass it. On Windows ConPTY repaints the old screen after a resize, so there, and where the app paints on its own, name what only the new layout has |
 | `wait_exit()` | `ExitStatus` | the child's exit; `success()`, `code() -> Option<u32>`, `signal() -> Option<&str>` |
 | `wait_until_matches(&Regex)` | `Screen` | feature `regex`: a pattern over a row of the screen — the expect-style wait, on the grid |
 | `record()` … `.stop()` | `Recording` | every complete DEC 2026 frame with its time; `frames()`, `duration()` (to the last frame), `write_asciicast(path)` for a file `asciinema` plays — its header carries when and what was recorded |
@@ -544,7 +545,7 @@ directory (see §9b).
 | `t.send_str("quit\n")` | `t.send_str("quit")?; t.send(Key::Enter)?;` |
 | `t.wait_frame(…)` against a ratatui app | `t.snapshot_after(…)` unless the app emits synchronized updates |
 | `t.click(3, 4)?` as the first thing after spawn | `t.wait_until(\|s\| s.mouse_mode() != MouseMode::None)?;` first |
-| `t.resize(100, 30)?; t.wait_until(\|s\| s.contains("Ready"))?;` | `t.resize_and_wait(100, 30, \|s\| s.contains("Ready"))?;` — the plain wait passes on the old screen, which has the new size at once; on Windows name what only the new layout has, since ConPTY repaints the old screen after a resize |
+| `t.resize(100, 30)?; t.wait_until(\|s\| s.contains("Ready"))?;` | `t.resize_and_wait(100, 30, \|s\| s.contains("Ready"))?;` — the plain wait passes on the old screen, which has the new size at once, and this one waits for the app to draw again; on Windows name what only the new layout has, since ConPTY repaints the old screen after a resize |
 | `.timeout(Duration::from_secs(60))` to stop a flake | find the race (rules 2 and 3); use `_for` on the one slow step |
 | `insta::assert_snapshot!(t.screen().text())` | `insta::assert_snapshot!(t.screen())` or `.with_styles()` |
 | `assert!(t.screen().contains("done"))` after the app printed a lot | `t.screen().full_text().contains("done")` — it scrolled |

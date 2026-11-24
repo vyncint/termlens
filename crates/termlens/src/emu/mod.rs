@@ -151,6 +151,13 @@ pub(crate) trait Emulator: Send {
     /// the app has begun a repaint and not finished it.
     fn in_sync_update(&self) -> bool;
 
+    /// How many printable characters the stream has written to the grid,
+    /// ever: never reset, so two readings tell whether anything was drawn
+    /// between them. Escape sequences and controls are not counted, so a
+    /// cursor hidden or a mode set draws nothing, and a repaint of exactly
+    /// what was there already does count (#788).
+    fn printed(&self) -> u64;
+
     /// The input-affecting modes the application has currently set.
     fn input_modes(&self) -> InputModes;
 

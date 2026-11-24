@@ -357,7 +357,8 @@ fn a_send_to_an_application_that_never_reads_returns_by_its_deadline() -> termle
 /// like one that read a key and drew nothing for it; one outside suite
 /// blamed termlens for keys that sat in the terminal's input queue behind
 /// a stalled read. The count is the slave's: in raw mode, the mode a TUI
-/// runs in, every byte sent; in canonical mode the complete lines, since a
+/// runs in, every byte sent, up to what the line discipline's read buffer
+/// holds (the next test); in canonical mode the complete lines, since a
 /// line still waiting for its Enter cannot be read yet.
 #[test]
 #[cfg_attr(
@@ -411,5 +412,36 @@ fn a_timeout_names_the_input_the_application_left_unread() -> termlens::Result<(
     );
     cooked.send_str("\n")?;
     names(&expire(&mut cooked), 4);
+    Ok(())
+}
+
+/// At what the line discipline's read buffer holds, the count is a floor,
+/// and the note says so (#790). Linux's n_tty keeps 4,095 bytes where a
+/// read can take them, and the slave's `FIONREAD` counts those alone; what a
+/// raw-mode program left past them waits in the kernel too. 5,000 bytes,
+/// every one taken by the kernel, were noted as "the application left 4095
+/// bytes of input unread", as if that were all of them.
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the 4,095-byte read buffer counted here is Linux's n_tty, and only Linux is measured past it; ConPTY keeps no queue to count (#790)"
+)]
+fn input_past_the_line_discipline_s_buffer_is_noted_as_at_least() -> termlens::Result<()> {
+    let mut t = common::spawn_emit(
+        Terminal::builder()
+            .size(80, 6)
+            .timeout(Duration::from_secs(10)),
+        &["--raw-mode", "READY", "--idle"],
+    )?;
+    t.wait_until(|s| s.contains("READY"))?;
+    t.send_str(&"x".repeat(5000))?;
+    match t.wait_until_for(|s| s.contains("never drawn"), Duration::from_millis(500)) {
+        Err(err @ Error::Timeout { .. }) => {
+            let message = err.to_string();
+            let note = "the application left at least 4095 bytes of input unread";
+            assert!(message.contains(note), "no `{note}` in: {message}");
+        }
+        other => panic!("nothing draws it, so the wait expires: {other:?}"),
+    }
     Ok(())
 }

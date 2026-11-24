@@ -19,7 +19,8 @@
 //! also filtered on the tracker's word, which the emulator passes on just
 //! before vt100 dispatches it, since vte can read a query in a shape the
 //! tracker does not (#763); and the same way the tracker supplies the
-//! intermediates of a CSI vt100 reports without them (#764).
+//! intermediates of a CSI vt100 reports without them (#764), and says which
+//! `OSC` set an icon name (#760).
 //!
 //! The same callback set counts the rows vt100 drops off the front of the
 //! main screen's history, which is the one thing its history cannot tell
@@ -57,10 +58,9 @@ pub(super) struct Unhandled {
     /// Rows dropped off the front of the main screen's history since the
     /// emulator last took the count — see [`take_evicted`](Self::take_evicted).
     evicted: usize,
-    /// An icon name `set_window_icon_name` was handed and that is not on
-    /// record yet, because the call after it decides whether it is one —
-    /// see that callback.
-    icon: Option<IconName>,
+    /// The `OSC` vte dispatches next is an `OSC 1`, as the tracker read
+    /// it — see [`expect_icon_name`](Self::expect_icon_name).
+    icon_name: bool,
     /// What the tracker saw of the `OSC` vte dispatches next, when vte
     /// keeps only part of it — see [`CutOsc`].
     cut_osc: Option<CutOsc>,
@@ -86,7 +86,7 @@ impl Default for Unhandled {
             overflow: 0,
             visual_bells: 0,
             evicted: 0,
-            icon: None,
+            icon_name: false,
             cut_osc: None,
             query: false,
             spaced: None,
@@ -125,22 +125,15 @@ impl Unhandled {
         std::mem::take(&mut self.evicted)
     }
 
-    /// What the emulator does after every feed: an icon name still held
-    /// back goes on record, since the stream may end with one, and a query
-    /// no sequence took is forgotten.
+    /// What the emulator does after every feed: what it said of a CSI that
+    /// no callback took is forgotten, as when vte ignores the sequence.
+    ///
+    /// What it said of an `OSC` stays: an `OSC` ended by an ESC reaches vte
+    /// only when the rewriters let that ESC go, with the byte after it,
+    /// maybe a read later.
     pub(super) fn settle(&mut self) {
         self.query = false;
         self.spaced = None;
-        self.settle_icon();
-    }
-
-    /// Put an icon name still held back on record: no title followed it,
-    /// so it was an `OSC 1`. Every new entry does this first, so the record
-    /// stays in stream order.
-    fn settle_icon(&mut self) {
-        if let Some(icon) = self.icon.take() {
-            self.keep(icon.shape);
-        }
     }
 
     /// Tell the record that the sequence vt100 reports next is a query the
@@ -182,12 +175,23 @@ impl Unhandled {
         self.cut_osc = Some(cut);
     }
 
-    fn record(&mut self, shape: String) {
-        self.settle_icon();
-        self.keep(shape);
+    /// Tell the record that the `OSC` vte dispatches next is an `OSC 1`,
+    /// which sets the icon name, modelled nowhere. vt100 hands its name to
+    /// `set_window_icon_name`, the callback it also hands the icon half of
+    /// every `OSC 0`, whose title is the tracker's, and the two calls carry
+    /// the same bytes. Only the tracker sees which number the string began
+    /// with, so the emulator says so just before it feeds the byte that
+    /// ends the string, as for [`expect_cut_osc`](Self::expect_cut_osc).
+    ///
+    /// The record used to hold the name back and drop it when a title with
+    /// the same bytes came next, so whether an `OSC 1` followed by an
+    /// `OSC 2` naming the same thing was listed depended on where the read
+    /// split (#760).
+    pub(super) fn expect_icon_name(&mut self) {
+        self.icon_name = true;
     }
 
-    fn keep(&mut self, shape: String) {
+    fn record(&mut self, shape: String) {
         if self.seen.iter().any(|s| **s == *shape) {
             return;
         }
@@ -285,23 +289,6 @@ fn osc_shape(params: &[&[u8]], dropped: bool) -> String {
     shape
 }
 
-/// An icon name an `OSC 1` may have set: its entry, and a digest of the
-/// whole name for the title an `OSC 0` sets with the same bytes.
-#[derive(Debug)]
-struct IconName {
-    shape: String,
-    digest: u64,
-}
-
-/// A digest of `bytes`. `DefaultHasher::new` has fixed keys, so the same
-/// bytes give the same digest every time.
-fn digest(bytes: &[u8]) -> u64 {
-    use std::hash::{DefaultHasher, Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
-}
-
 /// DEC private modes the sequence tracker keeps itself, so a set or reset
 /// of one is termlens's business even though vt100 declines it — plus 9001,
 /// win32-input-mode, which is not the application's at all: on Windows the
@@ -387,32 +374,12 @@ impl Callbacks for Unhandled {
     fn set_window_icon_name(&mut self, _: &mut vt100::Screen, name: &[u8]) {
         // `OSC 1 ; name` sets the icon name, which nothing models, and
         // vt100 hands its two-operand form here rather than to
-        // `unhandled_osc`, so it was listed nowhere (#760). vt100 also
-        // hands over the icon half of every `OSC 0`, and right after it
-        // the same bytes to `set_window_title`: that title is the
-        // tracker's, and an `OSC 0` is no gap. So the entry waits for the
-        // call after it.
-        self.settle_icon();
-        self.icon = Some(IconName {
-            shape: osc_shape(&[b"1", name], false),
-            digest: digest(name),
-        });
-    }
-
-    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
-        // The title itself is the tracker's (#625). An icon name with the
-        // same bytes just before it came from the same `OSC 0`. An `OSC 1`
-        // then an `OSC 2` naming the same thing, in one read with nothing
-        // listed between, reach here the same way and are taken for one:
-        // the callbacks are given no more to tell them apart.
-        if self
-            .icon
-            .as_ref()
-            .is_some_and(|icon| icon.digest == digest(title))
-        {
-            self.icon = None;
-        } else {
-            self.settle_icon();
+        // `unhandled_osc`, so it was listed nowhere (#760). The icon half
+        // of an `OSC 0` comes here too, and that sequence is no gap, since
+        // its title is the tracker's: only the tracker's word tells the
+        // two apart.
+        if std::mem::take(&mut self.icon_name) {
+            self.record(osc_shape(&[b"1", name], false));
         }
     }
 
@@ -575,6 +542,10 @@ impl Callbacks for Unhandled {
         // not answer *that*, it belongs here. A palette query is any
         // `4;…?`, which is the rule `seq.rs` applies to it.
         let cut = self.cut_osc.take();
+        // An `OSC 1` with other than one operand comes here, not to
+        // `set_window_icon_name`, and the tracker's word for it ends with
+        // it: left over, it would list the icon half of the next `OSC 0`.
+        self.icon_name = false;
         let colour_query = match params.first() {
             // `12;?`, the cursor colour, is named rather than answered, and
             // in the same one shape (#691).
@@ -729,28 +700,40 @@ mod tests {
     /// `OSC 1 ; name` sets the icon name, which nothing models, and vt100
     /// hands the two-operand form to a callback of its own, so it was
     /// listed nowhere (#760). That callback also gets the icon half of
-    /// every `OSC 0`, whose title is the tracker's, just before the title
-    /// callback gets the same bytes — so an icon name is listed once the
-    /// call after it shows it was no `OSC 0`.
+    /// every `OSC 0`, whose title is the tracker's, with the same bytes, so
+    /// an icon name is listed on the tracker's word, which the emulator
+    /// gives just before the byte that ends the string, and only on it.
     #[test]
-    fn an_icon_name_is_unsupported_and_an_osc_0_title_is_not() {
-        assert_eq!(shapes(b"\x1b]1;myicon\x07"), ["^[]1;myicon"]);
-        assert_eq!(shapes(b"\x1b]1;\x1b\\"), ["^[]1;"]);
-        assert!(shapes(b"\x1b]0;both\x07\x1b]0;again\x1b\\").is_empty());
-        // In stream order, before whatever is listed next, and kept when
-        // the title after it is another one.
-        assert_eq!(
-            shapes(b"\x1b]1;tab\x07\x1b[20h\x1b]2;window\x07\x1b]1;tab2\x07\x1b]2;other\x07"),
-            ["^[]1;tab", "^[[20h", "^[]1;tab2"]
-        );
-        // The one shape it cannot tell from an `OSC 0`: the same name set
-        // as the icon's and then as the title, with nothing listed
-        // between them in the same read.
-        assert!(shapes(b"\x1b]1;same\x07\x1b]2;same\x07").is_empty());
-        assert_eq!(
-            shapes(b"\x1b]1;same\x07\x1b[20h\x1b]2;same\x07"),
-            ["^[]1;same", "^[[20h"]
-        );
+    fn an_icon_name_is_listed_on_the_trackers_word() {
+        /// One `OSC` ended by BEL, the word given before the BEL when
+        /// `icon`, then what the emulator does after a feed.
+        fn osc(parser: &mut vt100::Parser<Unhandled>, body: &[u8], icon: bool) {
+            parser.process(&[b"\x1b]", body].concat());
+            if icon {
+                parser.callbacks_mut().expect_icon_name();
+            }
+            parser.process(b"\x07");
+            parser.callbacks_mut().settle();
+        }
+        let mut parser = fed(b"");
+        osc(&mut parser, b"1;tab", true);
+        // The same name as the title is still an icon name set.
+        osc(&mut parser, b"2;tab", false);
+        // An `OSC 0`'s icon half, with no word, is not listed.
+        osc(&mut parser, b"0;both", false);
+        parser.process(b"\x1b[20h");
+        // An `OSC 1` with another operand is listed by `unhandled_osc`,
+        // which takes the word: the `OSC 0` after it is not listed.
+        osc(&mut parser, b"1;a;b", true);
+        osc(&mut parser, b"0;next", false);
+        osc(&mut parser, b"1;", true);
+        let listed: Vec<String> = parser
+            .callbacks()
+            .shapes()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(listed, ["^[]1;tab", "^[[20h", "^[]1;a;b", "^[]1;"]);
     }
 
     /// A mode list is handled only when every mode in it is: insert mode

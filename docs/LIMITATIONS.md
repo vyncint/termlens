@@ -228,7 +228,10 @@ CHANGELOG entry.
   and so does the cursor it saves, as in xterm: after a `DECRC` the next
   character starts the second row. The backend holds that save at the
   end of the top row rather than its start, so a cursor motion or a
-  position report made before that character starts from there.
+  position report made before that character starts from there. An erase
+  (`CSI K`, `CSI J`) at a pending wrap leaves the wrap pending where
+  xterm's erase cancels it, so a soft reset right after one keeps the
+  wrap (#809).
 - **Two SGR style attributes are not modelled.** Overline (`SGR 53`) and
   double underline (`SGR 21`) do not reach [`Style`](https://docs.rs/termlens/latest/termlens/struct.Style.html),
   so `with_styles()` cannot distinguish those attributes from a plain cell.
@@ -257,10 +260,13 @@ CHANGELOG entry.
   macOS only.** The count is the terminal's own, the slave's `FIONREAD`,
   so it is what a read would return at once: in raw mode every byte
   queued, query replies included, and in canonical mode only complete
-  lines, so a line still waiting for its Enter is not counted. Elsewhere
-  the note is left out rather than guessed: the other Unixes are not
-  measured, and on Windows ConPTY keeps typed input on its own side of the
-  pipe, where nothing can count it.
+  lines, so a line still waiting for its Enter is not counted. On Linux it
+  stops at 4,095 bytes, what n_tty's 4 KiB read buffer (`N_TTY_BUF_SIZE`)
+  holds; a raw-mode program can have more queued behind that, so at 4,095
+  the note says "at least 4095 bytes" (5,000 and 10,000 queued were both
+  counted as 4,095). Elsewhere the note is left out rather than guessed:
+  the other Unixes are not measured, and on Windows ConPTY keeps typed
+  input on its own side of the pipe, where nothing can count it.
 
 ## Windows
 
@@ -298,17 +304,19 @@ CHANGELOG entry.
   The `windows-latest` leg is a required check. This is decision 1 of
   [STABILITY.md](STABILITY.md).
 - **On Windows, a wait after a resize must name something only the new
-  layout has.** ConPTY repaints the screen itself after a resize, so output
-  arrives even when the program draws nothing, and a predicate the content
-  from before the resize satisfies passes on that repaint. Measured on
-  `windows-latest` (run 45393517904): `resize_and_wait` with
-  `contains("READY")`, against a program that ignores the resize, returned
-  on the text it had drawn before, where Linux and macOS time out. So
-  `resize_and_wait` keeps the old screen from answering only on Linux and
-  macOS; on Windows the predicate has to tell the layouts apart — the size
-  as the program reports it, or text that needs the new width, never
-  `Screen::size`, which is new at once — and the test that pins the
-  timeout is Windows-ignored for it.
+  layout has.** ConPTY repaints the screen itself after a resize, with the
+  text from before it, so output that draws arrives even when the program
+  draws nothing, and a predicate the content from before the resize
+  satisfies passes on that repaint. Measured on `windows-latest` (run
+  45393517904): `resize_and_wait` with `contains("READY")`, against a
+  program that ignores the resize, returned on the text it had drawn
+  before, where Linux and macOS time out. So `resize_and_wait` keeps the
+  old screen from answering only on Linux and macOS; on Windows the
+  predicate has to tell the layouts apart — the size as the program
+  reports it, or text that needs the new width, never `Screen::size`,
+  which is new at once — and the tests that pin it on Linux and macOS (the
+  two timeouts, and a cursor hide or a query ahead of the repaint) are
+  Windows-ignored for it.
 - **`termlens inspect` on Windows learns of an exit from the reap, not the
   terminal.** ConPTY never reports the terminal closing, so a program that
   has just exited ends inspect's wait by the silence window rather than an

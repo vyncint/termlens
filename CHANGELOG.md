@@ -38,20 +38,27 @@ reads that marker.
   keeps which buttons `mouse_down` pressed until `mouse_up` releases them,
   and X10 reports neither a move nor a release. A motion carries the held
   press's button and modifiers, so a press, a move per cell and a release
-  send what `drag` sends. Only hand-written bytes (`\x1b[<35;10;5M`)
-  produced a hover before. (#789)
+  send what `drag` sends; with several buttons held, it carries the
+  lowest-numbered one, left before middle before right, as xterm reports
+  it. Only hand-written bytes (`\x1b[<35;10;5M`) produced a hover before.
+  (#789)
 - `Terminal::resize_and_wait(cols, rows, predicate)` and
   `resize_and_wait_for(cols, rows, predicate, timeout)` resize, then wait
-  until the predicate holds on output read after the resize, and return
-  that screen. `resize` gives the grid the new size at once and keeps the
-  old content until the application repaints, so
+  until the predicate holds once the application has drawn after the
+  resize, and return that screen. `resize` gives the grid the new size at
+  once and keeps the old content until the application repaints, so
   `wait_until(|s| s.contains("ready"))` after `resize(100, 30)` returned at
   once on a screen still reading `size 80x24 ready`; outside suites wrote
-  the same helper to avoid it. A resize to the size the grid has reaches
+  the same helper to avoid it. Drawn means a printable character written,
+  a repaint of exactly what was there included, or a cell whose text or
+  style changed, a clear included; output that draws nothing, a cursor
+  hidden, a mode set, a query, does not count, since the old frame is
+  still on the grid after it. A resize to the size the grid has reaches
   no one, and the screen as it is answers. A timeout says when nothing was
-  read after the resize at all. Output read after the resize can still be
-  the old layout where an application paints on its own. On Windows
-  ConPTY repaints the screen itself after a resize, measured, so a
+  read after the resize at all, or when what was read drew nothing. What
+  is drawn after the resize can still be the old layout where an
+  application paints on its own. On Windows ConPTY repaints the screen
+  itself after a resize, with the text from before it, measured, so a
   predicate the old content satisfies can pass with nothing drawn by the
   application: there the predicate must name something only the new
   layout has. (#788)
@@ -171,10 +178,12 @@ reads that marker.
   the timeout said nothing of them, so its screen read as an application
   that drew nothing in answer; one outside suite blamed the harness for
   keys queued behind a stalled read. The count is the terminal's own, so
-  in canonical mode it counts complete lines only. Windows and the other
-  Unixes leave the note out rather than guess. A test that matched a whole
-  timeout message, not a part of it, should expect the added clause.
-  (#790)
+  in canonical mode it counts complete lines only, and on Linux it stops
+  at the 4,095 bytes the line discipline's 4 KiB read buffer holds, where
+  more can wait behind them: at that count the note says "at least 4095
+  bytes". Windows and the other Unixes leave the note out rather than
+  guess. A test that matched a whole timeout message, not a part of it,
+  should expect the added clause. (#790)
 
 - An image taller than the screen scrolls it as far as kitty and xterm
   scroll it: by as many rows as its last row is past the bottom margin, and,
@@ -204,14 +213,16 @@ reads that marker.
   file, skipping the key. A test that expected a transparent pixel inside
   a sixel's declared area should expect register 0's colour there, or the
   application should send `P2 = 1`. (#766)
-- A raw kitty RGB or RGBA payload (`f=24`, `f=32`) holding more bytes
-  than its `s=` and `v=` declare is refused with `DecodeError::Malformed`,
-  as kitty refuses it ("Image dimensions … do not match data size") and
-  as termlens already refused the same bytes zlib-compressed. It decoded
-  `Ok` as its first `s=` x `v=` pixels: two RGBA pixels sent as `f=24`,
-  the RGB/RGBA mix-up, gave a 2x1 image whose second pixel was magenta. A
-  test that decoded such a payload should expect `Malformed`, or the
-  application should send exactly the declared size. (#767)
+- A raw kitty RGB or RGBA payload (`f=24`, `f=32`) holding more than 10
+  bytes past what its `s=` and `v=` declare is refused with
+  `DecodeError::Malformed`, as kitty refuses it: kitty loads raw data into
+  a buffer of the declared size plus 10 bytes and aborts a load that
+  outgrows it ("Too much data"). It decoded `Ok` as its first `s=` x `v=`
+  pixels. A surplus of 10 bytes or fewer still does, as kitty draws it:
+  two RGBA pixels sent as `f=24`, the RGB/RGBA mix-up, are a 2x1 image
+  whose second pixel is magenta, as before. A test that decoded a payload
+  more than 10 bytes too long should expect `Malformed`, or the
+  application should send the declared size. (#767)
 - An APC holding only `G` (`ESC _ G ESC \`) is no kitty escape, as kitty
   drops an APC shorter than two bytes before reading it. It was counted
   as a kitty transmission of one byte, so `graphics().kitty()` counted an
@@ -263,9 +274,7 @@ reads that marker.
 - `Screen::unsupported()` lists `OSC 1 ; name`, which sets the icon name
   and is modelled nowhere, as `^[]1;name`; only the form with a further
   `;` was listed. `OSC 0`, which sets the icon name and the title at
-  once, is still not listed, since its title is read. One shape still
-  reads as an `OSC 0`: an `OSC 1` and then an `OSC 2` naming the same
-  thing in one read, with nothing listed between them. A test that
+  once, is still not listed, since its title is read. A test that
   expected an empty list beside an `OSC 1` should expect its entry.
   (#760)
 - `Screen::unsupported()` lists an `OSC` holding U+FFFD, or invalid UTF-8,
@@ -309,9 +318,10 @@ reads that marker.
   xterm's parser takes it whatever the parameters. It reset nothing: the
   rendition, the scroll margins and origin mode stayed as they were, and
   nothing was listed. `CSI SP ! p`, which xterm does not take for one, no
-  longer resets either, and is listed. A test that expected `CSI Ps ! p`
-  to leave the screen's state alone should expect it reset as by
-  `CSI ! p`. (#801)
+  longer resets either, and is listed. Written after the `!`
+  (`CSI ! 1 p`), a parameter makes the sequence ignored, as xterm and vte
+  ignore it. A test that expected `CSI Ps ! p` to leave the screen's
+  state alone should expect it reset as by `CSI ! p`. (#801)
 - CHT, CBT and TBC written with more than one parameter act on the first,
   as xterm's do: `CSI 1;2 I` moves to the next tab stop, `CSI 1;2 Z` to
   the previous one, and `CSI 3;5 g` clears every stop. They did nothing,
@@ -331,6 +341,16 @@ reads that marker.
   was right, but nothing said the sequence had been dropped. A test that
   expected an empty list beside one of these should expect its entry.
   (#804)
+- A parameter written after an intermediate makes a CSI one termlens
+  ignores, as xterm and vte do: vte reads such a sequence to its final
+  byte and dispatches nothing, and xterm's tables after `SP` and `$` send
+  the parameter to `CASE_CSI_IGNORE`. So `CSI SP 2 q` no longer sets the
+  cursor shape (`CSI 2 SP q` still does), `CSI ? $ 2026 p` is no longer
+  answered as a mode request, and `CSI $ 4 p` is no longer named in a
+  timeout. A test that expected `CSI SP Ps q` to change
+  `Screen::cursor_shape()`, or a reply or a timeout note for such a
+  request, should expect the shape the last well-formed `DECSCUSR` set,
+  and no reply or note. (#801)
 
 ### Fixed
 

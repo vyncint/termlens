@@ -310,9 +310,8 @@ impl Vt100Emulator {
         let bytes = stand_in_for_replacement(bytes);
         let normalized = self.colors.feed(&bytes);
         self.parser.process(&normalized);
-        // The record holds an icon name back until a later call shows it
-        // is no `OSC 0`'s, and the read may end with it; and what the
-        // emulator told it of a sequence this feed carried ends here.
+        // What the emulator told the record of a CSI this feed carried ends
+        // here, taken or not.
         self.parser.callbacks_mut().settle();
         self.shadow.feed(&bytes);
         self.capture_scrolled_rows();
@@ -942,13 +941,25 @@ impl Emulator for Vt100Emulator {
                 self.feed_staged(&bytes[fed..i]);
                 fed = i + 1;
             }
-            // An `OSC` with more parameters than vte keeps is read whole by
-            // the tracker alone, so the record is told what it saw, between
-            // the bytes before the one that ends the string and that byte,
-            // which is where vte dispatches it (#762).
-            if let Some(cut) = self.tracker.osc_ending(byte).and_then(CutOsc::of) {
+            // What only the tracker reads of an `OSC` is told to the record
+            // between the bytes before the one that ends the string and
+            // that byte, which is where vte dispatches it: an `OSC` with
+            // more parameters than vte keeps, which the tracker reads whole
+            // (#762), and an `OSC 1`, whose icon name vt100 hands to the
+            // callback that also gets the icon half of every `OSC 0` (#760).
+            // The feed is split for those two alone.
+            let (cut, icon_name) = self.tracker.osc_ending(byte).map_or((None, false), |osc| {
+                (CutOsc::of(osc), osc.starts_with(b"1;"))
+            });
+            if cut.is_some() || icon_name {
                 self.feed_staged(&bytes[fed..i]);
-                self.parser.callbacks_mut().expect_cut_osc(cut);
+                let record = self.parser.callbacks_mut();
+                if let Some(cut) = cut {
+                    record.expect_cut_osc(cut);
+                }
+                if icon_name {
+                    record.expect_icon_name();
+                }
                 self.feed_staged(&bytes[i..=i]);
                 fed = i + 1;
             }
@@ -1216,6 +1227,10 @@ impl Emulator for Vt100Emulator {
 
     fn in_sync_update(&self) -> bool {
         self.tracker.in_sync_update()
+    }
+
+    fn printed(&self) -> u64 {
+        self.tracker.printed_count()
     }
 
     fn input_modes(&self) -> InputModes {
@@ -2054,19 +2069,36 @@ mod tests {
 
     /// `OSC 1 ; name`, the icon name, is listed: nothing models it (#760).
     /// The `OSC 0` that sets icon and title at once is not, since its title
-    /// is the tracker's. An icon name that ends a read is listed by that
-    /// read, whole or split at any character.
+    /// is the tracker's. Which one a string is, is the tracker's word, so
+    /// an `OSC 1` and then an `OSC 2` naming the same thing are both what
+    /// they are, whatever comes between them: the record took them for one
+    /// `OSC 0` when one read carried both, and listed the `OSC 1` when the
+    /// read split between them. Whole, split once at every byte, and a byte
+    /// at a time.
     #[test]
     fn an_icon_name_is_listed_and_an_osc_0_title_is_set() {
-        for stream in [
-            "\x1b]0;both\x07\x1b]1;tab\x07",
-            "\x1b]1;tab\x1b\\\x1b]0;both\x07",
+        for (stream, listed, title) in [
+            ("\x1b]0;both\x07\x1b]1;tab\x07", &["^[]1;tab"][..], "both"),
+            ("\x1b]1;tab\x1b\\\x1b]0;both\x07", &["^[]1;tab"], "both"),
+            ("\x1b]1;tab\x07\x1b]2;tab\x07", &["^[]1;tab"], "tab"),
+            (
+                "\x1b]1;tab\x1b\\\x1b[5G\x1b]2;tab\x1b\\",
+                &["^[]1;tab"],
+                "tab",
+            ),
+            ("\x1b]2;tab\x07\x1b]1;tab\x07", &["^[]1;tab"], "tab"),
+            ("\x1b]0;same\x07\x1b]0;same\x1b\\", &[], "same"),
+            // Listed whole by the backend's own callback, and the word for
+            // it does not reach the `OSC 0` after it.
+            ("\x1b]1;a;b\x07\x1b]0;next\x07", &["^[]1;a;b"], "next"),
         ] {
-            for cut in (1..stream.len()).chain([0]) {
-                let emu = emu_fed_in_pieces(stream.as_bytes(), &[cut][..usize::from(cut > 0)]);
-                let s = emu.snapshot();
-                assert_eq!(s.unsupported(), ["^[]1;tab"], "{stream:?} cut at {cut}");
-                assert_eq!(s.title(), "both", "{stream:?} cut at {cut}");
+            let mut feeds: Vec<Vec<usize>> = vec![Vec::new()];
+            feeds.extend((1..stream.len()).map(|cut| vec![cut]));
+            feeds.push((1..stream.len()).collect());
+            for cuts in &feeds {
+                let s = emu_fed_in_pieces(stream.as_bytes(), cuts).snapshot();
+                assert_eq!(s.unsupported(), listed, "{stream:?} cut at {cuts:?}");
+                assert_eq!(s.title(), title, "{stream:?} cut at {cuts:?}");
             }
         }
     }
@@ -4738,6 +4770,14 @@ mod tests {
     /// origin mode included, and nothing was on record (#801). A
     /// sub-parameter is rejected there, and a `SP` before the `!` makes it
     /// another sequence.
+    ///
+    /// A parameter written *after* the `!` is not one: xterm's table for
+    /// `CSI !` sends a digit, `:` or `;` to `CASE_CSI_IGNORE` (VTPrsTbl.c
+    /// 1188-1201), and vte goes from its intermediate state to `CsiIgnore`,
+    /// so the sequence does nothing and, dispatched to nobody, is listed
+    /// nowhere. Taking every parameter for #801 made `CSI ! 1 p` a full
+    /// soft reset. The same holds after the `SP` of DECSCUSR (1837-1850):
+    /// `CSI SP 2 q` sets no cursor shape.
     #[test]
     fn a_soft_reset_written_with_a_parameter_is_one() {
         for reset in ["\x1b[1!p", "\x1b[0!p", "\x1b[1;2!p"] {
@@ -4763,6 +4803,34 @@ mod tests {
             assert!(s.cell(0, 0).unwrap().style().bold, "{other:?}");
             assert_eq!(s.unsupported(), [shape], "{other:?}");
         }
+        for ignored in ["\x1b[!1p", "\x1b[!;p", "\x1b[1!2p"] {
+            let stream = format!("\x1b(0\x1b[4h\x1b[1;5;9m{ignored}qX");
+            let (whole, bytewise) = whole_and_bytewise(4, 10, 0, stream.as_bytes());
+            assert_eq!(observed(&whole), observed(&bytewise), "{ignored:?}");
+            let s = whole.snapshot();
+            // The rendition, the character set and insert mode as they were.
+            assert_eq!(s.row_text(0).trim_end(), "\u{2500}X", "{ignored:?}");
+            let style = *s.cell(0, 0).unwrap().style();
+            assert!(
+                style.bold && style.blink && style.strikethrough,
+                "{ignored:?}: {style:?}"
+            );
+            assert!(s.insert_mode(), "{ignored:?}");
+            assert!(
+                s.unsupported().is_empty(),
+                "{ignored:?}: {:?}",
+                s.unsupported()
+            );
+            // Origin mode still on: the report counts from the top margin.
+            let emu = emu_with(format!("\x1b[2;4r\x1b[?6h\x1b[2;5H{ignored}").as_bytes());
+            assert_eq!(emu.reported_position(), (1, 4), "{ignored:?}");
+            // And the cursor still hidden.
+            let s = emu_with(format!("\x1b[?25l{ignored}").as_bytes()).snapshot();
+            assert!(!s.cursor().2, "{ignored:?}");
+        }
+        let s = emu_with(b"\x1b[4 q\x1b[ 2q").snapshot();
+        assert_eq!(s.cursor_shape(), crate::CursorShape::Underline);
+        assert!(s.unsupported().is_empty(), "{:?}", s.unsupported());
     }
 
     /// The tracker follows vt100's margins and origin mode, which vt100

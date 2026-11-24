@@ -226,11 +226,17 @@ the count is not zero. termlens keeps no slave descriptor past that one
 call, since one would hide the EOF every exit is read from, and after the
 close the master still sees it. The count is the kernel's answer to "how
 much would a read return now": every queued byte in raw mode, query
-replies included, and only complete lines in canonical mode. Linux is
-measured, macOS reads `FIONREAD` from its terminal queues too and CI's
-leg runs the test that holds the count, and everywhere else the note is
-left out, never guessed: the other Unixes are unmeasured, and ConPTY keeps
-typed input on its own side of the pipe.
+replies included, and only complete lines in canonical mode, up to what
+the line discipline's read buffer holds. On Linux that is 4,095 bytes:
+n_tty's buffer is `N_TTY_BUF_SIZE`, 4 KiB, and input past it waits in the
+tty's own buffers, where `FIONREAD` does not look. A raw-mode program that
+read nothing was sent 5,000 and then 10,000 bytes, the kernel took them
+all and the program read them all later, and both were counted as 4,095,
+which the note gave as the whole. So at 4,095 the note says "at least
+4095 bytes". Linux is measured, macOS reads `FIONREAD` from its terminal
+queues too and CI's leg runs the test that holds the count, and everywhere
+else the note is left out, never guessed: the other Unixes are unmeasured,
+and ConPTY keeps typed input on its own side of the pipe.
 
 `XTGETTCAP` is answered from a table of capabilities the crate actually
 implements, and every entry was checked against the code that implements it
@@ -588,19 +594,27 @@ the grid already has is a no-op, and the frame the application last drew
 is still the current truth.
 
 `resize_and_wait(cols, rows, pred)` is the resize and the wait in one call,
-for any application: its predicate is asked only about screens that output
-read after the resize produced, so on Linux and macOS the stale frame cannot
-satisfy it. The read count it compares against is taken under the lock that
-resizes, as the frame cursor is, so no read falls between the two (#788).
-After a no-op resize the screen as it is answers, as for `wait_frame`. It
-does not make the rule above optional. Output read after the resize is not
-always drawn for it: an application that paints on its own can paint the old
-layout before it handles `SIGWINCH`.
+for any application: its predicate is asked only once the application has
+drawn on the grid after the resize — written a printable character, a
+repaint of exactly what was there included, or changed a cell's text or
+style, a clear included — so on Linux and macOS the stale frame cannot
+satisfy it. A read is not enough. Output that draws nothing, a cursor hidden,
+a mode set, a query, the start of a synchronized update, leaves the stale
+frame on the grid: asked after any read, the predicate passed on that frame
+whenever an application hid its cursor or asked where it was before it
+repainted (#788). The counts it compares against, of reads and of printed
+characters, and the grid the resize left are taken under the lock that
+resizes, as the frame cursor is, so no read falls between them. After a
+no-op resize the screen as it is answers, as for `wait_frame`. It does not
+make the rule above optional. A repaint read half drawn can leave old text
+below the rows drawn so far, and what is drawn after the resize is not always
+drawn for it: an application that paints on its own can paint the old layout
+before it handles `SIGWINCH`.
 
-On Windows the stale frame comes back as output. ConPTY repaints the screen
-itself after a resize, so output arrives even when the application draws
-nothing, and a predicate the content from before the resize satisfies passes
-on that repaint. Measured on `windows-latest` (run 45393517904): a program
+On Windows the stale frame comes back as output that draws. ConPTY repaints
+the screen itself after a resize, with the text from before it, so output
+arrives even when the application draws nothing, and a predicate the content
+from before the resize satisfies passes on that repaint. Measured on `windows-latest` (run 45393517904): a program
 that ignores the resize satisfied `contains("READY")` with the text it had
 drawn before it, where Linux and macOS time out. ConPTY also applies the
 resize on a thread of its own and lays out what it relays at the old width
@@ -1094,8 +1108,11 @@ could be held to — `scrollback(n)` takes any `n`, and a bound on it would
 refuse a release's own output — so each row is held instead: to 1000
 cells of at most 22 bytes, a terminal's widest row of vt100's fullest
 cells, or as text to the 22,000 bytes those come to. The empty row, the
-commonest, is one allocation however often it comes, and room the
-allocator refuses for the rows is an error, not an abort. The unsupported
+commonest, is one allocation however often it comes. Every allocation
+the history takes asks for its room first — the list of rows, each row's
+text or cells, each cell's contents — so room the allocator refuses is an
+error, not an abort, and room is held back while the history is read so
+the error can be built after a refusal. The unsupported
 sequences and the links are read to the 32 and the 64 a terminal keeps,
 and one past is refused. So the history costs memory in proportion to
 the rows it declares: a pointer for an empty one, where the derive spent
@@ -1345,10 +1362,14 @@ because whether a motion is reported at all depends on it: any-event
 tracking (`?1003`) reports every motion, button-event tracking (`?1002`)
 only while a button is down, and `?1000` and X10 none. A move the mode
 cannot carry is a typed error, as a click without tracking is. A motion
-carries the code of the button pressed last and still held, with the
-modifiers it was pressed with, or `3` with none held, plus 32 — xterm's
-arithmetic — so a hover is SGR `35` and a step of a left drag `32`, and a
-press, a move per cell and a release send the bytes `drag` sends.
+carries the code of the button held, with the modifiers it was pressed
+with, or `3` with none held, plus 32 — xterm's arithmetic — so a hover is
+SGR `35` and a step of a left drag `32`, and a press, a move per cell and a
+release send the bytes `drag` sends. With several buttons held, the code is
+the lowest-numbered one's, left before middle before right, as xterm picks
+it (`FirstBitN` over the buttons it holds, in `button.c`): reporting the
+one pressed last turned a left drag into a right drag the moment the right
+button went down as well.
 
 **Focus events** (`ESC [ I` / `ESC [ O`) follow the same mode-aware contract
 as the mouse: sent only when the application enabled mode 1004, refused with

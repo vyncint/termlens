@@ -214,7 +214,7 @@ impl fmt::Display for GraphicsTransmission {
 /// application stated or the wire carried — nothing here is inferred from a
 /// rendering, because there is no rendering.
 #[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
 pub struct GraphicsPayload {
     protocol: GraphicsProtocol,
     action: GraphicsAction,
@@ -238,15 +238,45 @@ pub struct GraphicsPayload {
     /// In the JSON only where it is not 0: a payload with the default header
     /// writes the document earlier releases wrote, one they wrote — which
     /// never recorded it — reads as 0, and their reader, a derive that skips
-    /// a key it does not know, reads one that has it.
-    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "is_zero"))]
+    /// a key it does not know, reads one that has it. Everywhere else it is
+    /// always written: see the `Serialize` impl.
+    #[cfg_attr(feature = "serde", serde(default))]
     background_select: u32,
 }
 
-/// Whether a serialized number is its default, 0, and so left out.
+/// The derive's shape, field for field, but for the background select:
+/// left out at 0 only by a human-readable serializer, the JSON's, and
+/// written everywhere else. A format without field names, postcard or
+/// bincode, reads a struct's fields by position, and the derive's
+/// `skip_serializing_if` left that one out of the sequence, so a `Screen`
+/// holding any payload no longer read back from its own bytes there,
+/// where 0.11.10's did.
 #[cfg(feature = "serde")]
-fn is_zero(value: &u32) -> bool {
-    *value == 0
+impl serde::Serialize for GraphicsPayload {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+        let skip = serializer.is_human_readable() && self.background_select == 0;
+        let mut payload =
+            serializer.serialize_struct("GraphicsPayload", if skip { 12 } else { 13 })?;
+        payload.serialize_field("protocol", &self.protocol)?;
+        payload.serialize_field("action", &self.action)?;
+        payload.serialize_field("format", &self.format)?;
+        payload.serialize_field("compressed", &self.compressed)?;
+        payload.serialize_field("transmission", &self.transmission)?;
+        payload.serialize_field("id", &self.id)?;
+        payload.serialize_field("size", &self.size)?;
+        payload.serialize_field("cells", &self.cells)?;
+        payload.serialize_field("chunks", &self.chunks)?;
+        payload.serialize_field("bytes", &self.bytes)?;
+        payload.serialize_field("at", &self.at)?;
+        payload.serialize_field("data", &self.data)?;
+        if skip {
+            payload.skip_field("background_select")?;
+        } else {
+            payload.serialize_field("background_select", &self.background_select)?;
+        }
+        payload.end()
+    }
 }
 
 impl fmt::Debug for GraphicsPayload {
@@ -409,10 +439,12 @@ impl GraphicsPayload {
     /// image, and [`DecodeError::Unsupported`] when its format is not
     /// supported. [`DecodeError::Malformed`] covers contradictory or invalid
     /// payload data, including data that cannot be decoded within its declared
-    /// size, and kitty pixel data longer or shorter than that size, which
-    /// kitty refuses too. [`DecodeError::TooLarge`] covers declared
-    /// dimensions or sixel commands beyond the 4096-pixel and related safety
-    /// limits.
+    /// size, and the kitty pixel data kitty refuses too: data short of the
+    /// declared size, zlib data that does not inflate to exactly that size,
+    /// and raw data more than 10 bytes past it. Raw data within those 10
+    /// bytes decodes from its declared prefix, as kitty draws it.
+    /// [`DecodeError::TooLarge`] covers declared dimensions or sixel commands
+    /// beyond the 4096-pixel and related safety limits.
     #[cfg(feature = "decode")]
     #[cfg_attr(docsrs, doc(cfg(feature = "decode")))]
     pub fn decode(&self) -> Result<Bitmap, DecodeError> {
@@ -498,17 +530,20 @@ impl GraphicsPayload {
                 "fewer bytes than the declared size needs",
             ));
         }
-        // A surplus is refused too, as kitty refuses it (`data_sz !=
-        // required_sz` in `handle_add_command`) and as the zlib form above
-        // already was: it is the RGB/RGBA mix-up, not padding, and its
-        // prefix decoded into a plausible wrong picture (#767).
-        if raw.len() > wanted {
+        // Raw data past the declared size is what kitty's load buffer
+        // decides (#767): kitty keeps KITTY_RAW_SLACK bytes of room past it
+        // and refuses a load that outgrows them, and within them it never
+        // reads the surplus, so neither is it decoded here. Refusing every
+        // surplus byte refused what kitty draws. Inflated data is already
+        // held to the size exactly above, as kitty's inflate holds it.
+        if raw.len() > wanted.saturating_add(KITTY_RAW_SLACK) {
             return Err(DecodeError::Malformed(
-                "more bytes than the declared size holds",
+                "raw data more than the 10 bytes past its declared size that kitty loads \
+                 (\"Too much data\")",
             ));
         }
         let mut pixels = Vec::with_capacity(wanted / channels);
-        for chunk in raw.chunks_exact(channels) {
+        for chunk in raw[..wanted].chunks_exact(channels) {
             pixels.push([
                 chunk[0],
                 chunk[1],
@@ -647,6 +682,14 @@ const MAX_DECODED_HEIGHT: usize = 4096;
 /// this.
 #[cfg(feature = "decode")]
 const MAX_SIXEL_REGISTERS: usize = 65_536;
+/// The bytes of raw kitty data (`f=24`, `f=32`, no `o=z`) a payload may
+/// carry past its declared size and still be drawn: kitty loads it into a
+/// buffer of the declared size plus 10 (`initialize_load_data`,
+/// `graphics.c`), aborts a load past that with `EFBIG`, "Too much data"
+/// (`load_image_data`), and reads only the declared size of one within it
+/// (#767).
+#[cfg(feature = "decode")]
+const KITTY_RAW_SLACK: usize = 10;
 
 /// Why a payload could not be decoded.
 #[cfg(feature = "decode")]
@@ -2164,44 +2207,112 @@ mod tests {
         }
     }
 
-    /// kitty refuses an image whose data is not exactly `s=` x `v=` pixels,
-    /// compressed or not: `handle_add_command` (`graphics.c`) aborts with
-    /// `EINVAL`, "Image dimensions: %ux%u do not match data size", unless
-    /// `data_sz == required_sz`. Raw data with bytes to spare decoded `Ok`
-    /// as its prefix (#767): two RGBA pixels sent as `f=24`, the RGB/RGBA
-    /// mix-up, came out as two pixels with the second one magenta, while
-    /// the same bytes compressed were refused.
+    /// kitty loads a raw image (`f=24` or `f=32`, no `o=z`) into a buffer of
+    /// the declared size plus 10 bytes (`initialize_load_data`,
+    /// `graphics.c`) and aborts a load that outgrows it with `EFBIG`, "Too
+    /// much data" (`load_image_data`). Within the buffer the surplus is
+    /// never read: raw data leaves `data_sz` at the declared size, so
+    /// `handle_add_command`'s `data_sz != required_sz` cannot fire, and the
+    /// image is the declared prefix. #767 refused every surplus byte, and
+    /// so refused what kitty draws: two RGBA pixels sent as `f=24`, the
+    /// RGB/RGBA mix-up, which kitty shows as two pixels, the second
+    /// magenta. The buffer fills chunk by chunk, so the surplus is the
+    /// whole upload's, and a chunked one is held to the same 10 bytes.
     #[cfg(feature = "decode")]
     #[test]
-    fn kitty_data_must_be_exactly_the_declared_size() {
-        // Red, then green, as RGBA: 8 bytes.
-        let rgba = [0xff, 0, 0, 0xff, 0, 0xff, 0, 0xff];
-        for (control, raw) in [
-            // 6 bytes needed, then 4: a surplus. 8 needed, 6 sent: short.
-            ("a=T,f=24,s=2,v=1", &rgba[..]),
-            ("a=T,f=32,s=1,v=1", &rgba[..]),
-            ("a=T,f=32,s=2,v=1", &rgba[..6]),
-        ] {
-            for compressed in [false, true] {
-                let (control, data) = if compressed {
-                    let deflated = miniz_oxide::deflate::compress_to_vec_zlib(raw, 6);
-                    (format!("{control},o=z"), deflated)
-                } else {
-                    (control.to_owned(), raw.to_vec())
-                };
-                let payload = kitty_payload(control.as_bytes(), base64(&data).as_bytes());
-                assert!(
-                    matches!(payload.decode(), Err(DecodeError::Malformed(_))),
-                    "{control} with {} bytes: {:?}",
-                    raw.len(),
-                    payload.decode()
-                );
+    fn kitty_raw_data_may_run_ten_bytes_past_the_declared_size() {
+        for (format, channels) in [(24, 3), (32, 4)] {
+            let control = format!("a=T,f={format},s=2,v=1");
+            let wanted = 2 * channels;
+            for surplus in [0, 1, 10, 11] {
+                let raw: Vec<u8> = (1..=u8::try_from(wanted + surplus).unwrap()).collect();
+                let whole = kitty_payload(control.as_bytes(), base64(&raw).as_bytes());
+                // `m=1` with the first pixel's bytes, then `m=0` with the
+                // rest, each chunk its own base64, fed as the tracker feeds
+                // the two escapes.
+                let mut builder = GraphicsBuilder::default();
+                builder.kitty(format!("{control},m=1").as_bytes());
+                let first = base64(&raw[..channels]);
+                builder.chunk(first.len() as u64, first.as_bytes(), true, usize::MAX);
+                builder.kitty(b"m=0");
+                let rest = base64(&raw[channels..]);
+                builder.chunk(rest.len() as u64, rest.as_bytes(), true, usize::MAX);
+                let chunked = builder.finish().expect("a payload");
+                assert_eq!(chunked.chunks(), 2);
+                for (shape, payload) in [("whole", whole), ("chunked", chunked)] {
+                    let decoded = payload.decode();
+                    if surplus <= 10 {
+                        let bitmap = decoded.unwrap_or_else(|e| {
+                            panic!("f={format}, {surplus} surplus bytes, {shape}: {e}")
+                        });
+                        assert_eq!((bitmap.width(), bitmap.height()), (2, 1));
+                        // Two pixels and no more: the surplus is not read.
+                        let pixels: u32 = bitmap.colours().iter().map(|(_, n)| n).sum();
+                        assert_eq!(pixels, 2, "f={format}, {surplus} surplus bytes, {shape}");
+                        // The second pixel is the declared prefix's.
+                        let second = &raw[channels..2 * channels];
+                        let alpha = if channels == 4 { second[3] } else { 0xff };
+                        assert_eq!(
+                            bitmap.pixel(1, 0),
+                            Some([second[0], second[1], second[2], alpha]),
+                            "f={format}, {surplus} surplus bytes, {shape}"
+                        );
+                    } else {
+                        assert_eq!(
+                            decoded,
+                            Err(DecodeError::Malformed(
+                                "raw data more than the 10 bytes past its declared size \
+                                 that kitty loads (\"Too much data\")"
+                            )),
+                            "f={format}, {surplus} surplus bytes, {shape}"
+                        );
+                    }
+                }
             }
         }
-        // Exactly the declared size decodes.
-        let exact = kitty_payload(b"a=T,f=32,s=2,v=1", base64(&rgba).as_bytes());
-        let bitmap = exact.decode().expect("decodes");
-        assert_eq!(bitmap.pixel(1, 0), Some([0, 0xff, 0, 0xff]));
+        // The CHANGELOG's mix-up, as kitty draws it: red, then magenta.
+        let rgba = [0xff, 0, 0, 0xff, 0, 0xff, 0, 0xff];
+        let mixed = kitty_payload(b"a=T,f=24,s=2,v=1", base64(&rgba).as_bytes());
+        let bitmap = mixed.decode().expect("8 bytes for 6 is within kitty's 10");
+        assert_eq!(bitmap.pixel(1, 0), Some([0xff, 0, 0xff, 0xff]));
+        // Short is refused at once, as kitty's "Insufficient image data".
+        let short = kitty_payload(b"a=T,f=32,s=2,v=1", base64(&rgba[..7]).as_bytes());
+        assert_eq!(
+            short.decode(),
+            Err(DecodeError::Malformed(
+                "fewer bytes than the declared size needs"
+            ))
+        );
+    }
+
+    /// Compressed, kitty inflates into exactly the declared size
+    /// (`inflate_zlib`, `graphics.c`): more output than that is "Failed to
+    /// inflate image data" (`Z_BUF_ERROR`), less is "Image data size post
+    /// inflation does not match expected size". There is no slack after
+    /// the inflate, so a zlib payload that inflates to the RGB/RGBA mix-up,
+    /// or short of the size, is refused, and one that inflates to exactly
+    /// the size decodes.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn kitty_zlib_data_must_inflate_to_exactly_the_declared_size() {
+        // Red, then green, as RGBA: 8 bytes.
+        let rgba = [0xff, 0, 0, 0xff, 0, 0xff, 0, 0xff];
+        for (control, raw, decodes) in [
+            ("a=T,f=24,s=2,v=1,o=z", &rgba[..], false),
+            ("a=T,f=32,s=1,v=1,o=z", &rgba[..], false),
+            ("a=T,f=32,s=2,v=1,o=z", &rgba[..7], false),
+            ("a=T,f=32,s=2,v=1,o=z", &rgba[..], true),
+        ] {
+            let deflated = miniz_oxide::deflate::compress_to_vec_zlib(raw, 6);
+            let payload = kitty_payload(control.as_bytes(), base64(&deflated).as_bytes());
+            match payload.decode() {
+                Ok(bitmap) if decodes => {
+                    assert_eq!(bitmap.pixel(1, 0), Some([0, 0xff, 0, 0xff]));
+                }
+                Err(DecodeError::Malformed(_)) if !decodes => {}
+                other => panic!("{control} inflating to {} bytes: {other:?}", raw.len()),
+            }
+        }
     }
 
     #[cfg(feature = "decode")]
@@ -2345,6 +2456,174 @@ mod tests {
         let back: GraphicsPayload = serde_json::from_str(&earlier).unwrap();
         assert_eq!(back, opaque);
         assert_eq!(back.decode().unwrap().pixel(3, 0), Some([0, 0, 0, 255]));
+    }
+
+    /// The fields a struct hands a serializer that is not human-readable,
+    /// by name, in order, and nothing else: what a format without field
+    /// names, postcard or bincode, writes, and reads back by position.
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    struct FieldNames(Vec<&'static str>);
+
+    /// Anything [`FieldNames`] is handed but a struct.
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    #[derive(Debug)]
+    struct NotAStruct;
+
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    impl fmt::Display for NotAStruct {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("only a struct's field names are recorded")
+        }
+    }
+
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    impl std::error::Error for NotAStruct {}
+
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    impl serde::ser::Error for NotAStruct {
+        fn custom<T: fmt::Display>(_: T) -> Self {
+            NotAStruct
+        }
+    }
+
+    /// The methods [`FieldNames`] refuses, each with the arguments it takes.
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    macro_rules! not_a_struct {
+        ($($method:ident($($arg:ty),*) -> $ok:ty;)*) => {$(
+            fn $method(self, $(_: $arg),*) -> Result<$ok, NotAStruct> {
+                Err(NotAStruct)
+            }
+        )*};
+    }
+
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    impl serde::Serializer for &mut FieldNames {
+        type Ok = ();
+        type Error = NotAStruct;
+        type SerializeSeq = serde::ser::Impossible<(), NotAStruct>;
+        type SerializeTuple = serde::ser::Impossible<(), NotAStruct>;
+        type SerializeTupleStruct = serde::ser::Impossible<(), NotAStruct>;
+        type SerializeTupleVariant = serde::ser::Impossible<(), NotAStruct>;
+        type SerializeMap = serde::ser::Impossible<(), NotAStruct>;
+        type SerializeStruct = Self;
+        type SerializeStructVariant = serde::ser::Impossible<(), NotAStruct>;
+
+        fn is_human_readable(&self) -> bool {
+            false
+        }
+
+        fn serialize_struct(self, _: &'static str, _: usize) -> Result<Self, NotAStruct> {
+            Ok(self)
+        }
+
+        not_a_struct! {
+            serialize_bool(bool) -> (); serialize_i8(i8) -> (); serialize_i16(i16) -> ();
+            serialize_i32(i32) -> (); serialize_i64(i64) -> (); serialize_u8(u8) -> ();
+            serialize_u16(u16) -> (); serialize_u32(u32) -> (); serialize_u64(u64) -> ();
+            serialize_f32(f32) -> (); serialize_f64(f64) -> (); serialize_char(char) -> ();
+            serialize_str(&str) -> (); serialize_bytes(&[u8]) -> (); serialize_none() -> ();
+            serialize_unit() -> (); serialize_unit_struct(&'static str) -> ();
+            serialize_unit_variant(&'static str, u32, &'static str) -> ();
+            serialize_seq(Option<usize>) -> Self::SerializeSeq;
+            serialize_tuple(usize) -> Self::SerializeTuple;
+            serialize_tuple_struct(&'static str, usize) -> Self::SerializeTupleStruct;
+            serialize_tuple_variant(&'static str, u32, &'static str, usize)
+                -> Self::SerializeTupleVariant;
+            serialize_map(Option<usize>) -> Self::SerializeMap;
+            serialize_struct_variant(&'static str, u32, &'static str, usize)
+                -> Self::SerializeStructVariant;
+        }
+
+        fn serialize_some<T: ?Sized + serde::Serialize>(self, _: &T) -> Result<(), NotAStruct> {
+            Err(NotAStruct)
+        }
+
+        fn serialize_newtype_struct<T: ?Sized + serde::Serialize>(
+            self,
+            _: &'static str,
+            _: &T,
+        ) -> Result<(), NotAStruct> {
+            Err(NotAStruct)
+        }
+
+        fn serialize_newtype_variant<T: ?Sized + serde::Serialize>(
+            self,
+            _: &'static str,
+            _: u32,
+            _: &'static str,
+            _: &T,
+        ) -> Result<(), NotAStruct> {
+            Err(NotAStruct)
+        }
+    }
+
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    impl serde::ser::SerializeStruct for &mut FieldNames {
+        type Ok = ();
+        type Error = NotAStruct;
+
+        // The value is not serialized: its name is what is recorded.
+        fn serialize_field<T: ?Sized + serde::Serialize>(
+            &mut self,
+            name: &'static str,
+            _: &T,
+        ) -> Result<(), NotAStruct> {
+            self.0.push(name);
+            Ok(())
+        }
+
+        fn end(self) -> Result<(), NotAStruct> {
+            Ok(())
+        }
+    }
+
+    /// A format without field names reads a struct's fields by position, so
+    /// the background select is written there whatever its value, 0
+    /// included (#766). The derive's `skip_serializing_if` left it out at
+    /// 0, as the JSON does, and such a format then read the next field in
+    /// its place: a `Screen` holding any payload, default header or kitty,
+    /// stopped reading back from its own bytes, where 0.11.10's did. Every
+    /// field is written, in the order the derived `Deserialize` reads them.
+    /// The JSON leaves the field out at 0 alone.
+    #[cfg(all(feature = "serde", feature = "decode"))]
+    #[test]
+    fn the_background_select_is_always_written_without_field_names() {
+        use serde::Serialize as _;
+        const ALL: [&str; 13] = [
+            "protocol",
+            "action",
+            "format",
+            "compressed",
+            "transmission",
+            "id",
+            "size",
+            "cells",
+            "chunks",
+            "bytes",
+            "at",
+            "data",
+            "background_select",
+        ];
+        let data = b"\"1;1;4;12#1;2;100;0;0~~";
+        let kitty = kitty_payload(b"a=T,f=24,s=2,v=1", base64(&[0; 6]).as_bytes());
+        for (payload, select) in [
+            (sixel_payload(data), 0),
+            (sixel_under_header(b"0;1;0", data), 1),
+            (sixel_under_header(b"0;2;0", data), 2),
+            (kitty, 0),
+        ] {
+            assert_eq!(payload.background_select, select);
+            let mut names = FieldNames(Vec::new());
+            payload.serialize(&mut names).expect("a struct");
+            assert_eq!(names.0, ALL, "P2 = {select}, not human-readable");
+            let json = serde_json::to_string(&payload).unwrap();
+            if select == 0 {
+                assert!(!json.contains("background_select"), "{json}");
+            } else {
+                let written = format!(",\"background_select\":{select}}}");
+                assert!(json.ends_with(&written), "{json}");
+            }
+        }
     }
 
     /// A VT340 starts with its colour map in registers 0 to 15 and draws in
