@@ -69,6 +69,14 @@ reads that marker.
   shapes, and the corpus holds a pair of each that the published 0.11.6
   wrote. A test that pinned the old reading of such a row sees the cells
   after the first column's wide character one column right. (#782)
+- `termlens render` and `diff` refuse a screen saved as UTF-32 by name:
+  "the byte-order mark says UTF-32, which termlens does not read (it
+  reads UTF-8 and UTF-16)". UTF-32 is what PowerShell's `Out-File
+  -Encoding utf32` writes. Its little-endian mark begins with UTF-16LE's,
+  so such a file was decoded as UTF-16 and refused with a header error
+  full of NULs, and a big-endian one as "not valid UTF-8". The exit code
+  is 2 as before; a script that matched either old diagnosis needs the
+  new one. (#784)
 
 ### Fixed
 

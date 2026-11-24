@@ -801,6 +801,64 @@ fn render_and_diff_read_a_screen_behind_a_byte_order_mark() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A screen saved as UTF-32 — what PowerShell's `Out-File -Encoding utf32`
+/// writes, behind the mark `FF FE 00 00` or `00 00 FE FF` — is refused by
+/// name, in either byte order, as a file and on a pipe, text or JSON
+/// (#784). Little-endian's mark begins with UTF-16LE's, so it was decoded
+/// as UTF-16 and refused with a header error full of NULs; big-endian's
+/// was "not valid UTF-8": two byte orders of one encoding, two unrelated
+/// diagnoses.
+#[test]
+fn render_refuses_utf32_by_name() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("termlens-utf32-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let text = "size: 10x2  cursor: 0,2\nhi\n\nstyles:\n0: 0-1 bold\n";
+    let json = String::from_utf8(with_stdin(&["render", "--json", "-"], text).stdout).unwrap();
+    for (name, big_endian, content) in [
+        ("le.snap", false, text),
+        ("be.snap", true, text),
+        ("le.json", false, json.as_str()),
+        ("be.json", true, json.as_str()),
+    ] {
+        let bytes: Vec<u8> = std::iter::once('\u{feff}')
+            .chain(content.chars())
+            .flat_map(|ch| {
+                let unit = u32::from(ch);
+                if big_endian {
+                    unit.to_be_bytes()
+                } else {
+                    unit.to_le_bytes()
+                }
+            })
+            .collect();
+        let path = dir.join(name);
+        std::fs::write(&path, &bytes).expect("the file is written");
+        let path = path.to_str().unwrap();
+        let file = Command::new(env!("CARGO_BIN_EXE_termlens"))
+            .args(["render", "--text", path])
+            .output()
+            .expect("termlens runs");
+        let piped = with_stdin(&["render", "--text", "-"], &bytes);
+        for (source, out, shown) in [("file", file, path), ("pipe", piped, "<stdin>")] {
+            assert_eq!(
+                out.status.code(),
+                Some(2),
+                "{name} from a {source}: {out:?}"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&out.stderr),
+                format!(
+                    "termlens: {shown}: the byte-order mark says UTF-32, which termlens \
+                     does not read (it reads UTF-8 and UTF-16)\n"
+                ),
+                "{name} from a {source}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 #[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
 fn inspect_prints_the_screen_and_the_exit_trailer() -> termlens::Result<()> {

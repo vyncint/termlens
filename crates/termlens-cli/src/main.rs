@@ -332,6 +332,10 @@ fn read(source: Source<'_>, limit: usize) -> Result<Screen, String> {
         // The words `read_to_string` used, which this read replaced.
         NotText::Utf8 => format!("{name}: stream did not contain valid UTF-8"),
         NotText::Utf16 => format!("{name}: stream did not contain valid UTF-16"),
+        NotText::Utf32 => format!(
+            "{name}: the byte-order mark says UTF-32, which termlens does not read \
+             (it reads UTF-8 and UTF-16)"
+        ),
         NotText::TooLarge => too_large(name, limit, " as UTF-8"),
         // As a refused reservation reads when the bytes are read.
         NotText::Memory => format!("{name}: {}", io::Error::from(io::ErrorKind::OutOfMemory)),
@@ -363,6 +367,8 @@ enum NotText {
     Utf8,
     /// A UTF-16 byte-order mark, then half a code unit or a lone surrogate.
     Utf16,
+    /// A UTF-32 byte-order mark (#784).
+    Utf32,
     /// UTF-16 inside the bound as bytes and past it as UTF-8.
     TooLarge,
     /// The allocator refused the room the text needs.
@@ -386,8 +392,10 @@ enum NotText {
 /// reserved fallibly: a refusal is an error to report, as in
 /// [`read_bounded`].
 fn decode(raw: Vec<u8>, limit: usize) -> Result<String, NotText> {
-    let Encoding::Utf16 { big_endian } = encoding(&raw) else {
-        return String::from_utf8(raw).map_err(|_| NotText::Utf8);
+    let big_endian = match encoding(&raw) {
+        Encoding::Utf8 => return String::from_utf8(raw).map_err(|_| NotText::Utf8),
+        Encoding::Utf16 { big_endian } => big_endian,
+        Encoding::Utf32 => return Err(NotText::Utf32),
     };
     if raw.len() % 2 != 0 {
         return Err(NotText::Utf16);
@@ -420,12 +428,25 @@ fn decode(raw: Vec<u8>, limit: usize) -> Result<String, NotText> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Encoding {
     Utf8,
-    Utf16 { big_endian: bool },
+    Utf16 {
+        big_endian: bool,
+    },
+    /// Not read, and named in the refusal (#784).
+    Utf32,
 }
 
 /// The encoding the first bytes of an input name: UTF-16 behind its mark,
-/// in either byte order, and UTF-8 otherwise.
+/// in either byte order, UTF-32 behind its own, and UTF-8 otherwise.
+///
+/// UTF-32 is what PowerShell's `Out-File -Encoding utf32` writes. Its
+/// little-endian mark, `FF FE 00 00`, begins with UTF-16LE's, so it is
+/// looked for first; read as UTF-16 it was a header full of NULs. A
+/// UTF-16 file cannot begin that way, since no saved screen begins with
+/// U+0000.
 fn encoding(bytes: &[u8]) -> Encoding {
+    if let Some([0xff, 0xfe, 0, 0] | [0, 0, 0xfe, 0xff]) = bytes.get(..4) {
+        return Encoding::Utf32;
+    }
     match bytes.get(..2) {
         Some([0xff, 0xfe]) => Encoding::Utf16 { big_endian: false },
         Some([0xfe, 0xff]) => Encoding::Utf16 { big_endian: true },
@@ -474,6 +495,8 @@ impl Head {
                     false,
                 ),
             },
+            // Read as the text format is, where it is refused by name.
+            Encoding::Utf32 => return None,
             Encoding::Utf16 { big_endian } => {
                 let units = self.bytes.chunks_exact(2).map(|unit| {
                     let unit = [unit[0], unit[1]];
@@ -556,7 +579,7 @@ fn read_json(
 ) -> Result<Screen, String> {
     let input = io::Cursor::new(head).chain(rest);
     let mut text: Box<dyn Read + '_> = match encoding {
-        Encoding::Utf8 => Box::new(input),
+        Encoding::Utf8 | Encoding::Utf32 => Box::new(input),
         Encoding::Utf16 { big_endian } => Box::new(Utf16Text::new(input, big_endian)),
     };
     io::copy(&mut text.by_ref().take(skip as u64), &mut io::sink())
@@ -1551,6 +1574,20 @@ mod tests {
         assert_eq!(decode(vec![b'a', 0xff], 1 << 20), Err(NotText::Utf8));
         assert_eq!(decode(Vec::new(), 1 << 20).as_deref(), Ok(""));
         assert_eq!(decode(vec![0xff, 0xfe], 1 << 20).as_deref(), Ok("\u{feff}"));
+        // UTF-32's marks, little-endian's beginning with UTF-16LE's, are
+        // named and not decoded as something else (#784), from the head
+        // that tells JSON apart too.
+        for mark in [[0xff, 0xfe, 0, 0], [0, 0, 0xfe, 0xff]] {
+            let bytes = [&mark[..], b"s\0\0\0"].concat();
+            assert_eq!(super::encoding(&bytes), Encoding::Utf32);
+            assert_eq!(decode(bytes.clone(), 1 << 20), Err(NotText::Utf32));
+            let head = Head { bytes, ended: true };
+            assert_eq!(head.json(), None);
+        }
+        assert_eq!(
+            super::encoding(&[0xff, 0xfe, b's', 0]),
+            Encoding::Utf16 { big_endian: false }
+        );
     }
 
     /// Half a code unit, or a surrogate without its other half, is not
