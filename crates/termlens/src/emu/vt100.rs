@@ -310,9 +310,8 @@ impl Vt100Emulator {
         let bytes = stand_in_for_replacement(bytes);
         let normalized = self.colors.feed(&bytes);
         self.parser.process(&normalized);
-        // The record holds an icon name back until a later call shows it
-        // is no `OSC 0`'s, and the read may end with it; and what the
-        // emulator told it of a sequence this feed carried ends here.
+        // What the emulator told the record of a CSI this feed carried ends
+        // here, taken or not.
         self.parser.callbacks_mut().settle();
         self.shadow.feed(&bytes);
         self.capture_scrolled_rows();
@@ -942,13 +941,25 @@ impl Emulator for Vt100Emulator {
                 self.feed_staged(&bytes[fed..i]);
                 fed = i + 1;
             }
-            // An `OSC` with more parameters than vte keeps is read whole by
-            // the tracker alone, so the record is told what it saw, between
-            // the bytes before the one that ends the string and that byte,
-            // which is where vte dispatches it (#762).
-            if let Some(cut) = self.tracker.osc_ending(byte).and_then(CutOsc::of) {
+            // What only the tracker reads of an `OSC` is told to the record
+            // between the bytes before the one that ends the string and
+            // that byte, which is where vte dispatches it: an `OSC` with
+            // more parameters than vte keeps, which the tracker reads whole
+            // (#762), and an `OSC 1`, whose icon name vt100 hands to the
+            // callback that also gets the icon half of every `OSC 0` (#760).
+            // The feed is split for those two alone.
+            let (cut, icon_name) = self.tracker.osc_ending(byte).map_or((None, false), |osc| {
+                (CutOsc::of(osc), osc.starts_with(b"1;"))
+            });
+            if cut.is_some() || icon_name {
                 self.feed_staged(&bytes[fed..i]);
-                self.parser.callbacks_mut().expect_cut_osc(cut);
+                let record = self.parser.callbacks_mut();
+                if let Some(cut) = cut {
+                    record.expect_cut_osc(cut);
+                }
+                if icon_name {
+                    record.expect_icon_name();
+                }
                 self.feed_staged(&bytes[i..=i]);
                 fed = i + 1;
             }
@@ -2054,19 +2065,36 @@ mod tests {
 
     /// `OSC 1 ; name`, the icon name, is listed: nothing models it (#760).
     /// The `OSC 0` that sets icon and title at once is not, since its title
-    /// is the tracker's. An icon name that ends a read is listed by that
-    /// read, whole or split at any character.
+    /// is the tracker's. Which one a string is, is the tracker's word, so
+    /// an `OSC 1` and then an `OSC 2` naming the same thing are both what
+    /// they are, whatever comes between them: the record took them for one
+    /// `OSC 0` when one read carried both, and listed the `OSC 1` when the
+    /// read split between them. Whole, split once at every byte, and a byte
+    /// at a time.
     #[test]
     fn an_icon_name_is_listed_and_an_osc_0_title_is_set() {
-        for stream in [
-            "\x1b]0;both\x07\x1b]1;tab\x07",
-            "\x1b]1;tab\x1b\\\x1b]0;both\x07",
+        for (stream, listed, title) in [
+            ("\x1b]0;both\x07\x1b]1;tab\x07", &["^[]1;tab"][..], "both"),
+            ("\x1b]1;tab\x1b\\\x1b]0;both\x07", &["^[]1;tab"], "both"),
+            ("\x1b]1;tab\x07\x1b]2;tab\x07", &["^[]1;tab"], "tab"),
+            (
+                "\x1b]1;tab\x1b\\\x1b[5G\x1b]2;tab\x1b\\",
+                &["^[]1;tab"],
+                "tab",
+            ),
+            ("\x1b]2;tab\x07\x1b]1;tab\x07", &["^[]1;tab"], "tab"),
+            ("\x1b]0;same\x07\x1b]0;same\x1b\\", &[], "same"),
+            // Listed whole by the backend's own callback, and the word for
+            // it does not reach the `OSC 0` after it.
+            ("\x1b]1;a;b\x07\x1b]0;next\x07", &["^[]1;a;b"], "next"),
         ] {
-            for cut in (1..stream.len()).chain([0]) {
-                let emu = emu_fed_in_pieces(stream.as_bytes(), &[cut][..usize::from(cut > 0)]);
-                let s = emu.snapshot();
-                assert_eq!(s.unsupported(), ["^[]1;tab"], "{stream:?} cut at {cut}");
-                assert_eq!(s.title(), "both", "{stream:?} cut at {cut}");
+            let mut feeds: Vec<Vec<usize>> = vec![Vec::new()];
+            feeds.extend((1..stream.len()).map(|cut| vec![cut]));
+            feeds.push((1..stream.len()).collect());
+            for cuts in &feeds {
+                let s = emu_fed_in_pieces(stream.as_bytes(), cuts).snapshot();
+                assert_eq!(s.unsupported(), listed, "{stream:?} cut at {cuts:?}");
+                assert_eq!(s.title(), title, "{stream:?} cut at {cuts:?}");
             }
         }
     }

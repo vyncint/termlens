@@ -263,9 +263,7 @@ reads that marker.
 - `Screen::unsupported()` lists `OSC 1 ; name`, which sets the icon name
   and is modelled nowhere, as `^[]1;name`; only the form with a further
   `;` was listed. `OSC 0`, which sets the icon name and the title at
-  once, is still not listed, since its title is read. One shape still
-  reads as an `OSC 0`: an `OSC 1` and then an `OSC 2` naming the same
-  thing in one read, with nothing listed between them. A test that
+  once, is still not listed, since its title is read. A test that
   expected an empty list beside an `OSC 1` should expect its entry.
   (#760)
 - `Screen::unsupported()` lists an `OSC` holding U+FFFD, or invalid UTF-8,
