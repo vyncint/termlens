@@ -945,10 +945,14 @@ there either, though the text keeps it; `Cell::contents` tells the two
 apart, and so does the JSON. One header releases before 0.11.2 wrote
 does not render back as written: a visible cursor at `col == cols`, the
 pending-wrap column (#401), reads onto the last cell, as the JSON reader
-reads it, so the header comes back one column left (#643). And one row
-releases before 0.11.7 wrote renders back as written but is not the
-picture its writer saw: a VS16 emoji with room after it reads two columns
-wide, as rule 4 says, so it differs from its own JSON twin (#723).
+reads it, so the header comes back one column left (#643). And two rows
+releases before 0.11.7 wrote render back as written but are not the
+picture their writer saw: a VS16 emoji with room after it reads two
+columns wide, as rule 4 says, so it differs from its own JSON twin (#723);
+and a wide character a resize stranded can read whole, or another one can
+read stranded in its place, since the text does not say which lost its
+second column — "The JSON shape" below says which readings it takes
+(#782).
 
 The header's row count is what decides where the grid ends — not a search
 for the `styles:` marker — so a grid may hold the words `styles:` or
@@ -1043,6 +1047,18 @@ in proportion to the screen it declares, not to its length (#713). A grid
 that comes before the header (`jq -S` sorts `cells` ahead of `cols`) is
 held to the 1000-per-axis limit until the header is known.
 
+The state is held the same way (#778). The history has no count a file
+could be held to — `scrollback(n)` takes any `n`, and a bound on it would
+refuse a release's own output — so each row is held instead: to 1000
+cells of at most 22 bytes, a terminal's widest row of vt100's fullest
+cells, or as text to the 22,000 bytes those come to. The empty row, the
+commonest, is one allocation however often it comes, and room the
+allocator refuses for the rows is an error, not an abort. The unsupported
+sequences and the links are read to the 32 and the 64 a terminal keeps,
+and one past is refused. So the history costs memory in proportion to
+the rows it declares: a pointer for an empty one, where the derive spent
+about fifty bytes on each three of file.
+
 A cell must also be one a termlens could have written, because the CLI
 prints what it reads: a cell carrying an escape sequence drove the
 terminal of whoever ran `render --text` or `diff` on the file (#582).
@@ -1076,11 +1092,21 @@ wide character whose second column would fall one past the edge is that
 stranded cell, not an over-long row (#643). So is one that a redraw after
 widening left before other text: a row too long at two columns per wide
 character, but not at one for some of them, reads with as many as it needs
-stranded, the leftmost first (#683). A row that fits reads with every wide
-character whole, since the text does not say one lost its second half; the
-JSON twin of such a row, which carries the flags, can then hold the text
-after a stranded character one column further left than the text reads it.
-Both render back to the same text.
+stranded, the leftmost first (#683) — but one in the first column last,
+since no resize strands it, a terminal being two columns wide at least, and
+taking it first read every cell, span and cursor after it a column left of
+its JSON twin when the writer had stranded a later one (#782). It is still
+taken when no other reading fits, so no file that read stops reading. A
+row that fits reads with every wide character whole, since the text does
+not say one lost its second half; the JSON twin of such a row, which
+carries the flags, can then hold the text after a stranded character one
+column further left than the text reads it, or, where nothing was redrawn
+after it, a blank where the text reads its second column (#782). Both
+render back to the same text, and `tests/compat/0.11.6` pins a file of
+each shape. A picture of the grid — the ANSI and
+HTML renderings, the diff's frame — draws a stranded character as the one
+blank its column holds, since its glyph takes two columns in any font, and
+the SVG fits the glyph to its one cell (#781).
 
 The compatibility corpus under `crates/termlens/tests/compat/` holds both
 formats as written by each release since 0.10.1, and `tests/compat.rs`
@@ -1091,13 +1117,15 @@ holds every later release to reading them (#327).
 `Screen::mask_rect`, `mask_matching`, `mask_cells` (and `mask_matches` with
 the `regex` feature) return a *new* `Screen` with cell contents replaced and
 nothing else changed: the size, the cursor, every style, and the two columns
-of a wide character (both become the fill) are preserved, so the masked
-screen renders in this same format — a masked cell renders as its fill, a
-blank fill as the blank a cell renders as anyway — and its `styles:` block
-is the original's. That is the whole reason the masks exist in the crate
-rather than as a text filter in the snapshot tool: a filter over the
-rendering changes a field's width and moves every column after it while the
-style runs still name the original columns; a mask over the grid cannot.
+of a wide character (both become the fill; a stranded one has only its
+first, which becomes one, and the cell after it is its own, #780) are
+preserved, so the masked screen renders in this same format — a masked cell
+renders as its fill, a blank fill as the blank a cell renders as anyway —
+and its `styles:` block is the original's. That is the whole reason the
+masks exist in the crate rather than as a text filter in the snapshot tool:
+a filter over the rendering changes a field's width and moves every column
+after it while the style runs still name the original columns; a mask over
+the grid cannot.
 
 ## 4. Emulator abstraction — why
 

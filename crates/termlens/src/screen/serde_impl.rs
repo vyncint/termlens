@@ -19,13 +19,19 @@
 //! that is what it is; a number this build does not know is refused with
 //! a message naming it rather than read as far as the fields happen to
 //! line up.
+//!
+//! What the reader holds is bounded by what the file declares, never by how
+//! long it is: the grid by its header (#713), the history one row at a time,
+//! and the lists a terminal keeps a fixed number of by that number (#778).
 
 use std::fmt;
+use std::marker::PhantomData;
+use std::sync::Arc;
 
 use serde::de::{DeserializeSeed, Error as _, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::{parse, Cell, MouseModes, Screen, TermState};
+use super::{parse, Cell, Link, MouseModes, Screen, TermState};
 use crate::terminal::MAX_DIMENSION;
 
 /// The cursor as three named fields rather than a tuple, so the JSON reads.
@@ -508,6 +514,311 @@ fn one_column(ch: char) -> bool {
     matches!(ch, ' '..='~')
 }
 
+/// The most bytes a terminal's cell holds: vt100's `CONTENT_BYTES`, 22 in
+/// 0.16 and in 0.18 alike, the backends of every release since 0.10. A
+/// history cell is copied from the terminal's own and from nowhere else, so
+/// one longer than this is a cell no termlens wrote (#778).
+const CELL_BYTES: usize = 22;
+
+/// The most bytes a history row holds as text: a terminal's widest row,
+/// [`MAX_DIMENSION`] cells, at [`CELL_BYTES`] each. vt100 gives a row's text
+/// a cell at a time — a blank as one space, the second column of a wide
+/// character as nothing — so none it gives is longer.
+const ROW_BYTES: usize = MAX_DIMENSION as usize * CELL_BYTES;
+
+/// How many unsupported sequences a terminal records before it only counts
+/// them: `MAX_UNSUPPORTED` in `emu/unhandled.rs`, 32 in every release since
+/// 0.10.
+const UNSUPPORTED: usize = 32;
+
+/// How many links a terminal keeps, the oldest evicted: `LINK_HISTORY` in
+/// `emu/seq.rs`, 64 in every release since 0.10.
+const LINKS: usize = 64;
+
+/// `state.scrollback`, held one row at a time (#778).
+///
+/// The derive read history as the file had it, one allocation a row, so
+/// `"",` — three bytes of file — cost about fifty of memory, and a 201 MB
+/// file of them aborted `termlens render` at 1.77 GB. No count can bound a
+/// history, since `scrollback(n)` takes any `n` and a release would then
+/// refuse its own output (#777). Each row is bounded instead, at
+/// [`ROW_BYTES`], and the empty row, the commonest, is one allocation
+/// shared by all of them: what the history costs is in proportion to the
+/// rows it declares, and room the allocator refuses is an error.
+pub(super) fn history_text<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Arc<[Arc<str>]>, D::Error> {
+    deserializer.deserialize_seq(HistoryText)
+}
+
+/// Styled history as a `Screen` holds it: shared rows of cells.
+type StyledRows = Arc<[Arc<[Cell]>]>;
+
+/// `state.scrollback_cells`, held as [`history_text`] holds the text: each
+/// row at most [`MAX_DIMENSION`] cells of at most [`CELL_BYTES`], the empty
+/// row shared (#778).
+pub(super) fn history_cells<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<StyledRows>, D::Error> {
+    deserializer.deserialize_option(StyledHistory)
+}
+
+/// `state.unsupported`: at most the [`UNSUPPORTED`] a terminal records.
+pub(super) fn unsupported<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Arc<[Arc<str>]>, D::Error> {
+    let shapes = deserializer.deserialize_seq(Capped::<Arc<str>>::new(
+        UNSUPPORTED,
+        format!("unsupported sequences; a terminal records {UNSUPPORTED} and counts the rest"),
+    ))?;
+    Ok(Arc::from(shapes))
+}
+
+/// `state.links`: at most the [`LINKS`] a terminal keeps.
+pub(super) fn links<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Arc<Vec<Link>>, D::Error> {
+    let links = deserializer.deserialize_seq(Capped::<Link>::new(
+        LINKS,
+        format!("links; a terminal keeps the newest {LINKS}"),
+    ))?;
+    Ok(Arc::new(links))
+}
+
+/// A sequence whose length is the file's to say, gathered so that room the
+/// allocator refuses is an error to report rather than an abort (#778).
+struct Gather<T>(Vec<T>);
+
+impl<T> Gather<T> {
+    fn push<E: serde::de::Error>(&mut self, item: T, what: &str) -> Result<(), E> {
+        if self.0.len() == self.0.capacity() {
+            // Grows as `push` would, doubling, but asks first.
+            self.0
+                .try_reserve(1)
+                .map_err(|_| refused(self.0.len() + 1, what))?;
+        }
+        self.0.push(item);
+        Ok(())
+    }
+
+    /// The gathered items as the shared slice a [`Screen`] holds.
+    fn into_shared<E: serde::de::Error>(self, what: &str) -> Result<Arc<[T]>, E> {
+        // `Arc::from` copies the vector into an allocation of its own, the
+        // two counts in front, and that allocation cannot fail softly. So
+        // the same room is asked for first and given back at once: a
+        // refusal is then the error, not the copy's abort. Best effort —
+        // another thread could take the room in between — and enough for a
+        // reader on one thread under an address-space cap.
+        let bytes = std::mem::size_of_val(self.0.as_slice())
+            .saturating_add(2 * std::mem::size_of::<usize>());
+        let mut room: Vec<u8> = Vec::new();
+        room.try_reserve_exact(bytes)
+            .map_err(|_| refused(self.0.len(), what))?;
+        // Opaque, or the optimiser may drop a reservation nothing uses.
+        std::hint::black_box(&room);
+        drop(room);
+        Ok(Arc::from(self.0))
+    }
+}
+
+fn refused<E: serde::de::Error>(count: usize, what: &str) -> E {
+    E::custom(format!("the allocator refused the room for {count} {what}"))
+}
+
+struct HistoryText;
+
+impl<'de> Visitor<'de> for HistoryText {
+    type Value = Arc<[Arc<str>]>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a sequence of rows")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let empty: Arc<str> = Arc::from("");
+        let mut rows = Gather(Vec::new());
+        while let Some(row) = seq.next_element_seed(RowText {
+            index: rows.0.len(),
+            empty: &empty,
+        })? {
+            rows.push(row, "rows of history")?;
+        }
+        rows.into_shared("rows of history")
+    }
+}
+
+/// One row of [`history_text`].
+struct RowText<'a> {
+    index: usize,
+    empty: &'a Arc<str>,
+}
+
+impl<'de> DeserializeSeed<'de> for RowText<'_> {
+    type Value = Arc<str>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_str(self)
+    }
+}
+
+impl<'de> Visitor<'de> for RowText<'_> {
+    type Value = Arc<str>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a string")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, row: &str) -> Result<Self::Value, E> {
+        if row.len() > ROW_BYTES {
+            return Err(E::custom(format!(
+                "scrollback row {} is {} bytes, more than the {ROW_BYTES} a \
+                 {MAX_DIMENSION}-column row of {CELL_BYTES}-byte cells holds",
+                self.index,
+                row.len()
+            )));
+        }
+        Ok(if row.is_empty() {
+            Arc::clone(self.empty)
+        } else {
+            Arc::from(row)
+        })
+    }
+}
+
+/// [`history_cells`]'s `null` or rows.
+struct StyledHistory;
+
+impl<'de> Visitor<'de> for StyledHistory {
+    type Value = Option<StyledRows>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("null or a sequence of rows")
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(None)
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_seq(HistoryCells).map(Some)
+    }
+}
+
+struct HistoryCells;
+
+impl<'de> Visitor<'de> for HistoryCells {
+    type Value = StyledRows;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a sequence of rows")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let empty: Arc<[Cell]> = Arc::from(Vec::new());
+        let mut rows = Gather(Vec::new());
+        while let Some(row) = seq.next_element_seed(RowCells {
+            index: rows.0.len(),
+            empty: &empty,
+        })? {
+            rows.push(row, "rows of styled history")?;
+        }
+        rows.into_shared("rows of styled history")
+    }
+}
+
+/// One row of [`history_cells`].
+struct RowCells<'a> {
+    index: usize,
+    empty: &'a Arc<[Cell]>,
+}
+
+impl<'de> DeserializeSeed<'de> for RowCells<'_> {
+    type Value = Arc<[Cell]>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_seq(self)
+    }
+}
+
+impl<'de> Visitor<'de> for RowCells<'_> {
+    type Value = Arc<[Cell]>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a sequence of cells")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let index = self.index;
+        let mut row = Vec::new();
+        while let Some(cell) = seq.next_element::<Cell>()? {
+            if row.len() == usize::from(MAX_DIMENSION) {
+                return Err(A::Error::custom(format!(
+                    "scrollback row {index} holds more than {MAX_DIMENSION} cells, past \
+                     the {MAX_DIMENSION}-per-axis limit of a terminal"
+                )));
+            }
+            if cell.contents.len() > CELL_BYTES {
+                return Err(A::Error::custom(format!(
+                    "scrollback cell {index},{}: {} bytes, more than the {CELL_BYTES} a \
+                     terminal's cell holds",
+                    row.len(),
+                    cell.contents.len()
+                )));
+            }
+            row.push(cell);
+        }
+        Ok(if row.is_empty() {
+            Arc::clone(self.empty)
+        } else {
+            Arc::from(row)
+        })
+    }
+}
+
+/// A list a terminal keeps at most `most` entries of, refused past that.
+struct Capped<T> {
+    most: usize,
+    /// What the refusal says after "more than `most`".
+    what: String,
+    entry: PhantomData<T>,
+}
+
+impl<T> Capped<T> {
+    fn new(most: usize, what: String) -> Self {
+        Self {
+            most,
+            what,
+            entry: PhantomData,
+        }
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Visitor<'de> for Capped<T> {
+    type Value = Vec<T>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a sequence")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut entries = Vec::new();
+        while let Some(entry) = seq.next_element()? {
+            if entries.len() == self.most {
+                return Err(A::Error::custom(format!(
+                    "more than {} {}",
+                    self.most, self.what
+                )));
+            }
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,6 +953,139 @@ mod tests {
             .to_string();
         assert!(
             err.contains("format 2 is not one this termlens reads"),
+            "{err}"
+        );
+    }
+
+    /// A 1x1 screen's document with `state.<field>` set to `value`, read.
+    fn read_state(field: &str, value: serde_json::Value) -> Result<Screen, String> {
+        let screen = Screen::parse("size: 1x1  cursor: 0,0\nx").unwrap();
+        let mut document = serde_json::to_value(&screen).unwrap();
+        document["state"][field] = value;
+        serde_json::from_value(document).map_err(|e| e.to_string())
+    }
+
+    /// History is held a row at a time (#778). The empty row, three bytes
+    /// of file, is one allocation however many times it comes, where the
+    /// derive made one each, so a file of them cost about fifty bytes of
+    /// memory a row; and a row longer than a terminal's widest row of its
+    /// fullest cells is refused, at a byte past it and not at the bound.
+    #[test]
+    fn history_text_shares_the_empty_row_and_bounds_each_row() {
+        let screen =
+            read_state("scrollback", serde_json::json!(["", "a", "", ""])).expect("history reads");
+        let rows = &screen.state.scrollback;
+        assert_eq!(screen.scrollback_text(), "\na\n\n");
+        assert!(
+            Arc::ptr_eq(&rows[0], &rows[2]) && Arc::ptr_eq(&rows[0], &rows[3]),
+            "the empty rows are one allocation"
+        );
+
+        let widest = "x".repeat(ROW_BYTES);
+        let screen = read_state("scrollback", serde_json::json!(["", widest]))
+            .expect("a row of exactly the bound reads");
+        assert_eq!(screen.state.scrollback[1].len(), 22_000);
+        let err =
+            read_state("scrollback", serde_json::json!(["", format!("{widest}x")])).unwrap_err();
+        assert!(
+            err.contains(
+                "scrollback row 1 is 22001 bytes, more than the 22000 a 1000-column row of \
+                 22-byte cells holds"
+            ),
+            "{err}"
+        );
+    }
+
+    /// Styled history the same way (#778): the empty row shared, a row
+    /// held to a terminal's width and a cell to what vt100 stores in one —
+    /// 22 bytes, a base character and the marks after it — each at the
+    /// bound and refused a step past it; and `null` or no field at all is
+    /// unstyled history, as the derive read it.
+    #[test]
+    fn history_cells_share_the_empty_row_and_bound_rows_and_cells() {
+        let cell = |contents: &str| {
+            serde_json::to_value(Cell::new(contents.into(), Style::default(), false, false))
+                .unwrap()
+        };
+        let row = |cells: usize| serde_json::Value::Array(vec![cell("x"); cells]);
+        let screen = read_state(
+            "scrollback_cells",
+            serde_json::json!([[], row(1000), [], []]),
+        )
+        .expect("styled history reads");
+        let rows = screen.state.scrollback_cells.as_ref().unwrap();
+        assert_eq!(rows[1].len(), 1000);
+        assert!(
+            Arc::ptr_eq(&rows[0], &rows[2]) && Arc::ptr_eq(&rows[0], &rows[3]),
+            "the empty rows are one allocation"
+        );
+        let err = read_state("scrollback_cells", serde_json::json!([[], row(1001)])).unwrap_err();
+        assert!(
+            err.contains(
+                "scrollback row 1 holds more than 1000 cells, past the 1000-per-axis limit"
+            ),
+            "{err}"
+        );
+
+        // `e` and seven enclosing circles (U+20DD, three bytes each).
+        let full = format!("e{}", "\u{20dd}".repeat(7));
+        assert_eq!(full.len(), CELL_BYTES);
+        let screen = read_state("scrollback_cells", serde_json::json!([[cell(&full)]]))
+            .expect("a cell of exactly the bound reads");
+        assert_eq!(screen.scrollback_cell(0, 0).unwrap().contents(), full);
+        let over = format!("\u{e9}{}", "\u{20dd}".repeat(7));
+        let err = read_state(
+            "scrollback_cells",
+            serde_json::json!([[cell("a"), cell(&over)]]),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("scrollback cell 0,1: 23 bytes, more than the 22 a terminal's cell holds"),
+            "{err}"
+        );
+
+        let unstyled = read_state("scrollback_cells", serde_json::Value::Null).unwrap();
+        assert!(!unstyled.styled_scrollback());
+        let screen = Screen::parse("size: 1x1  cursor: 0,0\nx").unwrap();
+        let mut document = serde_json::to_value(&screen).unwrap();
+        document["state"]
+            .as_object_mut()
+            .unwrap()
+            .remove("scrollback_cells");
+        let read: Screen = serde_json::from_value(document).expect("a missing field is None");
+        assert!(!read.styled_scrollback());
+    }
+
+    /// The two lists a terminal keeps a fixed number of are read to that
+    /// number and refused one past it (#778): 32 unsupported sequences,
+    /// the rest only counted, and the 64 newest links.
+    #[test]
+    fn the_unsupported_list_and_the_links_are_held_to_what_a_terminal_keeps() {
+        let shapes =
+            |n: usize| serde_json::json!((0..n).map(|i| format!("^[[{i}h")).collect::<Vec<_>>());
+        let screen = read_state("unsupported", shapes(32)).expect("32 read");
+        assert_eq!(screen.unsupported().len(), 32);
+        let err = read_state("unsupported", shapes(33)).unwrap_err();
+        assert!(
+            err.contains("more than 32 unsupported sequences; a terminal records 32"),
+            "{err}"
+        );
+
+        let links = |n: usize| {
+            serde_json::json!((0..n)
+                .map(|i| serde_json::json!({
+                    "uri": format!("https://example.com/{i}"),
+                    "id": null,
+                    "label": "x",
+                    "closed": true
+                }))
+                .collect::<Vec<_>>())
+        };
+        let screen = read_state("links", links(64)).expect("64 read");
+        assert_eq!(screen.links().len(), 64);
+        let err = read_state("links", links(65)).unwrap_err();
+        assert!(
+            err.contains("more than 64 links; a terminal keeps the newest 64"),
             "{err}"
         );
     }

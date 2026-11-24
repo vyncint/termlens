@@ -571,6 +571,7 @@ pub(crate) struct TermState {
     pub(crate) cursor_style: Option<u8>,
     /// `OSC 8` hyperlinks emitted, oldest first, behind an `Arc` so a
     /// snapshot costs one refcount rather than a copy of every link.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "serde_impl::links"))]
     pub(crate) links: Arc<Vec<Link>>,
     /// Inline graphics payloads transmitted.
     pub(crate) graphics: GraphicsSeen,
@@ -583,9 +584,19 @@ pub(crate) struct TermState {
     /// cells per snapshot would dominate the cost of every wait, and
     /// history is asserted on for its content. The rows are shared, so a
     /// snapshot pays one `Arc` clone each.
+    #[cfg_attr(
+        feature = "serde",
+        serde(deserialize_with = "serde_impl::history_text")
+    )]
     pub(crate) scrollback: Arc<[Arc<str>]>,
     /// The scrolled-off rows as cells, when the terminal retains styled
     /// history; `None` when it does not. In lockstep with `scrollback`.
+    // `default` keeps what the derive did for a missing `Option` field,
+    // which a `deserialize_with` would otherwise make an error.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, deserialize_with = "serde_impl::history_cells")
+    )]
     pub(crate) scrollback_cells: Option<Arc<[Arc<[Cell]>]>>,
     /// Per row, whether it ended in a soft wrap rather than a line end —
     /// the backend's own record, never asked for before #265.
@@ -593,6 +604,7 @@ pub(crate) struct TermState {
     /// `IRM` is set: the application left the terminal in insert mode.
     pub(crate) insert_mode: bool,
     /// Escape sequences nobody honoured, distinct, first seen first (#266).
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "serde_impl::unsupported"))]
     pub(crate) unsupported: Arc<[Arc<str>]>,
     /// Distinct unsupported shapes beyond the bound, counted only.
     pub(crate) unsupported_overflow: u64,
@@ -1850,8 +1862,9 @@ impl Screen {
     /// `pattern` — a literal, matched the way [`find_all`](Self::find_all)
     /// matches — replaced by `fill`, one per column, so an eight-column
     /// time stays eight columns of `▒`. A wide character under a match
-    /// becomes two fill cells. See [`mask_rect`](Self::mask_rect) for what
-    /// a mask keeps.
+    /// becomes two fill cells — one, if it is a stranded character an old
+    /// file holds without its second column. See
+    /// [`mask_rect`](Self::mask_rect) for what a mask keeps.
     ///
     /// With the `regex` feature, `mask_matches` takes a pattern instead; the
     /// two share one engine.
@@ -1976,6 +1989,19 @@ impl Screen {
         self.apply_mask(hits, Some(fill))
     }
 
+    /// Whether the cell at `(row, col)` is a stranded wide character: wide,
+    /// with no second column after it. vt100 0.16, behind every release up
+    /// to 0.11.6, narrowed a row by cutting it, so files those releases
+    /// wrote can hold one at the edge or, redrawn after, before other text
+    /// (DESIGN §3). It is one column on the grid and two in any font that
+    /// draws its glyph.
+    fn stranded(&self, row: u16, col: u16) -> bool {
+        self.cell(row, col).is_some_and(Cell::is_wide)
+            && !self
+                .cell(row, col.saturating_add(1))
+                .is_some_and(Cell::is_wide_continuation)
+    }
+
     fn apply_mask(&self, mut hits: Vec<bool>, fill: Option<char>) -> Screen {
         if let Some(fill) = fill {
             assert_eq!(
@@ -1985,13 +2011,22 @@ impl Screen {
             );
         }
         // A masked wide character masks both of its columns, whichever of
-        // the two was hit, so the row keeps its width.
+        // the two was hit, so the row keeps its width. One a resize left
+        // without its second column — a stranded cell, which files 0.11.6
+        // and earlier wrote (DESIGN §3) — has one column, and the cell
+        // after it is a character of its own, never masked for it (#780).
         let width = usize::from(self.cols);
         for i in 0..hits.len() {
             if !hits[i] {
                 continue;
             }
-            if self.cells[i].is_wide() && (i + 1) % width != 0 && i + 1 < hits.len() {
+            if self.cells[i].is_wide()
+                && (i + 1) % width != 0
+                && self
+                    .cells
+                    .get(i + 1)
+                    .is_some_and(Cell::is_wide_continuation)
+            {
                 hits[i + 1] = true;
             }
             if self.cells[i].is_wide_continuation() && i % width != 0 {

@@ -24,6 +24,71 @@ reads that marker.
   kitty keyboard pop that crossterm sends (`CSI < 1 u`) was listed as
   `^[[1<u`, which is not a sequence; it is now `^[[<1u`. A test that pins
   the old spelling needs the new one. (#759)
+- `termlens render` and `diff` read a JSON saved screen of any length, as
+  termlens writes them. They refused every input past 1 GiB as larger
+  than any saved screen (#653), but JSON is not bounded by its grid: its
+  history and images grow with `scrollback(n)` and `capture_graphics(n)`,
+  and 50,000 rows of styled history on 120x40 came to 1.25 GiB of the
+  compact JSON `TERMLENS_ARTIFACT_DIR` writes, which `render` refused with
+  exit 2. JSON is now parsed as it is read, holding memory for the screen
+  and history it declares (#778) rather than for the file; its strings and
+  its nesting are held to what a saved screen has. `render --json` writes
+  the document as it makes it, as `render`'s other formats, `diff` and
+  `inspect` now write theirs, so that screen renders back to JSON in the
+  484 MB it is read in, where building the document and a copy of it took
+  5.6 GB. Only the text format, which holds a grid alone and is at most
+  about 110 MB, is still held to 1 GiB, and the refusal says so: a script
+  that matched `which no saved screen is` needs `which no screen in the
+  text format is`. (#777)
+- Masking a stranded wide character masks its one cell. A wide character
+  a resize left without its second column, which files 0.11.6 and earlier
+  wrote, is one cell, but `mask_matching`, `mask_rect` and the other masks
+  blanked the cell after it too, as though it were the second half:
+  `abcd東Zyw` masked at `東` read `abcd##yw`, and `find("Z")` lost the `Z`.
+  It now reads `abcd#Zyw`; a whole wide character still masks both of its
+  columns. A snapshot of such a masked screen shows the character after
+  the stranded one again. (#780)
+- A stranded wide character keeps its row on the grid in `to_ansi`,
+  `to_html`, the diff and `termlens diff --color`. Those printed its glyph
+  whole, two columns for a cell of one, so `render --ansi` of a 5-column
+  0.11.6 file wrote a 6-column row and the diff's frame and `^` marker
+  stood a column right of the cell that changed. Each now prints it as
+  the one blank its column holds, as the diff already did at a screen's
+  edge; the SVG still fits the glyph to its cell. A snapshot of such a
+  rendering shows a blank where the glyph was. (#781)
+- `Screen::parse` strands a wide character in a row's first column last.
+  A text row 0.11.6 or earlier wrote with a wide character stranded by a
+  resize, and only fitting with one at one column, read with the leftmost
+  stranded, even the one in column 0, which no resize strands. When the
+  writer had stranded a later one, every cell, `styles:` span and cursor
+  between the two read a column left of its JSON twin: `東abc東Zy` with
+  `abc` red read `find("abc")` as `(0, 1)` against the twin's `(0, 2)`.
+  The first column's is now stranded only when no other reading fits, so
+  that row reads as its twin and no row that read stops reading. The
+  0.11.9 note that such rows read "the leftmost first, as its JSON twin
+  holds them" was true only where the stranded character was the row's
+  leftmost wide one. A row that fits still reads every wide character
+  whole, so one stranded with nothing redrawn after it differs from its
+  twin in the blank after it; DESIGN §3 and LIMITATIONS now describe both
+  shapes, and the corpus holds a pair of each that the published 0.11.6
+  wrote. A test that pinned the old reading of such a row sees the cells
+  after the first column's wide character one column right. (#782)
+- `termlens render` and `diff` refuse a screen saved as UTF-32 by name:
+  "the byte-order mark says UTF-32, which termlens does not read (it
+  reads UTF-8 and UTF-16)". UTF-32 is what PowerShell's `Out-File
+  -Encoding utf32` writes. Its little-endian mark begins with UTF-16LE's,
+  so such a file was decoded as UTF-16 and refused with a header error
+  full of NULs, and a big-endian one as "not valid UTF-8". The exit code
+  is 2 as before; a script that matched either old diagnosis needs the
+  new one. (#784)
+- `termlens inspect` of a bare program name, with no PATH in its
+  environment, says what a user of the CLI can do: give the program's
+  absolute path, or a PATH with `--env PATH=DIR`. It passed on the
+  library's advice to remove `env_clear()` or call `.env("PATH", …)`,
+  which the CLI's user never wrote, and under `--inherit-env` the PTY
+  layer's "Unable to resolve the PATH". The exit code is 2 as before; a
+  script that matched either message needs the new one. (#785)
+
 - A send blocked on a full input queue fails as soon as the application
   releases the terminal, and names the exit: "the child released the
   terminal (EOF) before this write of 1048576 bytes finished; nothing can
@@ -66,6 +131,32 @@ reads that marker.
 - Saved JSON screens with leading spaces, tabs or carriage returns are
   recognized as JSON by `render` and `diff`, rather than rejected as text
   snapshots with a missing `size:` header. (#786)
+- The JSON reader holds the out-of-band state to what the file declares,
+  as #713 held the grid. The state was read with no bound: a 1x1 screen
+  whose history held 67 million empty rows, 201 MB on disk, took 1.77 GB,
+  and `termlens render` aborted with exit 134 under a memory cap. History
+  has no row count to hold it to, since `scrollback(n)` takes any `n`, so
+  each row is held instead: to 1000 cells of at most 22 bytes, the most a
+  terminal's row and vt100's cell hold, or as text to the 22,000 bytes
+  those come to. The empty row is one allocation for all of them, and room
+  the allocator refuses is an error, so `render` and `diff` exit 2 naming
+  it. The unsupported sequences and the links are read to the 32 and 64 a
+  terminal keeps. Every file a release wrote reads as before; the JSON
+  format does not change. (#778)
+- `Screen::parse` walks the lines after the grid instead of gathering
+  every line of its input first. It kept a 16-byte pointer for each, so a
+  1x1 screen followed by 20 MB of blank lines took 351 MB to read and one
+  followed by 200 MB aborted `termlens render` with exit 134 under a
+  2 GB cap. Both now read in the memory the input and the declared grid
+  take, with or without a `styles:` block. (#779)
+- The report action says when `termlens diff` cannot read a `.snap` pair,
+  such as an insta value snapshot beside a screen one: "(termlens could
+  not compare these files)" under its "Against" line. The diff's exit 2
+  was ignored, and the summary showed an empty code block there, which
+  reads as no difference. The step's log line and the summary's closing
+  line count and claim SVG and HTML renderings for only the files
+  termlens read, and the log names how many it could not. (#783)
+
 - On Windows every write into the terminal goes through the writer
   thread, so a send keeps the terminal's deadline there as it does on Unix.
   The thread was started only with a duplicate of the master, which

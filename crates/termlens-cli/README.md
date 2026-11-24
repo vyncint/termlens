@@ -30,11 +30,15 @@ termlens diff expected.snap -   < actual.snap
 
 `--` ends the options of all three commands, so a file whose name begins
 with `-` can be named (`termlens render --text -- -x.snap`); a `-` after it
-is still standard input. `diff` and `render` refuse an input larger than
-1 GiB with exit code `2`: the largest screen termlens writes, 1000x1000
-cells each styled differently, is about 600 MB as JSON, so nothing real is
-near it, and `render --text /dev/zero` stops there rather than filling
-memory.
+is still standard input. `diff` and `render` refuse an input in the text
+format larger than 1 GiB with exit code `2`: the format holds the grid
+alone, and the largest, 1000x1000 cells each styled differently, is about
+110 MB, so nothing real is near it, and `render --text /dev/zero` stops
+there rather than filling memory. JSON has no size limit. It carries the
+history and the captured images, which grow with `scrollback(n)` and
+`capture_graphics(n)` — 50,000 rows of styled history on 120x40 are
+1.25 GiB — so it is read as it arrives, holding memory for the screen and
+history it declares rather than for its length.
 
 `render --out PATH` writes there instead of to stdout, and creates nothing
 when the render fails. A shell redirect cannot promise that — `> file.svg`

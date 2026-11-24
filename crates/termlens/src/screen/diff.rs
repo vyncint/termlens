@@ -136,9 +136,10 @@ impl Screen {
 /// and the `│` after it and the `^` under it stay in their columns (#649).
 ///
 /// A wide character whose second column falls past `cols` — cut by the
-/// overlap, or stranded at a screen's own edge by a narrowing resize — is
-/// printed as one blank: it does not fit, and printing it whole would push
-/// the frame a column right. Its cell is still compared, and still marked.
+/// overlap — or that has none — stranded by a narrowing resize, at a
+/// screen's edge or before other text (#781) — is printed as one blank: it
+/// does not fit, and printing it whole would push the frame a column right.
+/// Its cell is still compared, and still marked.
 fn overlap_text(screen: &Screen, row: u16, cols: u16) -> String {
     let mut out = String::new();
     for col in 0..cols {
@@ -148,7 +149,10 @@ fn overlap_text(screen: &Screen, row: u16, cols: u16) -> String {
         if cell.is_wide_continuation() {
             continue;
         }
-        if cell.contents().is_empty() || (cell.is_wide() && col + 1 >= cols) {
+        if cell.contents().is_empty()
+            || (cell.is_wide() && col + 1 >= cols)
+            || screen.stranded(row, col)
+        {
             out.push(' ');
         } else {
             out.push_str(cell.contents());

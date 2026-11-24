@@ -30,6 +30,10 @@
 #     before GitHub's 1 MiB limit, which drops a step's whole summary, says
 #     how many more screens the artifact holds, and the artifact holds all
 #     six (#710)
+#   - a `.snap.new` and its `.snap` that are no screens — an insta value
+#     snapshot beside a screen one: the pair's entry says termlens could
+#     compare nothing, with no empty code block under "Against", and
+#     neither the count nor the artifact line claims it was rendered (#783)
 #
 # Root reads a chmod 000 directory anyway, so as root the first two cases
 # cannot fail and are skipped by name rather than passed.
@@ -73,6 +77,14 @@ workspace() {
   mkdir -p "$ws" "$artifacts" "$rt/termlens-cli/bin"
   cat > "$rt/termlens-cli/bin/termlens" <<'STUB'
 #!/bin/sh
+# A file holding `not a screen` is one termlens cannot read: every command
+# naming it exits 2, as the real CLI does, before writing anything.
+for arg in "$@"; do
+  if [ -f "$arg" ] && grep -q 'not a screen' "$arg"; then
+    echo "stub termlens: $arg: not a termlens Screen" >&2
+    exit 2
+  fi
+done
 case "$1 $2" in
   "render --text") exec cat "$3" ;;
   "render --svg" | "render --html") : > "$4" ;;
@@ -303,6 +315,38 @@ if [ "$(ls "$rt/termlens-report" | grep -c '[.]svg$')" -eq 6 ]; then
   printf '  ok    %-58s\n' "$label"
 else
   printf '  FAIL  %-58s artifact holds: %s\n' "$label" "$(ls "$rt/termlens-report")" >&2
+  status=1
+fi
+
+# A crate that also snapshots values with insta has `.snap`/`.snap.new`
+# pairs that are no screens. `diff`'s exit 2 was dropped with `|| true`, so
+# the entry showed "Against" over an empty code block, which reads as no
+# difference, and the step counted the pair as rendered and claimed SVG and
+# HTML for it (#783).
+workspace unreadable-pair
+rm -rf "$scratch/blocks"; mkdir -p "$scratch/blocks"
+mkdir -p "$ws/tests/snapshots"
+printf 'a screen\n' > "$ws/tests/snapshots/a__one.snap.new"
+printf 'the old screen\n' > "$ws/tests/snapshots/a__one.snap"
+printf 'not a screen: {"answer": 42}\n' > "$ws/tests/snapshots/b__json.snap.new"
+printf 'not a screen: {"answer": 41}\n' > "$ws/tests/snapshots/b__json.snap"
+expect "a pair termlens cannot read says so, not an empty block" \
+  "<p>Against <code>./tests/snapshots/b__json.snap</code>:</p>" \
+  "(termlens could not compare these files)" \
+  "SVG and HTML renderings of the 1 screen termlens could read are in the \`termlens-report\` artifact."
+label="  and no code block in the summary is empty"
+if awk '/^`{3,}$/ { if (open && !lines) bad = 1; open = !open; lines = 0; next } open { lines++ } END { exit bad }' "$rt/summary.md"; then
+  printf '  ok    %-58s\n' "$label"
+else
+  printf '  FAIL  %-58s\n' "$label" >&2
+  sed 's/^/        /' "$rt/summary.md" >&2
+  status=1
+fi
+label="  and the step counts the one screen it rendered"
+if grep -Fq "rendered 1 screen(s), 1 of them into the step summary; termlens could not read 1 file(s)" "$rt/out.log"; then
+  printf '  ok    %-58s\n' "$label"
+else
+  printf '  FAIL  %-58s %s\n' "$label" "$(tail -1 "$rt/out.log")" >&2
   status=1
 fi
 

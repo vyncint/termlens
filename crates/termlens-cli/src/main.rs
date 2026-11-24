@@ -40,7 +40,7 @@ writes to stdout, an insta .snap with or without its header, the block a
 wait error prints, a TERMLENS_ARTIFACT_DIR file — or the JSON the crate's
 `serde` feature writes. `diff` and `render` read `-` as standard input; only
 one of diff's two operands can be, since stdin is read once. Either refuses
-an input larger than 1 GiB, which no saved screen is.
+a screen in the text format larger than 1 GiB; JSON has no size limit.
 
 Exit code 0: the command ran (diff: the screens are the same picture).
 Exit code 1: diff found a difference. Exit code 2: termlens itself could not
@@ -90,8 +90,9 @@ usage: termlens diff [--color auto|always|never] [--] <a> <b>
 
 Either <a> or <b> may be `-`, meaning standard input — not both, since
 stdin is read once. -- ends the options, so a file whose name begins with
-`-` can follow it; a `-` after it is still standard input. An input larger
-than 1 GiB is refused, since no saved screen is that large.
+`-` can follow it; a `-` after it is still standard input. A text-format
+input larger than 1 GiB is refused, since no screen in that format is that
+large; JSON has no size limit.
 
 Parses two saved screens and prints what changed from <a> to <b>: the rows
 that differ side by side, the size and cursor deltas, the style runs before
@@ -113,9 +114,10 @@ format-1 JSON document the crate's `serde` feature writes.
 
 <a> may be `-`, meaning standard input. -- ends the options, so a file
 whose name begins with `-` can follow it; a `-` after it is still standard
-input. An input larger than 1 GiB is refused, since no saved screen is that
-large. --out writes to PATH instead of stdout; `--out -` is standard
-output, and a file named `-` is still `./-`.
+input. A text-format input larger than 1 GiB is refused, since no screen in
+that format is that large; JSON has no size limit. --out writes to PATH
+instead of stdout; `--out -` is standard output, and a file named `-` is
+still `./-`.
 --out creates nothing when the render fails — unlike a shell redirect,
 which truncates the file before termlens runs. Every option that takes a
 value also accepts it attached with `=`, as in --out=screen.svg.
@@ -127,11 +129,18 @@ run — bad arguments, a file that is missing or not a saved screen, or an
 /// Where a rendering goes, so a reader that closed early (`termlens … |
 /// head`) is a clean exit rather than a panic on a broken pipe.
 fn print(out: &str) -> ExitCode {
-    let mut stdout = io::stdout().lock();
-    match stdout
-        .write_all(out.as_bytes())
-        .and_then(|()| stdout.flush())
-    {
+    emit(|stdout| stdout.write_all(out.as_bytes()))
+}
+
+/// [`print`] for a rendering made as it is written: `write` writes it to
+/// stdout through a buffer, so none is held whole first. A screen's JSON
+/// grows with its history past any bound (#777), and `to_string_pretty`
+/// then `format!` held it twice and more: `render --json` of a 1.25 GiB
+/// screen needed some 3.6 times its output, and aborted under a cap that
+/// read the screen.
+fn emit(write: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> ExitCode {
+    let mut stdout = io::BufWriter::new(io::stdout().lock());
+    match write(&mut stdout).and_then(|()| stdout.flush()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(e) => fail(&format!("writing the output failed: {e}")),
@@ -226,82 +235,115 @@ fn main() -> ExitCode {
 /// it a moment earlier. Only the reading changes; the parser already took a
 /// `&str` rather than a path.
 fn load(path: &str) -> Result<Screen, String> {
-    read(open(path)?)
+    read(open(path, MAX_INPUT)?, MAX_INPUT)
 }
 
 /// An operand that has been opened and measured and not yet read: the
 /// first half of [`load`]. The halves are apart so that `diff` can learn
 /// that one operand will never be read before it waits on the other (#715).
-enum Source<'a> {
-    /// `-`: standard input, which has nothing to open.
-    Stdin,
-    /// A file, with its length when it is a regular one. A pipe or a
-    /// device (`/dev/zero`) says 0 and is bounded by the read itself.
-    File {
-        path: &'a str,
-        file: std::fs::File,
-        len: usize,
-    },
+struct Source<'a> {
+    /// What a diagnostic calls it.
+    name: &'a str,
+    input: Box<dyn Read + 'a>,
+    /// A regular file's length; 0 for standard input, a pipe or a device
+    /// (`/dev/zero`), which are bounded by the read itself.
+    len: usize,
+    /// A regular file's first bytes, read by [`open`]; anything else's are
+    /// read by [`read`].
+    head: Option<Head>,
 }
 
-/// The refusal of an input past [`MAX_INPUT`], for an operand named `name`.
-fn too_large(name: &str) -> String {
+/// The refusal of a text-format input past `limit` ([`MAX_INPUT`] outside
+/// the tests), for an operand named `name`.
+fn too_large(name: &str, limit: usize, as_utf8: &str) -> String {
     format!(
-        "{name}: larger than {} GiB, which no saved screen is",
-        MAX_INPUT >> 30
+        "{name}: larger than {}{as_utf8}, which no screen in the text format is",
+        size(limit)
     )
 }
 
-/// Open the operand at `path` and find what can be known of it without
-/// reading it: that it is there, that it is not a directory, how long it is.
-fn open(path: &str) -> Result<Source<'_>, String> {
-    if path == STDIN {
-        return Ok(Source::Stdin);
+/// A limit in the unit [`too_large`] names it in.
+fn size(limit: usize) -> String {
+    if limit % (1 << 30) == 0 {
+        format!("{} GiB", limit >> 30)
+    } else {
+        format!("{limit} bytes")
     }
-    let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
-    // A regular file says how long it is, so one past the bound is refused
-    // before a byte is read, and one inside it is read into a buffer of its
-    // own size.
-    let len = match file.metadata() {
-        Ok(meta) if meta.is_file() => meta.len(),
+}
+
+/// Open the operand at `path` and find what can be known of it before the
+/// read: that it is there, that it is not a directory, how long it is, and,
+/// for a regular file, whether it is JSON, which no length bounds (#777).
+fn open(path: &str, limit: usize) -> Result<Source<'_>, String> {
+    if path == STDIN {
+        return Ok(Source {
+            name: STDIN_NAME,
+            input: Box::new(io::stdin().lock()),
+            len: 0,
+            head: None,
+        });
+    }
+    let mut file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+    let (len, head) = match file.metadata() {
+        // A regular file's head is read here: the read waits on nobody, and
+        // it says whether the length is a bound. A text-format file past the
+        // bound is then refused before the rest is read, and one inside it
+        // is read into a buffer of its own size.
+        Ok(meta) if meta.is_file() => {
+            let head = Head::read(&mut file).map_err(|e| format!("{path}: {e}"))?;
+            (meta.len(), Some(head))
+        }
         // A directory opens like a file on Unix and refuses its first read.
         // That read waits on nobody, so it is made here and the error is the
         // operating system's own, the one `render --text /` has always
         // printed. Where a directory can be read, it is no screen either way.
         Ok(meta) if meta.is_dir() => match (&file).read(&mut [0; 1]) {
-            Ok(_) => 0,
+            Ok(_) => (0, None),
             Err(e) => return Err(format!("{path}: {e}")),
         },
-        _ => 0,
+        _ => (0, None),
     };
-    if len > MAX_INPUT as u64 {
-        return Err(too_large(path));
+    if len > limit as u64 && head.as_ref().is_some_and(|head| head.json().is_none()) {
+        return Err(too_large(path, limit, ""));
     }
-    Ok(Source::File {
-        path,
-        file,
-        len: len as usize,
+    Ok(Source {
+        name: path,
+        input: Box::new(file),
+        len: usize::try_from(len).unwrap_or(usize::MAX),
+        head,
     })
 }
 
 /// Read an opened operand to its end and parse it: the second half of
-/// [`load`].
-fn read(source: Source<'_>) -> Result<Screen, String> {
-    let (name, raw) = match source {
-        Source::Stdin => (STDIN_NAME, read_bounded(io::stdin().lock(), 0, MAX_INPUT)),
-        Source::File { path, file, len } => (path, read_bounded(file, len, MAX_INPUT)),
+/// [`load`]. JSON is parsed as it is read; the text format is read whole,
+/// to at most `limit` bytes ([`MAX_INPUT`] outside the tests).
+fn read(source: Source<'_>, limit: usize) -> Result<Screen, String> {
+    let Source {
+        name,
+        mut input,
+        len,
+        head,
+    } = source;
+    let head = match head {
+        Some(head) => head,
+        None => Head::read(&mut input).map_err(|e| format!("{name}: {e}"))?,
     };
+    if let Some((encoding, skip)) = head.json() {
+        return read_json(name, head.bytes, encoding, skip, input);
+    }
+    let raw = read_bounded(io::Cursor::new(head.bytes).chain(input), len, limit);
     let Some(raw) = raw.map_err(|e| format!("{name}: {e}"))? else {
-        return Err(too_large(name));
+        return Err(too_large(name, limit, ""));
     };
-    let text = decode(raw, MAX_INPUT).map_err(|e| match e {
+    let text = decode(raw, limit).map_err(|e| match e {
         // The words `read_to_string` used, which this read replaced.
         NotText::Utf8 => format!("{name}: stream did not contain valid UTF-8"),
         NotText::Utf16 => format!("{name}: stream did not contain valid UTF-16"),
-        NotText::TooLarge => format!(
-            "{name}: larger than {} GiB as UTF-8, which no saved screen is",
-            MAX_INPUT >> 30
+        NotText::Utf32 => format!(
+            "{name}: the byte-order mark says UTF-32, which termlens does not read \
+             (it reads UTF-8 and UTF-16)"
         ),
+        NotText::TooLarge => too_large(name, limit, " as UTF-8"),
         // As a refused reservation reads when the bytes are read.
         NotText::Memory => format!("{name}: {}", io::Error::from(io::ErrorKind::OutOfMemory)),
     })?;
@@ -332,6 +374,8 @@ enum NotText {
     Utf8,
     /// A UTF-16 byte-order mark, then half a code unit or a lone surrogate.
     Utf16,
+    /// A UTF-32 byte-order mark (#784).
+    Utf32,
     /// UTF-16 inside the bound as bytes and past it as UTF-8.
     TooLarge,
     /// The allocator refused the room the text needs.
@@ -355,10 +399,10 @@ enum NotText {
 /// reserved fallibly: a refusal is an error to report, as in
 /// [`read_bounded`].
 fn decode(raw: Vec<u8>, limit: usize) -> Result<String, NotText> {
-    let big_endian = match raw.get(..2) {
-        Some([0xff, 0xfe]) => false,
-        Some([0xfe, 0xff]) => true,
-        _ => return String::from_utf8(raw).map_err(|_| NotText::Utf8),
+    let big_endian = match encoding(&raw) {
+        Encoding::Utf8 => return String::from_utf8(raw).map_err(|_| NotText::Utf8),
+        Encoding::Utf16 { big_endian } => big_endian,
+        Encoding::Utf32 => return Err(NotText::Utf32),
     };
     if raw.len() % 2 != 0 {
         return Err(NotText::Utf16);
@@ -387,6 +431,367 @@ fn decode(raw: Vec<u8>, limit: usize) -> Result<String, NotText> {
     Ok(text)
 }
 
+/// How an input's bytes are text, by the byte-order mark in front (#716).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Encoding {
+    Utf8,
+    Utf16 {
+        big_endian: bool,
+    },
+    /// Not read, and named in the refusal (#784).
+    Utf32,
+}
+
+/// The encoding the first bytes of an input name: UTF-16 behind its mark,
+/// in either byte order, UTF-32 behind its own, and UTF-8 otherwise.
+///
+/// UTF-32 is what PowerShell's `Out-File -Encoding utf32` writes. Its
+/// little-endian mark, `FF FE 00 00`, begins with UTF-16LE's, so it is
+/// looked for first; read as UTF-16 it was a header full of NULs. A
+/// UTF-16 file cannot begin that way, since no saved screen begins with
+/// U+0000.
+fn encoding(bytes: &[u8]) -> Encoding {
+    if let Some([0xff, 0xfe, 0, 0] | [0, 0, 0xfe, 0xff]) = bytes.get(..4) {
+        return Encoding::Utf32;
+    }
+    match bytes.get(..2) {
+        Some([0xff, 0xfe]) => Encoding::Utf16 { big_endian: false },
+        Some([0xfe, 0xff]) => Encoding::Utf16 { big_endian: true },
+        _ => Encoding::Utf8,
+    }
+}
+
+/// How much of an input is read before the rest to tell JSON from the text
+/// format. What comes before a document — a byte-order mark, an insta
+/// header, whitespace — is a few hundred bytes in anything termlens, insta
+/// or a shell writes; an input this cannot decide is read the way the text
+/// format is.
+const HEAD: usize = 64 * 1024;
+
+/// The first bytes of an input, read to tell JSON from the text format.
+struct Head {
+    bytes: Vec<u8>,
+    /// The input ended inside them.
+    ended: bool,
+}
+
+impl Head {
+    fn read(input: &mut impl Read) -> io::Result<Head> {
+        let mut bytes = Vec::new();
+        input.take(HEAD as u64).read_to_end(&mut bytes)?;
+        Ok(Head {
+            ended: bytes.len() < HEAD,
+            bytes,
+        })
+    }
+
+    /// Where the JSON document begins, when the input is one: its encoding,
+    /// and how many bytes of its text as UTF-8 come before the document.
+    /// `None` for the text format, and for a head that cannot say, which is
+    /// read as the text format is — whole and bounded — and still parsed as
+    /// JSON if it turns out to be ([`read`]).
+    fn json(&self) -> Option<(Encoding, usize)> {
+        let encoding = encoding(&self.bytes);
+        let (text, whole) = match encoding {
+            // A head that stops inside a character, or at a byte that is
+            // not UTF-8, is read as far as it decodes.
+            Encoding::Utf8 => match std::str::from_utf8(&self.bytes) {
+                Ok(text) => (Cow::Borrowed(text), self.ended),
+                Err(e) => (
+                    Cow::Borrowed(std::str::from_utf8(&self.bytes[..e.valid_up_to()]).ok()?),
+                    false,
+                ),
+            },
+            // Read as the text format is, where it is refused by name.
+            Encoding::Utf32 => return None,
+            Encoding::Utf16 { big_endian } => {
+                let units = self.bytes.chunks_exact(2).map(|unit| {
+                    let unit = [unit[0], unit[1]];
+                    if big_endian {
+                        u16::from_be_bytes(unit)
+                    } else {
+                        u16::from_le_bytes(unit)
+                    }
+                });
+                let mut text = String::new();
+                let mut whole = self.ended && self.bytes.len() % 2 == 0;
+                for decoded in char::decode_utf16(units) {
+                    let Ok(ch) = decoded else {
+                        whole = false;
+                        break;
+                    };
+                    text.push(ch);
+                }
+                (Cow::Owned(text), whole)
+            }
+        };
+        json_body(&text, whole).map(|skip| (encoding, skip))
+    }
+}
+
+/// The byte at which [`read`] hands a JSON document in `text` to the parser
+/// — past a byte-order mark, an insta header and the newlines after them,
+/// as the text format's reading strips them — when what follows is JSON.
+/// `text` is the head of a decoded input, the whole of it when `whole`; a
+/// head that ends before the answer is known is `None`.
+///
+/// The rules are the text reading's, kept apart from it so that JSON is
+/// recognised from a head: the header found as `strip_insta_header` finds it
+/// once CRLF is LF, and the document wherever the body begins with `{`
+/// after Unicode whitespace (#786). What whitespace the parser is handed is
+/// its to judge, as it was: CRLF is whitespace to JSON, and a no-break space
+/// is still refused.
+fn json_body(text: &str, whole: bool) -> Option<usize> {
+    let mut rest = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if let Some(header) = rest
+        .strip_prefix("---\n")
+        .or_else(|| rest.strip_prefix("---\r\n"))
+    {
+        let close = header.match_indices("\n---").find_map(|(at, _)| {
+            let after = &header[at + 4..];
+            after
+                .strip_prefix('\n')
+                .or_else(|| after.strip_prefix("\r\n"))
+        });
+        match close {
+            Some(body) => rest = body,
+            // A header that never closes is no header; the text reading
+            // keeps it as content.
+            None if whole => {}
+            None => return None,
+        }
+    }
+    let body = rest.trim_start_matches('\n');
+    let first = body.trim_start();
+    if first.is_empty() && !whole {
+        return None;
+    }
+    first.starts_with('{').then_some(text.len() - body.len())
+}
+
+/// Parse a JSON saved screen as it is read (#777): `head`, the first bytes
+/// read, then `rest`, after the `skip` bytes of text before the document.
+///
+/// Nothing holds the input: the parser takes it a buffer at a time, its
+/// strings and its nesting are bounded ([`JsonText`]), and the screen it
+/// builds is bounded by what the file declares (#713, #778). So no length
+/// is refused, which is what reads back the JSON termlens writes at any
+/// length — history and images grow without a bound of their own.
+fn read_json(
+    name: &str,
+    head: Vec<u8>,
+    encoding: Encoding,
+    skip: usize,
+    rest: impl Read,
+) -> Result<Screen, String> {
+    let input = io::Cursor::new(head).chain(rest);
+    let mut text: Box<dyn Read + '_> = match encoding {
+        Encoding::Utf8 | Encoding::Utf32 => Box::new(input),
+        Encoding::Utf16 { big_endian } => Box::new(Utf16Text::new(input, big_endian)),
+    };
+    io::copy(&mut text.by_ref().take(skip as u64), &mut io::sink())
+        .map_err(|e| format!("{name}: {e}"))?;
+    let document = io::BufReader::with_capacity(HEAD, JsonText::new(text));
+    serde_json::from_reader(document).map_err(|e| {
+        if e.is_io() {
+            format!("{name}: {e}")
+        } else {
+            format!("{name}: not a termlens Screen: {e}")
+        }
+    })
+}
+
+/// The longest string [`JsonText`] passes: 1 MiB. The longest a saved
+/// screen holds is a title, a clipboard or a link's address, each at most
+/// the 64 KiB a terminal keeps of an OSC string, six times that escaped; a
+/// row of history is at most 22,000 bytes (#778).
+const MAX_STRING: usize = 1 << 20;
+
+/// The deepest [`JsonText`] passes: `serde_json`'s own limit for what it
+/// builds. A saved screen nests seven deep.
+const MAX_DEPTH: usize = 128;
+
+/// A JSON document on its way to the parser, held to strings of at most
+/// [`MAX_STRING`] bytes and nesting of at most [`MAX_DEPTH`] (#777).
+///
+/// `serde_json` gathers a string whole before handing it on, and keeps a
+/// byte for each array or object it skips inside a field it does not know,
+/// so an endless string or an endless `[[[[` grew its buffers as an endless
+/// file grew the reader's before #653. Counting them as they pass bounds
+/// those buffers by a constant, whatever the length of the input.
+struct JsonText<R> {
+    inner: R,
+    in_string: bool,
+    escaped: bool,
+    run: usize,
+    depth: usize,
+}
+
+impl<R> JsonText<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            in_string: false,
+            escaped: false,
+            run: 0,
+            depth: 0,
+        }
+    }
+
+    fn refuse(what: String) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, what)
+    }
+}
+
+impl<R: Read> Read for JsonText<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        for &byte in &buf[..read] {
+            if self.in_string {
+                if self.escaped {
+                    self.escaped = false;
+                } else if byte == b'\\' {
+                    self.escaped = true;
+                } else if byte == b'"' {
+                    self.in_string = false;
+                    continue;
+                }
+                self.run += 1;
+                if self.run > MAX_STRING {
+                    return Err(Self::refuse(format!(
+                        "a string in the JSON runs past {} MiB, longer than any a saved screen holds",
+                        MAX_STRING >> 20
+                    )));
+                }
+                continue;
+            }
+            match byte {
+                b'"' => {
+                    self.in_string = true;
+                    self.run = 0;
+                }
+                b'[' | b'{' => {
+                    self.depth += 1;
+                    if self.depth > MAX_DEPTH {
+                        return Err(Self::refuse(format!(
+                            "the JSON nests deeper than {MAX_DEPTH}, which no saved screen does"
+                        )));
+                    }
+                }
+                b']' | b'}' => self.depth = self.depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        Ok(read)
+    }
+}
+
+/// UTF-16 behind its byte-order mark read as UTF-8 (#716), a buffer at a
+/// time, so a JSON saved screen a Windows shell re-encoded streams as the
+/// UTF-8 one does. Half a code unit or a lone surrogate is an error, in the
+/// words [`decode`]'s refusal is reported in.
+struct Utf16Text<R> {
+    inner: R,
+    big_endian: bool,
+    /// A byte of a code unit the last read split.
+    odd: Option<u8>,
+    /// A high surrogate waiting for its low half.
+    high: Option<u16>,
+    /// Decoded text not yet handed out, and how much of it has been.
+    out: Vec<u8>,
+    at: usize,
+}
+
+impl<R: Read> Utf16Text<R> {
+    fn new(inner: R, big_endian: bool) -> Self {
+        Self {
+            inner,
+            big_endian,
+            odd: None,
+            high: None,
+            out: Vec::new(),
+            at: 0,
+        }
+    }
+
+    fn invalid() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-16",
+        )
+    }
+
+    /// Decode the next bytes of `inner` into `out`; `false` at its end.
+    fn fill(&mut self) -> io::Result<bool> {
+        let mut raw = [0; 8 * 1024];
+        let mut have = 0;
+        if let Some(byte) = self.odd.take() {
+            raw[0] = byte;
+            have = 1;
+        }
+        let read = loop {
+            match self.inner.read(&mut raw[have..]) {
+                Ok(read) => break read,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        };
+        if read == 0 {
+            return if have > 0 || self.high.is_some() {
+                Err(Self::invalid())
+            } else {
+                Ok(false)
+            };
+        }
+        have += read;
+        if have % 2 == 1 {
+            have -= 1;
+            self.odd = Some(raw[have]);
+        }
+        self.out.clear();
+        self.at = 0;
+        for unit in raw[..have].chunks_exact(2) {
+            let unit = [unit[0], unit[1]];
+            let unit = if self.big_endian {
+                u16::from_be_bytes(unit)
+            } else {
+                u16::from_le_bytes(unit)
+            };
+            let ch = match (self.high.take(), unit) {
+                (None, 0xd800..=0xdbff) => {
+                    self.high = Some(unit);
+                    continue;
+                }
+                (Some(high), 0xdc00..=0xdfff) => {
+                    let code =
+                        0x10000 + ((u32::from(high) - 0xd800) << 10) + (u32::from(unit) - 0xdc00);
+                    char::from_u32(code).ok_or_else(Self::invalid)?
+                }
+                (None, unit) => char::from_u32(u32::from(unit)).ok_or_else(Self::invalid)?,
+                (Some(_), _) => return Err(Self::invalid()),
+            };
+            let mut encoded = [0; 4];
+            self.out
+                .extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
+        }
+        Ok(true)
+    }
+}
+
+impl<R: Read> Read for Utf16Text<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        while self.at == self.out.len() {
+            if !self.fill()? {
+                return Ok(0);
+            }
+        }
+        let n = buf.len().min(self.out.len() - self.at);
+        buf[..n].copy_from_slice(&self.out[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
 /// The dash operand: standard input where a screen is read, standard
 /// output where one is written (`render --out -`, #469). One constant,
 /// because it is one convention — a reader who meets `-` in either
@@ -395,17 +800,23 @@ const STDIN: &str = "-";
 /// What a diagnostic calls it, since `-: ...` reads as a stray flag.
 const STDIN_NAME: &str = "<stdin>";
 
-/// The most `diff` and `render` read of one input, in bytes (#653). Without
-/// a bound, `render --text /dev/zero` or `yes | render --text -` grew until
-/// the allocator or the OOM killer stopped it.
+/// The most `diff` and `render` read of an input in the text format, in
+/// bytes (#653). Without a bound, `render --text /dev/zero` or `yes |
+/// render --text -` grew until the allocator or the OOM killer stopped it.
 ///
-/// A saved screen has a ceiling of its own — at most 1000x1000 cells since
-/// #583 — but the bound has to sit above the largest file termlens itself
-/// writes, or a release would refuse its own output: a 1000x1000 screen with
-/// every cell differently styled and carrying combining marks is about
-/// 80 MB in the text format and about 600 MB as the pretty-printed JSON
-/// `render --json` writes. 1 GiB clears that with room for a JSON writer
-/// that indents more.
+/// The text format holds a grid and nothing else, at most 1000x1000 cells
+/// since #583, so the bound can sit above the largest such file termlens
+/// writes and refuse nothing a release wrote: 1000x1000 cells, each as full
+/// as vt100 fills one (21 bytes) and styled unlike its neighbours with every
+/// token a `styles:` span carries, come to about 110 MB.
+///
+/// JSON has no such ceiling and is not held to this (#777). Its history
+/// grows with `scrollback(n)` and its images with `capture_graphics(n)`,
+/// neither bounded: 50,000 rows of styled history on 120x40 are 1.25 GiB of
+/// the compact JSON `TERMLENS_ARTIFACT_DIR` writes, which the 1 GiB bound
+/// once held to both formats refused. JSON is parsed as it is read instead
+/// ([`read_json`]), holding what the file declares (#713, #778) rather than
+/// the file.
 const MAX_INPUT: usize = 1 << 30;
 
 /// Read all of `reader`, or `None` once it holds more than `limit` bytes
@@ -593,7 +1004,7 @@ fn diff(args: &[String]) -> ExitCode {
     // is read, so `diff - missing.snap` does not wait either; the two are
     // then read in argument order all the same.
     let right = if a.as_str() == STDIN {
-        match open(b) {
+        match open(b, MAX_INPUT) {
             Ok(source) => Some(source),
             Err(e) => return fail(&e),
         }
@@ -604,7 +1015,7 @@ fn diff(args: &[String]) -> ExitCode {
         Ok(screen) => screen,
         Err(e) => return fail(&e),
     };
-    let after = match right.map_or_else(|| load(b), read) {
+    let after = match right.map_or_else(|| load(b), |source| read(source, MAX_INPUT)) {
         Ok(screen) => screen,
         Err(e) => return fail(&e),
     };
@@ -618,11 +1029,14 @@ fn diff(args: &[String]) -> ExitCode {
     // plain one already ends its last line, "no difference" and the
     // coloured one do not. Adding one regardless left a blank line after
     // every plain diff, in a pipe and in the report action's summary (#652).
-    let code = if rendered.ends_with('\n') {
-        print(&rendered)
-    } else {
-        print(&format!("{rendered}\n"))
-    };
+    let code = emit(|out| {
+        out.write_all(rendered.as_bytes())?;
+        if rendered.ends_with('\n') {
+            Ok(())
+        } else {
+            out.write_all(b"\n")
+        }
+    });
     if code != ExitCode::SUCCESS {
         return code;
     }
@@ -693,7 +1107,9 @@ fn colored(before: &Screen, after: &Screen, diff: &ScreenDiff) -> String {
     for row in changed_rows {
         // The row's cells in the overlap, each as `(text, changed)`. A wide
         // character whose second column falls past the overlap does not fit
-        // in it and is one blank, as in the plain rendering.
+        // in it and is one blank, as in the plain rendering — and so is one
+        // with no second column at all, stranded by a resize in a file
+        // 0.11.6 or earlier wrote (#781).
         let cells = |screen: &Screen| -> Vec<(String, bool)> {
             let mut cells = Vec::new();
             for col in 0..cols {
@@ -703,7 +1119,12 @@ fn colored(before: &Screen, after: &Screen, diff: &ScreenDiff) -> String {
                 if cell.is_wide_continuation() {
                     continue;
                 }
-                let text = if cell.contents().is_empty() || (cell.is_wide() && col + 1 >= cols) {
+                let stranded = cell.is_wide()
+                    && (col + 1 >= cols
+                        || !screen
+                            .cell(row, col + 1)
+                            .is_some_and(termlens::Cell::is_wide_continuation));
+                let text = if cell.contents().is_empty() || stranded {
                     " "
                 } else {
                     cell.contents()
@@ -827,30 +1248,44 @@ fn render(args: &[String]) -> ExitCode {
         Ok(screen) => screen,
         Err(e) => return fail(&e),
     };
-    let out = match format {
-        "--svg" => screen.to_svg(),
-        "--html" => screen.to_html(),
-        "--ansi" => screen.to_ansi(),
-        // Pretty-printed and newline-terminated, the shape the corpus
-        // commits: a saved screen a human diffs, and one `load` reads back.
-        "--json" => match serde_json::to_string_pretty(&screen) {
-            Ok(json) => format!("{json}\n"),
-            Err(e) => return fail(&format!("writing the JSON failed: {e}")),
-        },
-        _ => format!("{}\n", screen.with_styles()),
+    // Each rendering is written as it is made (#777): the text and the JSON
+    // straight to the output, through a buffer, and the SVG, HTML and ANSI
+    // from the one string the library makes of each.
+    let write = |out: &mut dyn Write| -> io::Result<()> {
+        match format {
+            "--svg" => out.write_all(screen.to_svg().as_bytes()),
+            "--html" => out.write_all(screen.to_html().as_bytes()),
+            "--ansi" => out.write_all(screen.to_ansi().as_bytes()),
+            // Pretty-printed and newline-terminated, the shape the corpus
+            // commits: a saved screen a human diffs, and one `load` reads
+            // back.
+            "--json" => {
+                serde_json::to_writer_pretty(&mut *out, &screen)?;
+                out.write_all(b"\n")
+            }
+            _ => writeln!(out, "{}", screen.with_styles()),
+        }
     };
     // The file is created here, after the screen parsed, and not before
     // (#313): `termlens render … > out.svg` truncates out.svg in the shell
     // before the process runs, so a failing render leaves an empty file
-    // behind. --out cannot, because nothing is opened until there are bytes.
-    // `--out -` is stdout, the same stream every other `-` operand already
-    // is (#469). Treating it as a filename wrote `./-` and printed nothing.
+    // behind. --out cannot, because nothing is opened until the screen is
+    // read. `--out -` is stdout, the same stream every other `-` operand
+    // already is (#469). Treating it as a filename wrote `./-` and printed
+    // nothing.
     match out_path {
-        Some(STDIN) | None => print(&out),
-        Some(path) => match std::fs::write(path, &out) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => fail(&format!("{path}: {e}")),
-        },
+        Some(STDIN) | None => emit(write),
+        Some(path) => {
+            let written = std::fs::File::create(path).and_then(|file| {
+                let mut file = io::BufWriter::new(file);
+                write(&mut file)?;
+                file.flush()
+            });
+            match written {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(&format!("{path}: {e}")),
+            }
+        }
     }
 }
 
@@ -1021,6 +1456,26 @@ fn inspect(args: Vec<OsString>) -> ExitCode {
         return usage_error(INSPECT_USAGE);
     };
 
+    // A bare name is looked up on PATH, and the child has one only if this
+    // process does or `--env` gives one: PATH is passed through when the
+    // environment is cleared, and inherited with it under `--inherit-env`.
+    // Without one the builder refuses the name with advice for code that
+    // called `env_clear()` and `.env(…)`, which a user of the CLI never
+    // wrote, so the refusal is made here, naming what that user can do
+    // (#785) — as `--cwd` is checked above, for the same reason (#312).
+    // "Bare" is the builder's own test: no directory part.
+    let bare = Path::new(&program)
+        .parent()
+        .is_none_or(|dir| dir.as_os_str().is_empty());
+    if bare && std::env::var_os("PATH").is_none() && !env.iter().any(|(key, _)| key == "PATH") {
+        return fail(&format!(
+            "`{}` is a bare program name and there is no PATH to find it in, \
+             since termlens has none to pass on, with --inherit-env or without; \
+             give the program's absolute path, or a PATH with --env PATH=DIR",
+            program.to_string_lossy()
+        ));
+    }
+
     let mut builder = Terminal::builder()
         .size(size.0, size.1)
         .timeout(timeout)
@@ -1099,7 +1554,7 @@ fn inspect(args: Vec<OsString>) -> ExitCode {
         Err(termlens::Error::Timeout { .. }) => at_the_deadline.to_owned(),
         Err(e) => format!("--- waiting for the program failed: {e} ---"),
     };
-    let code = print(&format!("{}\n", inspect_render(&t.screen(), ansi)));
+    let code = emit(|out| writeln!(out, "{}", inspect_render(&t.screen(), ansi)));
     // The trailer is what inspect reports about the program; if stderr
     // cannot take it, say so with the exit code rather than a panic (#594).
     if report(&trailer).is_err() {
@@ -1110,7 +1565,13 @@ fn inspect(args: Vec<OsString>) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode, read_bounded, NotText};
+    use std::io::Read as _;
+
+    use super::{
+        decode, json_body, open, read, read_bounded, Encoding, Head, JsonText, NotText, Source,
+        Utf16Text, MAX_DEPTH, MAX_STRING,
+    };
+    use termlens::Screen;
 
     /// `text` as UTF-16 behind its byte-order mark.
     fn utf16(text: &str, big_endian: bool) -> Vec<u8> {
@@ -1157,6 +1618,20 @@ mod tests {
         assert_eq!(decode(vec![b'a', 0xff], 1 << 20), Err(NotText::Utf8));
         assert_eq!(decode(Vec::new(), 1 << 20).as_deref(), Ok(""));
         assert_eq!(decode(vec![0xff, 0xfe], 1 << 20).as_deref(), Ok("\u{feff}"));
+        // UTF-32's marks, little-endian's beginning with UTF-16LE's, are
+        // named and not decoded as something else (#784), from the head
+        // that tells JSON apart too.
+        for mark in [[0xff, 0xfe, 0, 0], [0, 0, 0xfe, 0xff]] {
+            let bytes = [&mark[..], b"s\0\0\0"].concat();
+            assert_eq!(super::encoding(&bytes), Encoding::Utf32);
+            assert_eq!(decode(bytes.clone(), 1 << 20), Err(NotText::Utf32));
+            let head = Head { bytes, ended: true };
+            assert_eq!(head.json(), None);
+        }
+        assert_eq!(
+            super::encoding(&[0xff, 0xfe, b's', 0]),
+            Encoding::Utf16 { big_endian: false }
+        );
     }
 
     /// Half a code unit, or a surrogate without its other half, is not
@@ -1240,5 +1715,237 @@ mod tests {
         assert!(empty.is_empty());
         let small = read_bounded(&b"size"[..], 4, limit).unwrap().unwrap();
         assert_eq!(small, b"size");
+    }
+
+    /// A saved screen's JSON, pretty as `render --json` writes it.
+    fn screen_json() -> String {
+        let screen = Screen::parse("size: 6x2  cursor: 1,2\nab 汉\ncd").expect("a screen");
+        serde_json::to_string_pretty(&screen).expect("the JSON")
+    }
+
+    /// An in-memory operand for [`read`], handed out `chunk` bytes a read.
+    fn source(bytes: Vec<u8>, chunk: usize) -> Source<'static> {
+        struct Owned {
+            data: Vec<u8>,
+            at: usize,
+            chunk: usize,
+        }
+        impl std::io::Read for Owned {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                let n = (self.data.len() - self.at).min(self.chunk).min(out.len());
+                out[..n].copy_from_slice(&self.data[self.at..self.at + n]);
+                self.at += n;
+                Ok(n)
+            }
+        }
+        Source {
+            name: "t",
+            input: Box::new(Owned {
+                data: bytes,
+                at: 0,
+                chunk,
+            }),
+            len: 0,
+            head: None,
+        }
+    }
+
+    /// JSON is told from the text format by its head, past a byte-order
+    /// mark, an insta header (CRLF or not) and the newlines after it, and
+    /// is handed to the parser from there: the whitespace left is the
+    /// parser's to judge, so a no-break space is passed on and refused
+    /// there. A head that ends before the answer is known says nothing,
+    /// and is read as the text format is (#777).
+    #[test]
+    fn json_is_told_from_its_head() {
+        assert_eq!(json_body("{\"format\":1}", true), Some(0));
+        assert_eq!(json_body("\u{feff}\n\n {}", true), Some(5));
+        assert_eq!(json_body(" \t\r\n{}", true), Some(0));
+        assert_eq!(json_body("\u{a0}{}", true), Some(0));
+        let snap = "---\nsource: tests/a.rs\nexpression: screen\n---\n{}";
+        assert_eq!(json_body(snap, true), Some(snap.len() - 2));
+        let crlf = "---\r\nsource: a\r\n---x\r\n---\r\n\r\n{}";
+        assert_eq!(json_body(crlf, true), Some(crlf.len() - 4));
+        assert_eq!(json_body("size: 2x1  cursor: 0,0\n{}", true), None);
+        assert_eq!(
+            json_body("---\n{}", true),
+            None,
+            "a header that never closes"
+        );
+        // Undecided: the head ends inside the header, or in whitespace.
+        assert_eq!(json_body("---\nsource: a\n", false), None);
+        assert_eq!(json_body("\n\n  ", false), None);
+        assert_eq!(json_body("\n\n  {", false), Some(2));
+
+        let head = |bytes: &[u8]| Head {
+            bytes: bytes.to_vec(),
+            ended: true,
+        };
+        assert_eq!(head(b"{}").json(), Some((Encoding::Utf8, 0)));
+        assert_eq!(head(b"\xef\xbb\xbf{}").json(), Some((Encoding::Utf8, 3)));
+        assert_eq!(
+            head(&utf16("\n{}", false)).json(),
+            Some((Encoding::Utf16 { big_endian: false }, 4))
+        );
+        assert_eq!(
+            head(&utf16("{}", true)).json(),
+            Some((Encoding::Utf16 { big_endian: true }, 3))
+        );
+        assert_eq!(head(b"size: 1x1  cursor: 0,0\nx").json(), None);
+        // Bytes that are not UTF-8 before a document: not JSON by its head,
+        // and read whole, where the text reading names them.
+        assert_eq!(head(b"\xff\n{}").json(), None);
+    }
+
+    /// The text format is held to the limit and JSON is not (#777): a
+    /// document ten times the limit reads, from a pipe a few bytes at a
+    /// time as from a file, and a text-format input one byte past it is
+    /// refused. A regular file in the text format is refused by its length
+    /// before it is read; a JSON one past the limit is not.
+    #[test]
+    fn json_is_not_held_to_the_text_limit() {
+        let limit = 16 * 1024;
+        let json = screen_json();
+        assert!(json.len() < limit);
+        let padded = format!("{json}{}", " \n".repeat(5 * limit));
+        let expected = Screen::parse("size: 6x2  cursor: 1,2\nab 汉\ncd").unwrap();
+        for chunk in [1, 7, 4096] {
+            let screen = read(source(padded.clone().into_bytes(), chunk), limit)
+                .expect("JSON past the limit reads");
+            assert_eq!(screen, expected, "chunk {chunk}");
+            let marked = [&[0xef, 0xbb, 0xbf][..], padded.as_bytes()].concat();
+            assert_eq!(read(source(marked, chunk), limit), Ok(expected.clone()));
+            let wide = utf16(&padded, chunk % 2 == 0);
+            assert_eq!(read(source(wide, chunk), limit), Ok(expected.clone()));
+        }
+
+        let text = format!("size: 6x2  cursor: 1,2\nab 汉\ncd\n{}", "\n".repeat(limit));
+        assert_eq!(
+            read(source(text.clone().into_bytes(), 7), limit).unwrap_err(),
+            "t: larger than 16384 bytes, which no screen in the text format is"
+        );
+        let fits = &text[..limit];
+        assert!(read(source(fits.as_bytes().to_vec(), 7), limit).is_ok());
+
+        let dir = std::env::temp_dir().join(format!("termlens-unit-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (big_text, big_json) = (dir.join("big.txt"), dir.join("big.json"));
+        std::fs::write(&big_text, &text).unwrap();
+        std::fs::write(&big_json, &padded).unwrap();
+        let path = big_text.to_str().unwrap();
+        let refused = open(path, limit).err().expect("refused by its length");
+        assert_eq!(
+            refused,
+            format!("{path}: larger than 16384 bytes, which no screen in the text format is")
+        );
+        let source = open(big_json.to_str().unwrap(), limit).expect("JSON opens");
+        assert_eq!(read(source, limit), Ok(expected));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Run `input` through [`JsonText`] to its end.
+    fn pass(input: &[u8]) -> std::io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        JsonText::new(input).read_to_end(&mut out).map(|_| out)
+    }
+
+    /// The parser's buffers are bounded whatever the input's length
+    /// (#777): a string is passed to [`MAX_STRING`] bytes and refused a
+    /// byte past it, escapes counted and an escaped quote not ending it,
+    /// and nesting is passed to [`MAX_DEPTH`] and refused a level past.
+    /// Bytes outside strings — whitespace, numbers — are not counted.
+    #[test]
+    fn json_text_bounds_strings_and_nesting() {
+        let string = |len: usize| format!("{{\"title\":\"{}\"}}", "a".repeat(len));
+        assert_eq!(
+            pass(string(MAX_STRING).as_bytes()).unwrap().len(),
+            MAX_STRING + 12
+        );
+        let err = pass(string(MAX_STRING + 1).as_bytes()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "a string in the JSON runs past 1 MiB, longer than any a saved screen holds"
+        );
+        let escaped = format!("\"{}\\\"\"", "a".repeat(MAX_STRING - 2));
+        assert!(
+            pass(escaped.as_bytes()).is_ok(),
+            "the escape is two bytes of the string"
+        );
+        let escaped = format!("\"{}\\\"a\"", "a".repeat(MAX_STRING - 2));
+        assert!(
+            pass(escaped.as_bytes()).is_err(),
+            "and the quote it escapes does not end it"
+        );
+        let many = "\"aaaa\",".repeat(MAX_STRING);
+        assert!(
+            pass(format!("[{many}\"\"]").as_bytes()).is_ok(),
+            "each string counts alone"
+        );
+        let outside = format!("[{}0]", " ".repeat(3 * MAX_STRING));
+        assert!(pass(outside.as_bytes()).is_ok());
+
+        let nested = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        assert!(pass(nested(MAX_DEPTH).as_bytes()).is_ok());
+        let err = pass(nested(MAX_DEPTH + 1).as_bytes()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "the JSON nests deeper than 128, which no saved screen does"
+        );
+        assert!(
+            pass(format!("\"{}\"", "[".repeat(1000)).as_bytes()).is_ok(),
+            "inside a string"
+        );
+
+        // Through `read`, a refusal is named as what it is, not as a screen
+        // that does not parse; the parser adds where it stopped.
+        let long = format!("{{\"title\":\"{}\"}}", "a".repeat(MAX_STRING + 1));
+        let err = read(source(long.into_bytes(), 4096), 1 << 30).unwrap_err();
+        assert!(
+            err.starts_with(
+                "t: a string in the JSON runs past 1 MiB, longer than any a saved screen holds"
+            ),
+            "{err}"
+        );
+    }
+
+    /// UTF-16 streams as the UTF-8 it reads as, a surrogate pair or a code
+    /// unit split across reads included, and half a unit or a lone
+    /// surrogate is the error [`decode`] gives it (#716, #777).
+    #[test]
+    fn utf16_text_streams_as_utf8() {
+        let text = "{\"汉字\": \"\u{1f600} ok\"}";
+        for big_endian in [false, true] {
+            let bytes = utf16(text, big_endian);
+            for chunk in [1, 2, 3, 5, 4096] {
+                let mut out = Vec::new();
+                let mut reader =
+                    Utf16Text::new(super::tests::source(bytes.clone(), chunk).input, big_endian);
+                reader.read_to_end(&mut out).expect("valid UTF-16");
+                assert_eq!(
+                    String::from_utf8(out).unwrap(),
+                    format!("\u{feff}{text}"),
+                    "big-endian {big_endian}, chunk {chunk}"
+                );
+            }
+        }
+        let mut odd = utf16("ok", false);
+        odd.push(b'!');
+        let mut lone = utf16("ok", false);
+        lone.extend([0x3d, 0xd8, b'!', 0]);
+        let mut unpaired = utf16("ok", false);
+        unpaired.extend([0x3d, 0xd8]);
+        for bytes in [odd, lone, unpaired] {
+            let err = Utf16Text::new(&bytes[..], false)
+                .read_to_end(&mut Vec::new())
+                .unwrap_err();
+            assert_eq!(err.to_string(), "stream did not contain valid UTF-16");
+        }
+        // A JSON document is refused in the words a text one is.
+        let mut json = utf16(&screen_json(), false);
+        json.extend([0x3d, 0xd8]);
+        assert_eq!(
+            read(source(json, 4096), 1 << 30),
+            Err("t: stream did not contain valid UTF-16".into())
+        );
     }
 }

@@ -46,17 +46,18 @@ holds it to that; the six shapes cannot, because the writer no longer
 produces the column. It is JSON only: the text format drops a hidden
 cursor's position, so only the JSON ever carried the column.
 
-Three more files sit outside the six shapes, each with its JSON twin, for
-shapes the text reader refused until #643 or #683. Both were written by the
-**published** release (a scratch crate on `termlens = "=<version>"` from
-crates.io, its lockfile resolving vt100 0.16), and `tests/compat.rs` names
-them in `EXTRA_SHAPES`:
+Four more files sit outside the six shapes, each with its JSON twin, for
+shapes the text reader refused until #643 or #683, or read as another
+picture until #782. Each was written by the **published** release (a
+scratch crate on `termlens = "=<version>"` from crates.io, its lockfile
+resolving vt100 0.16), and `tests/compat.rs` names them in `EXTRA_SHAPES`:
 
 | file | what it pins |
 | --- | --- |
 | `0.11.1/pending-wrap-visible` | `printf '\r\nabcdef'` on 6x2: the visible cursor at `1,6`, one past the last column, in the text header. It reads clamped onto `1,5`, as the JSON reader clamps it |
 | `0.11.6/stranded-wide` | `printf 'abcd東xy\r\nABC東'` on 8x3, then `resize(5, 3)`: `東` left wide in the last column with no continuation cell (DESIGN §3's truncation case). It reads as that cell and renders back byte for byte |
 | `0.11.6/stranded-wide-redrawn` | `printf 'abcd東xyz'` on 8x2, `resize(5, 2)`, `resize(8, 2)`, then `printf '\033[1;6HZyw'`: the stranded `東` left before `Zyw`, which fills the row to the edge (#683). It reads with `東` as the one-column cell its JSON twin has, and renders back byte for byte |
+| `0.11.6/notleftmost-styled` | `printf '東\033[31mabc\033[0m東x'` on 8x2, `resize(6, 2)`, `resize(8, 2)`, then `printf '\033[1;7HZy\033[1;5H'`: the row's *second* `東` stranded before `Zy`, a red span on `abc` and the cursor on the `c`. Until #782 the reader stranded the first `東`, in column 0, and read the cells, the span and the cursor a column left of the twin; it reads as its JSON twin, and renders back byte for byte |
 
 One pair sits outside `EXTRA_SHAPES` because its twins do not show one
 picture, and the extra shapes are held to showing one:
@@ -69,3 +70,17 @@ two tests in `tests/compat.rs` (`VS16_BEFORE_0_11_7`) pin that reading: the text
 renders back byte for byte, every cell after the emoji sits a column
 right, the `styles:` span and the cursor keep their columns, and the
 diff against the JSON twin is that row and nothing else.
+
+`0.11.6/rewiden-noredraw` is a second such pair, written the same way:
+`printf 'abcd東xyz'` on 8x2, `resize(5, 2)`, then `resize(8, 2)` with
+nothing redrawn, so 0.11.6 held `東` stranded in column 4 before a blank,
+which its JSON twin records. The text is the same bytes as a whole `東`,
+which fits, and the reader takes it whole (#782). Its two tests
+(`REWIDENED_BEFORE_0_11_7`) pin that reading and that the twins differ in
+that one cell, column 5, and nowhere else.
+
+The four files of `notleftmost-styled` and `rewiden-noredraw` were
+written on 2026-11-17 by such a scratch crate, which wrote
+`with_styles()` and the pretty JSON with no final newline; one was added
+when they were placed here, as every file here ends in one, and nothing
+else differs.
