@@ -1229,6 +1229,10 @@ impl Emulator for Vt100Emulator {
         self.tracker.in_sync_update()
     }
 
+    fn printed(&self) -> u64 {
+        self.tracker.printed_count()
+    }
+
     fn input_modes(&self) -> InputModes {
         let screen = self.parser.screen();
         InputModes {

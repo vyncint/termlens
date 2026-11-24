@@ -144,7 +144,7 @@ returns either the thing you asked for or a timeout carrying the screen.
 | `wait_frame(pred)` | a **complete** DEC 2026 frame satisfies `pred`; returns that frame, and each call sees a frame no earlier call did | the application brackets repaints in synchronized updates (crossterm's `BeginSynchronizedUpdate`) |
 | `snapshot_after(pred)` | `pred` holds and the picture has then held still; returns that screen | a whole-screen snapshot — what `assert_screen_snapshot!` uses |
 | `wait_stable(quiet)` | no cell, cursor or size change for `quiet`; returns the screen | settling after a resize, or without a predicate |
-| `resize_and_wait(cols, rows, pred)` | after the resize, `pred` holds on output read since; returns that screen | a resize: on Linux and macOS the old screen, still on the grid at the new size, cannot satisfy it; on Windows ConPTY repaints it after the resize, so name what only the new layout has |
+| `resize_and_wait(cols, rows, pred)` | after the resize, the application has drawn (a printable character, or a changed cell) and `pred` holds; returns that screen | a resize: on Linux and macOS the old screen, still on the grid at the new size, cannot satisfy it, and output that draws nothing (a cursor hide, a query) does not count; on Windows ConPTY repaints the old screen after the resize, so name what only the new layout has |
 | `wait_idle(quiet)` | no **bytes** for `quiet`, not mid-sequence, no update open | output silence is itself the fact; a heuristic, and documented as one |
 | `wait_exit()` | the process ended; returns its `ExitStatus` | the end of every test |
 

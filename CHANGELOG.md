@@ -42,16 +42,21 @@ reads that marker.
   produced a hover before. (#789)
 - `Terminal::resize_and_wait(cols, rows, predicate)` and
   `resize_and_wait_for(cols, rows, predicate, timeout)` resize, then wait
-  until the predicate holds on output read after the resize, and return
-  that screen. `resize` gives the grid the new size at once and keeps the
-  old content until the application repaints, so
+  until the predicate holds once the application has drawn after the
+  resize, and return that screen. `resize` gives the grid the new size at
+  once and keeps the old content until the application repaints, so
   `wait_until(|s| s.contains("ready"))` after `resize(100, 30)` returned at
   once on a screen still reading `size 80x24 ready`; outside suites wrote
-  the same helper to avoid it. A resize to the size the grid has reaches
+  the same helper to avoid it. Drawn means a printable character written,
+  a repaint of exactly what was there included, or a cell whose text or
+  style changed, a clear included; output that draws nothing, a cursor
+  hidden, a mode set, a query, does not count, since the old frame is
+  still on the grid after it. A resize to the size the grid has reaches
   no one, and the screen as it is answers. A timeout says when nothing was
-  read after the resize at all. Output read after the resize can still be
-  the old layout where an application paints on its own. On Windows
-  ConPTY repaints the screen itself after a resize, measured, so a
+  read after the resize at all, or when what was read drew nothing. What
+  is drawn after the resize can still be the old layout where an
+  application paints on its own. On Windows ConPTY repaints the screen
+  itself after a resize, with the text from before it, measured, so a
   predicate the old content satisfies can pass with nothing drawn by the
   application: there the predicate must name something only the new
   layout has. (#788)

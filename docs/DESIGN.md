@@ -588,19 +588,27 @@ the grid already has is a no-op, and the frame the application last drew
 is still the current truth.
 
 `resize_and_wait(cols, rows, pred)` is the resize and the wait in one call,
-for any application: its predicate is asked only about screens that output
-read after the resize produced, so on Linux and macOS the stale frame cannot
-satisfy it. The read count it compares against is taken under the lock that
-resizes, as the frame cursor is, so no read falls between the two (#788).
-After a no-op resize the screen as it is answers, as for `wait_frame`. It
-does not make the rule above optional. Output read after the resize is not
-always drawn for it: an application that paints on its own can paint the old
-layout before it handles `SIGWINCH`.
+for any application: its predicate is asked only once the application has
+drawn on the grid after the resize — written a printable character, a
+repaint of exactly what was there included, or changed a cell's text or
+style, a clear included — so on Linux and macOS the stale frame cannot
+satisfy it. A read is not enough. Output that draws nothing, a cursor hidden,
+a mode set, a query, the start of a synchronized update, leaves the stale
+frame on the grid: asked after any read, the predicate passed on that frame
+whenever an application hid its cursor or asked where it was before it
+repainted (#788). The counts it compares against, of reads and of printed
+characters, and the grid the resize left are taken under the lock that
+resizes, as the frame cursor is, so no read falls between them. After a
+no-op resize the screen as it is answers, as for `wait_frame`. It does not
+make the rule above optional. A repaint read half drawn can leave old text
+below the rows drawn so far, and what is drawn after the resize is not always
+drawn for it: an application that paints on its own can paint the old layout
+before it handles `SIGWINCH`.
 
-On Windows the stale frame comes back as output. ConPTY repaints the screen
-itself after a resize, so output arrives even when the application draws
-nothing, and a predicate the content from before the resize satisfies passes
-on that repaint. Measured on `windows-latest` (run 45393517904): a program
+On Windows the stale frame comes back as output that draws. ConPTY repaints
+the screen itself after a resize, with the text from before it, so output
+arrives even when the application draws nothing, and a predicate the content
+from before the resize satisfies passes on that repaint. Measured on `windows-latest` (run 45393517904): a program
 that ignores the resize satisfied `contains("READY")` with the text it had
 drawn before it, where Linux and macOS time out. ConPTY also applies the
 resize on a thread of its own and lays out what it relays at the old width

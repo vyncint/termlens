@@ -846,9 +846,17 @@ impl Screen {
     /// state — bells, repaints, the title — none of which is a picture.
     /// This is what `wait_stable` watches.
     pub(crate) fn same_picture(&self, other: &Screen) -> bool {
+        same_cursor(self.cursor(), other.cursor()) && self.same_cells(other)
+    }
+
+    /// Whether two snapshots hold the same cells: the same size, and every
+    /// cell's text, width and style alike. The cursor is left out, so a
+    /// cursor hidden or moved is no difference here: it draws nothing in a
+    /// cell. This is what `resize_and_wait` compares the grid against the
+    /// one a resize left (#788).
+    pub(crate) fn same_cells(&self, other: &Screen) -> bool {
         self.cols == other.cols
             && self.rows == other.rows
-            && same_cursor(self.cursor(), other.cursor())
             && (Arc::ptr_eq(&self.cells, &other.cells) || self.cells == other.cells)
     }
 

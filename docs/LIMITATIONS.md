@@ -301,17 +301,19 @@ CHANGELOG entry.
   The `windows-latest` leg is a required check. This is decision 1 of
   [STABILITY.md](STABILITY.md).
 - **On Windows, a wait after a resize must name something only the new
-  layout has.** ConPTY repaints the screen itself after a resize, so output
-  arrives even when the program draws nothing, and a predicate the content
-  from before the resize satisfies passes on that repaint. Measured on
-  `windows-latest` (run 45393517904): `resize_and_wait` with
-  `contains("READY")`, against a program that ignores the resize, returned
-  on the text it had drawn before, where Linux and macOS time out. So
-  `resize_and_wait` keeps the old screen from answering only on Linux and
-  macOS; on Windows the predicate has to tell the layouts apart — the size
-  as the program reports it, or text that needs the new width, never
-  `Screen::size`, which is new at once — and the test that pins the
-  timeout is Windows-ignored for it.
+  layout has.** ConPTY repaints the screen itself after a resize, with the
+  text from before it, so output that draws arrives even when the program
+  draws nothing, and a predicate the content from before the resize
+  satisfies passes on that repaint. Measured on `windows-latest` (run
+  45393517904): `resize_and_wait` with `contains("READY")`, against a
+  program that ignores the resize, returned on the text it had drawn
+  before, where Linux and macOS time out. So `resize_and_wait` keeps the
+  old screen from answering only on Linux and macOS; on Windows the
+  predicate has to tell the layouts apart — the size as the program
+  reports it, or text that needs the new width, never `Screen::size`,
+  which is new at once — and the tests that pin it on Linux and macOS (the
+  two timeouts, and a cursor hide or a query ahead of the repaint) are
+  Windows-ignored for it.
 - **`termlens inspect` on Windows learns of an exit from the reap, not the
   terminal.** ConPTY never reports the terminal closing, so a program that
   has just exited ends inspect's wait by the silence window rather than an

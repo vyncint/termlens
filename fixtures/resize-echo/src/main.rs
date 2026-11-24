@@ -8,10 +8,26 @@
 //! last, so that line is on the screen before a resize and again once the
 //! repaint is complete, and on no screen in between. That is what lets
 //! `resize_and_wait`'s test wait on it and know which of the two it got.
+//!
+//! `--on-resize WHAT` changes what a resize draws, for the tests of what
+//! `resize_and_wait` counts as the application having drawn (#788):
+//!
+//! - `hide-first`: hide the cursor, in a write of its own, then pause, then
+//!   repaint as usual: output that draws nothing, read ahead of the repaint;
+//! - `query-first`: ask where the cursor is and read the answer, then pause,
+//!   then repaint as usual;
+//! - `hide-only`: hide the cursor and draw nothing at all;
+//! - `same`: write `press q to quit` again where it already is, and nothing
+//!   else, so the repaint leaves every cell as it was;
+//! - `clear-only`: clear the screen and draw nothing else.
+//!
+//! The pause is what keeps the first write in a read of its own, as a real
+//! application's would be whenever it did any work between the two.
 
 use std::io::{self, Write};
+use std::time::Duration;
 
-use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::cursor::{self, Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::style::Print;
 use crossterm::terminal::{
@@ -19,6 +35,20 @@ use crossterm::terminal::{
     LeaveAlternateScreen,
 };
 use crossterm::{execute, queue};
+
+/// Long enough that the harness has read the first write before the
+/// repaint is written, on a loaded machine too.
+const PAUSE: Duration = Duration::from_millis(200);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnResize {
+    Redraw,
+    HideFirst,
+    QueryFirst,
+    HideOnly,
+    Same,
+    ClearOnly,
+}
 
 fn draw(out: &mut impl Write, cols: u16, rows: u16) -> io::Result<()> {
     queue!(
@@ -32,7 +62,51 @@ fn draw(out: &mut impl Write, cols: u16, rows: u16) -> io::Result<()> {
     out.flush()
 }
 
+fn on_resize(out: &mut impl Write, what: OnResize, cols: u16, rows: u16) -> io::Result<()> {
+    match what {
+        OnResize::Redraw => draw(out, cols, rows),
+        OnResize::HideFirst => {
+            execute!(out, Hide)?;
+            std::thread::sleep(PAUSE);
+            draw(out, cols, rows)
+        }
+        OnResize::QueryFirst => {
+            cursor::position()?;
+            std::thread::sleep(PAUSE);
+            draw(out, cols, rows)
+        }
+        OnResize::HideOnly => execute!(out, Hide),
+        OnResize::Same => {
+            queue!(out, MoveTo(0, 1), Print("press q to quit"))?;
+            out.flush()
+        }
+        OnResize::ClearOnly => execute!(out, Clear(ClearType::All)),
+    }
+}
+
+fn parse_args() -> io::Result<OnResize> {
+    let mut args = std::env::args().skip(1);
+    let mut what = OnResize::Redraw;
+    while let Some(arg) = args.next() {
+        if arg != "--on-resize" {
+            return Err(io::Error::other(format!("unknown argument {arg:?}")));
+        }
+        what = match args.next().as_deref() {
+            Some("hide-first") => OnResize::HideFirst,
+            Some("query-first") => OnResize::QueryFirst,
+            Some("hide-only") => OnResize::HideOnly,
+            Some("same") => OnResize::Same,
+            Some("clear-only") => OnResize::ClearOnly,
+            other => {
+                return Err(io::Error::other(format!("unknown --on-resize {other:?}")));
+            }
+        };
+    }
+    Ok(what)
+}
+
 fn main() -> io::Result<()> {
+    let what = parse_args()?;
     enable_raw_mode()?;
     let mut out = io::stdout();
     execute!(out, EnterAlternateScreen, Hide)?;
@@ -49,7 +123,7 @@ fn main() -> io::Result<()> {
 
     loop {
         match event::read()? {
-            Event::Resize(cols, rows) => draw(&mut out, cols, rows)?,
+            Event::Resize(cols, rows) => on_resize(&mut out, what, cols, rows)?,
             Event::Key(key)
                 if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') =>
             {

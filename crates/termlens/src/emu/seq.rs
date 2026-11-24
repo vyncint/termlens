@@ -937,6 +937,11 @@ pub(crate) struct SeqTracker {
     /// the Begin, read by the End — so it measures what one repaint drew,
     /// which is the other half of "did this repaint get more expensive?".
     frame_printable: u32,
+    /// Printable characters written since the tracker was made, counted as
+    /// `frame_printable` is and never reset, not even by `RIS`: a wait after
+    /// a resize compares two readings of it to learn whether the application
+    /// drew anything in between, an identical repaint included (#788).
+    printed_count: u64,
     /// True while the application has focus reporting (mode 1004) enabled.
     /// Tracked here because vt100 does not model 1004 at all — the same
     /// reason the window title is tracked here.
@@ -1109,6 +1114,7 @@ impl SeqTracker {
             upload_ask: None,
             capture,
             frame_printable: 0,
+            printed_count: 0,
             focus_events: false,
             mouse_tracking: 0,
             mouse_protocol: MouseMode::None,
@@ -1480,6 +1486,11 @@ impl SeqTracker {
     /// for the next one.
     pub(crate) fn take_frame_printable(&mut self) -> u32 {
         std::mem::replace(&mut self.frame_printable, 0)
+    }
+
+    /// Printable characters written since the tracker was made.
+    pub(crate) fn printed_count(&self) -> u64 {
+        self.printed_count
     }
 
     /// Whether `b` is the body of an OSC string past [`OSC_CAPTURE_MAX`],
@@ -2663,6 +2674,7 @@ impl SeqTracker {
                     // printable.
                     if printable && self.utf8_remaining == 0 {
                         self.frame_printable = self.frame_printable.saturating_add(1);
+                        self.printed_count = self.printed_count.saturating_add(1);
                     }
                     // Text written inside an `OSC 8` span is that link's
                     // label. Bytes rather than characters here, so a
@@ -4705,6 +4717,32 @@ mod tests {
         // A fresh update after the reset counts only what it draws.
         t.feed(b"\x1b[?2026hab");
         assert_eq!(t.take_frame_printable(), 2);
+    }
+
+    /// The running count `resize_and_wait` reads (#788) counts what the
+    /// frame count counts, a character once however many bytes it takes,
+    /// and only grows: a reset does not take it back, so two readings
+    /// always say whether anything was printed between them.
+    #[test]
+    fn the_printed_count_counts_characters_and_only_grows() {
+        // A cursor hide, an update begun, a position query, a title: none
+        // prints anything.
+        let mut t = fed(b"\x1b[?25l\x1b[?2026h\x1b[6n\x1b]0;title\x07");
+        assert_eq!(t.printed_count(), 0);
+        t.feed("ab\u{6f22}".as_bytes());
+        assert_eq!(
+            t.printed_count(),
+            3,
+            "two ASCII and one three-byte character"
+        );
+        t.feed(b"\x1bc");
+        assert_eq!(
+            t.printed_count(),
+            3,
+            "RIS prints nothing and resets nothing here"
+        );
+        t.feed(b"x");
+        assert_eq!(t.printed_count(), 4);
     }
 
     /// The three spellings vt100 reads as "erase the saved lines" are all
