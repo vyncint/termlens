@@ -24,6 +24,18 @@ reads that marker.
   kitty keyboard pop that crossterm sends (`CSI < 1 u`) was listed as
   `^[[1<u`, which is not a sequence; it is now `^[[<1u`. A test that pins
   the old spelling needs the new one. (#759)
+- `termlens render` and `diff` read a JSON saved screen of any length, as
+  termlens writes them. They refused every input past 1 GiB as larger
+  than any saved screen (#653), but JSON is not bounded by its grid: its
+  history and images grow with `scrollback(n)` and `capture_graphics(n)`,
+  and 50,000 rows of styled history on 120x40 came to 1.25 GiB of the
+  compact JSON `TERMLENS_ARTIFACT_DIR` writes, which `render` refused with
+  exit 2. JSON is now parsed as it is read, holding memory for the screen
+  and history it declares (#778) rather than for the file; its strings and
+  its nesting are held to what a saved screen has. Only the text format,
+  which holds a grid alone and is at most about 110 MB, is still held to
+  1 GiB, and the refusal says so: a script that matched `which no saved
+  screen is` needs `which no screen in the text format is`. (#777)
 
 ### Fixed
 

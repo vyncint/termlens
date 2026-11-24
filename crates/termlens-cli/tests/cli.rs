@@ -2630,9 +2630,10 @@ fn diff_output_ends_with_exactly_one_newline() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `diff` and `render` refuse an input past their 1 GiB bound (#653). A
-/// regular file says how long it is, so a sparse one past the bound — no
-/// disk, no memory — is refused before a byte is read.
+/// `diff` and `render` refuse an input in the text format past their 1 GiB
+/// bound (#653). A regular file says how long it is, so a sparse one past
+/// the bound — no disk, no memory — is refused once its first bytes say it
+/// is not JSON, before the rest is read. JSON has no such bound (#777).
 #[test]
 fn render_and_diff_refuse_a_file_past_the_size_bound() {
     let dir = std::env::temp_dir().join(format!("termlens-size-bound-{}", std::process::id()));
@@ -2653,7 +2654,7 @@ fn render_and_diff_refuse_a_file_past_the_size_bound() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(
             stderr,
-            format!("termlens: {big}: larger than 1 GiB, which no saved screen is\n"),
+            format!("termlens: {big}: larger than 1 GiB, which no screen in the text format is\n"),
             "{args:?}"
         );
     }
@@ -2697,20 +2698,20 @@ fn render_and_diff_refuse_a_stream_past_the_size_bound() {
         let out = capped(args, stdin);
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
-            format!("termlens: {name}: larger than 1 GiB, which no saved screen is\n"),
+            format!("termlens: {name}: larger than 1 GiB, which no screen in the text format is\n"),
             "{args:?}"
         );
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
     }
 }
 
-/// The 1 GiB input bound bounds the bytes, and the JSON reader has to
-/// bound what it builds from them (#713): a 1x1 screen whose `cells` holds
-/// millions of empty rows took a vector per row before the shape was
-/// checked, about eight bytes of memory per byte of file, and aborted
-/// under a cap. 30 MB of `[]` cost some 240 MB that way; under a 160 MiB
-/// address-space cap the reader now refuses the second row, with exit 2
-/// and the reason, in memory the declared 1x1 sets.
+/// The JSON reader bounds what it builds by what the file declares, not by
+/// the file's length (#713): a 1x1 screen whose `cells` holds millions of
+/// empty rows took a vector per row before the shape was checked, about
+/// eight bytes of memory per byte of file, and aborted under a cap. 30 MB
+/// of `[]` cost some 240 MB that way; under a 160 MiB address-space cap the
+/// reader now refuses the second row, with exit 2 and the reason, in memory
+/// the declared 1x1 sets.
 #[test]
 #[cfg_attr(
     not(target_os = "linux"),
@@ -2815,4 +2816,52 @@ fn render_refuses_history_it_has_no_room_for_with_exit_two() {
         );
         assert_eq!(out.status.code(), Some(2), "{field}: {out:?}");
     }
+}
+
+/// JSON is parsed as it arrives, not read whole first (#777). A screen with
+/// 1000 rows of styled history on 80 columns is 35 MB of the pretty JSON
+/// `render --json` writes and about 4 MB once read, and it renders under a
+/// 24 MiB address-space cap, where reading the input before parsing it
+/// needed the 35 MB. That is what reads back the JSON termlens writes past
+/// any fixed bound: 50,000 such rows on 120x40 are 1.25 GiB compact, which
+/// the 1 GiB bound refused.
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "`ulimit -v` caps the child's address space only on Linux"
+)]
+fn render_reads_json_as_it_arrives() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let screen = Screen::parse("size: 80x2  cursor: 1,0\nthe last row of the grid").unwrap();
+    let mut document = serde_json::to_value(&screen).unwrap();
+    let row = document["cells"][0].clone();
+    document["state"]["scrollback"] = serde_json::json!(vec!["the last row of the grid"; 1000]);
+    document["state"]["scrollback_cells"] = serde_json::json!(vec![row; 1000]);
+    let json = serde_json::to_string_pretty(&document).unwrap();
+    assert!(json.len() > 32 << 20, "{} bytes", json.len());
+
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(r#"ulimit -v 24576 && exec "$0" "$@""#)
+        .arg(env!("CARGO_BIN_EXE_termlens"))
+        .args(["render", "--text", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("sh runs");
+    let mut stdin = child.stdin.take().expect("a stdin pipe");
+    // A refusal before the end of the input closes the pipe; that is a
+    // result, not a failure of the writer.
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(json.as_bytes());
+    });
+    let out = child.wait_with_output().expect("termlens runs");
+    writer.join().expect("the writer thread");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{}\n", screen.with_styles())
+    );
 }
