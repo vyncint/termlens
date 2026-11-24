@@ -62,6 +62,16 @@ reads that marker.
   thread under the same lock: a full ConPTY input pipe would have hung the
   test and stopped the drain behind it. The thread is now handed the PTY
   layer's own writer where there is no duplicate. (#771)
+- A failure screen is written to `TERMLENS_ARTIFACT_DIR` for a test whose
+  path is too long to be a file name whole. `<test>-<n>.screen.txt` (or
+  `.json`) used the path all of it, so one past about 230 bytes, which
+  generated cases and deeply nested modules reach, made a name longer than
+  the 255 bytes a filesystem allows; the write failed with "File name too
+  long" and only a line on stderr was left. A name past 222 bytes is now
+  cut to its first 200 and 16 hex digits of a hash of the whole name, which
+  keeps two such tests apart. Names up to 222 bytes are unchanged; one of
+  223 to about 240 that fitted with a small `<n>` is now cut too, so each
+  test keeps one name whatever its count. (#773)
 
 ## [0.11.10] - 2026-11-17
 

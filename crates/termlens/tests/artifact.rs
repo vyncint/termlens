@@ -144,3 +144,77 @@ fn same_named_failures_in_two_processes_leave_two_files() -> termlens::Result<()
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
+
+/// A screen is written for a test whose name is too long to be a file name
+/// whole (#773). `<test>` was the test's path, all of it, so a path past
+/// about 230 bytes, which generated cases and deeply nested modules reach,
+/// made `<test>-<n>.screen.*` longer than the 255 bytes a file name may
+/// have: the write failed with "File name too long", and only a line on
+/// stderr was left. Here two threads, named like two cases of one such test
+/// and alike for their first 300 bytes, each fail a wait in a process of
+/// their own, as in the test above. Each leaves a file whose name fits,
+/// begins with the same 200 bytes of that path, and is its own.
+#[test]
+fn a_test_name_too_long_for_a_file_name_still_leaves_its_screen() -> termlens::Result<()> {
+    const NAME: &str = "a_test_name_too_long_for_a_file_name_still_leaves_its_screen";
+    const RUN: &str = "TERMLENS_ARTIFACT_LONG";
+    const CASES: [&str; 2] = ["case_1", "case_2"];
+    let path = |case: &str| format!("{}{case}", "deeply::nested::module::".repeat(13));
+    if std::env::var_os(RUN).is_some() {
+        for case in CASES {
+            std::thread::Builder::new()
+                .name(path(case))
+                .spawn(move || -> termlens::Result<()> {
+                    let mut t = common::emit(&[case, "--wait"])?;
+                    t.wait_until(|s| s.contains(case))?;
+                    let err = t
+                        .wait_until_for(|s| s.contains("never"), Duration::from_millis(100))
+                        .expect_err("the wait must time out");
+                    assert!(matches!(err, termlens::Error::Timeout { .. }), "{err}");
+                    t.send(termlens::Key::Enter)?;
+                    t.wait_exit()?;
+                    Ok(())
+                })?
+                .join()
+                .expect("the case does not panic")?;
+        }
+        return Ok(());
+    }
+
+    let dir = std::env::temp_dir().join(format!("termlens-artifact-long-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = common::rerun_self(&["emit"])?
+        .args(["--exact", NAME, "--nocapture"])
+        .env("TERMLENS_ARTIFACT_DIR", &dir)
+        .env(RUN, "1")
+        .output()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("1 passed"),
+        "{}\n{stdout}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let kept: String = path("")
+        .chars()
+        .take(200)
+        .map(|c| if c == ':' { '_' } else { c })
+        .collect();
+    let mut seen = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let file = entry?.path();
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.len() <= 255, "{} bytes: {name}", name.len());
+        assert!(name.starts_with(&format!("{kept}-")), "{name}");
+        let screen = read_screen(&file)?;
+        seen.extend(CASES.into_iter().filter(|case| screen.contains(case)));
+    }
+    seen.sort_unstable();
+    assert_eq!(
+        seen, CASES,
+        "one screen from each case, in a file of its own"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
