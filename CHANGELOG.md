@@ -108,6 +108,13 @@ reads that marker.
   followed by 200 MB aborted `termlens render` with exit 134 under a
   2 GB cap. Both now read in the memory the input and the declared grid
   take, with or without a `styles:` block. (#779)
+- The report action says when `termlens diff` cannot read a `.snap` pair,
+  such as an insta value snapshot beside a screen one: "(termlens could
+  not compare these files)" under its "Against" line. The diff's exit 2
+  was ignored, and the summary showed an empty code block there, which
+  reads as no difference. The step's log line and the summary's closing
+  line count and claim SVG and HTML renderings for only the files
+  termlens read, and the log names how many it could not. (#783)
 
 ## [0.11.10] - 2026-11-17
 
