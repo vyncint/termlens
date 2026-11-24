@@ -24,11 +24,14 @@
 //! long it is: the grid by its header (#713), the history one row at a time,
 //! and the lists a terminal keeps a fixed number of by that number (#778).
 
+use std::collections::TryReserveError;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use serde::de::{DeserializeSeed, Error as _, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::{
+    DeserializeSeed, Error as _, IgnoredAny, MapAccess, SeqAccess, Unexpected, Visitor,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{parse, Cell, Link, MouseModes, Screen, TermState};
@@ -544,10 +547,13 @@ const LINKS: usize = 64;
 /// refuse its own output (#777). Each row is bounded instead, at
 /// [`ROW_BYTES`], and the empty row, the commonest, is one allocation
 /// shared by all of them: what the history costs is in proportion to the
-/// rows it declares, and room the allocator refuses is an error.
+/// rows it declares. Every allocation the rows take is asked for first, the
+/// list's, each row's and each cell's, and room the allocator refuses is an
+/// error.
 pub(super) fn history_text<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Arc<[Arc<str>]>, D::Error> {
+    let _spare = Spare::hold();
     deserializer.deserialize_seq(HistoryText)
 }
 
@@ -560,7 +566,50 @@ type StyledRows = Arc<[Arc<[Cell]>]>;
 pub(super) fn history_cells<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<StyledRows>, D::Error> {
+    let _spare = Spare::hold();
     deserializer.deserialize_option(StyledHistory)
+}
+
+std::thread_local! {
+    /// Room held back while a history is read, and given back when the
+    /// allocator refuses the history room (#778). The refusal is an error,
+    /// and building one takes a little memory: its message and the box the
+    /// deserializer puts it in. A history of short rows fills an
+    /// address-space cap a few dozen bytes at a time and leaves none of
+    /// it, so without this the error's own allocation aborted the reader.
+    // Already `const`; see HOLDS_LIFECYCLE in terminal.rs for why the lint
+    // still fires on illumos (#791).
+    #[allow(clippy::missing_const_for_thread_local)]
+    static SPARE: std::cell::Cell<Vec<u8>> = const { std::cell::Cell::new(Vec::new()) };
+}
+
+/// What [`SPARE`] holds: far more than an error takes to build.
+const SPARE_BYTES: usize = 64 * 1024;
+
+/// [`SPARE`], held for as long as this is.
+struct Spare;
+
+impl Spare {
+    fn hold() -> Spare {
+        let mut room = Vec::new();
+        // With not even this much room, the first refusal comes at once,
+        // and the error has what the reader had.
+        if room.try_reserve_exact(SPARE_BYTES).is_ok() {
+            SPARE.with(|spare| spare.set(room));
+        }
+        Spare
+    }
+
+    /// Give the room back, for the error a refusal is about to build.
+    fn release() {
+        let _ = SPARE.try_with(|spare| drop(spare.take()));
+    }
+}
+
+impl Drop for Spare {
+    fn drop(&mut self) {
+        Spare::release();
+    }
 }
 
 /// `state.unsupported`: at most the [`UNSUPPORTED`] a terminal records.
@@ -590,39 +639,107 @@ pub(super) fn links<'de, D: Deserializer<'de>>(
 struct Gather<T>(Vec<T>);
 
 impl<T> Gather<T> {
-    fn push<E: serde::de::Error>(&mut self, item: T, what: &str) -> Result<(), E> {
+    fn push(&mut self, item: T) -> Result<(), TryReserveError> {
         if self.0.len() == self.0.capacity() {
             // Grows as `push` would, doubling, but asks first.
-            self.0
-                .try_reserve(1)
-                .map_err(|_| refused(self.0.len() + 1, what))?;
+            self.0.try_reserve(1)?;
         }
         self.0.push(item);
         Ok(())
     }
 
     /// The gathered items as the shared slice a [`Screen`] holds.
-    fn into_shared<E: serde::de::Error>(self, what: &str) -> Result<Arc<[T]>, E> {
-        // `Arc::from` copies the vector into an allocation of its own, the
-        // two counts in front, and that allocation cannot fail softly. So
-        // the same room is asked for first and given back at once: a
-        // refusal is then the error, not the copy's abort. Best effort —
-        // another thread could take the room in between — and enough for a
-        // reader on one thread under an address-space cap.
-        let bytes = std::mem::size_of_val(self.0.as_slice())
-            .saturating_add(2 * std::mem::size_of::<usize>());
-        let mut room: Vec<u8> = Vec::new();
-        room.try_reserve_exact(bytes)
-            .map_err(|_| refused(self.0.len(), what))?;
-        // Opaque, or the optimiser may drop a reservation nothing uses.
-        std::hint::black_box(&room);
-        drop(room);
+    fn into_shared(self) -> Result<Arc<[T]>, TryReserveError> {
+        ask_for_arc(std::mem::size_of_val(self.0.as_slice()))?;
         Ok(Arc::from(self.0))
     }
 }
 
-fn refused<E: serde::de::Error>(count: usize, what: &str) -> E {
-    E::custom(format!("the allocator refused the room for {count} {what}"))
+/// Ask the allocator for the room an `Arc` of `bytes` takes, the two counts
+/// in front, and give it back at once (#778). `Arc::from` copies into an
+/// allocation of its own, and that allocation cannot fail softly, so asking
+/// first makes a refusal the error rather than the copy's abort. Best
+/// effort — another thread could take the room in between — and enough for
+/// a reader on one thread under an address-space cap.
+fn ask_for_arc(bytes: usize) -> Result<(), TryReserveError> {
+    let mut room: Vec<u8> = Vec::new();
+    room.try_reserve_exact(bytes.saturating_add(2 * std::mem::size_of::<usize>()))?;
+    // Opaque, or the optimiser may drop a reservation nothing uses.
+    std::hint::black_box(&room);
+    Ok(())
+}
+
+/// The error for room the allocator refused: the spare given back first,
+/// and nothing allocated before that, which is why `what` arrives as
+/// arguments to format rather than as a string.
+fn refused<E: serde::de::Error>(what: fmt::Arguments<'_>) -> E {
+    Spare::release();
+    E::custom(format_args!("the allocator refused the room for {what}"))
+}
+
+/// `n` of `one`, plural unless `n` is 1, formatted where it is written.
+struct Count(usize, &'static str);
+
+impl fmt::Display for Count {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Count(n, one) = *self;
+        write!(f, "{n} {one}{}", if n == 1 { "" } else { "s" })
+    }
+}
+
+/// `Cell::contents`, its room asked for before it is taken (#778): a
+/// history holds a cell for every column of every row it declares, so a
+/// refusal is an error to report rather than an abort, as it is for the
+/// rows. An owned string is taken as it comes, with nothing copied.
+pub(super) fn contents<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    deserializer.deserialize_string(Contents)
+}
+
+/// [`contents`]'s visitor: what the derive's `String` takes, the strings
+/// and UTF-8 bytes, held to a fallible reservation.
+struct Contents;
+
+impl Contents {
+    /// `contents` as an owned string, its room asked for first, and bytes
+    /// that are not UTF-8 refused as the derive's `String` refuses them.
+    ///
+    /// Built as bytes and checked, not as a `String` reserved and pushed
+    /// to: that spelling read a 110 MB styled history 12% slower, every
+    /// run, where this one reads it as fast as the derive's `to_owned`.
+    fn owned<E: serde::de::Error>(self, contents: &[u8]) -> Result<String, E> {
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(contents.len())
+            .map_err(|_| refused(format_args!("a cell's {}", Count(contents.len(), "byte"))))?;
+        owned.extend_from_slice(contents);
+        String::from_utf8(owned)
+            .map_err(|e| E::invalid_value(Unexpected::Bytes(e.as_bytes()), &self))
+    }
+}
+
+impl Visitor<'_> for Contents {
+    type Value = String;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a string")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, contents: &str) -> Result<String, E> {
+        self.owned(contents.as_bytes())
+    }
+
+    fn visit_string<E: serde::de::Error>(self, contents: String) -> Result<String, E> {
+        Ok(contents)
+    }
+
+    fn visit_bytes<E: serde::de::Error>(self, contents: &[u8]) -> Result<String, E> {
+        self.owned(contents)
+    }
+
+    fn visit_byte_buf<E: serde::de::Error>(self, contents: Vec<u8>) -> Result<String, E> {
+        String::from_utf8(contents)
+            .map_err(|e| E::invalid_value(Unexpected::Bytes(&e.into_bytes()), &self))
+    }
 }
 
 struct HistoryText;
@@ -641,9 +758,16 @@ impl<'de> Visitor<'de> for HistoryText {
             index: rows.0.len(),
             empty: &empty,
         })? {
-            rows.push(row, "rows of history")?;
+            rows.push(row).map_err(|_| {
+                refused(format_args!(
+                    "{} of history",
+                    Count(rows.0.len() + 1, "row")
+                ))
+            })?;
         }
-        rows.into_shared("rows of history")
+        let count = rows.0.len();
+        rows.into_shared()
+            .map_err(|_| refused(format_args!("{} of history", Count(count, "row"))))
     }
 }
 
@@ -677,11 +801,19 @@ impl<'de> Visitor<'de> for RowText<'_> {
                 row.len()
             )));
         }
-        Ok(if row.is_empty() {
-            Arc::clone(self.empty)
-        } else {
-            Arc::from(row)
-        })
+        if row.is_empty() {
+            return Ok(Arc::clone(self.empty));
+        }
+        // A row of text is as many rows as the file declares, each its own
+        // allocation, so it asks first, as the list of rows does.
+        ask_for_arc(row.len()).map_err(|_| {
+            refused(format_args!(
+                "scrollback row {}, {}",
+                self.index,
+                Count(row.len(), "byte")
+            ))
+        })?;
+        Ok(Arc::from(row))
     }
 }
 
@@ -724,9 +856,16 @@ impl<'de> Visitor<'de> for HistoryCells {
             index: rows.0.len(),
             empty: &empty,
         })? {
-            rows.push(row, "rows of styled history")?;
+            rows.push(row).map_err(|_| {
+                refused(format_args!(
+                    "{} of styled history",
+                    Count(rows.0.len() + 1, "row")
+                ))
+            })?;
         }
-        rows.into_shared("rows of styled history")
+        let count = rows.0.len();
+        rows.into_shared()
+            .map_err(|_| refused(format_args!("{} of styled history", Count(count, "row"))))
     }
 }
 
@@ -753,9 +892,12 @@ impl<'de> Visitor<'de> for RowCells<'_> {
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         let index = self.index;
-        let mut row = Vec::new();
+        // A row of cells is as many rows as the file declares, each its own
+        // allocation, so it grows and is shared asking first, as the list
+        // of rows does; each cell's contents asks too (`contents`).
+        let mut row = Gather(Vec::new());
         while let Some(cell) = seq.next_element::<Cell>()? {
-            if row.len() == usize::from(MAX_DIMENSION) {
+            if row.0.len() == usize::from(MAX_DIMENSION) {
                 return Err(A::Error::custom(format!(
                     "scrollback row {index} holds more than {MAX_DIMENSION} cells, past \
                      the {MAX_DIMENSION}-per-axis limit of a terminal"
@@ -765,16 +907,26 @@ impl<'de> Visitor<'de> for RowCells<'_> {
                 return Err(A::Error::custom(format!(
                     "scrollback cell {index},{}: {} bytes, more than the {CELL_BYTES} a \
                      terminal's cell holds",
-                    row.len(),
+                    row.0.len(),
                     cell.contents.len()
                 )));
             }
-            row.push(cell);
+            row.push(cell).map_err(|_| {
+                refused(format_args!(
+                    "{} of scrollback row {index}",
+                    Count(row.0.len() + 1, "cell")
+                ))
+            })?;
         }
-        Ok(if row.is_empty() {
-            Arc::clone(self.empty)
-        } else {
-            Arc::from(row)
+        if row.0.is_empty() {
+            return Ok(Arc::clone(self.empty));
+        }
+        let cells = row.0.len();
+        row.into_shared().map_err(|_| {
+            refused(format_args!(
+                "{} of scrollback row {index}",
+                Count(cells, "cell")
+            ))
         })
     }
 }

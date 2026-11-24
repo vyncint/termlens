@@ -643,6 +643,7 @@ impl Default for TermState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cell {
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "serde_impl::contents"))]
     contents: String,
     style: Style,
     wide: bool,

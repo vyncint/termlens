@@ -3009,7 +3009,11 @@ fn render_refuses_json_rows_past_the_header_without_building_them() {
 /// bounded a row at a time, the empty row shared, and room the allocator
 /// refuses is exit 2 with the reason rather than an abort. The derive took
 /// about fifty bytes of memory a row: ten million empty rows, 30 MB of
-/// `"",` or `[],`, aborted under a 160 MiB address-space cap.
+/// `"",` or `[],`, aborted under a 160 MiB address-space cap. So did ten
+/// million rows of `"a"` after the empty row was shared, each row its own
+/// allocation still; and once each asked first, the refusal's own error
+/// found no room left to be built in, a few dozen bytes a row having taken
+/// it all, until room was held back for it.
 #[test]
 #[cfg_attr(
     not(target_os = "linux"),
@@ -3023,6 +3027,7 @@ fn render_refuses_history_it_has_no_room_for_with_exit_two() {
     for (field, empty, what) in [
         ("scrollback", "\"\"", "rows of history"),
         ("scrollback_cells", "[]", "rows of styled history"),
+        ("scrollback", "\"a\"", "scrollback row "),
     ] {
         let written = json
             .find(&format!("\"{field}\":"))
@@ -3065,6 +3070,134 @@ fn render_refuses_history_it_has_no_room_for_with_exit_two() {
         );
         assert_eq!(out.status.code(), Some(2), "{field}: {out:?}");
     }
+}
+
+/// Every row of history asks for its room before it takes it, not only the
+/// list of rows (#778): a row's text, a row's cells and each cell's
+/// contents are refused with exit 2 and the reason. Only the empty row was
+/// shared and the list asked first, so a history of rows that held
+/// anything was allocated a row at a time as the derive allocated it, and
+/// aborted `render` under an address-space cap with exit 134. The rows are
+/// the widest the reader takes, so the rows and not the list run into the
+/// cap, and they are written until `render` stops reading.
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "`ulimit -v` caps the child's address space only on Linux"
+)]
+fn render_refuses_history_rows_it_has_no_room_for_with_exit_two() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let screen = Screen::parse("size: 1x1  cursor: 0,0\nx").expect("a 1x1 screen");
+    let json = serde_json::to_string(&screen).expect("serialize");
+    let cell = serde_json::to_value(&screen).expect("a value")["cells"][0][0].to_string();
+    for (field, row) in [
+        ("scrollback", format!("\"{}\"", "a".repeat(22_000))),
+        (
+            "scrollback_cells",
+            format!("[{}]", vec![cell; 1000].join(",")),
+        ),
+    ] {
+        let written = json
+            .find(&format!("\"{field}\":"))
+            .expect("the field is written");
+        let value = written + field.len() + 3;
+        let end = value + json[value..].find([',', '}']).expect("the value ends");
+        let (head, tail) = (
+            format!("{}[{row}", &json[..value]),
+            format!("]{}", &json[end..]),
+        );
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(r#"ulimit -v 32768 && exec "$0" "$@""#)
+            .arg(env!("CARGO_BIN_EXE_termlens"))
+            .args(["render", "--text", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("sh runs");
+        let mut stdin = child.stdin.take().expect("a stdin pipe");
+        let writer = std::thread::spawn(move || {
+            // Far past the cap, and stopped by the refusal, which closes
+            // the pipe: that is a result, not a failure of the writer.
+            let more = format!(",{row}");
+            let wrote = stdin.write_all(head.as_bytes()).is_ok()
+                && (0..2_000).all(|_| stdin.write_all(more.as_bytes()).is_ok());
+            if wrote {
+                let _ = stdin.write_all(tail.as_bytes());
+            }
+        });
+        let out = child.wait_with_output().expect("termlens runs");
+        writer.join().expect("the writer thread");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.starts_with(
+                "termlens: <stdin>: not a termlens Screen: the allocator refused the room for "
+            ),
+            "{field}: {stderr}"
+        );
+        assert_eq!(out.status.code(), Some(2), "{field}: {out:?}");
+    }
+}
+
+/// A cell's contents asks for its room too (#778), wherever the cell is: a
+/// history holds a cell for every column of every row it declares. The
+/// grid shows it alone, since a history cell past the 22 bytes a terminal
+/// keeps is refused for that as soon as it is read, and a grid cell is not
+/// held to them until the grid is read: a 1000-column row of 64 KiB cells
+/// runs into the cap a cell at a time, and aborted `render` with exit 134
+/// when the contents were allocated as the derive allocated them.
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "`ulimit -v` caps the child's address space only on Linux"
+)]
+fn render_refuses_a_cell_it_has_no_room_for_with_exit_two() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let screen = Screen::parse("size: 1000x1  cursor: 0,0\nx").expect("a 1000x1 screen");
+    let json = serde_json::to_string(&screen).expect("serialize");
+    let cells = json.find("\"cells\":[[").expect("the grid is written") + 10;
+    let head = json[..cells].to_owned();
+    let cell = serde_json::to_value(&screen).expect("a value")["cells"][0][0].clone();
+    let mut big = cell;
+    big["contents"] = serde_json::Value::String("\u{e9}".repeat(32 * 1024));
+    let big = big.to_string();
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(r#"ulimit -v 32768 && exec "$0" "$@""#)
+        .arg(env!("CARGO_BIN_EXE_termlens"))
+        .args(["render", "--text", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("sh runs");
+    let mut stdin = child.stdin.take().expect("a stdin pipe");
+    let writer = std::thread::spawn(move || {
+        // The refusal closes the pipe before the row ends: a result, not a
+        // failure of the writer.
+        let _ = stdin.write_all(head.as_bytes());
+        for col in 0..1000 {
+            let comma = if col == 0 { "" } else { "," };
+            if stdin.write_all(format!("{comma}{big}").as_bytes()).is_err() {
+                return;
+            }
+        }
+        let _ = stdin.write_all(b"]]}");
+    });
+    let out = child.wait_with_output().expect("termlens runs");
+    writer.join().expect("the writer thread");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with(
+            "termlens: <stdin>: not a termlens Screen: the allocator refused the room for a \
+             cell's 65536 bytes"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
 }
 
 /// JSON is parsed as it arrives, not read whole first (#777). A screen with

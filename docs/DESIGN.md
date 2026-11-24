@@ -1108,8 +1108,11 @@ could be held to — `scrollback(n)` takes any `n`, and a bound on it would
 refuse a release's own output — so each row is held instead: to 1000
 cells of at most 22 bytes, a terminal's widest row of vt100's fullest
 cells, or as text to the 22,000 bytes those come to. The empty row, the
-commonest, is one allocation however often it comes, and room the
-allocator refuses for the rows is an error, not an abort. The unsupported
+commonest, is one allocation however often it comes. Every allocation
+the history takes asks for its room first — the list of rows, each row's
+text or cells, each cell's contents — so room the allocator refuses is an
+error, not an abort, and room is held back while the history is read so
+the error can be built after a refusal. The unsupported
 sequences and the links are read to the 32 and the 64 a terminal keeps,
 and one past is refused. So the history costs memory in proportion to
 the rows it declares: a pointer for an empty one, where the derive spent
