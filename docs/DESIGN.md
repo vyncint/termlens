@@ -135,7 +135,21 @@ thread applies the terminal's deadline and returns `Error::Write` with the
 screen ("the application is not reading its input") instead of blocking
 forever; there is no portable way to ask whether a PTY write *would*
 block, since `POLLOUT` on a macOS master reports writable and then blocks
-anyway.
+anyway. The acknowledgement is waited for in `POLL_CAP` slices with the
+terminal looked at between them, because nothing else ends a write the
+application exits under: Linux leaves a master write asleep when the other
+side closes. Such a send fails as the terminal closes and names the exit,
+rather than blaming a program that is gone for not reading (#770). How much
+of it went is not said, since a blocked `write(2)` reports no count.
+
+The thread writes through a duplicate of the master, so that the PTY
+layer's own writer can stay with the terminal and close under the
+lifecycle lock (§2). Where there is no descriptor to duplicate — Windows,
+where portable-pty exposes none — the thread is handed that writer itself.
+It used not to be started there at all, so every send was written on the
+test thread with no deadline, and every reply on the reader thread, under
+one lock; a full ConPTY input pipe would have hung the test and stopped
+the drain behind it (#771).
 
 Which failures are errors and which are panics is a deliberate split, not
 an accident of history. `send`/`send_str`/`paste`/`click`/`drag`/`scroll`
@@ -396,7 +410,10 @@ screen dump** — a CI log alone answers "what was the app showing?".
   "did the stream stop inside an update?". EOF counts as idle. An
   application that opens an update and never closes it therefore times out
   here, and the message says exactly that instead of "waiting for 100ms of
-  output silence", which reads as nonsense against a quiet terminal.
+  output silence", which reads as nonsense against a quiet terminal. A
+  stream that went silent inside an escape sequence or a UTF-8 character
+  is named the same way, the sequence as the tracker captured it, its
+  first 24 bytes (#772).
   **This is a heuristic**: silence is evidence of a finished render, not
   proof. Prefer `wait_until` on visible content, or `wait_frame` where the
   app uses synchronized output.
@@ -435,8 +452,12 @@ followed by SIGKILL to the group; then the child is reaped. A group id is
 safe to signal only while the child is unreaped, since its zombie holds
 the id, so `Drop` reaps nothing before the last signal (it polls the exit
 with `waitid(WNOWAIT)`), and signals nothing once the child is reaped:
-after `wait_exit`, or where the kernel reaped it. `signal` still reaches
-the child alone.
+after `wait_exit`, or where the kernel reaped it before the drop. One the
+kernel reaps during it, where SIGCHLD is ignored and the hang-up ends the
+child, is the exception: the group is killed all the same, since POSIX
+reuses no process group id while a member of the group exists, and a
+member that ignored the hang-up is what the kill is for (#774). `signal`
+still reaches the child alone.
 
 ### `screen()` is the live grid, frames or no frames
 

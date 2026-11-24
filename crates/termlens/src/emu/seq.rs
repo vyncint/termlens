@@ -1293,6 +1293,21 @@ impl SeqTracker {
         self.state != State::Ground || self.utf8_remaining > 0
     }
 
+    /// The escape sequence the stream is inside, as captured from its
+    /// `ESC` and shown printably, or `None` in ground state. The capture
+    /// keeps the first 24 bytes; a full one ends in `…`, since the
+    /// sequence may go on past it.
+    pub(crate) fn open_sequence(&self) -> Option<String> {
+        if self.state == State::Ground {
+            return None;
+        }
+        let mut shown = self.seq_printable();
+        if usize::from(self.seq_len) == self.seq_buf.len() {
+            shown.push('…');
+        }
+        Some(shown)
+    }
+
     /// True while the stream is inside a DEC 2026 synchronized update.
     pub(crate) fn in_sync_update(&self) -> bool {
         self.sync_update

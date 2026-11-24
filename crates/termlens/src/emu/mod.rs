@@ -142,6 +142,11 @@ pub(crate) trait Emulator: Send {
     /// declaring idleness mid-update.
     fn mid_sequence(&self) -> bool;
 
+    /// The escape sequence the stream ends inside, printably (`ESC` as
+    /// `^[`), or `None` outside one: what a wait that will not call a
+    /// silent terminal idle names as the reason (#772).
+    fn open_sequence(&self) -> Option<String>;
+
     /// True while the stream is inside a DEC 2026 synchronized update —
     /// the app has begun a repaint and not finished it.
     fn in_sync_update(&self) -> bool;
