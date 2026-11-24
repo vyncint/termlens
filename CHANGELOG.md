@@ -115,6 +115,12 @@ reads that marker.
   and nothing was listed. A test that expected such a sequence to leave
   the cursor or the stops alone should expect it to act as with its first
   parameter alone. (#802)
+- A `DECRC` right after a soft reset taken at a pending wrap leaves the
+  next character at the start of the second row, as in xterm, whose soft
+  reset saves the cursor with its wrap flag and zeroes only the saved row
+  and column. The character overwrote the top-left cell instead. A test
+  that pinned that cell should expect the top row as it was and the
+  character on the second row. (#803)
 
 ### Fixed
 

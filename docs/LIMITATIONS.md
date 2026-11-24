@@ -212,7 +212,11 @@ CHANGELOG entry.
   the cursor where it was), and homes the saved cursor; it keeps bracketed
   paste, mouse tracking and its encoding, focus reporting, the tab stops
   and the alternate screen, which xterm resets only on `RIS`. The keypad
-  mode is not modelled.
+  mode is not modelled. A reset taken at a pending wrap keeps the wrap,
+  and so does the cursor it saves, as in xterm: after a `DECRC` the next
+  character starts the second row. The backend holds that save at the
+  end of the top row rather than its start, so a cursor motion or a
+  position report made before that character starts from there.
 - **Two SGR style attributes are not modelled.** Overline (`SGR 53`) and
   double underline (`SGR 21`) do not reach [`Style`](https://docs.rs/termlens/latest/termlens/struct.Style.html),
   so `with_styles()` cannot distinguish those attributes from a plain cell.

@@ -581,6 +581,19 @@ impl Vt100Emulator {
     /// character overwrite it rather than start the next row (#753), so
     /// the last column is drawn again, which is the one way to put a
     /// cursor back there.
+    ///
+    /// The cursor the reset saves keeps the flag too: xterm's
+    /// `CursorSave` records it and the reset zeroes only the saved row and
+    /// column, so a `DECRC` after it puts back a pending wrap at the
+    /// top-left, and the next character starts the second row (#803).
+    /// vt100 keeps a pending wrap only as the column past the last, so the
+    /// save is made again at the end of the top row, drawn again to put
+    /// the cursor there: the next character starts the second row as in
+    /// xterm. An empty last cell cannot be drawn, and the save goes to the
+    /// start of the second row, where that character lands either way.
+    /// What a restore leaves differs from xterm only for a motion or a
+    /// report before the next character, which starts from the end of the
+    /// top row, not its start.
     fn soft_reset(&mut self) {
         let screen = self.parser.screen();
         let (row, col) = screen.cursor_position();
@@ -589,6 +602,9 @@ impl Vt100Emulator {
         if col < cols {
             self.feed(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
         } else {
+            self.feed(b"\x1b[1d");
+            self.redraw_last_column(0);
+            self.feed(b"\x1b7");
             self.feed(format!("\x1b[{}d", row + 1).as_bytes());
             self.redraw_last_column(row);
         }
@@ -4530,6 +4546,44 @@ mod tests {
         let s = emu_with_size(4, 5, b"\x1b[1;5;9mabcde\x1b[!pX").snapshot();
         let last = *s.cell(0, 4).unwrap().style();
         assert!(last.bold && last.blink && last.strikethrough, "{last:?}");
+    }
+
+    /// The cursor `DECSTR` saves keeps a pending wrap. xterm's soft reset
+    /// calls `CursorSave`, which records the wrap flag (cursor.c 408), and
+    /// zeroes only the saved row and column (charproc.c 14559-14561);
+    /// `CursorRestore` puts the flag back after the position (cursor.c
+    /// 494). So a `DECRC` right after a reset taken at a pending wrap
+    /// leaves the next character to start the second row, where termlens
+    /// drew it over the top-left cell (#803). Whatever the top row holds,
+    /// the reset's row included; whole and a character at a time; the top
+    /// row's last cell keeps its attributes, the shadow's included.
+    #[test]
+    fn a_restore_after_a_soft_reset_at_a_pending_wrap_wraps() {
+        for (stream, text) in [
+            ("abcde\x1b[!p\x1b8X", "abcde\nX\n\n"),
+            ("\x1b[3;1Habcde\x1b[!p\x1b8X", "\nX\nabcde\n"),
+            ("fghij\x1b[3;1Habcde\x1b[!p\x1b8X", "fghij\nX\nabcde\n"),
+            (
+                "\x1b[5mfgh\x1b[0mij\x1b[3;1Habcde\x1b[!p\x1b8X",
+                "fghij\nX\nabcde\n",
+            ),
+        ] {
+            let (whole, bytewise) = whole_and_bytewise(4, 5, 0, stream.as_bytes());
+            assert_eq!(observed(&whole), observed(&bytewise), "{stream:?}");
+            let s = whole.snapshot();
+            assert_eq!(s.text(), text, "{stream:?}: {s}");
+            assert_eq!(s.cursor(), (1, 1, true), "{stream:?}: {s}");
+            assert_eq!(
+                *s.cell(1, 0).unwrap().style(),
+                Style::default(),
+                "{stream:?}"
+            );
+        }
+        let s = emu_with_size(4, 5, b"\x1b[5mfghij\x1b[0m\x1b[3;1Habcde\x1b[!p\x1b8X").snapshot();
+        assert!(s.cell(0, 4).unwrap().style().blink, "{s}");
+        // Not at a pending wrap, the restore is to the top-left, as before.
+        let s = emu_with_size(4, 5, b"abcd\x1b[!p\x1b8X").snapshot();
+        assert_eq!(s.text(), "Xbcd\n\n\n", "{s}");
     }
 
     /// `DECSTR` written with a parameter is `DECSTR`: xterm's parse table
