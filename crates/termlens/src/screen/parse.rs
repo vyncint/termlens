@@ -92,7 +92,6 @@ impl Screen {
             .next()
             .ok_or_else(|| Error::Parse("empty input; expected a `size: …` header".into()))?;
         let (cols, rows, cursor) = parse_header(header)?;
-        let body: Vec<&str> = lines.collect();
 
         // The grid is the number of lines the header declares, and nothing
         // else decides that. `Display` writes every row — blank ones
@@ -108,20 +107,24 @@ impl Screen {
         // block, the block's lines are within the declared row count and are
         // read as grid content. Content wins ties, on purpose — a wrong row
         // of text is visible in a diff, a silently dropped one is not.
-        let split = body.len().min(usize::from(rows));
-        let (grid, rest) = body.split_at(split);
-
+        //
+        // The lines are walked, never gathered: a 1x1 screen followed by
+        // 200 MB of blank lines kept a pointer for each, 17 times the text,
+        // and aborted `termlens render` (#779). What the parse holds is the
+        // grid the header declares.
         let mut cells = vec![
             Cell::new(String::new(), Style::default(), false, false);
             usize::from(cols) * usize::from(rows)
         ];
-        for (index, line) in grid.iter().enumerate() {
+        let mut grid = 0;
+        for (index, line) in lines.by_ref().take(usize::from(rows)).enumerate() {
             parse_row(
                 line,
                 index + 2,
                 cols,
                 &mut cells[index * usize::from(cols)..][..usize::from(cols)],
             )?;
+            grid = index + 1;
         }
 
         let mut screen = Screen::from_parts(
@@ -135,16 +138,17 @@ impl Screen {
         );
 
         // After the grid: blank separator lines, then `styles:` and its
-        // spans, or nothing at all.
-        if let Some(at) = rest.iter().position(|line| !line.trim().is_empty()) {
-            let number = split + at + 2;
-            if rest[at].trim_end() != "styles:" {
+        // spans, or nothing at all. Each line with its 1-based number.
+        let mut rest = lines
+            .enumerate()
+            .map(|(offset, line)| (grid + offset + 2, line));
+        if let Some((number, line)) = rest.find(|(_, line)| !line.trim().is_empty()) {
+            if line.trim_end() != "styles:" {
                 return Err(Error::Parse(format!(
-                    "line {number}: expected `styles:` or the end of the text after the {rows}-row grid, got {:?}",
-                    rest[at]
+                    "line {number}: expected `styles:` or the end of the text after the {rows}-row grid, got {line:?}"
                 )));
             }
-            parse_styles(&rest[at + 1..], number + 1, &mut screen)?;
+            parse_styles(rest, &mut screen)?;
         }
         Ok(screen)
     }
@@ -234,16 +238,21 @@ pub(super) fn cell_width(ch: char) -> std::result::Result<usize, String> {
 /// without its second half, and a program that redrew after the screen
 /// widened again put text in the column that half had held (#683). As
 /// many wide characters as the row needs are read as those stranded
-/// cells, the leftmost first, as the JSON reader holds them (`check_row`).
+/// cells, as the JSON reader holds them (`check_row`): the leftmost
+/// first, but one in the first column last. No resize strands that one,
+/// a terminal being two columns wide at least, and taking it first moved
+/// every cell, span and cursor after it a column left of what the writer
+/// drew when the stranded character was a later one (#782). It is still
+/// taken when nothing else fits, so no row that read stops reading.
 /// A row that fits is read as fitting: the text does not say a wide
 /// character lost its second half, and two columns is what every capture
 /// writes.
 fn parse_row(line: &str, number: usize, cols: u16, row: &mut [Cell]) -> Result<()> {
     let blank =
         |row: &mut [Cell]| row.fill(Cell::new(String::new(), Style::default(), false, false));
-    let whole = lay_out_row(line, number, cols, row, true, 0).or_else(|_| {
+    let whole = lay_out_row(line, number, cols, row, true, 0, false).or_else(|_| {
         blank(row);
-        lay_out_row(line, number, cols, row, false, 0)
+        lay_out_row(line, number, cols, row, false, 0, false)
     });
     let Err(err) = whole else {
         return Ok(());
@@ -252,13 +261,15 @@ fn parse_row(line: &str, number: usize, cols: u16, row: &mut [Cell]) -> Result<(
     // that lands in the last column strands there by itself, so the row
     // fits at `over - 1` strands or at `over`, or at no count.
     let over = natural_width(line).saturating_sub(usize::from(cols));
-    for strand in [over.saturating_sub(1), over] {
-        if strand == 0 {
-            continue;
-        }
-        blank(row);
-        if lay_out_row(line, number, cols, row, false, strand).is_ok() {
-            return Ok(());
+    for first in [false, true] {
+        for strand in [over.saturating_sub(1), over] {
+            if strand == 0 {
+                continue;
+            }
+            blank(row);
+            if lay_out_row(line, number, cols, row, false, strand, first).is_ok() {
+                return Ok(());
+            }
         }
     }
     Err(err)
@@ -274,8 +285,9 @@ fn natural_width(line: &str) -> usize {
 }
 
 /// [`parse_row`] for one layout: `widen` is whether the selector widens,
-/// and `strand` how many wide characters, the leftmost first, are laid out
-/// as stranded one-column cells.
+/// `strand` how many wide characters, the leftmost first, are laid out as
+/// stranded one-column cells, and `first` whether one in the first column
+/// may be among them.
 fn lay_out_row(
     line: &str,
     number: usize,
@@ -283,6 +295,7 @@ fn lay_out_row(
     row: &mut [Cell],
     widen: bool,
     mut strand: usize,
+    first: bool,
 ) -> Result<()> {
     let too_wide = || {
         Error::Parse(format!(
@@ -330,7 +343,7 @@ fn lay_out_row(
         }
         // At most two columns, as the emulator draws them.
         let width = width.min(2);
-        if width == 2 && strand > 0 && col < usize::from(cols) {
+        if width == 2 && strand > 0 && col < usize::from(cols) && (first || col > 0) {
             // A wide character stranded before other text (#683): one
             // cell, wide, with no continuation, as below.
             strand -= 1;
@@ -364,16 +377,15 @@ fn lay_out_row(
 }
 
 /// The span lines after `styles:` — `(none)`, or `<row>: <spans>` — applied
-/// onto `screen`'s cells. `first_line` is the 1-based number of the first,
-/// for the errors.
-fn parse_styles(lines: &[&str], first_line: usize, screen: &mut Screen) -> Result<()> {
-    if lines.is_empty() {
-        return Ok(());
-    }
+/// onto `screen`'s cells, each with its 1-based number for the errors.
+fn parse_styles<'a>(
+    lines: impl Iterator<Item = (usize, &'a str)>,
+    screen: &mut Screen,
+) -> Result<()> {
     let cols = screen.cols;
-    let mut cells: Vec<Cell> = screen.cells.to_vec();
-    for (offset, line) in lines.iter().enumerate() {
-        let number = first_line + offset;
+    // Copied at the first span, so a block of `(none)` copies nothing.
+    let mut styled: Option<Vec<Cell>> = None;
+    for (number, line) in lines {
         let line = line.trim_end();
         if line.is_empty() || line == "(none)" {
             continue;
@@ -422,12 +434,15 @@ fn parse_styles(lines: &[&str], first_line: usize, screen: &mut Screen) -> Resul
                     }
                 }
             }
+            let cells = styled.get_or_insert_with(|| screen.cells.to_vec());
             for col in start..=end {
                 cells[usize::from(row) * usize::from(cols) + usize::from(col)].style = style;
             }
         }
     }
-    screen.cells = cells.into();
+    if let Some(cells) = styled {
+        screen.cells = cells.into();
+    }
     Ok(())
 }
 
@@ -616,18 +631,25 @@ mod tests {
         let marked = Screen::parse("size: 5x1  cursor: 0,0\nab\u{6771}\u{301}cd").unwrap();
         assert_eq!(marked.cell(0, 2).unwrap().contents(), "\u{6771}\u{301}");
         assert_eq!(marked.cell(0, 3).unwrap().contents(), "c");
-        // As many as the row needs, the leftmost first; the rest keep their
-        // second column, and one landing in the last column strands there.
+        // As many as the row needs, the leftmost first but one in the first
+        // column last, since no resize strands it (#782); the rest keep
+        // their second column, and one landing in the last column strands
+        // there.
         let two = Screen::parse("size: 7x1  cursor: 0,0\n\u{6771}a\u{6771}b\u{6771}c").unwrap();
         assert_eq!(two.row_text(0), "\u{6771}a\u{6771}b\u{6771}c");
-        assert!(!two.cell(0, 1).unwrap().is_wide_continuation());
-        assert!(!two.cell(0, 3).unwrap().is_wide_continuation());
-        assert!(two.cell(0, 5).unwrap().is_wide_continuation());
+        assert!(two.cell(0, 1).unwrap().is_wide_continuation());
+        assert!(!two.cell(0, 4).unwrap().is_wide_continuation());
+        assert!(!two.cell(0, 6).unwrap().is_wide_continuation());
+        assert_eq!(two.cell(0, 6).unwrap().contents(), "c");
         let edge = Screen::parse("size: 6x1  cursor: 0,0\n\u{6771}ab\u{6771}\u{6771}").unwrap();
-        assert_eq!(edge.cell(0, 0).unwrap().contents(), "\u{6771}");
-        assert!(!edge.cell(0, 1).unwrap().is_wide_continuation());
-        assert!(edge.cell(0, 4).unwrap().is_wide_continuation());
+        assert!(edge.cell(0, 1).unwrap().is_wide_continuation());
+        assert_eq!(edge.cell(0, 4).unwrap().contents(), "\u{6771}");
+        assert!(!edge.cell(0, 5).unwrap().is_wide_continuation());
         assert_eq!(edge.cell(0, 5).unwrap().contents(), "\u{6771}");
+        // The first column's is stranded when nothing else fits, as before.
+        let only = Screen::parse("size: 4x1  cursor: 0,0\n\u{6771}abc").unwrap();
+        assert!(only.cell(0, 0).unwrap().is_wide());
+        assert_eq!(only.cell(0, 1).unwrap().contents(), "a");
         // Five fit eight columns, one stranded and one in the last column.
         let five = "\u{6771}".repeat(5);
         let five = Screen::parse(&format!("size: 8x1  cursor: 0,0\n{five}")).unwrap();
@@ -754,6 +776,25 @@ mod tests {
         let junk = Screen::parse("size: 2x1  cursor: 0,0\nab\nextra\n")
             .unwrap_err()
             .to_string();
-        assert!(junk.contains("expected `styles:`"), "{junk}");
+        assert!(junk.contains("line 3: expected `styles:`"), "{junk}");
+        // The lines after the grid are walked, not gathered (#779), and keep
+        // their numbers past blank lines and a block of `(none)`.
+        let late = Screen::parse("size: 2x1  cursor: 0,0\nab\n\n\n\nbogus")
+            .unwrap_err()
+            .to_string();
+        assert!(late.contains("line 6: expected `styles:`"), "{late}");
+        let span =
+            Screen::parse("size: 2x3  cursor: 0,0\nab\ncd\nef\n\nstyles:\n(none)\n\n0: 0 shiny")
+                .unwrap_err()
+                .to_string();
+        assert!(
+            span.contains("line 9") && span.contains("unknown style token"),
+            "{span}"
+        );
+        let trimmed = Screen::parse("size: 2x3  cursor: 0,0\nab\n")
+            .expect("a trimmed grid")
+            .with_styles()
+            .to_string();
+        assert_eq!(trimmed, "size: 2x3  cursor: 0,0\nab\n\n\n\nstyles:\n(none)");
     }
 }

@@ -5,7 +5,7 @@
 //! so errors and assertions can carry whole screens around freely.
 
 use std::fmt;
-use std::ops::{Bound, RangeBounds};
+use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 
 use unicode_normalization::UnicodeNormalization;
@@ -571,6 +571,7 @@ pub(crate) struct TermState {
     pub(crate) cursor_style: Option<u8>,
     /// `OSC 8` hyperlinks emitted, oldest first, behind an `Arc` so a
     /// snapshot costs one refcount rather than a copy of every link.
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "serde_impl::links"))]
     pub(crate) links: Arc<Vec<Link>>,
     /// Inline graphics payloads transmitted.
     pub(crate) graphics: GraphicsSeen,
@@ -583,9 +584,19 @@ pub(crate) struct TermState {
     /// cells per snapshot would dominate the cost of every wait, and
     /// history is asserted on for its content. The rows are shared, so a
     /// snapshot pays one `Arc` clone each.
+    #[cfg_attr(
+        feature = "serde",
+        serde(deserialize_with = "serde_impl::history_text")
+    )]
     pub(crate) scrollback: Arc<[Arc<str>]>,
     /// The scrolled-off rows as cells, when the terminal retains styled
     /// history; `None` when it does not. In lockstep with `scrollback`.
+    // `default` keeps what the derive did for a missing `Option` field,
+    // which a `deserialize_with` would otherwise make an error.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, deserialize_with = "serde_impl::history_cells")
+    )]
     pub(crate) scrollback_cells: Option<Arc<[Arc<[Cell]>]>>,
     /// Per row, whether it ended in a soft wrap rather than a line end —
     /// the backend's own record, never asked for before #265.
@@ -593,6 +604,7 @@ pub(crate) struct TermState {
     /// `IRM` is set: the application left the terminal in insert mode.
     pub(crate) insert_mode: bool,
     /// Escape sequences nobody honoured, distinct, first seen first (#266).
+    #[cfg_attr(feature = "serde", serde(deserialize_with = "serde_impl::unsupported"))]
     pub(crate) unsupported: Arc<[Arc<str>]>,
     /// Distinct unsupported shapes beyond the bound, counted only.
     pub(crate) unsupported_overflow: u64,
@@ -744,6 +756,27 @@ impl Location {
             Location::Screen { col, .. } | Location::History { col, .. } => col,
         }
     }
+}
+
+/// One stretch of a row whose cells all satisfy a predicate, as long as it
+/// goes: what [`Screen::runs_where`] returns, one per stretch.
+///
+/// `#[non_exhaustive]`, so it is read rather than built — `run.row`,
+/// `run.cols`, `run.text` — and a field added later breaks nobody.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct Run {
+    /// Grid row, zero-based from the top.
+    pub row: u16,
+    /// The real terminal columns the run covers, end exclusive. A wide
+    /// character is in or out of a run whole, so it covers both of its
+    /// columns.
+    pub cols: Range<u16>,
+    /// The text of those cells as [`Screen::rect_text`] reads them: the
+    /// characters the application sent, unfolded, a blank cell as a space,
+    /// trailing whitespace stripped. A run of blank cells reads as `""`,
+    /// and `cols` still says where it is.
+    pub text: String,
 }
 
 /// An immutable snapshot of the terminal screen.
@@ -1610,10 +1643,14 @@ impl Screen {
     #[must_use]
     pub fn find(&self, needle: &str) -> Option<(u16, u16)> {
         let mut first = None;
-        self.for_each_match(needle, |at| {
-            first = Some(at);
-            false
-        });
+        self.for_each_match(
+            needle,
+            |_, _| true,
+            |at| {
+                first = Some(at);
+                false
+            },
+        );
         first
     }
 
@@ -1660,20 +1697,166 @@ impl Screen {
     #[must_use]
     pub fn find_all(&self, needle: &str) -> Vec<(u16, u16)> {
         let mut all = Vec::new();
-        self.for_each_match(needle, |at| {
-            all.push(at);
-            true
-        });
+        self.for_each_match(
+            needle,
+            |_, _| true,
+            |at| {
+                all.push(at);
+                true
+            },
+        );
         all
     }
 
-    /// The one scan behind [`find`](Self::find) and [`find_all`](Self::find_all):
-    /// every non-overlapping match of `needle` in reading order, handed to
-    /// `visit` until it returns `false`. One implementation, so the two can
-    /// never disagree about what matches — `find`'s rustdoc promises it
-    /// agrees with `contains`, and a second scan would be a second thing to
-    /// keep in agreement.
-    fn for_each_match(&self, needle: &str, mut visit: impl FnMut((u16, u16)) -> bool) {
+    /// Every occurrence of `needle` whose cells all satisfy `style`, in
+    /// reading order — the `(row, col)` of each match's first character,
+    /// as [`find_all`](Self::find_all) reports it. "Which `beta` is the
+    /// selected one?" is the question this answers, where `find_all` sees
+    /// two of the same text and [`find_by`](Self::find_by) one cell with
+    /// none:
+    ///
+    /// ```
+    /// use termlens::{Color, Screen};
+    ///
+    /// // `beta` selected (reversed) in a list, and again, cyan, in a pane.
+    /// let s = Screen::parse(
+    ///     "size: 20x2  cursor: 0,0\n  alpha\n> beta    beta\n\nstyles:\n1: 0-5 reverse; 10-13 fg=6",
+    /// )?;
+    /// assert_eq!(s.find_all("beta"), [(1, 2), (1, 10)]);
+    /// assert_eq!(s.find_all_styled("beta", |c| c.style().reverse), [(1, 2)]);
+    /// assert_eq!(s.find_all_styled("beta", |c| c.style().fg == Color::Indexed(6)), [(1, 10)]);
+    /// # Ok::<(), termlens::Error>(())
+    /// ```
+    ///
+    /// Matching is `find_all`'s: NFC on both sides, a substring of each
+    /// row with trailing whitespace trimmed, real columns across
+    /// double-width characters, multi-row needles as `contains` reads them,
+    /// the visible screen only. `style` is asked about each cell the match
+    /// covers, the cell holding a character with all its marks, and a wide
+    /// character is judged by the cell that holds it: its second column
+    /// goes with it. One cell `style` refuses and the occurrence is not a
+    /// match — so a needle drawn half bold is not found by
+    /// `|c| c.style().bold` — while one spanning two styles that both pass,
+    /// say red then green under `|c| c.style().fg != Color::Default`, is.
+    ///
+    /// Matches do not overlap, as in `find_all`, and only matches use up
+    /// cells. On a row reading `aaa`, the first `a` plain and the other two
+    /// reversed, `find_all("aa")` is `(0, 0)` alone, and
+    /// `find_all_styled("aa", |c| c.style().reverse)` is `(0, 1)`: the
+    /// plain occurrence covering it is no match here, so it hides nothing.
+    #[must_use]
+    pub fn find_all_styled(&self, needle: &str, style: impl Fn(&Cell) -> bool) -> Vec<(u16, u16)> {
+        let mut all = Vec::new();
+        // Each row's verdicts are worked out once, and only for a row a
+        // match touches: a needle found nowhere costs no call of `style`.
+        let mut verdicts: Vec<Option<Vec<bool>>> = vec![None; usize::from(self.rows)];
+        self.for_each_match(
+            needle,
+            |row, col| {
+                verdicts[usize::from(row)]
+                    .get_or_insert_with(|| self.cells_where(row, &style))
+                    .get(usize::from(col))
+                    .is_some_and(|&taken| taken)
+            },
+            |at| {
+                all.push(at);
+                true
+            },
+        );
+        all
+    }
+
+    /// The runs of cells satisfying `style`, row by row: each stretch of a
+    /// row whose cells all pass, as long as it goes, with its columns and
+    /// its text — "which row is selected?", "what does the error colour
+    /// cover?":
+    ///
+    /// ```
+    /// use termlens::Screen;
+    ///
+    /// let s = Screen::parse(
+    ///     "size: 12x3  cursor: 0,0\n  alpha\n> beta\n  gamma\n\nstyles:\n1: 0-11 reverse",
+    /// )?;
+    /// let selected = s.runs_where(|c| c.style().reverse);
+    /// assert_eq!(selected.len(), 1, "one highlighted row");
+    /// assert_eq!((selected[0].row, selected[0].text.as_str()), (1, "> beta"));
+    /// assert_eq!(selected[0].cols, 0..12, "the highlight spans the row");
+    /// # Ok::<(), termlens::Error>(())
+    /// ```
+    ///
+    /// In reading order, top to bottom and left to right; a run never
+    /// spans rows. `style` is asked about every cell, blanks included, and
+    /// a wide character is judged by the cell that holds it, its second
+    /// column going with it, so a run covers a wide character whole or not
+    /// at all — [`find_all_styled`](Self::find_all_styled) judges the cells
+    /// of a match the same way. [`Run`] says how its text is read; for one
+    /// cell rather than a stretch, [`find_by`](Self::find_by).
+    #[must_use]
+    pub fn runs_where(&self, style: impl Fn(&Cell) -> bool) -> Vec<Run> {
+        let mut runs = Vec::new();
+        for row in 0..self.rows {
+            let taken = self.cells_where(row, &style);
+            let mut col = 0;
+            while col < self.cols {
+                if !taken[usize::from(col)] {
+                    col += 1;
+                    continue;
+                }
+                let start = col;
+                while col < self.cols && taken[usize::from(col)] {
+                    col += 1;
+                }
+                runs.push(Run {
+                    row,
+                    cols: start..col,
+                    text: self.rect_text(start..col, row..=row),
+                });
+            }
+        }
+        runs
+    }
+
+    /// Per column of `row`, whether its cell satisfies `style`. A wide
+    /// character's continuation cell takes the verdict of the cell before
+    /// it, the one holding the character, so the character is in or out
+    /// whole; `style` is never asked about the continuation itself, whose
+    /// contents are empty. A continuation with no wide character before it
+    /// is asked about like any other cell.
+    fn cells_where(&self, row: u16, style: &impl Fn(&Cell) -> bool) -> Vec<bool> {
+        let mut taken: Vec<bool> = Vec::with_capacity(usize::from(self.cols));
+        for col in 0..self.cols {
+            let cell = self.cell(row, col).expect("row and column are in bounds");
+            let continues = col > 0
+                && cell.is_wide_continuation()
+                && self.cell(row, col - 1).is_some_and(Cell::is_wide);
+            let verdict = if continues {
+                taken[usize::from(col - 1)]
+            } else {
+                style(cell)
+            };
+            taken.push(verdict);
+        }
+        taken
+    }
+
+    /// The one scan behind [`find`](Self::find), [`find_all`](Self::find_all)
+    /// and [`find_all_styled`](Self::find_all_styled): every non-overlapping
+    /// match of `needle` in reading order, handed to `visit` until it
+    /// returns `false`. One implementation, so they can never disagree about
+    /// what matches — `find`'s rustdoc promises it agrees with `contains`,
+    /// and a second scan would be a second thing to keep in agreement.
+    ///
+    /// `takes(row, col)` says whether the cell there may be part of a
+    /// match. An occurrence covering a cell it refuses is not a match and
+    /// uses up nothing, so the scan looks again one character on; for
+    /// `find` and `find_all` it takes every cell, and the scan is
+    /// `str::match_indices`'s.
+    fn for_each_match(
+        &self,
+        needle: &str,
+        mut takes: impl FnMut(u16, u16) -> bool,
+        mut visit: impl FnMut((u16, u16)) -> bool,
+    ) {
         if needle.is_empty() {
             visit((0, 0));
             return;
@@ -1686,13 +1869,22 @@ impl Screen {
                 // trimmed — not the grid padded out to `cols`. The trimmed
                 // string is a prefix, so the byte-to-column map is unchanged
                 // and an interior space still matches (#212).
-                for (byte_off, _) in text.trim_end().match_indices(needle.as_str()) {
-                    let Some(&col) = cols.get(byte_off) else {
+                let hay = text.trim_end();
+                let mut from = 0;
+                while let Some(found) = hay[from..].find(needle.as_str()) {
+                    let start = from + found;
+                    let end = start + needle.len();
+                    if !(start..end).all(|byte| cols.get(byte).is_some_and(|&c| takes(row, c))) {
+                        from = start + hay[start..].chars().next().map_or(1, char::len_utf8);
+                        continue;
+                    }
+                    let Some(&col) = cols.get(start) else {
                         return;
                     };
                     if !visit((row, col)) {
                         return;
                     }
+                    from = end;
                 }
             }
             return;
@@ -1706,7 +1898,15 @@ impl Screen {
             return;
         };
         let rows = self.searchable_rows();
-        self.for_each_multirow_match(&rows, &segments, |row| {
+        let accepts = |row: u16| {
+            multirow_spans(&rows, &segments, row)
+                .into_iter()
+                .all(|(at, mut bytes)| {
+                    let cols = &rows[usize::from(at)].1;
+                    bytes.all(|byte| cols.get(byte).is_some_and(|&c| takes(at, c)))
+                })
+        };
+        self.for_each_multirow_match(&rows, &segments, accepts, |row| {
             let (first_line, cols) = &rows[usize::from(row)];
             let first = first_line.trim_end();
             // The needle's first character: on this row for a non-empty
@@ -1759,6 +1959,7 @@ impl Screen {
         &self,
         rows: &[(String, Vec<u16>)],
         segments: &[&str],
+        mut accept: impl FnMut(u16) -> bool,
         mut visit: impl FnMut(u16) -> bool,
     ) {
         let Ok(extra) = u16::try_from(segments.len().saturating_sub(1)) else {
@@ -1799,7 +2000,9 @@ impl Screen {
                 && spent.is_some_and(|(spent_row, spent_col)| {
                     spent_row == row && rows[at].1[lines[at].len() - first.len()] <= spent_col
                 });
-            if !matched || shares_a_cell {
+            // A candidate `accept` refuses is no match, so it spends
+            // nothing: the next may start on the row below.
+            if !matched || shares_a_cell || !accept(row) {
                 row += 1;
                 continue;
             }
@@ -1851,8 +2054,9 @@ impl Screen {
     /// `pattern` — a literal, matched the way [`find_all`](Self::find_all)
     /// matches — replaced by `fill`, one per column, so an eight-column
     /// time stays eight columns of `▒`. A wide character under a match
-    /// becomes two fill cells. See [`mask_rect`](Self::mask_rect) for what
-    /// a mask keeps.
+    /// becomes two fill cells — one, if it is a stranded character an old
+    /// file holds without its second column. See
+    /// [`mask_rect`](Self::mask_rect) for what a mask keeps.
     ///
     /// With the `regex` feature, `mask_matches` takes a pattern instead; the
     /// two share one engine.
@@ -1898,34 +2102,25 @@ impl Screen {
     /// cell a row-spanning needle covers. `needle` is already folded.
     fn masked_multiline(&self, needle: &str, fill: char) -> Screen {
         let segments: Vec<&str> = needle.split('\n').collect();
-        let Ok(extra) = u16::try_from(segments.len().saturating_sub(1)) else {
-            return self.clone();
-        };
         let width = usize::from(self.cols);
         let mut hits = vec![false; self.cells.len()];
         let rows = self.searchable_rows();
-        self.for_each_multirow_match(&rows, &segments, |row| {
-            for (index, segment) in segments.iter().enumerate() {
-                let at = row + index as u16;
-                let (text, cols) = &rows[usize::from(at)];
-                let line = text.trim_end();
-                // The same shape the matcher just checked: the first segment
-                // ends its row, the last starts one, the rest are whole rows.
-                let (start, end) = if index == 0 {
-                    (line.len().saturating_sub(segment.len()), line.len())
-                } else if index as u16 == extra {
-                    (0, segment.len())
-                } else {
-                    (0, line.len())
-                };
-                for byte in start..end {
-                    if let Some(&col) = cols.get(byte) {
-                        hits[usize::from(at) * width + usize::from(col)] = true;
+        self.for_each_multirow_match(
+            &rows,
+            &segments,
+            |_| true,
+            |row| {
+                for (at, bytes) in multirow_spans(&rows, &segments, row) {
+                    let cols = &rows[usize::from(at)].1;
+                    for byte in bytes {
+                        if let Some(&col) = cols.get(byte) {
+                            hits[usize::from(at) * width + usize::from(col)] = true;
+                        }
                     }
                 }
-            }
-            true
-        });
+                true
+            },
+        );
         self.apply_mask(hits, Some(fill))
     }
 
@@ -1977,6 +2172,19 @@ impl Screen {
         self.apply_mask(hits, Some(fill))
     }
 
+    /// Whether the cell at `(row, col)` is a stranded wide character: wide,
+    /// with no second column after it. vt100 0.16, behind every release up
+    /// to 0.11.6, narrowed a row by cutting it, so files those releases
+    /// wrote can hold one at the edge or, redrawn after, before other text
+    /// (DESIGN §3). It is one column on the grid and two in any font that
+    /// draws its glyph.
+    fn stranded(&self, row: u16, col: u16) -> bool {
+        self.cell(row, col).is_some_and(Cell::is_wide)
+            && !self
+                .cell(row, col.saturating_add(1))
+                .is_some_and(Cell::is_wide_continuation)
+    }
+
     fn apply_mask(&self, mut hits: Vec<bool>, fill: Option<char>) -> Screen {
         if let Some(fill) = fill {
             assert_eq!(
@@ -1986,13 +2194,22 @@ impl Screen {
             );
         }
         // A masked wide character masks both of its columns, whichever of
-        // the two was hit, so the row keeps its width.
+        // the two was hit, so the row keeps its width. One a resize left
+        // without its second column — a stranded cell, which files 0.11.6
+        // and earlier wrote (DESIGN §3) — has one column, and the cell
+        // after it is a character of its own, never masked for it (#780).
         let width = usize::from(self.cols);
         for i in 0..hits.len() {
             if !hits[i] {
                 continue;
             }
-            if self.cells[i].is_wide() && (i + 1) % width != 0 && i + 1 < hits.len() {
+            if self.cells[i].is_wide()
+                && (i + 1) % width != 0
+                && self
+                    .cells
+                    .get(i + 1)
+                    .is_some_and(Cell::is_wide_continuation)
+            {
                 hits[i + 1] = true;
             }
             if self.cells[i].is_wide_continuation() && i % width != 0 {
@@ -2365,6 +2582,38 @@ fn clamp_range(range: &impl RangeBounds<u16>, len: u16, axis: &str, caller: &str
     (start.min(len), end.min(len))
 }
 
+/// The cells a multi-row match starting on `row` covers, as each of its
+/// rows with the byte span of that row's searchable text, top to bottom:
+/// the shape [`Screen::for_each_multirow_match`] matches, where the first
+/// segment ends its row, the last starts one and the rest are whole rows.
+/// One description of it, for the mask that blanks a match and the search
+/// that asks a predicate about one, so the two cover the same cells.
+fn multirow_spans(
+    rows: &[(String, Vec<u16>)],
+    segments: &[&str],
+    row: u16,
+) -> Vec<(u16, Range<usize>)> {
+    let last = segments.len().saturating_sub(1);
+    segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| {
+            // The matcher took this match only where all its rows exist,
+            // so `row + index` is a row of the screen.
+            let at = row + index as u16;
+            let line = rows[usize::from(at)].0.trim_end();
+            let bytes = if index == 0 {
+                line.len().saturating_sub(segment.len())..line.len()
+            } else if index == last {
+                0..segment.len()
+            } else {
+                0..line.len()
+            };
+            (at, bytes)
+        })
+        .collect()
+}
+
 /// `at[p]` is whether `lines[p..p + pattern.len()]` equals `pattern` row for
 /// row, for every `p` up to `lines.len()` inclusive (an empty pattern is
 /// found everywhere). Knuth–Morris–Pratt with a row as the symbol, so it
@@ -2417,6 +2666,9 @@ mod search_work {
     use std::cell::Cell;
 
     thread_local! {
+        // Already `const`; see HOLDS_LIFECYCLE in terminal.rs for why the
+        // lint still fires on illumos (#791).
+        #[allow(clippy::missing_const_for_thread_local)]
         static WORK: Cell<usize> = const { Cell::new(0) };
     }
 

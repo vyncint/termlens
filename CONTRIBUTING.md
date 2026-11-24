@@ -36,7 +36,7 @@ pushing and nothing in CI should surprise you.
 [`tools/preflight.sh`](tools/preflight.sh) runs the whole list below in order
 and prints one line per gate; `--fast` narrows it to fmt, clippy and the test
 suite. A gate whose optional tooling is not installed — `cargo-deny`,
-`cargo-semver-checks`, `pipx`, the 1.85 toolchain, the Windows target — is
+`cargo-semver-checks`, `pipx`, the 1.85 toolchain, the Windows or illumos target — is
 skipped by name rather than failed.
 
 ```sh
@@ -69,13 +69,14 @@ cargo +1.85 check --workspace --exclude ratatui-app --locked --all-targets    # 
 cargo +1.85 check -p termlens --all-features --all-targets --locked           # …and every optional feature at the same floor
 cargo +1.85 check -p termlens --no-default-features --all-targets --locked
 cargo clippy --workspace --all-targets --all-features --target x86_64-pc-windows-msvc -- -D warnings   # the Windows build, from any host: `rustup target add x86_64-pc-windows-msvc` once
+cargo clippy --workspace --all-targets --all-features --target x86_64-unknown-illumos -- -D warnings   # …and illumos (#748), likewise: `rustup target add x86_64-unknown-illumos` once
 tools/semver-gate-selftest/run.sh                       # the semver gate can fail (cargo install cargo-semver-checks)…
 tools/link-gate-selftest/run.sh                         # …and so can the link gate, with no extra tooling
 tools/report-pin-gate-selftest/run.sh                   # …and the report-pin gate, likewise
 tools/attribution-gate-selftest/run.sh                  # …and the AI-attribution gate, likewise
 tools/dco-gate-selftest/run.sh                          # …and the DCO gate, its one-commit squash exemption included
 tools/preflight-selftest/run.sh                         # …and the runner accounts for each gate it runs, failures included
-tools/report-action-selftest/run.sh                     # …and the report action writes its summary past a directory it cannot read, a fence, a newline or CR in a name, a relative artifact directory, or screens past 1 MiB
+tools/report-action-selftest/run.sh                     # …and the report action writes its summary past a directory it cannot read, a fence, a newline or CR in a name, a relative artifact directory, screens past 1 MiB, or a pair it cannot read
 tools/gates-listed-selftest/run.sh                      # …and the gates-listed gate, named, quoted and folded gates included
 tools/snippet-gate-selftest/run.sh                      # …and the snippet gate reads indented and variant-tagged Rust blocks
 tools/release-notes-selftest/run.sh                     # …and the release notes carry the link definitions their section uses
@@ -170,6 +171,13 @@ cargo insta review            # inspect and accept/reject each diff
 - Snapshot updates must be **reviewed diffs**: run `cargo insta review` and
   look at every change. Never blind-accept with `cargo insta accept` or
   `INSTA_UPDATE=always`. A snapshot diff you can't explain is a bug report.
+- **The next compilers run once a week.** `canary.yml` runs clippy with
+  `-D warnings`, the suite and rustdoc with `-D warnings` on beta and
+  nightly every Monday, and on demand from the Actions tab. It is not
+  required, so it never blocks a pull request; a red canary means the next
+  toolchain breaks something here. Look at its latest run before a release,
+  and open an issue for a failure on beta, which becomes stable within six
+  weeks (Rust 1.100 broke every pull request on the day it shipped, #749).
 
 ## 4. Commit conventions
 

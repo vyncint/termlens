@@ -177,6 +177,25 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - run: cargo clippy --workspace --all-targets --all-features --target x86_64-pc-windows-msvc -- -D warnings
 
+  # illumos builds since 0.11.10 (#748: `id_t` is an `i32` there) and nothing
+  # checked it, so a later change could break it unnoticed (#791). The same
+  # trade as windows-check: a cross-target clippy needs only the target's
+  # std, no linker and no illumos machine. `x86_64-pc-solaris` stays out: it
+  # fails inside nix 0.28, which portable-pty 0.9 pins.
+  illumos-check:
+    name: illumos-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          components: clippy
+          targets: x86_64-unknown-illumos
+      - run: cargo clippy --workspace --all-targets --all-features --target x86_64-unknown-illumos -- -D warnings
+
   # The Windows leg (#149): the whole suite over ConPTY, with the tests that
   # ConPTY cannot honour marked `#[cfg_attr(windows, ignore = "…")]`, each
   # with its reason. Required since #280: it ran non-required first and held
@@ -457,7 +476,7 @@ jobs:
   required-green:
     name: required-green
     if: always()
-    needs: [fmt, clippy, test, features, windows-check, windows, msrv, semver, docs, deny, zizmor, gates-listed, skill]
+    needs: [fmt, clippy, test, features, windows-check, illumos-check, windows, msrv, semver, docs, deny, zizmor, gates-listed, skill]
     runs-on: ubuntu-latest
     steps:
       - name: Verify every needed job succeeded

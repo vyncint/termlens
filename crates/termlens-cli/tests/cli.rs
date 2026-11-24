@@ -192,6 +192,59 @@ fn diff_across_sizes_keeps_every_separator_in_one_column() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A wide character stranded before other text — the shape 0.11.6 wrote,
+/// in the corpus — is one column, and the coloured diff prints it as one
+/// blank, as the plain one does (#781). It printed the glyph whole, two
+/// columns, and the second `│` of the row stood a column right of every
+/// other frame. The columns are counted on the terminal's terms: the
+/// corpus row is ASCII and one CJK character.
+#[test]
+fn diff_color_keeps_a_stranded_wide_character_in_its_column() {
+    use std::process::Command;
+    let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../termlens/tests/compat/0.11.6/stranded-wide-redrawn.txt");
+    let text = std::fs::read_to_string(&corpus).expect("the corpus file");
+    let dir = std::env::temp_dir().join(format!("termlens-stranded-diff-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let changed = dir.join("changed.txt");
+    std::fs::write(&changed, text.replacen("abcd東Zyw", "abcd東Xyw", 1)).expect("write");
+    let columns = |line: &str| -> Vec<usize> {
+        let mut plain = String::new();
+        let mut rest = line;
+        while let Some(at) = rest.find('\x1b') {
+            plain.push_str(&rest[..at]);
+            let end = rest[at..].find('m').expect("an SGR run ends") + at + 1;
+            rest = &rest[end..];
+        }
+        plain.push_str(rest);
+        plain
+            .match_indices('│')
+            .map(|(at, _)| {
+                plain[..at]
+                    .chars()
+                    .map(|ch| if ch.is_ascii() || ch == '│' { 1 } else { 2 })
+                    .sum()
+            })
+            .collect()
+    };
+    for color in ["never", "always"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_termlens"))
+            .args(["diff", "--color", color])
+            .arg(&corpus)
+            .arg(&changed)
+            .output()
+            .expect("run termlens");
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        let printed = String::from_utf8(out.stdout).expect("UTF-8");
+        let row = printed
+            .lines()
+            .find(|line| line.starts_with("  0 │"))
+            .expect("row 0 changed");
+        assert_eq!(columns(row), [4, 13], "--color {color}:\n{printed}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A text save and a JSON save of one screen are the same picture, a row
 /// ending in a no-break space or an ideographic space included (#724). The
 /// text form trims both with the padding and the JSON keeps them, so the
@@ -744,6 +797,64 @@ fn render_and_diff_read_a_screen_behind_a_byte_order_mark() {
             format!("termlens: {path}: stream did not contain valid UTF-16\n"),
             "{name}"
         );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A screen saved as UTF-32 — what PowerShell's `Out-File -Encoding utf32`
+/// writes, behind the mark `FF FE 00 00` or `00 00 FE FF` — is refused by
+/// name, in either byte order, as a file and on a pipe, text or JSON
+/// (#784). Little-endian's mark begins with UTF-16LE's, so it was decoded
+/// as UTF-16 and refused with a header error full of NULs; big-endian's
+/// was "not valid UTF-8": two byte orders of one encoding, two unrelated
+/// diagnoses.
+#[test]
+fn render_refuses_utf32_by_name() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("termlens-utf32-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let text = "size: 10x2  cursor: 0,2\nhi\n\nstyles:\n0: 0-1 bold\n";
+    let json = String::from_utf8(with_stdin(&["render", "--json", "-"], text).stdout).unwrap();
+    for (name, big_endian, content) in [
+        ("le.snap", false, text),
+        ("be.snap", true, text),
+        ("le.json", false, json.as_str()),
+        ("be.json", true, json.as_str()),
+    ] {
+        let bytes: Vec<u8> = std::iter::once('\u{feff}')
+            .chain(content.chars())
+            .flat_map(|ch| {
+                let unit = u32::from(ch);
+                if big_endian {
+                    unit.to_be_bytes()
+                } else {
+                    unit.to_le_bytes()
+                }
+            })
+            .collect();
+        let path = dir.join(name);
+        std::fs::write(&path, &bytes).expect("the file is written");
+        let path = path.to_str().unwrap();
+        let file = Command::new(env!("CARGO_BIN_EXE_termlens"))
+            .args(["render", "--text", path])
+            .output()
+            .expect("termlens runs");
+        let piped = with_stdin(&["render", "--text", "-"], &bytes);
+        for (source, out, shown) in [("file", file, path), ("pipe", piped, "<stdin>")] {
+            assert_eq!(
+                out.status.code(),
+                Some(2),
+                "{name} from a {source}: {out:?}"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&out.stderr),
+                format!(
+                    "termlens: {shown}: the byte-order mark says UTF-32, which termlens \
+                     does not read (it reads UTF-8 and UTF-16)\n"
+                ),
+                "{name} from a {source}"
+            );
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1381,6 +1492,92 @@ fn every_corpus_file_renders() -> termlens::Result<()> {
     Ok(())
 }
 
+/// `render` writes each rendering as it is made rather than building it
+/// whole first (#777), and the bytes are the ones it printed before: the
+/// library's own rendering of the screen it read — the text format and the
+/// pretty JSON each with one newline after it, the SVG, HTML and ANSI as
+/// they are — on stdout and through `--out`, for the corpus screens of the
+/// last release and every extra 0.11.6 shape. `diff` likewise prints the
+/// diff's own text with exactly one newline after it.
+#[test]
+fn render_and_diff_print_the_library_rendering_byte_for_byte() {
+    use std::process::Command;
+    let bin = env!("CARGO_BIN_EXE_termlens");
+    let compat = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../termlens/tests/compat");
+    let mut files: Vec<std::path::PathBuf> = ["0.11.10", "0.11.6"]
+        .iter()
+        .flat_map(|version| std::fs::read_dir(compat.join(version)).expect("a version directory"))
+        .map(|entry| entry.expect("a corpus file").path())
+        .collect();
+    files.sort();
+    assert!(files.len() >= 24, "{files:?}");
+    let dir = std::env::temp_dir().join(format!("termlens-render-bytes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let written = dir.join("out");
+    let read = |path: &std::path::Path| -> Screen {
+        let text = std::fs::read_to_string(path)
+            .expect("a corpus file")
+            .replace("\r\n", "\n");
+        if path.extension().is_some_and(|e| e == "json") {
+            serde_json::from_str(&text).expect("a JSON screen")
+        } else {
+            Screen::parse(&text).expect("a text screen")
+        }
+    };
+    for file in &files {
+        let screen = read(file);
+        let path = file.to_str().unwrap();
+        for (flag, expected) in [
+            ("--text", format!("{}\n", screen.with_styles())),
+            (
+                "--json",
+                format!("{}\n", serde_json::to_string_pretty(&screen).unwrap()),
+            ),
+            ("--svg", screen.to_svg()),
+            ("--html", screen.to_html()),
+            ("--ansi", screen.to_ansi()),
+        ] {
+            let out = Command::new(bin)
+                .args(["render", flag, path])
+                .output()
+                .expect("termlens runs");
+            assert_eq!(out.status.code(), Some(0), "{flag} {path}: {out:?}");
+            assert!(out.stdout == expected.as_bytes(), "{flag} {path} on stdout");
+            let out = Command::new(bin)
+                .args(["render", flag, "--out", written.to_str().unwrap(), path])
+                .output()
+                .expect("termlens runs");
+            assert_eq!(out.status.code(), Some(0), "{flag} {path}: {out:?}");
+            assert!(
+                std::fs::read(&written).unwrap() == expected.as_bytes(),
+                "{flag} {path} through --out"
+            );
+        }
+    }
+
+    let (plain, styled) = (
+        compat.join("0.11.10/plain.txt"),
+        compat.join("0.11.10/styled.txt"),
+    );
+    for (a, b) in [(&plain, &styled), (&plain, &plain)] {
+        let diff = read(a).diff(&read(b)).to_string();
+        let expected = if diff.ends_with('\n') {
+            diff
+        } else {
+            format!("{diff}\n")
+        };
+        let out = Command::new(bin)
+            .args(["diff", "--color", "never"])
+            .arg(a)
+            .arg(b)
+            .output()
+            .expect("termlens runs");
+        assert!(matches!(out.status.code(), Some(0 | 1)), "{out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Run the CLI with `input` on standard input, and without a PTY: a pipe is
 /// the whole point of `-`, and through a PTY there is no EOF to read to.
 fn with_stdin(args: &[&str], input: impl AsRef<[u8]>) -> std::process::Output {
@@ -1869,6 +2066,58 @@ fn inspect_refuses_a_cwd_that_is_not_a_directory() -> termlens::Result<()> {
         "and what was wrong with it: {stderr}"
     );
     Ok(())
+}
+
+/// With no PATH in its environment, `inspect` of a bare program name says
+/// what a CLI user can do — give the program's absolute path, or a PATH
+/// with `--env PATH=…` — in one line naming the flag (#785). The message
+/// was the library's, for code that called `env_clear()` and `.env(…)`,
+/// which the user of the CLI never wrote. `--inherit-env` gives the child
+/// no PATH either when there is none to inherit, so it is refused the same
+/// way; each of the two remedies then runs the program.
+#[test]
+#[cfg_attr(windows, ignore = "the program under inspection is a POSIX shell")]
+fn inspect_without_path_names_what_the_cli_user_can_do() {
+    use std::process::Command;
+    let inspect = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_termlens"))
+            .env_remove("PATH")
+            .arg("inspect")
+            .args(args)
+            .output()
+            .expect("termlens runs")
+    };
+    for args in [
+        &["sh", "-c", "true"][..],
+        &["--inherit-env", "sh", "-c", "true"],
+    ] {
+        let out = inspect(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(stderr.lines().count(), 1, "{args:?}: one line: {stderr}");
+        assert!(
+            stderr.starts_with("termlens: `sh` is a bare program name and there is no PATH"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains("absolute path") && stderr.contains("--env PATH="),
+            "{args:?}: it names the remedies: {stderr}"
+        );
+        assert!(
+            !stderr.contains("env_clear") && !stderr.contains(".env("),
+            "{args:?}: not the builder's advice: {stderr}"
+        );
+    }
+    let sh = ["/bin/sh", "/usr/bin/sh"]
+        .into_iter()
+        .find(|sh| std::path::Path::new(sh).exists())
+        .expect("a POSIX shell");
+    let dir = std::path::Path::new(sh).parent().unwrap().to_str().unwrap();
+    let path = format!("--env=PATH={dir}");
+    for args in [&[sh, "-c", "true"][..], &[&path, "sh", "-c", "true"]] {
+        let out = inspect(args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {out:?}");
+    }
 }
 
 /// `inspect` exists so a test sees the screen its own program will see, so
@@ -2630,9 +2879,10 @@ fn diff_output_ends_with_exactly_one_newline() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `diff` and `render` refuse an input past their 1 GiB bound (#653). A
-/// regular file says how long it is, so a sparse one past the bound — no
-/// disk, no memory — is refused before a byte is read.
+/// `diff` and `render` refuse an input in the text format past their 1 GiB
+/// bound (#653). A regular file says how long it is, so a sparse one past
+/// the bound — no disk, no memory — is refused once its first bytes say it
+/// is not JSON, before the rest is read. JSON has no such bound (#777).
 #[test]
 fn render_and_diff_refuse_a_file_past_the_size_bound() {
     let dir = std::env::temp_dir().join(format!("termlens-size-bound-{}", std::process::id()));
@@ -2653,7 +2903,7 @@ fn render_and_diff_refuse_a_file_past_the_size_bound() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(
             stderr,
-            format!("termlens: {big}: larger than 1 GiB, which no saved screen is\n"),
+            format!("termlens: {big}: larger than 1 GiB, which no screen in the text format is\n"),
             "{args:?}"
         );
     }
@@ -2697,20 +2947,20 @@ fn render_and_diff_refuse_a_stream_past_the_size_bound() {
         let out = capped(args, stdin);
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
-            format!("termlens: {name}: larger than 1 GiB, which no saved screen is\n"),
+            format!("termlens: {name}: larger than 1 GiB, which no screen in the text format is\n"),
             "{args:?}"
         );
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
     }
 }
 
-/// The 1 GiB input bound bounds the bytes, and the JSON reader has to
-/// bound what it builds from them (#713): a 1x1 screen whose `cells` holds
-/// millions of empty rows took a vector per row before the shape was
-/// checked, about eight bytes of memory per byte of file, and aborted
-/// under a cap. 30 MB of `[]` cost some 240 MB that way; under a 160 MiB
-/// address-space cap the reader now refuses the second row, with exit 2
-/// and the reason, in memory the declared 1x1 sets.
+/// The JSON reader bounds what it builds by what the file declares, not by
+/// the file's length (#713): a 1x1 screen whose `cells` holds millions of
+/// empty rows took a vector per row before the shape was checked, about
+/// eight bytes of memory per byte of file, and aborted under a cap. 30 MB
+/// of `[]` cost some 240 MB that way; under a 160 MiB address-space cap the
+/// reader now refuses the second row, with exit 2 and the reason, in memory
+/// the declared 1x1 sets.
 #[test]
 #[cfg_attr(
     not(target_os = "linux"),
@@ -2752,4 +3002,163 @@ fn render_refuses_json_rows_past_the_header_without_building_them() {
         "{stderr}"
     );
     assert_eq!(out.status.code(), Some(2), "{out:?}");
+}
+
+/// The state is held to what it declares as the grid is (#778). History
+/// has no bound on its rows — `scrollback(n)` takes any `n` — so it is
+/// bounded a row at a time, the empty row shared, and room the allocator
+/// refuses is exit 2 with the reason rather than an abort. The derive took
+/// about fifty bytes of memory a row: ten million empty rows, 30 MB of
+/// `"",` or `[],`, aborted under a 160 MiB address-space cap.
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "`ulimit -v` caps the child's address space only on Linux"
+)]
+fn render_refuses_history_it_has_no_room_for_with_exit_two() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let screen = Screen::parse("size: 1x1  cursor: 0,0\nx").expect("a 1x1 screen");
+    let json = serde_json::to_string(&screen).expect("serialize");
+    for (field, empty, what) in [
+        ("scrollback", "\"\"", "rows of history"),
+        ("scrollback_cells", "[]", "rows of styled history"),
+    ] {
+        let written = json
+            .find(&format!("\"{field}\":"))
+            .expect("the field is written");
+        let value = written + field.len() + 3;
+        let end = value + json[value..].find([',', '}']).expect("the value ends");
+        let (head, tail) = (
+            format!("{}[", &json[..value]),
+            format!("{empty}]{}", &json[end..]),
+        );
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(r#"ulimit -v 163840 && exec "$0" "$@""#)
+            .arg(env!("CARGO_BIN_EXE_termlens"))
+            .args(["render", "--text", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("sh runs");
+        let mut stdin = child.stdin.take().expect("a stdin pipe");
+        let writer = std::thread::spawn(move || {
+            let chunk = format!("{empty},").repeat(1_000_000);
+            // A refusal before the end of the input closes the pipe; that
+            // is a result, not a failure of the writer.
+            let _ = stdin.write_all(head.as_bytes());
+            for _ in 0..10 {
+                let _ = stdin.write_all(chunk.as_bytes());
+            }
+            let _ = stdin.write_all(tail.as_bytes());
+        });
+        let out = child.wait_with_output().expect("termlens runs");
+        writer.join().expect("the writer thread");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.starts_with(
+                "termlens: <stdin>: not a termlens Screen: the allocator refused the room for "
+            ) && stderr.contains(what),
+            "{field}: {stderr}"
+        );
+        assert_eq!(out.status.code(), Some(2), "{field}: {out:?}");
+    }
+}
+
+/// JSON is parsed as it arrives, not read whole first (#777). A screen with
+/// 1000 rows of styled history on 80 columns is 35 MB of the pretty JSON
+/// `render --json` writes and about 4 MB once read, and it renders under a
+/// 24 MiB address-space cap, where reading the input before parsing it
+/// needed the 35 MB. That is what reads back the JSON termlens writes past
+/// any fixed bound: 50,000 such rows on 120x40 are 1.25 GiB compact, which
+/// the 1 GiB bound refused.
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "`ulimit -v` caps the child's address space only on Linux"
+)]
+fn render_reads_json_as_it_arrives() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let screen = Screen::parse("size: 80x2  cursor: 1,0\nthe last row of the grid").unwrap();
+    let mut document = serde_json::to_value(&screen).unwrap();
+    let row = document["cells"][0].clone();
+    document["state"]["scrollback"] = serde_json::json!(vec!["the last row of the grid"; 1000]);
+    document["state"]["scrollback_cells"] = serde_json::json!(vec![row; 1000]);
+    let json = serde_json::to_string_pretty(&document).unwrap();
+    assert!(json.len() > 32 << 20, "{} bytes", json.len());
+
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(r#"ulimit -v 24576 && exec "$0" "$@""#)
+        .arg(env!("CARGO_BIN_EXE_termlens"))
+        .args(["render", "--text", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("sh runs");
+    let mut stdin = child.stdin.take().expect("a stdin pipe");
+    // A refusal before the end of the input closes the pipe; that is a
+    // result, not a failure of the writer.
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(json.as_bytes());
+    });
+    let out = child.wait_with_output().expect("termlens runs");
+    writer.join().expect("the writer thread");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{}\n", screen.with_styles())
+    );
+}
+
+/// The text reader walks the lines after the grid rather than gathering
+/// them (#779): a 1x1 screen followed by 8 MB of blank lines, with or
+/// without a `styles:` line in front of them, kept a 16-byte pointer for
+/// every line, 128 MiB, and aborted `render` under a 96 MiB cap. It now
+/// renders there, in the memory the input and the declared 1x1 take.
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "`ulimit -v` caps the child's address space only on Linux"
+)]
+fn render_walks_the_lines_after_the_grid() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    for head in [
+        "size: 1x1  cursor: 0,0\nx\n",
+        "size: 1x1  cursor: 0,0\nx\n\nstyles:\n",
+    ] {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(r#"ulimit -v 98304 && exec "$0" "$@""#)
+            .arg(env!("CARGO_BIN_EXE_termlens"))
+            .args(["render", "--text", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("sh runs");
+        let mut stdin = child.stdin.take().expect("a stdin pipe");
+        let writer = std::thread::spawn(move || {
+            let blank = vec![b'\n'; 1 << 20];
+            // A refusal before the end of the input closes the pipe; that
+            // is a result, not a failure of the writer.
+            let _ = stdin.write_all(head.as_bytes());
+            for _ in 0..8 {
+                let _ = stdin.write_all(&blank);
+            }
+        });
+        let out = child.wait_with_output().expect("termlens runs");
+        writer.join().expect("the writer thread");
+        assert_eq!(out.status.code(), Some(0), "{head:?}: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "size: 1x1  cursor: 0,0\nx\n\nstyles:\n(none)\n",
+            "{head:?}"
+        );
+    }
 }

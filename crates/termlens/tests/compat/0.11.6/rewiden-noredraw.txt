@@ -1,0 +1,6 @@
+size: 8x2  cursor: 1,1
+abcd東
+z
+
+styles:
+(none)

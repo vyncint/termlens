@@ -17,6 +17,45 @@ reads that marker.
 
 ## [Unreleased]
 
+### Added
+
+- `Screen::find_all_styled(needle, style)` and `Screen::runs_where(style)`
+  find text by its style. `find_all_styled` matches as `find_all` does,
+  counting only the occurrences whose every cell passes `style`, so "which
+  `beta` is the selected one" is one call where `find_all` found both and
+  `find_by` named one cell and no text. `runs_where` returns each stretch of a row
+  whose cells pass, as a `Run` with its row, its columns and its text: the
+  selected row of a list, what an error colour covers. A wide character
+  is judged by the cell that holds it and counts both of its columns.
+  Several outside test suites carried a helper for this. (#787)
+- `Terminal::mouse_move(col, row)`, `mouse_down(button, col, row)` and
+  `mouse_up(button, col, row)` send a pointer move, a press and a release
+  as calls of their own: a hover, which crossterm reads as `Moved`, and a
+  drag driven a step at a time, with the screen asserted in the middle of
+  it. They encode as `click` does, in every encoding, and refuse with
+  `Error::Input` what the application's tracking mode would not report: a
+  move needs `?1003`, or `?1002` while a button is held, so the terminal
+  keeps which buttons `mouse_down` pressed until `mouse_up` releases them,
+  and X10 reports neither a move nor a release. A motion carries the held
+  press's button and modifiers, so a press, a move per cell and a release
+  send what `drag` sends. Only hand-written bytes (`\x1b[<35;10;5M`)
+  produced a hover before. (#789)
+- `Terminal::resize_and_wait(cols, rows, predicate)` and
+  `resize_and_wait_for(cols, rows, predicate, timeout)` resize, then wait
+  until the predicate holds on output read after the resize, and return
+  that screen. `resize` gives the grid the new size at once and keeps the
+  old content until the application repaints, so
+  `wait_until(|s| s.contains("ready"))` after `resize(100, 30)` returned at
+  once on a screen still reading `size 80x24 ready`; outside suites wrote
+  the same helper to avoid it. A resize to the size the grid has reaches
+  no one, and the screen as it is answers. A timeout says when nothing was
+  read after the resize at all. Output read after the resize can still be
+  the old layout where an application paints on its own. On Windows
+  ConPTY repaints the screen itself after a resize, measured, so a
+  predicate the old content satisfies can pass with nothing drawn by the
+  application: there the predicate must name something only the new
+  layout has. (#788)
+
 ### Changed
 
 - `Screen::unsupported()` lists a CSI with a `<` private marker with the
@@ -24,6 +63,170 @@ reads that marker.
   kitty keyboard pop that crossterm sends (`CSI < 1 u`) was listed as
   `^[[1<u`, which is not a sequence; it is now `^[[<1u`. A test that pins
   the old spelling needs the new one. (#759)
+- `termlens render` and `diff` read a JSON saved screen of any length, as
+  termlens writes them. They refused every input past 1 GiB as larger
+  than any saved screen (#653), but JSON is not bounded by its grid: its
+  history and images grow with `scrollback(n)` and `capture_graphics(n)`,
+  and 50,000 rows of styled history on 120x40 came to 1.25 GiB of the
+  compact JSON `TERMLENS_ARTIFACT_DIR` writes, which `render` refused with
+  exit 2. JSON is now parsed as it is read, holding memory for the screen
+  and history it declares (#778) rather than for the file; its strings and
+  its nesting are held to what a saved screen has. `render --json` writes
+  the document as it makes it, as `render`'s other formats, `diff` and
+  `inspect` now write theirs, so that screen renders back to JSON in the
+  484 MB it is read in, where building the document and a copy of it took
+  5.6 GB. Only the text format, which holds a grid alone and is at most
+  about 110 MB, is still held to 1 GiB, and the refusal says so: a script
+  that matched `which no saved screen is` needs `which no screen in the
+  text format is`. (#777)
+- Masking a stranded wide character masks its one cell. A wide character
+  a resize left without its second column, which files 0.11.6 and earlier
+  wrote, is one cell, but `mask_matching`, `mask_rect` and the other masks
+  blanked the cell after it too, as though it were the second half:
+  `abcd東Zyw` masked at `東` read `abcd##yw`, and `find("Z")` lost the `Z`.
+  It now reads `abcd#Zyw`; a whole wide character still masks both of its
+  columns. A snapshot of such a masked screen shows the character after
+  the stranded one again. (#780)
+- A stranded wide character keeps its row on the grid in `to_ansi`,
+  `to_html`, the diff and `termlens diff --color`. Those printed its glyph
+  whole, two columns for a cell of one, so `render --ansi` of a 5-column
+  0.11.6 file wrote a 6-column row and the diff's frame and `^` marker
+  stood a column right of the cell that changed. Each now prints it as
+  the one blank its column holds, as the diff already did at a screen's
+  edge; the SVG still fits the glyph to its cell. A snapshot of such a
+  rendering shows a blank where the glyph was. (#781)
+- `Screen::parse` strands a wide character in a row's first column last.
+  A text row 0.11.6 or earlier wrote with a wide character stranded by a
+  resize, and only fitting with one at one column, read with the leftmost
+  stranded, even the one in column 0, which no resize strands. When the
+  writer had stranded a later one, every cell, `styles:` span and cursor
+  between the two read a column left of its JSON twin: `東abc東Zy` with
+  `abc` red read `find("abc")` as `(0, 1)` against the twin's `(0, 2)`.
+  The first column's is now stranded only when no other reading fits, so
+  that row reads as its twin and no row that read stops reading. The
+  0.11.9 note that such rows read "the leftmost first, as its JSON twin
+  holds them" was true only where the stranded character was the row's
+  leftmost wide one. A row that fits still reads every wide character
+  whole, so one stranded with nothing redrawn after it differs from its
+  twin in the blank after it; DESIGN §3 and LIMITATIONS now describe both
+  shapes, and the corpus holds a pair of each that the published 0.11.6
+  wrote. A test that pinned the old reading of such a row sees the cells
+  after the first column's wide character one column right. (#782)
+- `termlens render` and `diff` refuse a screen saved as UTF-32 by name:
+  "the byte-order mark says UTF-32, which termlens does not read (it
+  reads UTF-8 and UTF-16)". UTF-32 is what PowerShell's `Out-File
+  -Encoding utf32` writes. Its little-endian mark begins with UTF-16LE's,
+  so such a file was decoded as UTF-16 and refused with a header error
+  full of NULs, and a big-endian one as "not valid UTF-8". The exit code
+  is 2 as before; a script that matched either old diagnosis needs the
+  new one. (#784)
+- `termlens inspect` of a bare program name, with no PATH in its
+  environment, says what a user of the CLI can do: give the program's
+  absolute path, or a PATH with `--env PATH=DIR`. It passed on the
+  library's advice to remove `env_clear()` or call `.env("PATH", …)`,
+  which the CLI's user never wrote, and under `--inherit-env` the PTY
+  layer's "Unable to resolve the PATH". The exit code is 2 as before; a
+  script that matched either message needs the new one. (#785)
+
+- A send blocked on a full input queue fails as soon as the application
+  releases the terminal, and names the exit: "the child released the
+  terminal (EOF) before this write of 1048576 bytes finished; nothing can
+  read what it had not written". It waited out the whole deadline, since
+  Linux does not wake a master write when the other side closes, and then
+  reported "the application is not reading its input … reaches the
+  application if it reads again" about an application that was gone. The
+  send now waits for its write in 50 ms slices and looks at the terminal
+  between them; a write that fails as the terminal closes, rather than
+  blocking, is reported the same way. A test that matched "not reading its
+  input" on a send into an application that exits during it should match
+  "released the terminal (EOF) before this write" instead. (#770)
+- A `wait_idle` or `wait_stable` timeout on a terminal whose output went
+  quiet inside an escape sequence or a UTF-8 character it never finished
+  names it, as an open DEC 2026 update was already named: "…while waiting
+  for 100ms of output silence — the output has been silent that long, but
+  it stopped inside an unfinished escape sequence (`^[]0;title`), and the
+  terminal is still waiting for the rest of it", or "…inside an incomplete
+  UTF-8 character…". The sequence is shown as received, its first 24
+  bytes. Both waits refused such a terminal before too, and said only
+  "100ms of output silence" or "the screen to hold still for 100ms" about
+  one that had been silent all along; `snapshot_after`'s settle says the
+  same now. A test that matched the whole message, not a part of it,
+  should expect the added clause. (#772)
+- With SIGCHLD ignored in the test process, dropping a terminal whose
+  program is still running kills a helper in the program's process group
+  that ignores SIGHUP, as the drop already did with the default
+  disposition. The drop's hang-up ended the program, the kernel reaped it
+  at once, and teardown took that reap for the end of the group and
+  stopped before its SIGKILL, so the helper ran on. The group is now
+  killed after such a reap too: POSIX reuses no process group id while a
+  member of the group exists. A program reaped before the drop, by
+  `wait_exit` or by the kernel, still has nothing signalled. A test whose
+  program leaves a helper running on purpose under SIGCHLD ignored must
+  have the helper leave the group (`setsid`), as it already had to under
+  the default disposition. (#774)
+- A wait that times out on Linux or macOS names the input the application
+  left unread, when it left any: "…while waiting for the screen predicate
+  to hold — note: the application left 100 bytes of input unread". Keys an
+  application has stopped reading sit in the terminal's input queue, and
+  the timeout said nothing of them, so its screen read as an application
+  that drew nothing in answer; one outside suite blamed the harness for
+  keys queued behind a stalled read. The count is the terminal's own, so
+  in canonical mode it counts complete lines only. Windows and the other
+  Unixes leave the note out rather than guess. A test that matched a whole
+  timeout message, not a part of it, should expect the added clause.
+  (#790)
+
+- An image taller than the screen scrolls it as far as kitty and xterm
+  scroll it: by as many rows as its last row is past the bottom margin, and,
+  as kitty caps it, by no more than the screen is tall. The cap applied to
+  the line feeds that move the cursor past the image, the first of which
+  only walk it down to the margin, so the screen scrolled short by that
+  walk: under `Graphics::Kitty` with `cell_size(10, 20)`, 24 numbered rows
+  on a 20x24 screen and the cursor on row 2, `a=T,c=1,r=30` left `L03` on
+  row 0 and 3 rows of history where kitty leaves `L08` and 8, and a 600 px
+  sixel under `Graphics::Sixel` did the same where xterm scrolls 8. The
+  cursor lands where it did. A test that reads the screen or the history
+  after such an image should expect it scrolled by the whole overshoot, up
+  to a screenful. (#765)
+- A sixel decodes with the background its header selects. With the
+  default header (`ESC P q`) or a background select (`P2`) of 0 or 2, the
+  area its leading raster attributes declare is filled with colour
+  register 0 before anything is painted, as xterm and Windows Terminal
+  fill it, so a pixel no sixel painted there decodes as register 0, opaque
+  black in the VT340 colour map unless the image redefines it. Only
+  `P2 = 1` (`ESC P 0;1;0 q`) leaves it `[0, 0, 0, 0]`. `P2` never reached
+  the decoder, so the three headers decoded alike, and an application that
+  forgot `P2=1` passed an assertion that its corners were transparent
+  while those terminals drew them black. The payload keeps `P2` under a
+  new JSON key, `background_select`, written only where it is not 0: a
+  JSON screen saved by an earlier release still reads, and its sixels,
+  whose `P2` it never recorded, decode as `P2 = 0`; 0.11.10 reads a newer
+  file, skipping the key. A test that expected a transparent pixel inside
+  a sixel's declared area should expect register 0's colour there, or the
+  application should send `P2 = 1`. (#766)
+- A raw kitty RGB or RGBA payload (`f=24`, `f=32`) holding more bytes
+  than its `s=` and `v=` declare is refused with `DecodeError::Malformed`,
+  as kitty refuses it ("Image dimensions … do not match data size") and
+  as termlens already refused the same bytes zlib-compressed. It decoded
+  `Ok` as its first `s=` x `v=` pixels: two RGBA pixels sent as `f=24`,
+  the RGB/RGBA mix-up, gave a 2x1 image whose second pixel was magenta. A
+  test that decoded such a payload should expect `Malformed`, or the
+  application should send exactly the declared size. (#767)
+- An APC holding only `G` (`ESC _ G ESC \`) is no kitty escape, as kitty
+  drops an APC shorter than two bytes before reading it. It was counted
+  as a kitty transmission of one byte, so `graphics().kitty()` counted an
+  image the application never sent, and in a chunked upload it was taken
+  as the last chunk, which made the real last chunk a second image. #735
+  fixed the empty APC only. A test that counted such an APC should expect
+  one image fewer, and an upload it interrupted to be one image of all its
+  chunks. (#768)
+- A chunked kitty upload that asks for quiet (`q=1` or `q=2`) in a middle
+  chunk is no longer named in the next timeout. kitty copies the nonzero
+  `q=` of every chunk onto the command that started the upload, so it
+  sends no `OK` at the end; termlens read `q=` off the first and the last
+  chunk only, and named `a=T,i=5,m=1`, then `m=1,q=1`, then `m=0` as
+  "the application queried the terminal (^[_Ga=T,i=5,m=1;…)". A test that
+  matched that note for such an upload should expect it gone. (#758)
 - A soft reset (`DECSTR`, `CSI ! p`) at a pending wrap leaves the wrap
   pending, as xterm's soft reset does and as 0.11.8 did: the next
   character starts the next row, and on the last row the screen scrolls.
@@ -134,6 +337,72 @@ reads that marker.
 - Saved JSON screens with leading spaces, tabs or carriage returns are
   recognized as JSON by `render` and `diff`, rather than rejected as text
   snapshots with a missing `size:` header. (#786)
+- The JSON reader holds the out-of-band state to what the file declares,
+  as #713 held the grid. The state was read with no bound: a 1x1 screen
+  whose history held 67 million empty rows, 201 MB on disk, took 1.77 GB,
+  and `termlens render` aborted with exit 134 under a memory cap. History
+  has no row count to hold it to, since `scrollback(n)` takes any `n`, so
+  each row is held instead: to 1000 cells of at most 22 bytes, the most a
+  terminal's row and vt100's cell hold, or as text to the 22,000 bytes
+  those come to. The empty row is one allocation for all of them, and room
+  the allocator refuses is an error, so `render` and `diff` exit 2 naming
+  it. The unsupported sequences and the links are read to the 32 and 64 a
+  terminal keeps. Every file a release wrote reads as before; the JSON
+  format does not change. (#778)
+- `Screen::parse` walks the lines after the grid instead of gathering
+  every line of its input first. It kept a 16-byte pointer for each, so a
+  1x1 screen followed by 20 MB of blank lines took 351 MB to read and one
+  followed by 200 MB aborted `termlens render` with exit 134 under a
+  2 GB cap. Both now read in the memory the input and the declared grid
+  take, with or without a `styles:` block. (#779)
+- The report action says when `termlens diff` cannot read a `.snap` pair,
+  such as an insta value snapshot beside a screen one: "(termlens could
+  not compare these files)" under its "Against" line. The diff's exit 2
+  was ignored, and the summary showed an empty code block there, which
+  reads as no difference. The step's log line and the summary's closing
+  line count and claim SVG and HTML renderings for only the files
+  termlens read, and the log names how many it could not. (#783)
+
+- On Windows every write into the terminal goes through the writer
+  thread, so a send keeps the terminal's deadline there as it does on Unix.
+  The thread was started only with a duplicate of the master, which
+  portable-pty does not expose on Windows, so there every send was written
+  on the test thread with no deadline, and every query reply on the reader
+  thread under the same lock: a full ConPTY input pipe would have hung the
+  test and stopped the drain behind it. The thread is now handed the PTY
+  layer's own writer where there is no duplicate. (#771)
+- A failure screen is written to `TERMLENS_ARTIFACT_DIR` for a test whose
+  path is too long to be a file name whole. `<test>-<n>.screen.txt` (or
+  `.json`) used the path all of it, so one past about 230 bytes, which
+  generated cases and deeply nested modules reach, made a name longer than
+  the 255 bytes a filesystem allows; the write failed with "File name too
+  long" and only a line on stderr was left. A name past 222 bytes is now
+  cut to its first 200 and 16 hex digits of a hash of the whole name, which
+  keeps two such tests apart. Names up to 222 bytes are unchanged; one of
+  223 to about 240 that fitted with a small `<n>` is now cut too, so each
+  test keeps one name whatever its count. (#773)
+- After an emulator panic, `Error::Emulator`'s screen and `screen()` show
+  the screen the test last saw, through a wait or `screen()`. They showed
+  the last one `screen()` had stored, since the waits kept none of theirs:
+  after a `wait_until` that had seen `ready`, the blank grid from the
+  spawn, or an older screen if `screen()` had been called earlier. Every
+  wait now keeps the screen it takes, which costs nothing measurable on a
+  full-throughput stream, and `wait_frame` keeps the live screen when it
+  returns a frame. Found by fault injection: no input is known to make the
+  emulator panic. (#775)
+- `Recorder::stop` after an emulator panic returns that panic,
+  `Error::Emulator`, as every wait and `resize` do. It said the
+  application "never emitted a DEC 2026 synchronized update" when its
+  frames came after the emulator had stopped seeing anything, and with
+  frames recorded before the panic it returned `Ok`, a recording cut at
+  the panic with nothing to say so. Found by fault injection: no input is
+  known to make the emulator panic. (#776)
+
+- `docs/LIMITATIONS.md` says which kitty placements leave the cursor
+  where it is. It said a placement of an image whose transmission has
+  left the payload log does, but given `c=` and `r=` one moves it by
+  those, taken to succeed as every placement is; only without them does
+  it stay, as a PNG placed without them does. (#769)
 
 ## [0.11.10] - 2026-11-17
 

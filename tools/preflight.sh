@@ -16,7 +16,7 @@
 #
 # A gate whose optional tooling is not installed is skipped by name, never
 # failed: cargo-deny, cargo-semver-checks, pipx, the 1.85 toolchain, the
-# Windows target. `--fast` runs only the fmt, clippy and test gates, by
+# Windows and illumos targets. `--fast` runs only the fmt, clippy and test gates, by
 # matching the documented command, so a fmt/clippy/test line added to §1 is
 # picked up without touching this script.
 #
@@ -85,6 +85,12 @@ skip_reason() {
     *"--target x86_64-pc-windows-msvc"*)
       rustup_target_has x86_64-pc-windows-msvc || {
         echo "target x86_64-pc-windows-msvc is not installed (rustup target add x86_64-pc-windows-msvc)"
+        return 0
+      }
+      ;;
+    *"--target x86_64-unknown-illumos"*)
+      rustup_target_has x86_64-unknown-illumos || {
+        echo "target x86_64-unknown-illumos is not installed (rustup target add x86_64-unknown-illumos)"
         return 0
       }
       ;;

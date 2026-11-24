@@ -175,12 +175,17 @@ to be short.
   difference, 2 the tool could not run) and the saved-screen input formats
   — the text format with or without an insta header or a pre-0.11 `inspect`
   trailer, and the JSON. Flags may be added; `inspect`'s stdout is a saved
-  screen. An input larger than 1 GiB is refused (#653), a size no release
-  writes: the largest screen termlens draws, 1000x1000 cells each styled
-  differently, is about 600 MB as pretty-printed JSON. *Checked by*
+  screen. An input in the text format larger than 1 GiB is refused (#653),
+  a size no release writes in it: the format holds the grid alone, and the
+  largest screen termlens draws, 1000x1000 cells each styled differently,
+  is about 110 MB. JSON has no size limit (#777): its history and images
+  grow with `scrollback(n)` and `capture_graphics(n)`, so a release writes
+  it at any length, and it is read as it arrives, holding memory in
+  proportion to the screen and history it declares (DESIGN §3). *Checked by*
   `.github/scripts/check-cli-contract.sh` against the tree on every pull
   request (`test` job) and against the **published** binary on every
-  release and every day (`install.yml`, `cli` job).
+  release and every day (`install.yml`, `cli` job); the size rules by
+  `crates/termlens-cli/tests/cli.rs` and the CLI's own unit tests.
 - **The coordinate conventions**: `(row, col)` for cells, `(cols, rows)` for
   geometry, both zero-based. *Checked by* the crate's own suite; there is no
   separate gate, since every accessor test encodes them.

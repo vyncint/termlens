@@ -142,7 +142,7 @@ fn a_declared_size_past_the_terminal_limit_is_refused_before_allocating() {
 /// them: each file was written by the published release its directory
 /// names (a registry dependency on `termlens = "=<version>"`, resolving
 /// vt100 0.16), and is frozen here for the reader that refused it (#643).
-const EXTRA_SHAPES: [(&str, &str); 3] = [
+const EXTRA_SHAPES: [(&str, &str); 4] = [
     // `printf '\r\nabcdef'` on 6x2: the write fills the last column and
     // 0.11.1 parked the visible cursor one past it, at `1,6`.
     ("0.11.1", "pending-wrap-visible"),
@@ -154,6 +154,11 @@ const EXTRA_SHAPES: [(&str, &str); 3] = [
     // `printf '\033[1;6HZyw'`: the stranded `東` is no longer in the last
     // column, and the redraw after it filled the row to the edge (#683).
     ("0.11.6", "stranded-wide-redrawn"),
+    // `printf '東\033[31mabc\033[0m東x'` on 8x2, `resize(6, 2)`,
+    // `resize(8, 2)`, then `printf '\033[1;7HZy\033[1;5H'`: the stranded
+    // `東` is the row's second wide character, after a red span, and the
+    // cursor is parked on the `c` (#782).
+    ("0.11.6", "notleftmost-styled"),
 ];
 
 fn extra(version: &str, shape: &str, ext: &str) -> PathBuf {
@@ -266,6 +271,193 @@ fn a_stranded_wide_character_redrawn_after_in_0_11_6_round_trips() {
         Screen::parse(&longer).is_err(),
         "a cell past the edge is refused"
     );
+}
+
+/// 0.11.6 wrote a stranded wide character that is not the first of its
+/// row: `東abc東Zy`, the second `東` cut by the resize and `Zy` redrawn
+/// after it, `abc` red and the cursor on the `c`. The row needs one
+/// stranded character to fit, and the reader took the leftmost — the `東`
+/// in column 0, which no resize can strand, a terminal being two columns
+/// wide at least — so the cells, the span and the cursor all read a
+/// column left of the JSON twin's: `find("abc")` was `(0, 1)` (#782). A
+/// character in the first column is now stranded only when no other
+/// reading fits, and the file reads as its twin.
+#[test]
+fn a_stranded_wide_character_after_another_in_0_11_6_reads_as_its_twin() {
+    let path = extra("0.11.6", "notleftmost-styled", "txt");
+    let text = read(&path);
+    assert_eq!(
+        text, "size: 8x2  cursor: 0,4\n東abc東Zy\n\n\nstyles:\n0: 2-4 fg=1\n",
+        "the frozen file really carries the row"
+    );
+    let (screen, rendered) = round_trip(&text);
+    assert_eq!(rendered, text, "it renders back byte for byte");
+    let first = screen.cell(0, 0).expect("column 0");
+    assert!(first.is_wide(), "the first 東 is whole");
+    assert!(screen.cell(0, 1).expect("column 1").is_wide_continuation());
+    let stranded = screen.cell(0, 5).expect("column 5");
+    assert_eq!(stranded.contents(), "東");
+    assert!(stranded.is_wide(), "the second 東 is the stranded one");
+    assert_eq!(screen.cell(0, 6).expect("column 6").contents(), "Z");
+    assert_eq!(screen.find("abc"), Some((0, 2)));
+    let red = termlens::Color::Indexed(1);
+    for col in 2..=4 {
+        assert_eq!(screen.cell(0, col).unwrap().style().fg, red, "column {col}");
+    }
+    assert_eq!(screen.cursor(), (0, 4, true));
+    assert_eq!(
+        screen.cell(0, 4).unwrap().contents(),
+        "c",
+        "the cursor is on the c"
+    );
+
+    // A row whose one candidate is in the first column still reads as it
+    // did: preferring the other reading refuses nothing that read before.
+    let only = Screen::parse("size: 8x1  cursor: 0,0\n東abcdefg").expect("still reads");
+    assert!(only.cell(0, 0).unwrap().is_wide());
+    assert_eq!(only.cell(0, 1).unwrap().contents(), "a");
+}
+
+/// 0.11.6 wrote a stranded wide character that the screen widened past and
+/// nothing redrew: `abcd東xyz` on 8x2, resized to 5 and back to 8, so `東`
+/// sits in column 4 without its second half and column 5 is blank. The
+/// text is the same bytes as a whole `東`, which fits, and the reader takes
+/// it whole, as every capture writes it. So the text file and its JSON
+/// twin differ in column 5, the blank the JSON holds being the `東`'s
+/// second half in the text, and `termlens diff` of the two exits 1 (#782).
+/// It is not in [`EXTRA_SHAPES`], which hold one picture; this pins the
+/// reading, as a known limit, and
+/// `json::a_stranded_wide_character_nothing_redrew_differs_from_its_json_twin`
+/// the difference.
+const REWIDENED_BEFORE_0_11_7: (&str, &str) = ("0.11.6", "rewiden-noredraw");
+
+#[test]
+fn a_stranded_wide_character_nothing_redrew_in_0_11_6_reads_whole() {
+    let (version, shape) = REWIDENED_BEFORE_0_11_7;
+    let text = read(&extra(version, shape, "txt"));
+    assert_eq!(
+        text, "size: 8x2  cursor: 1,1\nabcd東\nz\n\nstyles:\n(none)\n",
+        "the frozen file really carries the row"
+    );
+    let (screen, rendered) = round_trip(&text);
+    assert_eq!(rendered, text, "it renders back byte for byte");
+    assert!(screen.cell(0, 4).unwrap().is_wide(), "東 reads whole");
+    assert!(screen.cell(0, 5).unwrap().is_wide_continuation());
+}
+
+/// Masking the stranded `東` in that file masks its one cell and not the
+/// `Z` after it, which is no half of it (#780). A mask keeps the
+/// wide-character structure: a whole wide character masks both its
+/// columns, and a stranded one has one. The JSON twin is held to the same
+/// in the `json` module.
+#[test]
+fn masking_a_stranded_wide_character_masks_its_one_cell() {
+    let (screen, _) = round_trip(&read(&extra("0.11.6", "stranded-wide-redrawn", "txt")));
+    masks_one_cell(&screen);
+}
+
+/// What [`masking_a_stranded_wide_character_masks_its_one_cell`] holds
+/// the 0.11.6 `stranded-wide-redrawn` screen to, from either twin.
+fn masks_one_cell(screen: &Screen) {
+    let matched = screen.mask_matching("東", '#');
+    assert_eq!(matched.row_text(0), "abcd#Zyw");
+    assert_eq!(matched.find("Z"), Some((0, 5)));
+    let rect = screen.mask_rect(4..5, 0..1);
+    assert_eq!(rect.row_text(0), "abcd Zyw");
+    assert_eq!(rect.find("Z"), Some((0, 5)));
+    assert!(screen
+        .diff(&rect)
+        .cells()
+        .all(|(row, col, ..)| (row, col) == (0, 4)));
+    // A whole wide character still masks both of its columns, whichever
+    // was hit.
+    let whole = Screen::parse("size: 8x1  cursor: 0,0\nabcd東yw").unwrap();
+    assert_eq!(whole.mask_matching("東", '#').row_text(0), "abcd##yw");
+    assert_eq!(whole.mask_rect(5..6, 0..1).row_text(0), "abcd  yw");
+}
+
+/// The columns `text` takes on a terminal, for the stranded files' rows
+/// and the diff's frame around them: ASCII, the frame's `│`, and the one
+/// CJK character the rows hold, which is the one wide character.
+fn columns(text: &str) -> usize {
+    text.chars()
+        .map(|ch| if ch.is_ascii() || ch == '│' { 1 } else { 2 })
+        .sum()
+}
+
+/// `line` without its SGR runs.
+fn without_sgr(line: &str) -> String {
+    let mut plain = String::new();
+    let mut rest = line;
+    while let Some(at) = rest.find('\x1b') {
+        plain.push_str(&rest[..at]);
+        let end = rest[at..].find('m').expect("an SGR run ends") + at + 1;
+        rest = &rest[end..];
+    }
+    plain.push_str(rest);
+    plain
+}
+
+/// A stranded wide character is one column, and every picture of the
+/// screen keeps it one (#781): the ANSI and HTML rows are as wide as the
+/// screen, and the diff's frame and marker stay in their columns, for
+/// both 0.11.6 files that hold one — stranded at the edge and before
+/// other text. Each printed the glyph whole, two columns, and pushed the
+/// rest of its row one right. The SVG already drew it in its one cell.
+#[test]
+fn a_stranded_wide_character_keeps_every_rendering_on_the_grid() {
+    for shape in ["stranded-wide", "stranded-wide-redrawn"] {
+        let (screen, _) = round_trip(&read(&extra("0.11.6", shape, "txt")));
+        keeps_the_grid(shape, &screen);
+    }
+}
+
+/// What [`a_stranded_wide_character_keeps_every_rendering_on_the_grid`]
+/// holds a stranded screen to, from either twin.
+fn keeps_the_grid(shape: &str, screen: &Screen) {
+    let cols = usize::from(screen.cols());
+    for line in screen.to_ansi().lines() {
+        assert_eq!(columns(&without_sgr(line)), cols, "{shape} ANSI {line:?}");
+    }
+    let html = screen.to_html();
+    let pre = &html[html.find('>').unwrap() + 1..html.rfind("</pre>").unwrap()];
+    let mut text = String::new();
+    let mut tag = false;
+    for ch in pre.chars() {
+        match ch {
+            '<' => tag = true,
+            '>' => tag = false,
+            _ if !tag => text.push(ch),
+            _ => {}
+        }
+    }
+    for line in text.lines() {
+        assert_eq!(columns(line), cols, "{shape} HTML {line:?}");
+    }
+
+    // One character of the stranded row changed: before the stranded one
+    // at the edge, after the one stranded mid-row. Row 0 is ASCII up to
+    // there, so the character's index is its column.
+    let col: usize = if shape == "stranded-wide" { 1 } else { 5 };
+    let mut changed = screen.with_styles().to_string();
+    let line = changed.lines().nth(1).unwrap().to_owned();
+    let edited: String = line
+        .chars()
+        .enumerate()
+        .map(|(at, ch)| if at == col { 'X' } else { ch })
+        .collect();
+    changed = changed.replacen(&line, &edited, 1);
+    let diff = screen.diff(&Screen::parse(&changed).unwrap()).to_string();
+    let mut lines = diff.lines().skip_while(|l| !l.contains('│'));
+    let (text, marks) = (lines.next().unwrap(), lines.next().unwrap());
+    let frame = |line: &str| -> Vec<usize> {
+        line.match_indices('│')
+            .map(|(at, _)| columns(&line[..at]))
+            .collect()
+    };
+    assert_eq!(frame(text), frame(marks), "{shape}:\n{diff}");
+    let caret = marks.find('^').map(|at| columns(&marks[..at]));
+    assert_eq!(caret, Some(5 + col), "{shape}, under the change:\n{diff}");
 }
 
 /// `printf '⚠️\033[31mERR\033[0m ok'` on 10x2, written by the published
@@ -503,6 +695,58 @@ mod json {
         // on the text file's reading, not the JSON's.
         let again = Screen::parse(&from_json.with_styles().to_string()).expect("parses");
         assert!(from_text.diff(&again).is_empty());
+    }
+
+    /// [`masks_one_cell`] from the JSON twin, which carries the stranded
+    /// cell's flags rather than inferring them (#780).
+    #[test]
+    fn masking_a_stranded_wide_character_masks_its_one_cell_in_json() {
+        let path = extra("0.11.6", "stranded-wide-redrawn", "json");
+        let screen: Screen = serde_json::from_str(&read(&path))
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        masks_one_cell(&screen);
+    }
+
+    /// [`keeps_the_grid`] from the JSON twins, which carry the stranded
+    /// cells' flags (#781).
+    #[test]
+    fn a_stranded_wide_character_keeps_every_rendering_on_the_grid_in_json() {
+        for shape in ["stranded-wide", "stranded-wide-redrawn"] {
+            let path = extra("0.11.6", shape, "json");
+            let screen: Screen = serde_json::from_str(&read(&path))
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            keeps_the_grid(shape, &screen);
+        }
+    }
+
+    /// [`REWIDENED_BEFORE_0_11_7`]'s JSON twin holds what 0.11.6 had: `東`
+    /// stranded in column 4 and an ordinary blank in column 5. The text
+    /// reads it whole, so the twins differ in that one cell and nowhere
+    /// else (#782).
+    #[test]
+    fn a_stranded_wide_character_nothing_redrew_differs_from_its_json_twin() {
+        let (version, shape) = REWIDENED_BEFORE_0_11_7;
+        let json_path = extra(version, shape, "json");
+        let from_json: Screen = serde_json::from_str(&read(&json_path))
+            .unwrap_or_else(|e| panic!("{}: {e}", json_path.display()));
+        let stranded = from_json.cell(0, 4).expect("column 4");
+        assert_eq!(stranded.contents(), "東");
+        assert!(stranded.is_wide());
+        let after = from_json.cell(0, 5).expect("column 5");
+        assert!(!after.is_wide_continuation() && after.contents().is_empty());
+        let text = read(&extra(version, shape, "txt"));
+        assert_eq!(
+            format!("{}\n", from_json.with_styles()),
+            text,
+            "the twins are the same bytes as text"
+        );
+
+        let (from_text, _) = round_trip(&text);
+        let diff = from_text.diff(&from_json);
+        let changed: Vec<(u16, u16)> = diff.cells().map(|(row, col, ..)| (row, col)).collect();
+        assert_eq!(changed, [(0, 5)], "{diff}");
+        assert_eq!(diff.style_changes().count(), 0, "{diff}");
+        assert_eq!(from_text.cursor(), from_json.cursor());
     }
 
     #[test]

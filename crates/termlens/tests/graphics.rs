@@ -258,7 +258,9 @@ mod decoded {
         assert_eq!(bitmap.pixel(1, 1), Some([0, 255, 0, 255]));
         assert_eq!(bitmap.pixel(2, 0), Some([0, 0, 255, 255]));
         // Sixel has no alpha, so a pixel nothing painted reads as
-        // transparent rather than as a colour we would have to invent.
+        // transparent rather than as a colour we would have to invent —
+        // under the fixture's header, which selects no background
+        // (`P2 = 1`). The default one fills it with register 0 (#766).
         assert_eq!(bitmap.pixel(3, 0), Some([0, 0, 0, 0]));
         Ok(())
     }

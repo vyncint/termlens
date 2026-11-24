@@ -1,0 +1,6 @@
+size: 8x2  cursor: 0,4
+東abc東Zy
+
+
+styles:
+0: 2-4 fg=1

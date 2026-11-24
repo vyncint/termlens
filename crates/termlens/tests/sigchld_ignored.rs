@@ -93,5 +93,74 @@ fn the_cases() -> termlens::Result<()> {
     t.wait_until(|s| s.contains("up"))?;
     let took = timed_drop(t);
     assert!(took < PROMPT, "drop of a running child took {took:?}");
+
+    // Still running, with a helper in its group that ignores the hang-up:
+    // the hang-up ends the child, the kernel reaps it at once, and the group
+    // is killed all the same, helper and all (#774). Teardown took the reap
+    // for the end of the group and stopped, so the helper ran on, though
+    // with the default disposition it was killed. Its membership is what
+    // keeps the group's id from being reused (POSIX), so the kill cannot
+    // reach another process's group.
+    let mut t = sh("sh -c 'trap \"\" HUP; echo \"helper:$$;\"; exec sleep 30' & read _")?;
+    t.wait_until(|s| helper_pid(&s.text()).is_some())?;
+    let helper = Helper(helper_pid(&t.screen().text()).expect("the helper printed its pid"));
+    let took = timed_drop(t);
+    assert!(
+        took < PROMPT,
+        "drop of a running child and its helper took {took:?}"
+    );
+    assert!(
+        helper.gone(),
+        "helper {} outlived the drop of a child the kernel reaped during it",
+        helper.0
+    );
     Ok(())
 }
+
+/// The pid a helper printed as `helper:<pid>;`, once all of it is there.
+fn helper_pid(text: &str) -> Option<libc::pid_t> {
+    text.split("helper:")
+        .nth(1)?
+        .split_once(';')?
+        .0
+        .parse()
+        .ok()
+}
+
+/// A helper the program started, killed when this goes out of scope if it
+/// is still there, so a failing case leaves nothing running.
+struct Helper(libc::pid_t);
+
+impl Helper {
+    /// Whether the helper is gone within [`GROUP_DEADLINE`]: killed, and
+    /// reaped by whoever adopted it, which takes its own time. `kill(pid,
+    /// 0)` finds a zombie too, so this waits for the reap. A pid is not
+    /// reused within seconds.
+    fn gone(&self) -> bool {
+        let deadline = Instant::now() + GROUP_DEADLINE;
+        while self.signal(0) {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::yield_now();
+        }
+        true
+    }
+
+    /// `kill(2)`; whether the signal could be sent.
+    fn signal(&self, signal: libc::c_int) -> bool {
+        // SAFETY: kill(2) touches no memory.
+        #[allow(unsafe_code)]
+        let rc = unsafe { libc::kill(self.0, signal) };
+        rc == 0
+    }
+}
+
+impl Drop for Helper {
+    fn drop(&mut self) {
+        self.signal(libc::SIGKILL);
+    }
+}
+
+/// How long a killed helper gets to be gone.
+const GROUP_DEADLINE: Duration = Duration::from_secs(10);

@@ -133,15 +133,23 @@ CHANGELOG entry.
   probes is truthfully told there is none. Decoding also refuses anything
   above 4096x4096: every size in a payload is chosen by the program under
   test, and a sixel `!n` repeat or a declared `65535x65535` would otherwise
-  set the allocation directly.
+  set the allocation directly. A sixel decodes with the background its
+  header selects, as xterm and Windows Terminal draw it: with a background
+  select (`P2`) of 0 or 2, or none (`ESC P q`), the area its leading raster
+  attributes declare is filled with colour register 0 first, so a pixel no
+  sixel painted there decodes as that colour, opaque black unless the image
+  redefines it, and only `P2 = 1` leaves it transparent. A sixel without
+  raster attributes is filled nowhere, as in xterm, where Windows Terminal
+  fills to the edge of the screen. A JSON screen saved by a release before
+  0.11.11 did not record `P2`, and its sixels decode as `P2 = 0`.
 - **The cursor moves past an image as the declared terminal moves it**,
   and only as far as the escape says. A `Graphics::Kitty` terminal moves
   it for a placement whose size in cells is known: from `c=` and `r=`, or
   from the pixel size and `cell_size()` — for `a=p`, the pixel size of the
   newest transmission of that image id, or, for one that names its image
   by number (`I=`) alone, of the newest transmission with that number. A
-  PNG (`f=100`) placed without `c=` and `r=`, a placement of an image whose
-  transmission has left the payload log, or one that names neither an id
+  PNG (`f=100`) or an image whose transmission has left the payload log,
+  placed without `c=` and `r=`, or a placement that names neither an id
   nor a number, does not move it. Whether kitty would have loaded the
   image at all is not knowable here, so a placement is taken to succeed.
   Past the bottom of a scroll region the protocol leaves the cursor's
@@ -154,7 +162,10 @@ CHANGELOG entry.
   region then too, and termlens moves the cursor as line feeds would there,
   scrolling nothing. A
   `Graphics::Sixel` terminal with a `cell_size()` moves it to the image's
-  last text row, as xterm does with sixel scrolling on. Sixel display mode
+  last text row, as xterm does with sixel scrolling on. No image scrolls
+  the screen further than its height, which is kitty's cap: xterm goes on
+  scrolling under a sixel that ends more than a screen below the bottom
+  margin, pushing the blank rows under it into history. Sixel display mode
   (`CSI ? 80 h`), xterm's extra scroll for a trailing `-` on the bottom row,
   and its sixel-scrolls-right mode (`CSI ? 8452 h`) are not modelled. A
   `Graphics::None` terminal, the default, moves nothing: it ignores both
@@ -176,8 +187,9 @@ CHANGELOG entry.
   under test points at, and decodes only with the `decode` feature. Such a
   command is **named in the next timeout** instead, as an unanswered query
   is — an upload at its last chunk, by its first — unless it asked for
-  quiet (#680). Frames (`a=f`) and composes (`a=c`), which kitty answers
-  too, are neither answered nor named. A command naming both `i=` and `I=`
+  quiet, an upload in any of its chunks (#680, #758). Frames (`a=f`) and
+  composes (`a=c`), which kitty answers too, are neither answered nor
+  named. A command naming both `i=` and `I=`
   is refused by kitty whatever its action; termlens answers a query so, but
   still captures, counts and places a transmission or placement that does,
   and names it unless `q=2` silenced kitty's error. An upload interrupted
@@ -241,6 +253,14 @@ CHANGELOG entry.
   canonical-mode application on Linux loses replies silently: there the
   kernel discards what does not fit, so that loss is undetectable and goes
   unreported.
+- **A timeout names the input the application left unread on Linux and
+  macOS only.** The count is the terminal's own, the slave's `FIONREAD`,
+  so it is what a read would return at once: in raw mode every byte
+  queued, query replies included, and in canonical mode only complete
+  lines, so a line still waiting for its Enter is not counted. Elsewhere
+  the note is left out rather than guessed: the other Unixes are not
+  measured, and on Windows ConPTY keeps typed input on its own side of the
+  pipe, where nothing can count it.
 
 ## Windows
 
@@ -264,13 +284,31 @@ CHANGELOG entry.
   `ResizePseudoConsole` on its own thread, so a program's output written
   right after a resize can be laid out at the old width — after `resize()`
   on Windows, wait for the program's own repaint before asserting on
-  layout — and its re-render never forwards the program's HT); and bytes
-  that are not UTF-8 (Rust's console stdio refuses to write them). The
+  layout, with a predicate naming what only the new layout shows — and its
+  re-render never forwards the program's HT); a timeout
+  that names the escape sequence or character a quiet program stopped
+  inside (ConPTY keeps the unfinished sequence to itself, so `wait_idle`
+  and `wait_stable` see a terminal that is simply quiet); a timeout's count
+  of the input a program left unread (ConPTY keeps typed input on its own
+  side of the pipe); and bytes that are not UTF-8 (Rust's console stdio
+  refuses to write them). The
   tests for each are `#[cfg_attr(windows, ignore = "…")]` with
   the reason in the attribute; the probe that measured all of this is
   `tests/conpty_probe.rs`, and the `windows` workflow re-runs it on demand.
   The `windows-latest` leg is a required check. This is decision 1 of
   [STABILITY.md](STABILITY.md).
+- **On Windows, a wait after a resize must name something only the new
+  layout has.** ConPTY repaints the screen itself after a resize, so output
+  arrives even when the program draws nothing, and a predicate the content
+  from before the resize satisfies passes on that repaint. Measured on
+  `windows-latest` (run 45393517904): `resize_and_wait` with
+  `contains("READY")`, against a program that ignores the resize, returned
+  on the text it had drawn before, where Linux and macOS time out. So
+  `resize_and_wait` keeps the old screen from answering only on Linux and
+  macOS; on Windows the predicate has to tell the layouts apart — the size
+  as the program reports it, or text that needs the new width, never
+  `Screen::size`, which is new at once — and the test that pins the
+  timeout is Windows-ignored for it.
 - **`termlens inspect` on Windows learns of an exit from the reap, not the
   terminal.** ConPTY never reports the terminal closing, so a program that
   has just exited ends inspect's wait by the silence window rather than an
@@ -291,10 +329,14 @@ CHANGELOG entry.
 - **After `wait_exit`, `Drop` signals nothing** (Unix). `Drop` stops the
   program's whole process group, a helper that ignores SIGHUP included,
   but only while the program is unreaped: once a wait has reaped it, or
-  the kernel has (SIGCHLD ignored), the group's id may be another
-  process's. A helper still running in the group then runs on. Stop it
-  before the program exits, or have it leave the group with `setsid` if it
-  is meant to outlive the terminal (#714).
+  the kernel has before the drop (SIGCHLD ignored), the group's id may be
+  another process's. A helper still running in the group then runs on.
+  Stop it before the program exits, or have it leave the group with
+  `setsid` if it is meant to outlive the terminal (#714). A program still
+  running at the drop is the other case: where SIGCHLD is ignored, the
+  drop's hang-up ends it and the kernel reaps it at once, and the group is
+  killed all the same, since a member still running keeps the group's id
+  from being reused (#774).
 - Exotic grapheme clusters render as the vt100 crate renders them; the
   unicode-torture fixture pins the current behaviour.
 - **Needle matching is NFC, then substring, not grapheme matching.**
@@ -317,3 +359,20 @@ CHANGELOG entry.
   columns, land one character left of what they marked (#723). The file
   still parses and renders back as written. The JSON twin (`serde`)
   holds the columns its writer drew; keep that where they matter.
+- **A saved text screen from before 0.11.7 can read a stranded wide
+  character as a whole one, or take the wrong one as stranded.** Releases
+  up to 0.11.6 narrowed a row by cutting it, so a wide character a resize
+  cut kept one column, and the text format does not say which one did.
+  `Screen::parse` reads a row whole whenever it fits, so `abcd東` written
+  after a resize to 5 columns and back to 8, with nothing redrawn, reads
+  `東` with both its columns where the writer had it stranded before a
+  blank: the JSON twin and the text differ in that one cell, and
+  `termlens diff` of the two exits 1. A row that only fits with some wide
+  characters at one column reads with the leftmost stranded, though never
+  one in the first column while another reading fits, since no resize
+  strands that one (#782); where the writer had stranded a later one and
+  left an earlier one whole, the cells, `styles:` spans and cursor between
+  the two read a column off. The file still parses and renders back as
+  written. The JSON twin holds the flags its writer had; keep that where
+  they matter. Every rendering draws a stranded character as the one
+  blank its column holds, the SVG excepted (#781).

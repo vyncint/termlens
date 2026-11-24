@@ -166,6 +166,12 @@ runs:
         budget=921600
         n=0
         unshown=0
+        # Files termlens read, of the `n` found, and of those the ones the
+        # summary shows: a file it could not read is listed and said to be
+        # unreadable, but it is no rendered screen, and the artifact holds
+        # no rendering of it (#783).
+        rendered=0
+        shown=0
         while IFS= read -r -d '' file; do
           n=$((n + 1))
           # upload-artifact refuses a path holding any of these, and then the
@@ -176,8 +182,10 @@ runs:
           # rather than a redirect (0.11.1, #313): the shell truncates the
           # file before termlens runs, so a screen the CLI could not read
           # used to leave an empty .svg in the artifact. Now it leaves none.
-          termlens render --svg  --out "${out}/${stem}.svg"  "$file" || true
+          readable=0
+          termlens render --svg  --out "${out}/${stem}.svg"  "$file" && readable=1 || true
           termlens render --html --out "${out}/${stem}.html" "$file" || true
+          rendered=$((rendered + readable))
           if [ "$unshown" -gt 0 ]; then unshown=$((unshown + 1)); continue; fi
           termlens render --text "$file" > "${work}/screen.txt" \
             || echo "(termlens could not read this file)" >> "${work}/screen.txt"
@@ -189,11 +197,19 @@ runs:
               *.snap.new)
                 snap="${file%.new}"
                 if [ -f "$snap" ]; then
-                  termlens diff --color never "$snap" "$file" > "${work}/diff.txt" || true
+                  # 1 is a difference, which is the point; 2 is a pair that
+                  # termlens could not read, whose empty output under
+                  # "Against" read as no difference at all (#783).
+                  compared=0
+                  termlens diff --color never "$snap" "$file" > "${work}/diff.txt" || compared=$?
                   echo
                   echo "<p>Against <code>$(html "$snap")</code>:</p>"
                   echo
-                  fenced "${work}/diff.txt"
+                  if [ "$compared" -eq 2 ]; then
+                    echo "(termlens could not compare these files)"
+                  else
+                    fenced "${work}/diff.txt"
+                  fi
                 fi ;;
             esac
             echo "</details>"
@@ -205,16 +221,22 @@ runs:
             continue
           fi
           cat "${work}/entry.md" >> "$GITHUB_STEP_SUMMARY"
+          shown=$((shown + readable))
         done < "${work}/files.z"
         if [ "$unshown" -gt 0 ]; then
           if [ "$unshown" -eq 1 ]; then more="1 more screen is"; else more="${unshown} more screens are"; fi
           echo "${more} not shown here, to keep this summary under GitHub's 1 MiB limit for a step; the artifact holds every screen." >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
         fi
-        if [ "$n" -gt 0 ]; then
+        if [ "$rendered" -gt 0 ] && [ "$rendered" -eq "$n" ]; then
           echo "SVG and HTML renderings of each are in the \`${ARTIFACT_NAME:-termlens-report}\` artifact." >> "$GITHUB_STEP_SUMMARY"
+        elif [ "$rendered" -gt 0 ]; then
+          if [ "$rendered" -eq 1 ]; then which="the 1 screen"; else which="the ${rendered} screens"; fi
+          echo "SVG and HTML renderings of ${which} termlens could read are in the \`${ARTIFACT_NAME:-termlens-report}\` artifact." >> "$GITHUB_STEP_SUMMARY"
         fi
-        echo "rendered ${n} screen(s), $((n - unshown)) of them into the step summary"
+        unread=""
+        if [ "$rendered" -lt "$n" ]; then unread="; termlens could not read $((n - rendered)) file(s)"; fi
+        echo "rendered ${rendered} screen(s), ${shown} of them into the step summary${unread}"
 
     - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
