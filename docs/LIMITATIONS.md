@@ -177,8 +177,9 @@ CHANGELOG entry.
   under test points at, and decodes only with the `decode` feature. Such a
   command is **named in the next timeout** instead, as an unanswered query
   is — an upload at its last chunk, by its first — unless it asked for
-  quiet (#680). Frames (`a=f`) and composes (`a=c`), which kitty answers
-  too, are neither answered nor named. A command naming both `i=` and `I=`
+  quiet, an upload in any of its chunks (#680, #758). Frames (`a=f`) and
+  composes (`a=c`), which kitty answers too, are neither answered nor
+  named. A command naming both `i=` and `I=`
   is refused by kitty whatever its action; termlens answers a query so, but
   still captures, counts and places a transmission or placement that does,
   and names it unless `q=2` silenced kitty's error. An upload interrupted

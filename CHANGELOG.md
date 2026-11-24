@@ -170,6 +170,13 @@ reads that marker.
   fixed the empty APC only. A test that counted such an APC should expect
   one image fewer, and an upload it interrupted to be one image of all its
   chunks. (#768)
+- A chunked kitty upload that asks for quiet (`q=1` or `q=2`) in a middle
+  chunk is no longer named in the next timeout. kitty copies the nonzero
+  `q=` of every chunk onto the command that started the upload, so it
+  sends no `OK` at the end; termlens read `q=` off the first and the last
+  chunk only, and named `a=T,i=5,m=1`, then `m=1,q=1`, then `m=0` as
+  "the application queried the terminal (^[_Ga=T,i=5,m=1;…)". A test that
+  matched that note for such an upload should expect it gone. (#758)
 
 ### Fixed
 

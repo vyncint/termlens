@@ -647,7 +647,8 @@ struct KittyAsk {
     /// The `i=` and `I=` of the command that started the load, nonzero.
     id: bool,
     number: bool,
-    /// Its `q=`, 0 when absent.
+    /// Its `q=`, 0 when absent, and then the nonzero `q=` of each later
+    /// chunk of its upload as the chunk arrives (#758).
     quiet: u32,
     /// Its printable rendering, for the timeout note.
     shape: String,
@@ -680,8 +681,9 @@ impl KittyAsk {
     }
 
     /// The `OK` kitty sends once the data has loaded. `quiet` is the last
-    /// escape's `q=`: a nonzero one overrides the first's, as kitty's `if
-    /// (g->quiet) lg->quiet = g->quiet` does for a continuation chunk.
+    /// escape's `q=`: a nonzero one overrides the one kept, as kitty's `if
+    /// (g->quiet) lg->quiet = g->quiet` does for every chunk, the middle
+    /// ones included.
     fn answered(&self, quiet: u32) -> bool {
         let quiet = if quiet != 0 { quiet } else { self.quiet };
         !(self.id && self.number) && (self.id || self.number) && quiet == 0
@@ -2161,7 +2163,10 @@ impl SeqTracker {
                 // The reply kitty owes this escape at once, and the one it
                 // owes the load this escape starts once the load completes
                 // (#680): see `KittyAsk`. A continuation asks nothing of its
-                // own; it only finishes what the first chunk asked.
+                // own; it only finishes what the first chunk asked, and may
+                // ask for quiet: kitty copies the nonzero `q=` of every
+                // chunk onto the command that started the load, so a middle
+                // chunk's holds at the last (#758).
                 let mut unanswered = None;
                 if !self.building.in_progress() {
                     let ask = KittyAsk::of(keys, self.seq_printable());
@@ -2169,6 +2174,10 @@ impl SeqTracker {
                         unanswered = Some(ask.shape.clone());
                     }
                     self.upload_ask = ask.filter(|ask| !ask.refused());
+                } else if let Some(ask) = self.upload_ask.as_mut() {
+                    if let Some(quiet) = kitty_key(keys, b"q=").filter(|&quiet| quiet != 0) {
+                        ask.quiet = quiet;
+                    }
                 }
                 // One image, however many escapes it took. `m=1` says
                 // another follows; the transmission is not an image until
@@ -3148,6 +3157,19 @@ mod tests {
         unnamed(
             &[
                 b"\x1b_Ga=T,f=32,s=2,v=1,i=5,q=2,m=1;AAAA\x1b\\".as_slice(),
+                last,
+            ]
+            .concat(),
+        );
+        // A middle chunk's quiet holds at the last as well: kitty copies the
+        // nonzero `q=` of every chunk onto the command that started the
+        // load (#758). A `q=0` changes nothing.
+        unnamed(&[first, b"\x1b_Gm=1,q=1;AAAA\x1b\\", last].concat());
+        unnamed(&[first, b"\x1b_Gm=1,q=2;AAAA\x1b\\", last].concat());
+        unnamed(
+            &[
+                b"\x1b_Ga=T,f=32,s=2,v=1,i=5,q=1,m=1;AAAA\x1b\\".as_slice(),
+                b"\x1b_Gm=1,q=0;AAAA\x1b\\",
                 last,
             ]
             .concat(),
