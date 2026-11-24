@@ -57,6 +57,14 @@ reads that marker.
   alone and left them out, so they were reported nowhere; `CSI ? 996:1 n`
   was listed until 0.11.9. A test that expected an empty list beside one
   of these should expect its entry. (#757)
+- `Screen::unsupported()` lists `OSC 1 ; name`, which sets the icon name
+  and is modelled nowhere, as `^[]1;name`; only the form with a further
+  `;` was listed. `OSC 0`, which sets the icon name and the title at
+  once, is still not listed, since its title is read. One shape still
+  reads as an `OSC 0`: an `OSC 1` and then an `OSC 2` naming the same
+  thing in one read, with nothing listed between them. A test that
+  expected an empty list beside an `OSC 1` should expect its entry.
+  (#760)
 
 ### Fixed
 

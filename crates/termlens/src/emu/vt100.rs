@@ -302,6 +302,9 @@ impl Vt100Emulator {
         let bytes = stand_in_for_replacement(bytes);
         let normalized = self.colors.feed(&bytes);
         self.parser.process(&normalized);
+        // An icon name the parser handed over last is held back until a
+        // later call shows it is no `OSC 0`'s; the read may end with it.
+        self.parser.callbacks_mut().settle();
         self.shadow.feed(&bytes);
         self.capture_scrolled_rows();
     }
@@ -1845,6 +1848,25 @@ mod tests {
         assert!(!s.bracketed_paste());
         assert!(!s.application_cursor());
         assert_eq!(s.mouse_mode(), MouseMode::None);
+    }
+
+    /// `OSC 1 ; name`, the icon name, is listed: nothing models it (#760).
+    /// The `OSC 0` that sets icon and title at once is not, since its title
+    /// is the tracker's. An icon name that ends a read is listed by that
+    /// read, whole or split at any character.
+    #[test]
+    fn an_icon_name_is_listed_and_an_osc_0_title_is_set() {
+        for stream in [
+            "\x1b]0;both\x07\x1b]1;tab\x07",
+            "\x1b]1;tab\x1b\\\x1b]0;both\x07",
+        ] {
+            for cut in (1..stream.len()).chain([0]) {
+                let emu = emu_fed_in_pieces(stream.as_bytes(), &[cut][..usize::from(cut > 0)]);
+                let s = emu.snapshot();
+                assert_eq!(s.unsupported(), ["^[]1;tab"], "{stream:?} cut at {cut}");
+                assert_eq!(s.title(), "both", "{stream:?} cut at {cut}");
+            }
+        }
     }
 
     /// That the one unsupported shape is `expected`, and that `body` bytes

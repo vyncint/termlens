@@ -53,6 +53,10 @@ pub(super) struct Unhandled {
     /// Rows dropped off the front of the main screen's history since the
     /// emulator last took the count — see [`take_evicted`](Self::take_evicted).
     evicted: usize,
+    /// An icon name `set_window_icon_name` was handed and that is not on
+    /// record yet, because the call after it decides whether it is one —
+    /// see that callback.
+    icon: Option<IconName>,
     /// The content length of the last OSC recorded, before its entry was
     /// cut: how much of a body reached vt100, which the capture-bound
     /// tests read now that the entry no longer shows it (#694, #695).
@@ -68,6 +72,7 @@ impl Default for Unhandled {
             overflow: 0,
             visual_bells: 0,
             evicted: 0,
+            icon: None,
             #[cfg(test)]
             last_osc_len: 0,
         }
@@ -103,7 +108,22 @@ impl Unhandled {
         std::mem::take(&mut self.evicted)
     }
 
+    /// Put an icon name still held back on record: no title followed it,
+    /// so it was an `OSC 1`. Every new entry does this first, so the record
+    /// stays in stream order, and the emulator does it after every feed,
+    /// since the stream may end with one.
+    pub(super) fn settle(&mut self) {
+        if let Some(icon) = self.icon.take() {
+            self.keep(icon.shape);
+        }
+    }
+
     fn record(&mut self, shape: String) {
+        self.settle();
+        self.keep(shape);
+    }
+
+    fn keep(&mut self, shape: String) {
         if self.seen.iter().any(|s| **s == *shape) {
             return;
         }
@@ -167,6 +187,23 @@ fn osc_shape(params: &[&[u8]]) -> String {
         shape.push('…');
     }
     shape
+}
+
+/// An icon name an `OSC 1` may have set: its entry, and a digest of the
+/// whole name for the title an `OSC 0` sets with the same bytes.
+#[derive(Debug)]
+struct IconName {
+    shape: String,
+    digest: u64,
+}
+
+/// A digest of `bytes`. `DefaultHasher::new` has fixed keys, so the same
+/// bytes give the same digest every time.
+fn digest(bytes: &[u8]) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// DEC private modes the sequence tracker keeps itself, so a set or reset
@@ -248,6 +285,38 @@ impl Callbacks for Unhandled {
         // arrives here, and none of them is the main screen's.
         if !alternate_screen {
             self.evicted = self.evicted.saturating_add(1);
+        }
+    }
+
+    fn set_window_icon_name(&mut self, _: &mut vt100::Screen, name: &[u8]) {
+        // `OSC 1 ; name` sets the icon name, which nothing models, and
+        // vt100 hands its two-operand form here rather than to
+        // `unhandled_osc`, so it was listed nowhere (#760). vt100 also
+        // hands over the icon half of every `OSC 0`, and right after it
+        // the same bytes to `set_window_title`: that title is the
+        // tracker's, and an `OSC 0` is no gap. So the entry waits for the
+        // call after it.
+        self.settle();
+        self.icon = Some(IconName {
+            shape: osc_shape(&[b"1", name]),
+            digest: digest(name),
+        });
+    }
+
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        // The title itself is the tracker's (#625). An icon name with the
+        // same bytes just before it came from the same `OSC 0`. An `OSC 1`
+        // then an `OSC 2` naming the same thing, in one read with nothing
+        // listed between, reach here the same way and are taken for one:
+        // the callbacks are given no more to tell them apart.
+        if self
+            .icon
+            .as_ref()
+            .is_some_and(|icon| icon.digest == digest(title))
+        {
+            self.icon = None;
+        } else {
+            self.settle();
         }
     }
 
@@ -418,6 +487,8 @@ mod tests {
             Unhandled::default(),
         );
         parser.process(bytes);
+        // What the emulator does after every feed.
+        parser.callbacks_mut().settle();
         parser
     }
 
@@ -526,6 +597,33 @@ mod tests {
         assert_eq!(shapes(b"\x1b]2\x07"), ["^[]2"]);
         // The icon name is not modelled, with or without a `;`.
         assert_eq!(shapes(b"\x1b]1;a;b\x07"), ["^[]1;a;b"]);
+    }
+
+    /// `OSC 1 ; name` sets the icon name, which nothing models, and vt100
+    /// hands the two-operand form to a callback of its own, so it was
+    /// listed nowhere (#760). That callback also gets the icon half of
+    /// every `OSC 0`, whose title is the tracker's, just before the title
+    /// callback gets the same bytes — so an icon name is listed once the
+    /// call after it shows it was no `OSC 0`.
+    #[test]
+    fn an_icon_name_is_unsupported_and_an_osc_0_title_is_not() {
+        assert_eq!(shapes(b"\x1b]1;myicon\x07"), ["^[]1;myicon"]);
+        assert_eq!(shapes(b"\x1b]1;\x1b\\"), ["^[]1;"]);
+        assert!(shapes(b"\x1b]0;both\x07\x1b]0;again\x1b\\").is_empty());
+        // In stream order, before whatever is listed next, and kept when
+        // the title after it is another one.
+        assert_eq!(
+            shapes(b"\x1b]1;tab\x07\x1b[20h\x1b]2;window\x07\x1b]1;tab2\x07\x1b]2;other\x07"),
+            ["^[]1;tab", "^[[20h", "^[]1;tab2"]
+        );
+        // The one shape it cannot tell from an `OSC 0`: the same name set
+        // as the icon's and then as the title, with nothing listed
+        // between them in the same read.
+        assert!(shapes(b"\x1b]1;same\x07\x1b]2;same\x07").is_empty());
+        assert_eq!(
+            shapes(b"\x1b]1;same\x07\x1b[20h\x1b]2;same\x07"),
+            ["^[]1;same", "^[[20h"]
+        );
     }
 
     /// A mode list is handled only when every mode in it is: insert mode

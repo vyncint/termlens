@@ -2000,7 +2000,8 @@ impl SeqTracker {
                 content => {
                     // OSC 0 (icon + title) / OSC 2 (title) set the window
                     // title — state the vt100 backend does not track.
-                    // OSC 1 (icon only) is deliberately ignored.
+                    // OSC 1 (icon only) is deliberately not modelled, and
+                    // `unhandled.rs` lists it (#760).
                     if let Some(title) = content
                         .strip_prefix(b"0;")
                         .or_else(|| content.strip_prefix(b"2;"))
