@@ -123,7 +123,15 @@ CHANGELOG entry.
   probes is truthfully told there is none. Decoding also refuses anything
   above 4096x4096: every size in a payload is chosen by the program under
   test, and a sixel `!n` repeat or a declared `65535x65535` would otherwise
-  set the allocation directly.
+  set the allocation directly. A sixel decodes with the background its
+  header selects, as xterm and Windows Terminal draw it: with a background
+  select (`P2`) of 0 or 2, or none (`ESC P q`), the area its leading raster
+  attributes declare is filled with colour register 0 first, so a pixel no
+  sixel painted there decodes as that colour, opaque black unless the image
+  redefines it, and only `P2 = 1` leaves it transparent. A sixel without
+  raster attributes is filled nowhere, as in xterm, where Windows Terminal
+  fills to the edge of the screen. A JSON screen saved by a release before
+  0.11.11 did not record `P2`, and its sixels decode as `P2 = 0`.
 - **The cursor moves past an image as the declared terminal moves it**,
   and only as far as the escape says. A `Graphics::Kitty` terminal moves
   it for a placement whose size in cells is known: from `c=` and `r=`, or

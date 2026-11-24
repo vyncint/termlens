@@ -94,7 +94,9 @@ fn kitty(compress: bool, chunk: usize) -> String {
 
 /// The same shape as a sixel: one band, two colour registers, raster
 /// attributes declaring the size. The transparent column is simply never
-/// painted — sixel has no alpha to say it with.
+/// painted — sixel has no alpha to say it with — under a header whose
+/// background select (`0;1;0`, `P2 = 1`) asks for no background: the
+/// default one fills the declared area with register 0.
 ///
 /// The colours are pure rather than Primer's, and deliberately: a sixel
 /// register is a *percentage* of 255, so most 8-bit values do not survive

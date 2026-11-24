@@ -2385,8 +2385,10 @@ impl SeqTracker {
         }
         if self.dcs_introducer != b'_' && self.dcs_final == 0 {
             match b {
-                // Parameter and private bytes stay in the header.
-                0x30..=0x3f => {}
+                // Parameter and private bytes stay in the header. A sixel's
+                // second one is its background select, which the meter
+                // keeps for the decode (#766); no other DCS reads it.
+                0x30..=0x3f => self.sixel_meter.header(b),
                 // Intermediates: `+` (XTGETTCAP) and `$` (DECRQSS).
                 0x20..=0x2f => self.dcs_intermediate = b,
                 // Final byte closes the header; the rest is payload.
@@ -3550,6 +3552,47 @@ mod tests {
         let sixel = payloads(b"\x1bP0;1;0q\"1;1;2;6#0;2;100;0;0~~\x1b\\");
         assert_eq!(sixel[0].data(), Some(&b"\"1;1;2;6#0;2;100;0;0~~"[..]));
         assert_eq!(sixel[0].size(), Some((2, 6)));
+    }
+
+    /// A sixel's header selects its background with its second parameter,
+    /// `P2` (#766): 0, 2 or none fill the declared raster area with colour
+    /// register 0 — opaque black in the VT340 map — and 1 alone leaves what
+    /// no sixel paints transparent. xterm (`parse_sixel_init`, "0 or 2 =
+    /// opaque, 1 = transparent", and `init_sixel_background`) and Windows
+    /// Terminal (`_initRasterAttributes`, `_fillImageBackground`) fill it.
+    /// The parameter never reached the decoder, and every header decoded
+    /// transparent. The header is read as it arrives, so a parameter past
+    /// the 128 bytes the head buffer keeps is read too.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn a_sixel_header_selects_the_background_of_its_raster_area() {
+        const BLACK: [u8; 4] = [0, 0, 0, 255];
+        const CLEAR: [u8; 4] = [0, 0, 0, 0];
+        let long = format!("{};1q", "0".repeat(200));
+        for (header, unpainted) in [
+            ("q", BLACK),
+            ("0;0;0q", BLACK),
+            ("0;2;0q", BLACK),
+            ("0;1;0q", CLEAR),
+            // Only the second parameter, however it is spelled, and only
+            // its number: a sub-parameter is not part of it, as Windows
+            // Terminal's parser reads one.
+            ("1q", BLACK),
+            (";1q", CLEAR),
+            ("0;01q", CLEAR),
+            ("0;1:0;0q", CLEAR),
+            (long.as_str(), CLEAR),
+        ] {
+            let wire = format!("\x1bP{header}\"1;1;4;12#1;2;100;0;0~~\x1b\\");
+            let seen = payloads(wire.as_bytes());
+            assert_eq!(seen.len(), 1, "{header}");
+            let bitmap = seen[0].decode().expect("decodes");
+            assert_eq!((bitmap.width(), bitmap.height()), (4, 12), "{header}");
+            assert_eq!(bitmap.pixel(0, 0), Some([255, 0, 0, 255]), "{header}");
+            // Beside the painting, and in the band below it.
+            assert_eq!(bitmap.pixel(3, 0), Some(unpainted), "{header}");
+            assert_eq!(bitmap.pixel(0, 8), Some(unpainted), "{header}");
+        }
     }
 
     /// The kitty graphics *query* was the one probe of the startup set that

@@ -138,6 +138,22 @@ reads that marker.
   cursor lands where it did. A test that reads the screen or the history
   after such an image should expect it scrolled by the whole overshoot, up
   to a screenful. (#765)
+- A sixel decodes with the background its header selects. With the
+  default header (`ESC P q`) or a background select (`P2`) of 0 or 2, the
+  area its leading raster attributes declare is filled with colour
+  register 0 before anything is painted, as xterm and Windows Terminal
+  fill it, so a pixel no sixel painted there decodes as register 0, opaque
+  black in the VT340 colour map unless the image redefines it. Only
+  `P2 = 1` (`ESC P 0;1;0 q`) leaves it `[0, 0, 0, 0]`. `P2` never reached
+  the decoder, so the three headers decoded alike, and an application that
+  forgot `P2=1` passed an assertion that its corners were transparent
+  while those terminals drew them black. The payload keeps `P2` under a
+  new JSON key, `background_select`, written only where it is not 0: a
+  JSON screen saved by an earlier release still reads, and its sixels,
+  whose `P2` it never recorded, decode as `P2 = 0`; 0.11.10 reads a newer
+  file, skipping the key. A test that expected a transparent pixel inside
+  a sixel's declared area should expect register 0's colour there, or the
+  application should send `P2 = 1`. (#766)
 
 ### Fixed
 
