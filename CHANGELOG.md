@@ -29,6 +29,17 @@ reads that marker.
   expected `^[[0;1c` in `unsupported()` should expect the reply, and one
   that expected `^[[=1c` in a timeout's note should expect it in
   `unsupported()`. (#807)
+- An erase at a pending wrap starts from the last column and cancels the
+  wrap, as xterm's erase does. After a character in the last column,
+  `CSI K`, `CSI J` (0, 1 and 2), `CSI X` and the selective `CSI ? K` and
+  `CSI ? J` erase from that column and leave the cursor on it, so the
+  next character overwrites it: on five columns, `abcde` `CSI K` `X` is
+  `abcdX`, and with `CSI 2 K` it is `    X`. termlens kept the cursor
+  past the margin, where `CSI K` erased nothing and the next character
+  started the next row. A soft reset right after such an erase finds no
+  wrap to keep. `CSI 3 J` erases no cell and leaves the wrap pending, as
+  in xterm. A test that expected the next character on the next row
+  should expect it in the last column of the erased row. (#809)
 
 ## [0.11.11] - 2026-11-25
 

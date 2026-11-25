@@ -483,6 +483,13 @@ pub(crate) enum SeqEvent {
     /// A tab-stop operation completed, and needs the cursor column to
     /// finish — carried out for the same reason a graphics placement is.
     Tabs(TabOp),
+    /// An erase of the grid completed: `ED` or `EL` with 0, 1 or 2, their
+    /// selective forms (`CSI ? Ps J`, `CSI ? Ps K`), or `ECH`. xterm keeps a
+    /// cursor pending wrap on the last column and erases from there, which
+    /// cancels the wrap; vt100 keeps it one column past the last, where the
+    /// erase leaves it. Whether the cursor was pending is the grid's, so
+    /// the emulator settles it (#809).
+    Erased,
     /// `IL` or `DL` (`CSI L`, `CSI M`) completed. vt100 moves the lines and
     /// leaves the cursor; xterm also moves it to the left margin and clears
     /// a pending wrap when the cursor is inside the scroll region, which
@@ -2035,6 +2042,13 @@ impl SeqTracker {
                 // ED 3, erase the saved lines. vt100 reads the first
                 // parameter alone, and so does this.
                 b'J' if ps == 3 => return SeqEvent::ScrollbackErased,
+                // The erases of the grid, which xterm starts from the
+                // cursor's column and which cancel a pending wrap (#809):
+                // ED and EL by their first parameter, as vt100 and xterm
+                // read them, and ECH whatever its count. Not with a
+                // sub-parameter, which makes them no erase to xterm.
+                b'J' | b'K' if ps <= 2 && !self.csi_colon => return SeqEvent::Erased,
+                b'X' => return SeqEvent::Erased,
                 // IL and DL, whatever their parameters: vt100 dispatches
                 // every plain one.
                 b'L' | b'M' => return SeqEvent::LinesMoved,
@@ -2046,6 +2060,16 @@ impl SeqTracker {
         // (#621).
         if self.csi_prefix == b'?' && b == b'J' && !params_empty && self.csi_first_param == 3 {
             return SeqEvent::ScrollbackErased;
+        }
+        // DECSED and DECSEL (`CSI ? Ps J`, `CSI ? Ps K`), the selective
+        // erases. With no protected cell, which termlens does not model,
+        // xterm erases as ED and EL do, and vt100 carries them out as those.
+        if self.csi_prefix == b'?'
+            && matches!(b, b'J' | b'K')
+            && !self.csi_colon
+            && (params_empty || self.csi_first_param <= 2)
+        {
+            return SeqEvent::Erased;
         }
         if self.csi_colon {
             return SeqEvent::None;

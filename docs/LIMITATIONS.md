@@ -88,6 +88,14 @@ CHANGELOG entry.
   modelled: text past the right margin still wraps, and `unsupported()`
   names the sequence. `CSI ? 7 h`, which every ncurses program sends, asks
   for what the emulator already does and is not named.
+- **At a pending wrap, relative motions, `ICH` and `DCH` count from past
+  the margin.** After a character in the last column, xterm keeps the
+  cursor on that column with the wrap pending, and `CUU`, `CUD`, `VPA`,
+  `CUB`, `BS`, `ICH` and `DCH` cancel the wrap and work from that column.
+  The backend keeps the cursor one column past it, so `CUU`, `CUD` and
+  `VPA` leave the wrap pending, `CUB` and `BS` land a column right of
+  xterm's, and `ICH` and `DCH` change nothing (#814). The erases start
+  from the last column and cancel the wrap, as xterm's do.
 - **Tab stops are the application's to set.** `HTS` (`ESC H`), `TBC`
   (`CSI g`, `CSI 3 g`), `CHT` (`CSI I`) and `CBT` (`CSI Z`) all work, and a
   plain `\t` honours whatever stops are set rather than a fixed eight.
@@ -228,10 +236,7 @@ CHANGELOG entry.
   and so does the cursor it saves, as in xterm: after a `DECRC` the next
   character starts the second row. The backend holds that save at the
   end of the top row rather than its start, so a cursor motion or a
-  position report made before that character starts from there. An erase
-  (`CSI K`, `CSI J`) at a pending wrap leaves the wrap pending where
-  xterm's erase cancels it, so a soft reset right after one keeps the
-  wrap (#809).
+  position report made before that character starts from there.
 - **Two SGR style attributes are not modelled.** Overline (`SGR 53`) and
   double underline (`SGR 21`) do not reach [`Style`](https://docs.rs/termlens/latest/termlens/struct.Style.html),
   so `with_styles()` cannot distinguish those attributes from a plain cell.
