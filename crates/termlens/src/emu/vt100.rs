@@ -1054,6 +1054,33 @@ impl Emulator for Vt100Emulator {
                     }
                     None
                 }
+                SeqEvent::Erased => {
+                    // xterm keeps a cursor pending wrap on the last column,
+                    // erases from that column and resets the wrap
+                    // (`ClearRight`, `ClearInLine2` and `ClearScreen` in
+                    // util.c). vt100 keeps it one column past the last, so
+                    // an erase that starts at the cursor cleared nothing of
+                    // its row, and every erase left the wrap pending:
+                    // `abcde` `CSI K` `X` put the X on the next row, where
+                    // xterm draws it over the e (#809). The wrap is read
+                    // before the final byte, which vt100 carries the erase
+                    // out on. Then the cursor goes back onto the last
+                    // column, which is how vt100 cancels a wrap, and the
+                    // cell there is erased as the erase would have erased
+                    // it, in the attributes in force. An erase that reached
+                    // the cell already leaves nothing to change. Both
+                    // parsers are fed, so the shadow keeps the same shape.
+                    self.feed_staged(&bytes[fed..i]);
+                    let screen = self.parser.screen();
+                    let pending = screen.cursor_position().1 >= size(screen).1;
+                    self.feed_staged(&bytes[i..=i]);
+                    fed = i + 1;
+                    if pending {
+                        let (_, cols) = size(self.parser.screen());
+                        self.feed(format!("\x1b[{cols}G\x1b[X").as_bytes());
+                    }
+                    None
+                }
                 SeqEvent::Repeat { glyph, count } => {
                     // vt100 would repeat the glyph it drew last, whatever
                     // came between; xterm repeats only the character printed
@@ -2959,7 +2986,14 @@ mod tests {
                 } else {
                     let piece = pieces[next(pieces.len())];
                     feed_all(&mut emu, piece.as_bytes());
+                    // The reference erases as termlens does, which is
+                    // xterm's: at a pending wrap, from the last column
+                    // (#809).
+                    let pending = raw.screen().cursor_position().1 >= cols;
                     raw.process(piece.as_bytes());
+                    if piece == "\x1b[K" && pending {
+                        raw.process(format!("\x1b[{cols}G\x1b[K").as_bytes());
+                    }
                     if piece == "\x1bc" || (piece == "\x1b[3J" && !alternate) {
                         exact = false;
                     }
@@ -3438,9 +3472,9 @@ mod tests {
     }
 
     /// Three sequences termlens does not carry out were listed nowhere
-    /// (#804). DA1 or DA2 with a parameter other than 0, which xterm does
-    /// not answer either (charproc.c 4098), and TBC other than 0 or 3,
-    /// which it ignores (4301): the arms took every parameter for the
+    /// (#804). DA1, DA2 or DA3 with a first parameter other than 0, which
+    /// xterm does not answer either (charproc.c 4098), and TBC other than 0
+    /// or 3, which it ignores (4301): the arms took every parameter for the
     /// tracker's. And DECSCUSR with a sub-parameter, which xterm does not
     /// take (it reads sub-parameters only on SGR and XTMODKEYS) and vt100
     /// carries out by its first value with no callback at all: the cursor
@@ -3451,6 +3485,7 @@ mod tests {
         for (sequence, shape) in [
             ("\x1b[1c", "^[[1c"),
             ("\x1b[>1c", "^[[>1c"),
+            ("\x1b[=1c", "^[[=1c"),
             ("\x1b[1g", "^[[1g"),
             ("\x1b[2:1 q", "^[[2:1 q"),
             ("\x1b[6:9 q", "^[[6:9 q"),
@@ -4761,6 +4796,61 @@ mod tests {
         // Not at a pending wrap, the restore is to the top-left, as before.
         let s = emu_with_size(4, 5, b"abcd\x1b[!p\x1b8X").snapshot();
         assert_eq!(s.text(), "Xbcd\n\n\n", "{s}");
+    }
+
+    /// An erase at a pending wrap starts from the last column and cancels
+    /// the wrap, as xterm's does: `ClearRight`, `ClearInLine2` and
+    /// `ClearScreen` (util.c) erase from the cursor's column, which xterm
+    /// keeps on the last one, and reset its wrap flag. vt100 keeps the
+    /// cursor past the last column, where `CSI K` cleared nothing and the
+    /// next character started the next row (#809). Every erase of the grid,
+    /// whole and a character at a time. ED 3 erases no cell and cancels
+    /// nothing in xterm, and EL 3 is no erase at all, so the wrap stays.
+    #[test]
+    fn an_erase_at_a_pending_wrap_cancels_it() {
+        let rows = "\x1b[3;1Hklmno\x1b[4;1Hpqrs\x1b[1;1Hfghij\x1b[2;1Habcde";
+        for (erase, text) in [
+            ("\x1b[K", "fghij\nabcdX\nklmno\npqrs"),
+            ("\x1b[0K", "fghij\nabcdX\nklmno\npqrs"),
+            ("\x1b[1K", "fghij\n    X\nklmno\npqrs"),
+            ("\x1b[2K", "fghij\n    X\nklmno\npqrs"),
+            ("\x1b[2;5K", "fghij\n    X\nklmno\npqrs"),
+            ("\x1b[J", "fghij\nabcdX\n\n"),
+            ("\x1b[1J", "\n    X\nklmno\npqrs"),
+            ("\x1b[2J", "\n    X\n\n"),
+            ("\x1b[X", "fghij\nabcdX\nklmno\npqrs"),
+            ("\x1b[3X", "fghij\nabcdX\nklmno\npqrs"),
+            ("\x1b[?K", "fghij\nabcdX\nklmno\npqrs"),
+            ("\x1b[?2K", "fghij\n    X\nklmno\npqrs"),
+            ("\x1b[?J", "fghij\nabcdX\n\n"),
+            ("\x1b[?1J", "\n    X\nklmno\npqrs"),
+        ] {
+            let stream = format!("{rows}{erase}X");
+            let (whole, bytewise) = whole_and_bytewise(4, 5, 0, stream.as_bytes());
+            assert_eq!(observed(&whole), observed(&bytewise), "{erase:?}");
+            let s = whole.snapshot();
+            assert_eq!(s.text(), text, "{erase:?}: {s}");
+            assert_eq!(s.cursor(), (1, 4, true), "{erase:?}: {s}");
+            assert!(!s.row_wrapped(1), "{erase:?}: {s}");
+        }
+        for erase in ["\x1b[3J", "\x1b[3K"] {
+            let s = emu_with_size(4, 5, format!("{rows}{erase}X").as_bytes()).snapshot();
+            assert_eq!(s.text(), "fghij\nabcde\nXlmno\npqrs", "{erase:?}: {s}");
+        }
+        // A wide character in the last two columns is erased whole, as
+        // xterm erases the cell the cursor splits.
+        let s = emu_with_size(4, 5, "abc\u{6f22}\x1b[KX".as_bytes()).snapshot();
+        assert_eq!(s.text(), "abc X\n\n\n", "{s}");
+        // The cell is erased in the attributes in force, as the erase
+        // would have erased it, and the cursor stays on it.
+        let s = emu_with_size(4, 5, b"abcde\x1b[41m\x1b[K").snapshot();
+        assert_eq!(s.text(), "abcd\n\n\n", "{s}");
+        assert_eq!(s.cell(0, 4).unwrap().style().bg, Color::Indexed(1), "{s}");
+        assert_eq!(s.cell(0, 3).unwrap().style().bg, Color::Default, "{s}");
+        assert_eq!(s.cursor(), (0, 4, true), "{s}");
+        // A soft reset right after keeps no wrap, as there is none (#753).
+        let s = emu_with_size(4, 5, b"abcde\x1b[K\x1b[!pX").snapshot();
+        assert_eq!(s.text(), "abcdX\n\n\n", "{s}");
     }
 
     /// `DECSTR` written with a parameter is `DECSTR`: xterm's parse table

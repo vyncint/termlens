@@ -34,6 +34,10 @@
 #     snapshot beside a screen one: the pair's entry says termlens could
 #     compare nothing, with no empty code block under "Against", and
 #     neither the count nor the artifact line claims it was rendered (#783)
+#   - `.snap.new` names near the 255 bytes a file name may hold, as a long
+#     test name gives: each is shown whole, and its renderings, counter and
+#     suffix included, fit in 255 bytes, cut and hashed past that, so the
+#     artifact holds them and the count has them (#808)
 #
 # Root reads a chmod 000 directory anyway, so as root the first two cases
 # cannot fail and are skipped by name rather than passed.
@@ -344,6 +348,48 @@ else
 fi
 label="  and the step counts the one screen it rendered"
 if grep -Fq "rendered 1 screen(s), 1 of them into the step summary; termlens could not read 1 file(s)" "$rt/out.log"; then
+  printf '  ok    %-58s\n' "$label"
+else
+  printf '  FAIL  %-58s %s\n' "$label" "$(tail -1 "$rt/out.log")" >&2
+  status=1
+fi
+
+# insta names a snapshot after its module and test, so a long test name
+# makes a `.snap.new` name near the 255 bytes a file name may hold. With the
+# counter ahead of it and `.html` after, its renderings' names were longer
+# than that: `termlens render --out` could not create them, the artifact
+# held no rendering, and the count left the screen out (#808). A name one
+# byte past what `.html` fits, and one past what even `.svg` fits, are cut
+# to their first 200 bytes and a hash of the whole, which keeps the two
+# apart; one that fits exactly is kept whole.
+workspace long-name
+mkdir -p "$ws/tests/snapshots"
+x231="$(printf '%0231d' 0 | tr 0 x)"
+fits="app__$(printf '%0234d' 0 | tr 0 x)"
+for snap in "app__${x231}_one" "app__${x231}_three" "$fits"; do
+  printf 'a screen\n' > "$ws/tests/snapshots/${snap}.snap.new"
+done
+expect "a name near 255 bytes is shown whole" \
+  "<code>./tests/snapshots/app__${x231}_one.snap.new</code>" \
+  "<code>./tests/snapshots/app__${x231}_three.snap.new</code>" \
+  "<code>./tests/snapshots/${fits}.snap.new</code>" \
+  "SVG and HTML renderings of each are in the \`termlens-report\` artifact."
+label="  and its renderings fit, cut and apart past 255 bytes"
+cut="app__$(printf '%0195d' 0 | tr 0 x)"
+names="$(ls "$rt/termlens-report")"
+too_long="$(printf '%s\n' "$names" | awk 'length($0) > 255')"
+if [ "$(printf '%s\n' "$names" | grep -c .)" -eq 6 ] && [ -z "$too_long" ] \
+  && [ "$(printf '%s\n' "$names" | grep -Ec "^[0-9]-${cut}-[0-9a-f]{8}[.]svg\$")" -eq 2 ] \
+  && [ "$(printf '%s\n' "$names" | grep -Ec "^[0-9]-${cut}-[0-9a-f]{8}[.]html\$")" -eq 2 ] \
+  && [ "$(printf '%s\n' "$names" | grep -E "^[0-9]-${cut}-" | sed 's/^[0-9]-//' | sort -u | wc -l)" -eq 4 ] \
+  && printf '%s\n' "$names" | grep -Fqx "3-${fits}.snap.new.html"; then
+  printf '  ok    %-58s\n' "$label"
+else
+  printf '  FAIL  %-58s artifact holds: %s\n' "$label" "$names" >&2
+  status=1
+fi
+label="  and the step counts all three"
+if grep -Fq "rendered 3 screen(s), 3 of them into the step summary" "$rt/out.log"; then
   printf '  ok    %-58s\n' "$label"
 else
   printf '  FAIL  %-58s %s\n' "$label" "$(tail -1 "$rt/out.log")" >&2

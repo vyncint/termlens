@@ -30,6 +30,12 @@ GitHub drops a step's whole summary once more than 1 MiB is written to it,
 so the action stops adding screens at about 900 KiB. Every screen is still
 in the artifact, and the summary ends by saying how many it leaves out.
 
+In the artifact, a screen's renderings are named after its file, behind a
+number that keeps two files of one name apart: `3-app__main.snap.new.svg`.
+A name too long for a file name with those added, as a long test name
+gives a snapshot, is cut to its first 200 bytes and a hash of the whole,
+as the library cuts the names it writes to `TERMLENS_ARTIFACT_DIR`.
+
 Nothing to install: the action `cargo install`s `termlens-cli` on the
 runner. Inputs:
 

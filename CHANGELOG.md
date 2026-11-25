@@ -17,6 +17,50 @@ reads that marker.
 
 ## [Unreleased]
 
+### Changed
+
+- DA1 and DA2 are answered whatever follows a first parameter of 0
+  (`CSI 0;1 c`, `CSI > 0;1 c`), as xterm answers them by that parameter
+  alone. They got no reply, so a program that asked that way waited out
+  its own timeout, and `Screen::unsupported()` listed the sequence. DA3
+  is named in a timeout only as `CSI = c` or `CSI = 0 c`: xterm does not
+  answer `CSI = 1 c`, which `unsupported()` now lists, as it lists DA1
+  and DA2 with a first parameter other than 0 (#804). A test that
+  expected `^[[0;1c` in `unsupported()` should expect the reply, and one
+  that expected `^[[=1c` in a timeout's note should expect it in
+  `unsupported()`. (#807)
+- An erase at a pending wrap starts from the last column and cancels the
+  wrap, as xterm's erase does. After a character in the last column,
+  `CSI K`, `CSI J` (0, 1 and 2), `CSI X` and the selective `CSI ? K` and
+  `CSI ? J` erase from that column and leave the cursor on it, so the
+  next character overwrites it: on five columns, `abcde` `CSI K` `X` is
+  `abcdX`, and with `CSI 2 K` it is `    X`. termlens kept the cursor
+  past the margin, where `CSI K` erased nothing and the next character
+  started the next row. A soft reset right after such an erase finds no
+  wrap to keep. `CSI 3 J` erases no cell and leaves the wrap pending, as
+  in xterm. A test that expected the next character on the next row
+  should expect it in the last column of the erased row. (#809)
+- A zlib-compressed kitty RGB or RGBA payload (`o=z` with `f=24` or
+  `f=32`) more than 1024 bytes longer than its `s=` x `v=` declares is
+  refused with `DecodeError::Malformed`, as kitty refuses it: kitty loads
+  compressed data into a buffer of the declared size plus 1024 bytes and
+  aborts a load that outgrows it ("Too much data") before inflating it.
+  It decoded whenever it inflated to the declared size. Only padding makes
+  a payload that long, since deflate output for a picture is far smaller
+  than the picture. A test that decoded such a payload should expect
+  `Malformed`, or the application should send it unpadded. (#810)
+
+### Fixed
+
+- The report action renders a screen whose file name comes near the 255
+  bytes a file name may hold, as a long test name gives an insta
+  snapshot. With the counter ahead of it and `.html` after, its
+  renderings' names were longer than that, so the artifact held none and
+  the count of rendered screens left it out. Such a name is cut to its
+  first 200 bytes and a hash of the whole, as the library cuts the names
+  it writes to `TERMLENS_ARTIFACT_DIR` (#773). The summary shows it
+  whole. (#808)
+
 ## [0.11.11] - 2026-11-25
 
 ### Added
