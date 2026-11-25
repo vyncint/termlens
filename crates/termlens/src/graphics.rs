@@ -440,9 +440,10 @@ impl GraphicsPayload {
     /// supported. [`DecodeError::Malformed`] covers contradictory or invalid
     /// payload data, including data that cannot be decoded within its declared
     /// size, and the kitty pixel data kitty refuses too: data short of the
-    /// declared size, zlib data that does not inflate to exactly that size,
-    /// and raw data more than 10 bytes past it. Raw data within those 10
-    /// bytes decodes from its declared prefix, as kitty draws it.
+    /// declared size, zlib data more than 1024 bytes past it or that does
+    /// not inflate to exactly that size, and raw data more than 10 bytes
+    /// past it. Raw data within those 10 bytes decodes from its declared
+    /// prefix, as kitty draws it.
     /// [`DecodeError::TooLarge`] covers declared dimensions or sixel commands
     /// beyond the 4096-pixel and related safety limits.
     #[cfg(feature = "decode")]
@@ -517,6 +518,16 @@ impl GraphicsPayload {
             .ok_or(DecodeError::Malformed("a declared size that overflows"))?;
         let raw = decode_chunked_base64(data).ok_or(DecodeError::Malformed("bad base64"))?;
         let raw = if self.compressed {
+            // kitty loads compressed data as it loads raw data, into a
+            // buffer of the declared size plus KITTY_COMPRESSED_SLACK, and
+            // refuses a load that outgrows it before it inflates anything
+            // (#810). Within the buffer, what the data inflates to decides.
+            if raw.len() > wanted.saturating_add(KITTY_COMPRESSED_SLACK) {
+                return Err(DecodeError::Malformed(
+                    "zlib data more than the 1024 bytes past its declared size that kitty \
+                     loads (\"Too much data\")",
+                ));
+            }
             // Nothing past the declared size is ever read, so nothing past it
             // needs inflating.
             miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&raw, wanted).map_err(|_| {
@@ -690,6 +701,15 @@ const MAX_SIXEL_REGISTERS: usize = 65_536;
 /// (#767).
 #[cfg(feature = "decode")]
 const KITTY_RAW_SLACK: usize = 10;
+/// The bytes of zlib-compressed kitty data (`o=z` with `f=24` or `f=32`) a
+/// payload may carry past its declared size: kitty loads it into a buffer
+/// of the declared size plus 1024 (`initialize_load_data`, `graphics.c`),
+/// as it loads raw data into one plus 10, and aborts a load past that with
+/// `EFBIG`, "Too much data" (`load_image_data`), before inflating it
+/// (#810). Only padding makes a payload that long: deflate output for a
+/// picture is far smaller than the picture.
+#[cfg(feature = "decode")]
+const KITTY_COMPRESSED_SLACK: usize = 1024;
 
 /// Why a payload could not be decoded.
 #[cfg(feature = "decode")]
@@ -2311,6 +2331,75 @@ mod tests {
                 }
                 Err(DecodeError::Malformed(_)) if !decodes => {}
                 other => panic!("{control} inflating to {} bytes: {other:?}", raw.len()),
+            }
+        }
+    }
+
+    /// kitty loads compressed data into a buffer of the declared size plus
+    /// 1024 bytes (`initialize_load_data`, `graphics.c`) and aborts a load
+    /// that outgrows it with `EFBIG`, "Too much data" (`load_image_data`),
+    /// before it inflates anything. termlens checked only what the data
+    /// inflated to, so a padded stream that inflates to the declared size
+    /// decoded where kitty refuses it (#810). Padded two ways: with empty
+    /// stored blocks, which keep it one zlib stream that inflates to the
+    /// image, and with bytes after its end, which zlib's inflate leaves
+    /// unread. Whole and chunked, since kitty's buffer fills chunk by chunk.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn kitty_zlib_data_may_run_1024_bytes_past_the_declared_size() {
+        // Red, then green, as RGBA: 8 bytes declared.
+        let rgba = [0xff, 0, 0, 0xff, 0, 0xff, 0, 0xff];
+        let control = "a=T,f=32,s=2,v=1,o=z";
+        let limit = rgba.len() + 1024;
+        let deflated = miniz_oxide::deflate::compress_to_vec_zlib(&rgba, 6);
+        // Each a non-final stored block of no bytes, after the two-byte
+        // header, where the deflate stream starts on a byte boundary.
+        let stored = |blocks: usize| {
+            let mut zlib = deflated[..2].to_vec();
+            for _ in 0..blocks {
+                zlib.extend_from_slice(&[0, 0, 0, 0xff, 0xff]);
+            }
+            zlib.extend_from_slice(&deflated[2..]);
+            zlib
+        };
+        let trailing = |len: usize| {
+            let mut zlib = deflated.clone();
+            zlib.resize(len, 0);
+            zlib
+        };
+        let fits = (limit - deflated.len()) / 5;
+        for (padding, zlib, decodes) in [
+            ("trailing bytes", trailing(limit), true),
+            ("trailing bytes", trailing(limit + 1), false),
+            ("empty stored blocks", stored(fits), true),
+            ("empty stored blocks", stored(fits + 1), false),
+        ] {
+            let size = zlib.len();
+            assert_eq!(size <= limit, decodes, "{padding}: {size} bytes");
+            let whole = kitty_payload(control.as_bytes(), base64(&zlib).as_bytes());
+            let mut builder = GraphicsBuilder::default();
+            builder.kitty(format!("{control},m=1").as_bytes());
+            let first = base64(&zlib[..size / 2]);
+            builder.chunk(first.len() as u64, first.as_bytes(), true, usize::MAX);
+            builder.kitty(b"m=0");
+            let rest = base64(&zlib[size / 2..]);
+            builder.chunk(rest.len() as u64, rest.as_bytes(), true, usize::MAX);
+            let chunked = builder.finish().expect("a payload");
+            assert_eq!(chunked.chunks(), 2);
+            for (shape, payload) in [("whole", whole), ("chunked", chunked)] {
+                let at = format!("{padding}, {size} bytes, {shape}");
+                match payload.decode() {
+                    Ok(bitmap) if decodes => {
+                        assert_eq!(bitmap.pixel(1, 0), Some([0, 0xff, 0, 0xff]), "{at}");
+                    }
+                    Err(DecodeError::Malformed(reason)) if !decodes => assert_eq!(
+                        reason,
+                        "zlib data more than the 1024 bytes past its declared size that \
+                         kitty loads (\"Too much data\")",
+                        "{at}"
+                    ),
+                    other => panic!("{at}: {other:?}"),
+                }
             }
         }
     }

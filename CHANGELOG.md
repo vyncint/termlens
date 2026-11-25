@@ -40,6 +40,15 @@ reads that marker.
   wrap to keep. `CSI 3 J` erases no cell and leaves the wrap pending, as
   in xterm. A test that expected the next character on the next row
   should expect it in the last column of the erased row. (#809)
+- A zlib-compressed kitty RGB or RGBA payload (`o=z` with `f=24` or
+  `f=32`) more than 1024 bytes longer than its `s=` x `v=` declares is
+  refused with `DecodeError::Malformed`, as kitty refuses it: kitty loads
+  compressed data into a buffer of the declared size plus 1024 bytes and
+  aborts a load that outgrows it ("Too much data") before inflating it.
+  It decoded whenever it inflated to the declared size. Only padding makes
+  a payload that long, since deflate output for a picture is far smaller
+  than the picture. A test that decoded such a payload should expect
+  `Malformed`, or the application should send it unpadded. (#810)
 
 ## [0.11.11] - 2026-11-25
 
