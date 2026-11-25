@@ -50,6 +50,17 @@ reads that marker.
   than the picture. A test that decoded such a payload should expect
   `Malformed`, or the application should send it unpadded. (#810)
 
+### Fixed
+
+- The report action renders a screen whose file name comes near the 255
+  bytes a file name may hold, as a long test name gives an insta
+  snapshot. With the counter ahead of it and `.html` after, its
+  renderings' names were longer than that, so the artifact held none and
+  the count of rendered screens left it out. Such a name is cut to its
+  first 200 bytes and a hash of the whole, as the library cuts the names
+  it writes to `TERMLENS_ARTIFACT_DIR` (#773). The summary shows it
+  whole. (#808)
+
 ## [0.11.11] - 2026-11-25
 
 ### Added

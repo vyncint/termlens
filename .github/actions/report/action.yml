@@ -176,7 +176,24 @@ runs:
           n=$((n + 1))
           # upload-artifact refuses a path holding any of these, and then the
           # whole upload fails; the summary keeps the name as it is.
-          base="$(printf '%s' "$(basename -- "$file")" | tr '":<>|*?\r\n' '_________')"
+          name="$(basename -- "$file")"
+          base="$(printf '%s' "$name" | tr '":<>|*?\r\n' '_________')"
+          # A file name may hold 255 bytes, and insta names a snapshot after
+          # its module and test, so a long test name comes near that. With
+          # the counter ahead of it and `.html` after, the renderings' names
+          # did not fit: `termlens render --out` could not create them, and
+          # the screen went without one and out of the count (#808). A name
+          # past what fits is cut as TERMLENS_ARTIFACT_DIR's are (#773): its
+          # first 200 bytes, kept to ASCII letters, digits, `.`, `-` and `_`
+          # so that no character is cut in two, then a hash of the whole
+          # name. The counter already keeps two names apart, so the hash is
+          # for a reader, and POSIX `cksum`'s CRC, which every runner has,
+          # does.
+          if [ $((${#n} + 1 + $(printf '%s' "$base" | wc -c) + 5)) -gt 255 ]; then
+            crc="$(printf '%s' "$name" | cksum | cut -d ' ' -f 1)"
+            base="$(printf '%s' "$base" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_' | head -c 200)"
+            base="${base}-$(printf '%08x' "$crc")"
+          fi
           stem="${n}-${base}"
           # Renderings for the artifact; the summary holds the text. --out
           # rather than a redirect (0.11.1, #313): the shell truncates the
