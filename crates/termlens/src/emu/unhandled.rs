@@ -468,13 +468,14 @@ impl Callbacks for Unhandled {
             // Tab motions, by their first parameter (#802), and the DSR
             // queries the responder answers or names.
             (None, None, 'I' | 'Z' | 'n') => true,
-            // DA1 and DA2 as the responder answers them, `CSI c` or `CSI 0
-            // c`, which vte hands over alike; and TBC for the stop at the
-            // cursor or all of them. xterm does nothing for any other
-            // parameter (charproc.c 4098 and 4301), and neither does
-            // termlens: these arms took every parameter for the tracker's,
-            // and `CSI 1 c` and `CSI 1 g` were reported nowhere (#804).
-            (None | Some(b'>'), None, 'c') => params == [&[0][..]],
+            // DA1 and DA2 as the responder answers them, by a first
+            // parameter of 0 or none, whatever follows it (#807); and TBC
+            // for the stop at the cursor or all of them. xterm does nothing
+            // for any other first parameter (charproc.c 4098, 4224 and
+            // 4301), and neither does termlens: these arms took every
+            // parameter for the tracker's, and `CSI 1 c` and `CSI 1 g` were
+            // reported nowhere (#804).
+            (None | Some(b'>'), None, 'c') => matches!(first, None | Some(0)),
             (None, None, 'g') => matches!(first, Some(0 | 3)),
             // The window reports the responder answers (14, 16, 18) and the
             // ones it names in a timeout — `seq.rs`'s own predicate.
@@ -502,10 +503,12 @@ impl Callbacks for Unhandled {
             (Some(b'?'), None, 'u' | 'S') => true,
             // The prefixed queries `seq.rs` answers or names, in the shapes
             // it claims them in: DECXCPR (`CSI ? 6 n`, answered) and every
-            // other `CSI ? Ps n` or `CSI = Ps n`, DA3 (`CSI = c`), and
-            // XTVERSION (`CSI > q`, whose only parameter is 0). These were
-            // listed here while the responder handled them (#691).
-            (Some(b'?' | b'='), None, 'n') | (Some(b'='), None, 'c') => true,
+            // other `CSI ? Ps n` or `CSI = Ps n`, DA3 (`CSI = c`, by its
+            // first parameter as DA1, #807), and XTVERSION (`CSI > q`, whose
+            // only parameter is 0). These were listed here while the
+            // responder handled them (#691).
+            (Some(b'?' | b'='), None, 'n') => true,
+            (Some(b'='), None, 'c') => matches!(first, None | Some(0)),
             (Some(b'>'), None, 'q') => params == [&[0][..]],
             // The private modes the tracker keeps; any other private mode
             // vt100 declined is one nobody honoured.
@@ -963,22 +966,28 @@ mod tests {
         assert!(shapes(b"\x1b[?996n\x1b[6n\x1b[4h\x1b[?1000h\x1b[?7h\x1b[c\x1b[3g").is_empty());
     }
 
-    /// DA1 and DA2 are answered only as `CSI c` and `CSI 0 c` (`>` for
-    /// DA2), which vte hands over alike, and TBC is carried out only for 0
-    /// and 3, by its first parameter (#802). xterm does nothing for any
-    /// other parameter (charproc.c 4098 and 4301), and neither does
-    /// termlens, but the arms took every parameter for the tracker's
-    /// (#804).
+    /// DA1 and DA2 are answered, and DA3 named, only for a first parameter
+    /// of 0 or none, whatever follows it (#807), and TBC is carried out
+    /// only for 0 and 3, by its first parameter (#802). xterm does nothing
+    /// for any other first parameter (charproc.c 4098, 4224, 4281 and
+    /// 4301), and neither does termlens, but the arms took every parameter
+    /// for the tracker's (#804).
     #[test]
     fn da_and_tbc_with_a_parameter_nobody_takes_are_reported() {
-        for shape in ["1c", "0;1c", ">1c", "1g", "2g", "4g"] {
+        for shape in [
+            "1c", "1;0c", ">1c", ">2;0c", "=1c", "=1;0c", "1g", "2g", "4g",
+        ] {
             assert_eq!(
                 shapes(format!("\x1b[{shape}").as_bytes()),
                 [format!("^[[{shape}")],
                 "{shape}"
             );
         }
-        assert!(shapes(b"\x1b[c\x1b[0c\x1b[>c\x1b[>0c\x1b[g\x1b[0g\x1b[3g\x1b[3;5g").is_empty());
+        assert!(shapes(
+            b"\x1b[c\x1b[0c\x1b[0;1c\x1b[;1c\x1b[>c\x1b[>0c\x1b[>0;1c\x1b[=c\x1b[=0c\x1b[=0;1c\
+              \x1b[g\x1b[0g\x1b[3g\x1b[3;5g"
+        )
+        .is_empty());
     }
 
     #[test]

@@ -2056,8 +2056,13 @@ impl SeqTracker {
             (0, b'n') if single(6) => Some(Query::CursorPosition { private: false }),
             (b'?', b'n') if single(6) => Some(Query::CursorPosition { private: true }),
             (0, b'n') if single(5) => Some(Query::OperatingStatus),
-            (0, b'c') if params_empty || single(0) => Some(Query::PrimaryDa),
-            (b'>', b'c') if params_empty || single(0) => Some(Query::SecondaryDa),
+            // The device attributes by their first parameter alone, 0 or
+            // none, whatever follows: xterm's `GetParam(0) <= 0` in
+            // `CASE_DA1` and `CASE_DA2` (charproc.c 4098 and 4224). Taken
+            // only alone, `CSI 0;1 c` got no reply here, and xterm answers
+            // it (#807).
+            (0, b'c') if first == 0 => Some(Query::PrimaryDa),
+            (b'>', b'c') if first == 0 => Some(Query::SecondaryDa),
             (b'>', b'q') if params_empty || single(0) => {
                 Some(Query::Unanswerable(self.seq_printable()))
             }
@@ -2070,9 +2075,13 @@ impl SeqTracker {
             // Questions we can recognize but not answer: the DSR family,
             // and DA3. Not `CSI > Ps n`, which is XTMODKEYS's "disable", a
             // setting with no reply (#692).
-            (0 | b'?' | b'=', b'n') | (b'=', b'c') => {
-                Some(Query::Unanswerable(self.seq_printable()))
-            }
+            (0 | b'?' | b'=', b'n') => Some(Query::Unanswerable(self.seq_printable())),
+            // DA3 is a question only with a first parameter of 0 or none,
+            // as DA1 and DA2 are (`CASE_DECRPTUI`, charproc.c 4281). xterm
+            // does not answer `CSI = 1 c`, so nothing waits on it, and
+            // naming it in a timeout blamed it for a wait it did not cause
+            // (#807).
+            (b'=', b'c') if first == 0 => Some(Query::Unanswerable(self.seq_printable())),
             // XTSMGRAPHICS (`CSI ? Pi ; Pa ; Pv S`): sixel programs ask it
             // for the colour registers and the geometry right after DA1
             // claims sixel. Every form gets a reply from xterm, a set
@@ -5017,6 +5026,34 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The device attributes are taken by their first parameter, as xterm
+    /// takes them (`GetParam(0) <= 0`, charproc.c 4098, 4224 and 4281): 0
+    /// or none, whatever follows. `CSI 0;1 c` and `CSI > 0;1 c` went
+    /// unanswered, and `CSI = 1 c`, which xterm does not answer, was named
+    /// in a timeout (#807). A sub-parameter makes none of them a question.
+    #[test]
+    fn device_attributes_are_taken_by_their_first_parameter() {
+        let queries = |shape: &str| queries_of(format!("\x1b[{shape}").as_bytes());
+        for shape in ["c", "0c", "0;1c", ";1c", "0;0;5c"] {
+            assert_eq!(queries(shape), [Query::PrimaryDa], "{shape}");
+        }
+        for shape in [">c", ">0c", ">0;1c", ">;1c"] {
+            assert_eq!(queries(shape), [Query::SecondaryDa], "{shape}");
+        }
+        for shape in ["=c", "=0c", "=0;1c"] {
+            assert_eq!(
+                queries(shape),
+                [Query::Unanswerable(format!("^[[{shape}"))],
+                "{shape}"
+            );
+        }
+        for shape in [
+            "1c", "1;0c", ">1c", ">2;0c", "=1c", "=1;0c", "0:1c", ">0:1c",
+        ] {
+            assert!(queries(shape).is_empty(), "{shape}");
+        }
     }
 
     #[test]

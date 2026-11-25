@@ -3438,9 +3438,9 @@ mod tests {
     }
 
     /// Three sequences termlens does not carry out were listed nowhere
-    /// (#804). DA1 or DA2 with a parameter other than 0, which xterm does
-    /// not answer either (charproc.c 4098), and TBC other than 0 or 3,
-    /// which it ignores (4301): the arms took every parameter for the
+    /// (#804). DA1, DA2 or DA3 with a first parameter other than 0, which
+    /// xterm does not answer either (charproc.c 4098), and TBC other than 0
+    /// or 3, which it ignores (4301): the arms took every parameter for the
     /// tracker's. And DECSCUSR with a sub-parameter, which xterm does not
     /// take (it reads sub-parameters only on SGR and XTMODKEYS) and vt100
     /// carries out by its first value with no callback at all: the cursor
@@ -3451,6 +3451,7 @@ mod tests {
         for (sequence, shape) in [
             ("\x1b[1c", "^[[1c"),
             ("\x1b[>1c", "^[[>1c"),
+            ("\x1b[=1c", "^[[=1c"),
             ("\x1b[1g", "^[[1g"),
             ("\x1b[2:1 q", "^[[2:1 q"),
             ("\x1b[6:9 q", "^[[6:9 q"),

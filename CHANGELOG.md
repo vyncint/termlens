@@ -17,6 +17,19 @@ reads that marker.
 
 ## [Unreleased]
 
+### Changed
+
+- DA1 and DA2 are answered whatever follows a first parameter of 0
+  (`CSI 0;1 c`, `CSI > 0;1 c`), as xterm answers them by that parameter
+  alone. They got no reply, so a program that asked that way waited out
+  its own timeout, and `Screen::unsupported()` listed the sequence. DA3
+  is named in a timeout only as `CSI = c` or `CSI = 0 c`: xterm does not
+  answer `CSI = 1 c`, which `unsupported()` now lists, as it lists DA1
+  and DA2 with a first parameter other than 0 (#804). A test that
+  expected `^[[0;1c` in `unsupported()` should expect the reply, and one
+  that expected `^[[=1c` in a timeout's note should expect it in
+  `unsupported()`. (#807)
+
 ## [0.11.11] - 2026-11-25
 
 ### Added
