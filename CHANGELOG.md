@@ -52,6 +52,11 @@ reads that marker.
 
 ### Fixed
 
+- A sixel colour definition with an RGB component over 100, as an encoder
+  that writes 0-255 values gives, is ignored and the register keeps its
+  colour, as xterm does. Each component was clamped to 100 and applied,
+  so the image decoded in colours xterm never shows. (#845)
+
 - Both published crates, `termlens` and `termlens-cli`, ship `LICENSE-MIT`
   and `LICENSE-APACHE`. They are `MIT OR Apache-2.0`, and both licences ask
   for their text in every copy, but the texts sat only at the repository

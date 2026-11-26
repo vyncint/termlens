@@ -823,7 +823,8 @@ fn decode_sixel(data: &[u8], background: Option<(u32, u32)>) -> Result<Bitmap, D
 
     fn percent(value: u32) -> u8 {
         // Sixel colour components are percentages, and the rounding has to
-        // match what a terminal does or every assertion lands one off.
+        // match what a terminal does or every assertion lands one off. A
+        // definition with a component over 100 never gets here.
         ((value.min(100) * 255 + 50) / 100) as u8
     }
     fn rgb([r, g, b]: [u32; 3]) -> [u8; 4] {
@@ -894,7 +895,13 @@ fn decode_sixel(data: &[u8], background: Option<(u32, u32)>) -> Result<Bitmap, D
                     if values[1] != 2 {
                         return Err(DecodeError::Unsupported("sixel HLS colours"));
                     }
-                    registers[index] = rgb([values[2], values[3], values[4]]);
+                    // A component over 100 % is a data error to xterm
+                    // (`graphics_sixel.c`), which ignores the definition and
+                    // leaves the register as it was.
+                    let components = [values[2], values[3], values[4]];
+                    if components.iter().all(|&value| value <= 100) {
+                        registers[index] = rgb(components);
+                    }
                 }
                 current = index;
             }
@@ -2896,6 +2903,23 @@ mod tests {
             builder.finish().expect("a payload").decode(),
             Err(DecodeError::Unsupported(_))
         ));
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn a_colour_with_a_component_over_100_is_ignored() {
+        // Register 1 is defined blue, then given a red component of 150:
+        // xterm ignores that definition, so the columns stay blue.
+        let bitmap = sixel_payload(b"#1;2;0;0;100#1;2;150;0;0$#1!3~")
+            .decode()
+            .expect("decodes");
+        let top: Vec<[u8; 4]> = (0..bitmap.width())
+            .map(|x| bitmap.pixel(x, 0).unwrap())
+            .collect();
+        assert_eq!(top, [[0, 0, 255, 255]; 3]);
+        // 100 itself is in range.
+        let bitmap = sixel_payload(b"#1;2;100;0;0#1~").decode().expect("decodes");
+        assert_eq!(bitmap.pixel(0, 0), Some([255, 0, 0, 255]));
     }
 
     #[test]
