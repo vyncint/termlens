@@ -70,6 +70,10 @@ reads that marker.
   A run of one character that ncurses writes with REP, such as `===`,
   lost its run. Repeats that take the label past its bound make it
   unknown, as a long label does. (#825)
+- `assert_screen_snapshot!(t, after = ready)` accepts a predicate in a
+  non-`mut` binding, including non-`Copy` `FnMut` closures, just as
+  `snapshot_after` does. Closure literals still infer their screen argument
+  without a type annotation. (#852)
 - The report action renders a screen whose file name comes near the 255
   bytes a file name may hold, as a long test name gives an insta
   snapshot. With the counter ahead of it and `.html` after, its
