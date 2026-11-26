@@ -1031,8 +1031,9 @@ compares `==`.
 ### What a reader skips, and what it does not
 
 The format proper begins at the `size:` header and ends with the grid or
-the `styles:` block. `Screen::parse` accepts exactly that — every other
-line is an `Error::Parse` naming it. termlens itself writes two things
+the `styles:` block. `Screen::parse` accepts that, with the tolerances
+listed under "Reading it back" — every other line is an `Error::Parse`
+naming it. termlens itself writes two things
 *around* a screen, and its own reader, the `termlens` CLI, skips both:
 
 - **Above:** the insta header, `---` / `source: …` / `---`, which a `.snap`
