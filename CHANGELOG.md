@@ -52,6 +52,11 @@ reads that marker.
 
 ### Fixed
 
+- The HTML rendering stops a blinking run under `prefers-reduced-motion`.
+  The run's `animation` is in its own `style` attribute, which outranks
+  every normal declaration from a style sheet, so the `animation:none`
+  rule matched the run and changed nothing; it is now `!important`. (#848)
+
 - Both published crates, `termlens` and `termlens-cli`, ship `LICENSE-MIT`
   and `LICENSE-APACHE`. They are `MIT OR Apache-2.0`, and both licences ask
   for their text in every copy, but the texts sat only at the repository
