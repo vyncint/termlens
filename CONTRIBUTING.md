@@ -89,7 +89,8 @@ avoidable bad first experience. If it ever disagrees with
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml), the workflow is the
 source of truth and this list is the bug — and the `gates-listed` CI job
 (`.github/scripts/check-ci-gates-listed.sh`) fails when the two disagree,
-so the bug cannot sit here unnoticed again.
+so the bug cannot sit here unnoticed again. The same job holds §7's list
+of required checks to the jobs `required-green` needs.
 
 The integration tests spawn real PTYs and small fixture apps from
 `fixtures/`; there is nothing to install beyond a Rust toolchain
@@ -286,9 +287,9 @@ allowlist is a list on purpose, so that widening it is a visible decision.
   unless the maintainer sets another subject at merge — so keep both in
   Conventional Commit form. Branches are deleted on merge.
 - Required checks: `required-green`, which needs every CI job — `fmt`,
-  `clippy`, `test` (Ubuntu + macOS), `features`, `windows-check`, `windows`,
-  `msrv`, `semver`, `docs`, `deny`, `zizmor`, `gates-listed` and `skill` —
-  plus `commit-policy` (DCO + attribution). All must pass before merge; direct pushes to `main` are blocked by a ruleset.
+  `clippy`, `test` (Ubuntu + macOS), `features`, `windows-check`,
+  `illumos-check`, `windows`, `msrv`, `semver`, `docs`, `deny`, `zizmor`,
+  `gates-listed` and `skill` — plus `commit-policy` (DCO + attribution). All must pass before merge; direct pushes to `main` are blocked by a ruleset.
 - **Every change lands with a test, and the test must be able to fail.** If
   you add a guard, break it once and watch it go red before you commit.
 - **Say what you did not do.** A PR that lists what it left out and why is
