@@ -52,6 +52,12 @@ reads that marker.
 
 ### Fixed
 
+- A `drag` whose two ends are the same cell sends a press and a release,
+  with no motion report between them. It sent one at that cell, but xterm
+  reports motion only when the pointer enters another cell, so an
+  application that tells a click from a drag by a motion report saw a drag
+  where a terminal delivers a click. (#834)
+
 - Both published crates, `termlens` and `termlens-cli`, ship `LICENSE-MIT`
   and `LICENSE-APACHE`. They are `MIT OR Apache-2.0`, and both licences ask
   for their text in every copy, but the texts sat only at the repository
