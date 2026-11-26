@@ -58,6 +58,12 @@ reads that marker.
   root, so no crates.io tarball since 0.4.2 carried them. Each crate links
   them to the root's, and the package contents check fails a crate that
   does not ship them. (#863)
+- A program named with a directory part that is a directory
+  (`build/App.app`, `tdir/sub`) fails to spawn with `cannot execute …: it
+  is a directory`. execve(2) refuses a directory with `EACCES`, so the
+  reason read "Permission denied", which sends the reader to a mode
+  `chmod +x` cannot fix; `./tdir` and `/usr` already said it was a
+  directory. (#839)
 - The report action renders a screen whose file name comes near the 255
   bytes a file name may hold, as a long test name gives an insta
   snapshot. With the counter ahead of it and `.html` after, its
