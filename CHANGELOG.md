@@ -58,11 +58,22 @@ reads that marker.
   root, so no crates.io tarball since 0.4.2 carried them. Each crate links
   them to the root's, and the package contents check fails a crate that
   does not ship them. (#863)
+- A program named with a directory part that is a directory
+  (`build/App.app`, `tdir/sub`) fails to spawn with `cannot execute …: it
+  is a directory`. execve(2) refuses a directory with `EACCES`, so the
+  reason read "Permission denied", which sends the reader to a mode
+  `chmod +x` cannot fix; `./tdir` and `/usr` already said it was a
+  directory. (#839)
+- The characters REP (`CSI b`) repeats inside an `OSC 8` span are part of
+  the link's label. The emulator draws them, so they never reached the
+  label: `ab` `CSI 3 b` drew `abbbb` and `Link::label` was `Some("ab")`.
+  A run of one character that ncurses writes with REP, such as `===`,
+  lost its run. Repeats that take the label past its bound make it
+  unknown, as a long label does. (#825)
 - `assert_screen_snapshot!(t, after = ready)` accepts a predicate in a
   non-`mut` binding, including non-`Copy` `FnMut` closures, just as
   `snapshot_after` does. Closure literals still infer their screen argument
-  without a type annotation (#852).
-
+  without a type annotation. (#852)
 - The report action renders a screen whose file name comes near the 255
   bytes a file name may hold, as a long test name gives an insta
   snapshot. With the counter ahead of it and `.html` after, its
