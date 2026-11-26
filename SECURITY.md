@@ -10,7 +10,7 @@ issues in escape-sequence handling) are treated as security issues.
 
 What the project does continuously, enforced by required CI on every change:
 
-- **`unsafe` is confined to nine audited blocks, all Unix-only.** Three
+- **`unsafe` is confined to nine audited blocks, all Unix-only.** Four
   are single lines. `BorrowedFd::borrow_raw` borrows the PTY master's
   descriptor, which std then duplicates, close-on-exec, into the responder
   thread's second writer. `access(2)` resolves the program the way the PTY
@@ -18,20 +18,20 @@ What the project does continuously, enforced by required CI on every change:
   which signals the child and the process group it leads, and only while
   the child is unreaped (#714), or just after the kernel reaped it during
   the stop, while a member of the group still holds the group's id (#774).
-  The fourth asks `sigaction(2)` whether the kernel reaps this process's
-  children. The fifth asks `waitid(2)` with
+  `ioctl(2)` with `FIONREAD` asks how many bytes of input the application
+  left unread, through a descriptor of the slave opened for that one call,
+  so a wait's timeout can say so (#790); it writes one `int`.
+  The fifth asks `sigaction(2)` whether the kernel reaps this process's
+  children. The sixth asks `waitid(2)` with
   `WNOWAIT` whether a child has exited, or has already been reaped (#630),
-  without reaping it. The sixth and seventh unblock teardown (#628): `fcntl(2)`
+  without reaping it. The seventh and eighth unblock teardown (#628): `fcntl(2)`
   sets the master descriptor non-blocking, and `tcflush(2)` flushes unread
-  slave input. The eighth is the `pre_exec` hook in `src/spawn.rs`, which
+  slave input. The ninth is the `pre_exec` hook in `src/spawn.rs`, which
   runs in the forked child before exec. It repeats portable-pty's own hook
   step by step, with two changes: inherited descriptors are marked
   close-on-exec rather than closed, so that a failed exec can be reported
   (#563), and the umask step is left out because termlens never sets a
-  umask. The ninth asks `ioctl(2)` with `FIONREAD` how many bytes of input
-  the application left unread, through a descriptor of the slave opened
-  for that one call, so a wait's timeout can say so (#790); it writes one
-  `int`. Each block sits under its own `SAFETY` comment and carries its own
+  umask. Each block sits under its own `SAFETY` comment and carries its own
   `#[allow(unsafe_code)]`.
   The workspace sets `unsafe_code = "warn"` and CI runs clippy with
   `-D warnings`, so a new block fails unless it carries that `#[allow]` as
