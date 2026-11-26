@@ -76,6 +76,15 @@ with_step "a listed gate in quotes, with a comment, passes" zero \
 
 grep -Fv 'cargo test -p termlens --no-default-features --features regex' "$doc" > "$scratch/CONTRIBUTING.md"
 expect "a gate CONTRIBUTING.md stops listing fails" nonzero "$ci" "$scratch/CONTRIBUTING.md"
+# §7's Required checks must name exactly the jobs required-green needs
+# (#861): it went without illumos-check while this gate passed.
+sed 's/`illumos-check`, //' "$doc" > "$scratch/CONTRIBUTING.md"
+expect "§7 without a job required-green needs fails" nonzero "$ci" "$scratch/CONTRIBUTING.md"
+sed 's/^\(    needs: \[fmt, \)clippy, /\1/' "$ci" > "$scratch/ci.yml"
+expect "§7 naming a job required-green does not need fails" nonzero "$scratch/ci.yml" "$doc"
+sed 's/`commit-policy` (DCO/`commit-policy` and `nightly` (DCO/' "$doc" > "$scratch/CONTRIBUTING.md"
+expect "a name after commit-policy in §7 is not a job" zero "$ci" "$scratch/CONTRIBUTING.md"
+
 expect "this repository's ci.yml and CONTRIBUTING.md pass" zero "$ci" "$doc"
 
 if [ "$status" -eq 0 ]; then

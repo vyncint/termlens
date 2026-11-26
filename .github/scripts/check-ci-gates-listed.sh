@@ -2,7 +2,9 @@
 # Every gate CI runs must appear in CONTRIBUTING.md §1's "run these before
 # pushing" block. The paragraph under that block promises the workflow is
 # the source of truth when the two disagree; this is what makes the promise
-# hold. Usage: check-ci-gates-listed.sh [ci.yml] [CONTRIBUTING.md]
+# hold. It also holds §7's "Required checks" list to the jobs
+# `required-green` needs, which drifted twice with nothing comparing them
+# (#509, #861). Usage: check-ci-gates-listed.sh [ci.yml] [CONTRIBUTING.md]
 set -euo pipefail
 
 ci="${1:-.github/workflows/ci.yml}"
@@ -158,7 +160,44 @@ if [ -n "$pin" ] && ! grep -Fq -- "$pin" "$doc"; then
   status=1
 fi
 
+# CONTRIBUTING §7: the jobs named in the "Required checks" item, from its
+# first line up to `commit-policy`, must be exactly the jobs
+# `required-green` needs. `required-green` itself and `commit-policy`, which
+# lives in its own workflow, are named there but are not in `needs:`.
+needs="$(awk '
+  /^  required-green:/ { inside = 1; next }
+  inside && /^  [^ ]/ { exit }
+  inside && /^    needs:/ {
+    v = $0; sub(/^    needs:[ \t]*\[/, "", v); sub(/\].*$/, "", v)
+    n = split(v, a, /[ \t]*,[ \t]*/)
+    for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
+    exit
+  }
+' "$ci" | sort -u)"
+listed="$(awk '
+  /^- Required checks:/ { inside = 1 }
+  inside && /commit-policy/ { sub(/commit-policy.*/, "commit-policy`"); print; exit }
+  inside { print }
+' "$doc" | grep -o '`[^`]*`' | tr -d '`' | grep -Ev '^(required-green|commit-policy)$' | sort -u || true)"
+if [ -z "$needs" ]; then
+  echo "::error::$ci has no \`needs:\` list under the required-green job"
+  status=1
+elif [ -z "$listed" ]; then
+  echo "::error::CONTRIBUTING.md §7 has no \"- Required checks:\" item naming the jobs required-green needs"
+  status=1
+else
+  while IFS= read -r job; do
+    echo "::error::required-green needs \`$job\` but CONTRIBUTING.md §7's Required checks does not name it"
+    status=1
+  done < <(comm -23 <(printf '%s\n' "$needs") <(printf '%s\n' "$listed"))
+  while IFS= read -r job; do
+    echo "::error::CONTRIBUTING.md §7's Required checks names \`$job\`, which required-green does not need"
+    status=1
+  done < <(comm -13 <(printf '%s\n' "$needs") <(printf '%s\n' "$listed"))
+fi
+
 if [ "$status" -eq 0 ]; then
-  echo "every CI gate is listed in CONTRIBUTING.md §1 ($cargo_count cargo commands, $script_count script gates, $pin)"
+  echo "every CI gate is listed in CONTRIBUTING.md §1 ($cargo_count cargo commands, $script_count script gates, $pin)" \
+    "and §7 names the $(grep -c . <<<"$needs") jobs required-green needs"
 fi
 exit "$status"
