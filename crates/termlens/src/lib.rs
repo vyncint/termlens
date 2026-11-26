@@ -252,8 +252,13 @@ macro_rules! assert_screen_snapshot {
     };
     ($source:expr, after = $after:expr, styles = $styles:expr $(,)?) => {{
         use $crate::SnapshotSource as _;
-        let __after: &mut dyn ::core::ops::FnMut(&$crate::Screen) -> bool = &mut $after;
-        let __screen = ($source).screen_for_snapshot(::core::option::Option::Some(__after))?;
+        // The bound preserves inference for closure literals while moving a
+        // named predicate into a mutable local, as snapshot_after does.
+        fn __predicate<F: ::core::ops::FnMut(&$crate::Screen) -> bool>(predicate: F) -> F {
+            predicate
+        }
+        let mut __after = __predicate($after);
+        let __screen = ($source).screen_for_snapshot(::core::option::Option::Some(&mut __after))?;
         if $styles {
             $crate::insta::assert_snapshot!(__screen.with_styles());
         } else {

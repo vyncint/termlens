@@ -58,6 +58,11 @@ reads that marker.
   root, so no crates.io tarball since 0.4.2 carried them. Each crate links
   them to the root's, and the package contents check fails a crate that
   does not ship them. (#863)
+- `assert_screen_snapshot!(t, after = ready)` accepts a predicate in a
+  non-`mut` binding, including non-`Copy` `FnMut` closures, just as
+  `snapshot_after` does. Closure literals still infer their screen argument
+  without a type annotation (#852).
+
 - The report action renders a screen whose file name comes near the 255
   bytes a file name may hold, as a long test name gives an insta
   snapshot. With the counter ahead of it and `.html` after, its
