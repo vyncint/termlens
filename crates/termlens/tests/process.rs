@@ -220,7 +220,8 @@ fn a_program_with_a_directory_part_is_found_from_the_working_directory() -> term
 /// the reason read "No viable candidates found in PATH", which sends the
 /// reader to the one place the file was never meant to be: the common case
 /// is a `target/debug/app` downloaded as an artifact without its
-/// executable bit (#631).
+/// executable bit (#631). A directory is refused by execve(2) with
+/// `EACCES` too, and is named as a directory, not as a permission (#839).
 #[cfg(unix)]
 #[test]
 fn a_program_with_a_directory_part_that_cannot_run_names_the_os_s_reason() -> termlens::Result<()> {
@@ -228,13 +229,14 @@ fn a_program_with_a_directory_part_that_cannot_run_names_the_os_s_reason() -> te
 
     let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("dir-part-refused-{}", std::process::id()));
-    std::fs::create_dir_all(scratch.join("sub"))?;
+    std::fs::create_dir_all(scratch.join("sub/dir"))?;
     let plain = scratch.join("sub/plain");
     common::write_script(&plain, "#!/bin/sh\necho unreachable\n");
     std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644))?;
     for (program, reason) in [
         ("sub/plain", "Permission denied"),
         ("sub/missing", "No such file or directory"),
+        ("sub/dir", "is a directory"),
     ] {
         for clear in [false, true] {
             let mut builder = Terminal::builder()
