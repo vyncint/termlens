@@ -52,6 +52,12 @@ reads that marker.
 
 ### Fixed
 
+- A kitty placement decides whether it moves the cursor by the values of
+  `U=` and `P=`, as kitty does. `P=0` names no parent, so it moves the
+  cursor, and any nonzero `U=` makes the placement virtual, so it does
+  not; termlens took `P=` by its presence and `U=` only at 1, so the text
+  a client wrote after `P=0` landed on the image. (#844)
+
 - Both published crates, `termlens` and `termlens-cli`, ship `LICENSE-MIT`
   and `LICENSE-APACHE`. They are `MIT OR Apache-2.0`, and both licences ask
   for their text in every copy, but the texts sat only at the repository

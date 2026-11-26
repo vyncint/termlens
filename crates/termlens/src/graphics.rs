@@ -1205,8 +1205,9 @@ pub(crate) struct Placement {
     pub(crate) cell_x: u32,
     pub(crate) cell_y: u32,
     /// kitty: whether a placement moves the cursor at all. `C=1` asks it not
-    /// to, and neither a Unicode-placeholder placement (`U=1`) nor one
-    /// relative to another image (`P=`) moves it.
+    /// to, and neither a Unicode-placeholder placement (a nonzero `U=`) nor
+    /// one relative to another image (a nonzero `P=`) moves it. kitty reads
+    /// both by value, so `P=0` and `U=0` name no parent and no placeholder.
     pub(crate) moves: bool,
     /// sixel: the image's height in pixels as xterm measures it, the larger
     /// of the raster attributes' and the painted rows'.
@@ -1317,7 +1318,7 @@ impl GraphicsBuilder {
                 src_y: value(b"y"),
                 cell_x: value(b"X"),
                 cell_y: value(b"Y"),
-                moves: value(b"C") != 1 && value(b"U") != 1 && key(control, b"P").is_none(),
+                moves: value(b"C") != 1 && value(b"U") == 0 && value(b"P") == 0,
                 height: 0,
                 forgets: None,
                 number: value(b"I"),
@@ -1768,6 +1769,23 @@ mod tests {
             let (_, placement) = builder.finish_placed().expect("a payload");
             assert!(!placement.moves, "{}", String::from_utf8_lossy(control));
         }
+    }
+
+    /// kitty decides by value: `P=0` names no parent and `U=0` no
+    /// placeholder, so both move the cursor, while any nonzero `U=` makes
+    /// the placement virtual (`handle_put_command`, #844).
+    #[test]
+    fn p_and_u_decide_the_cursor_move_by_value() {
+        let moves = |control: &[u8]| {
+            let mut builder = GraphicsBuilder::default();
+            builder.kitty(control);
+            builder.chunk(0, b"", true, usize::MAX);
+            builder.finish_placed().expect("a payload").1.moves
+        };
+        assert!(moves(b"a=T,c=3,r=2,P=0"));
+        assert!(moves(b"a=T,c=3,r=2,U=0"));
+        assert!(!moves(b"a=T,c=3,r=2,U=2"));
+        assert!(!moves(b"a=T,c=3,r=2,P=1"));
     }
 
     /// What a delete frees, as kitty's `handle_delete_command` frees it:
