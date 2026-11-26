@@ -64,6 +64,12 @@ reads that marker.
   reason read "Permission denied", which sends the reader to a mode
   `chmod +x` cannot fix; `./tdir` and `/usr` already said it was a
   directory. (#839)
+- The characters REP (`CSI b`) repeats inside an `OSC 8` span are part of
+  the link's label. The emulator draws them, so they never reached the
+  label: `ab` `CSI 3 b` drew `abbbb` and `Link::label` was `Some("ab")`.
+  A run of one character that ncurses writes with REP, such as `===`,
+  lost its run. Repeats that take the label past its bound make it
+  unknown, as a long label does. (#825)
 - The report action renders a screen whose file name comes near the 255
   bytes a file name may hold, as a long test name gives an insta
   snapshot. With the counter ahead of it and `.html` after, its

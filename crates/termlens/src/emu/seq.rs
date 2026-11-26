@@ -1817,10 +1817,23 @@ impl SeqTracker {
             } else {
                 self.csi_first_param
             };
-            return SeqEvent::Repeat {
-                glyph: (!self.csi_colon).then(|| self.repeated()).flatten(),
-                count: u16::try_from(ps).unwrap_or(u16::MAX).max(1),
-            };
+            let glyph = (!self.csi_colon).then(|| self.repeated()).flatten();
+            let count = u16::try_from(ps).unwrap_or(u16::MAX).max(1);
+            // The emulator draws REP's characters, so they never pass the
+            // printable path that adds text to an open `OSC 8` span's label.
+            // Add them here, under the same bound (#825).
+            if let Some(glyph) = glyph.filter(|_| self.link_open) {
+                let mut utf8 = [0; 4];
+                let drawn = glyph.encode_utf8(&mut utf8).as_bytes();
+                for _ in 0..count {
+                    if self.link_label.len() + drawn.len() > LINK_LABEL_MAX {
+                        self.link_label_truncated = true;
+                        break;
+                    }
+                    self.link_label.extend_from_slice(drawn);
+                }
+            }
+            return SeqEvent::Repeat { glyph, count };
         }
         // ED, DECSTBM, IL and DL read the first value of a parameter with
         // sub-parameters in vt100, so they act on one; nothing else does.
@@ -3977,6 +3990,26 @@ mod tests {
         // Still open, so there is no final label — and the bound means the
         // captured bytes are a prefix, which is not an answer either.
         assert_eq!(seen[0].2, None);
+    }
+
+    /// REP draws its characters in the emulator, so the tracker adds them
+    /// to the open span's label itself: the reader sees `abbbb` (#825).
+    #[test]
+    fn rep_inside_a_span_is_part_of_its_label() {
+        let seen = links(b"\x1b]8;;http://x/\x1b\\ab\x1b[3b\x1b]8;;\x1b\\");
+        assert_eq!(seen[0].2.as_deref(), Some("abbbb"));
+        let seen = links("\x1b]8;;http://x/\x1b\\─\x1b[2b\x1b]8;;\x1b\\".as_bytes());
+        assert_eq!(seen[0].2.as_deref(), Some("───"), "a multi-byte glyph");
+    }
+
+    #[test]
+    fn rep_past_the_label_bound_makes_the_label_unknown() {
+        let mut bytes = b"\x1b]8;;http://x/\x1b\\".to_vec();
+        bytes.extend(std::iter::repeat_n(b'z', LINK_LABEL_MAX - 2));
+        bytes.extend_from_slice(b"\x1b[3b\x1b]8;;\x1b\\");
+        let seen = links(&bytes);
+        assert!(seen[0].3, "closed");
+        assert_eq!(seen[0].2, None, "the repeats ran the label past its bound");
     }
 
     #[test]
