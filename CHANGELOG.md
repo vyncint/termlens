@@ -52,6 +52,18 @@ reads that marker.
 
 ### Fixed
 
+- Both published crates, `termlens` and `termlens-cli`, ship `LICENSE-MIT`
+  and `LICENSE-APACHE`. They are `MIT OR Apache-2.0`, and both licences ask
+  for their text in every copy, but the texts sat only at the repository
+  root, so no crates.io tarball since 0.4.2 carried them. Each crate links
+  them to the root's, and the package contents check fails a crate that
+  does not ship them. (#863)
+- A program named with a directory part that is a directory
+  (`build/App.app`, `tdir/sub`) fails to spawn with `cannot execute …: it
+  is a directory`. execve(2) refuses a directory with `EACCES`, so the
+  reason read "Permission denied", which sends the reader to a mode
+  `chmod +x` cannot fix; `./tdir` and `/usr` already said it was a
+  directory. (#839)
 - The characters REP (`CSI b`) repeats inside an `OSC 8` span are part of
   the link's label. The emulator draws them, so they never reached the
   label: `ab` `CSI 3 b` drew `abbbb` and `Link::label` was `Some("ab")`.

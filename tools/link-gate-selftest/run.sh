@@ -24,6 +24,8 @@
 #   contributing-tree-missing/  a `…/tree/main/<path>` URL to a missing
 #                            directory, whose path the gate did not check
 #   contributing-html-missing/  an HTML `src` to a missing file
+#   contributing-html-single-href/, contributing-html-single-src/  the same in
+#                            single quotes, which the gate never read (#859)
 #
 # The first and the last assertions are the ones that keep the gate honest: a
 # fixture that must pass, and the repository's own files, which must still
@@ -63,10 +65,12 @@ expect "README.md: a relative reference definition fails (#657)" nonzero readme-
 expect "CONTRIBUTING.md: a reference to a missing target fails" nonzero contributing-reference-missing/CONTRIBUTING.md
 expect "CONTRIBUTING.md: a tree/main/ URL to a missing path fails" nonzero contributing-tree-missing/CONTRIBUTING.md
 expect "CONTRIBUTING.md: an HTML src to a missing target fails" nonzero contributing-html-missing/CONTRIBUTING.md
+expect "CONTRIBUTING.md: a single-quoted href to a missing target fails" nonzero contributing-html-single-href/CONTRIBUTING.md
+expect "CONTRIBUTING.md: a single-quoted src to a missing target fails" nonzero contributing-html-single-src/CONTRIBUTING.md
 expect "this repository's own files pass" zero "$root/README.md" "$root/CONTRIBUTING.md" "$root/.github/PULL_REQUEST_TEMPLATE.md"
 
 rm -f out.log
 if [ "$status" -eq 0 ]; then
-  echo "link gate selftest: 12 expectation(s), the gate fails when it should"
+  echo "link gate selftest: 14 expectation(s), the gate fails when it should"
 fi
 exit "$status"

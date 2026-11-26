@@ -318,6 +318,13 @@ mod unix {
                      is its #! interpreter or its dynamic loader"
                 ),
             },
+            // execve(2) refuses a directory with `EACCES`, not `EISDIR`, and
+            // "Permission denied" sends the reader to a mode `chmod +x`
+            // cannot fix. Say what the PTY layer says for `./dir` and `/usr`:
+            // it is a directory (#839).
+            Some(libc::EACCES) if program.is_dir() => {
+                format!("cannot execute {shown}: it is a directory")
+            }
             Some(libc::EACCES) => match interpreter(program) {
                 Ok(Some(interpreter)) if !runnable(dir, &interpreter) => format!(
                     "cannot execute {shown}: its #! interpreter {interpreter:?} is not an \
