@@ -1,6 +1,6 @@
 ---
 source: crates/termlens/tests/readme_example.rs
-expression: __screen.with_styles()
+expression: t
 ---
 size: 80x24  cursor: hidden
 ╭──────────────────────────────╮
