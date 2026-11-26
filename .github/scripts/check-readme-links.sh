@@ -80,7 +80,9 @@ links() {
     grep -oE '\]\([^)]+\)' "$1" | sed -E 's/^\]\([[:space:]]*//; s/\)$//; s/^<//; s/[[:space:]].*$//; s/>$//' || true
     grep -E '^ {0,3}\[[^]^][^]]*\]:' "$1" \
       | sed -E 's/^ {0,3}\[[^]]+\]:[[:space:]]*//; s/^<//; s/[[:space:]].*$//; s/>$//' || true
-    grep -oE '(src|href)=("[^"]*"|\047[^\047]*\047)' "$1" | sed -E 's/^(src|href)=.//; s/.$//' || true
+    # The single quote is written literally: grep's ERE has no \047 escape,
+    # which awk has, so that spelling never read a single-quoted target (#859).
+    grep -oE "(src|href)=(\"[^\"]*\"|'[^']*')" "$1" | sed -E 's/^(src|href)=.//; s/.$//' || true
   } | sort -u
 }
 
