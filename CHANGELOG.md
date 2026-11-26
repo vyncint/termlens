@@ -52,6 +52,12 @@ reads that marker.
 
 ### Fixed
 
+- Both published crates, `termlens` and `termlens-cli`, ship `LICENSE-MIT`
+  and `LICENSE-APACHE`. They are `MIT OR Apache-2.0`, and both licences ask
+  for their text in every copy, but the texts sat only at the repository
+  root, so no crates.io tarball since 0.4.2 carried them. Each crate links
+  them to the root's, and the package contents check fails a crate that
+  does not ship them. (#863)
 - The report action renders a screen whose file name comes near the 255
   bytes a file name may hold, as a long test name gives an insta
   snapshot. With the counter ahead of it and `.html` after, its
