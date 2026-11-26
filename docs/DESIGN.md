@@ -974,9 +974,15 @@ from the one the macro targets.
 ### Reading it back
 
 `Screen::parse` (0.10.0) is the reader for everything above: it accepts
-exactly what `Display` and `with_styles` write — the header, the grid, and
-optionally the blank line, `styles:` and its spans — and every other line is
-an `Error::Parse` naming it. The `termlens` CLI is built on it: `diff` and
+what `Display` and `with_styles` write — the header, the grid, and
+optionally the blank line, `styles:` and its spans — and a few shapes they
+never write, each read as its canonical form: a `+` before a number in the
+header, one space or none before `cursor:`, a row's spans split over
+several lines or with blank lines between them, `(none)` after spans, a
+range written `0-0`, a token repeated or out of order, and a span with no
+token. Every other line is an `Error::Parse` naming it. The tolerances stay
+because STABILITY promises that a file any release from 0.10.1 wrote parses
+in every later one, and a hand-edited snapshot may hold any of them. The `termlens` CLI is built on it: `diff` and
 `render` take saved screens, so a snapshot outlives the test run that
 produced it.
 

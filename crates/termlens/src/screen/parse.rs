@@ -20,12 +20,19 @@ use crate::{Error, Result};
 impl Screen {
     /// Parse the snapshot text format back into a `Screen`.
     ///
-    /// Accepts exactly what [`Display`](std::fmt::Display) and
+    /// Accepts what [`Display`](std::fmt::Display) and
     /// [`with_styles`](Self::with_styles) write: the `size:`/`cursor:`
     /// header, the grid one row per line with trailing blanks stripped
     /// (missing trailing rows and columns are blank), and optionally a blank
-    /// line, `styles:` and its span lines (or `(none)`). Everything else is
-    /// an [`Error::Parse`] naming the line.
+    /// line, `styles:` and its span lines (or `(none)`). It also reads a few
+    /// shapes they never write, each into the screen its canonical form
+    /// gives: a `+` before a number in the header, one space or none before
+    /// `cursor:`, a row's spans split over several lines, blank lines
+    /// between span lines, `(none)` after spans, a one-column range written
+    /// `0-0`, a token repeated or out of order, and a span with no token
+    /// (the default style). Any other line is an [`Error::Parse`] naming
+    /// it. A file that parses is therefore not proof that termlens wrote
+    /// it; rendering it back gives the canonical form.
     ///
     /// **The header's row count decides where the grid ends**, so a grid may
     /// contain the words `styles:` or `(none)` as ordinary content. The one
@@ -500,6 +507,63 @@ mod tests {
         // screen carries no styles at all.
         let none = Screen::parse("size: 4x3  cursor: hidden\nhi\n\n\n\nstyles:\n(none)").unwrap();
         assert!(screen.diff(&none).is_empty());
+    }
+
+    /// Shapes `Display` and `with_styles` never write, which the reader
+    /// takes as the canonical form beside them (#849). Each reads to the
+    /// screen its canonical form gives, and writes back as that form.
+    #[test]
+    fn the_reader_accepts_these_shapes_beside_the_canonical_ones() {
+        for (written, canonical) in [
+            // A leading `+` on the size and the cursor.
+            ("size: +4x+1  cursor: 0,0\nhi", "size: 4x1  cursor: 0,0\nhi"),
+            ("size: 4x1  cursor: +0,+0\nhi", "size: 4x1  cursor: 0,0\nhi"),
+            // One space before `cursor:`, or none.
+            ("size: 4x1 cursor: 0,0\nhi", "size: 4x1  cursor: 0,0\nhi"),
+            ("size: 4x1cursor: 0,0\nhi", "size: 4x1  cursor: 0,0\nhi"),
+            // A row listed twice, its spans merged.
+            (
+                "size: 4x1  cursor: 0,0\nhi\n\nstyles:\n0: 0 bold\n0: 1 italic",
+                "size: 4x1  cursor: 0,0\nhi\n\nstyles:\n0: 0 bold; 1 italic",
+            ),
+            // `(none)` after spans, and blank lines between span lines.
+            (
+                "size: 4x1  cursor: 0,0\nhi\n\nstyles:\n0: 0 bold\n(none)",
+                "size: 4x1  cursor: 0,0\nhi\n\nstyles:\n0: 0 bold",
+            ),
+            (
+                "size: 4x2  cursor: 0,0\nhi\nho\n\nstyles:\n0: 0 bold\n\n1: 1 italic",
+                "size: 4x2  cursor: 0,0\nhi\nho\n\nstyles:\n0: 0 bold\n1: 1 italic",
+            ),
+            // A one-column range, a repeated token, and a run's tokens in
+            // another order.
+            (
+                "size: 4x1  cursor: 0,0\nhi\n\nstyles:\n0: 0-0 bold",
+                "size: 4x1  cursor: 0,0\nhi\n\nstyles:\n0: 0 bold",
+            ),
+            (
+                "size: 4x1  cursor: 0,0\nhi\n\nstyles:\n0: 0 bold bold",
+                "size: 4x1  cursor: 0,0\nhi\n\nstyles:\n0: 0 bold",
+            ),
+            (
+                "size: 4x1  cursor: 0,0\nhi\n\nstyles:\n0: 0 bold fg=1",
+                "size: 4x1  cursor: 0,0\nhi\n\nstyles:\n0: 0 fg=1 bold",
+            ),
+            // A span with no token is the default style.
+            (
+                "size: 4x1  cursor: 0,0\nhi\n\nstyles:\n0: 0",
+                "size: 4x1  cursor: 0,0\nhi",
+            ),
+        ] {
+            let screen = Screen::parse(written).unwrap_or_else(|e| panic!("{written:?}: {e}"));
+            let expected = Screen::parse(canonical).unwrap();
+            assert!(screen.diff(&expected).is_empty(), "{written:?}");
+            assert_eq!(
+                screen.with_styles().to_string(),
+                expected.with_styles().to_string(),
+                "{written:?}"
+            );
+        }
     }
 
     /// The header's row count decides where the grid ends, so these words
