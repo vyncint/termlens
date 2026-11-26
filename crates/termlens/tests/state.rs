@@ -155,6 +155,27 @@ fn an_osc8_hyperlink_is_observable_and_a_missing_one_is_not() -> termlens::Resul
     Ok(())
 }
 
+/// REP (`CSI b`) draws its repeats in the emulator, and the reader sees
+/// them inside the link, so they are part of its label: ncurses writes a
+/// run of one character that way (#825).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY forwards an OSC 8 link with an id of its own choosing (#149)"
+)]
+fn rep_inside_a_link_is_part_of_its_label() -> termlens::Result<()> {
+    let mut t = emit(&[
+        "--raw",
+        r"\e]8;;https://example.invalid/r\e\\ab\e[3b\e]8;;\e\\.\n",
+    ])?;
+    t.wait_until(|s| s.contains("."))?;
+    let screen = t.screen();
+    assert!(t.wait_exit()?.success());
+    assert_eq!(screen.row_text(0).trim_end(), "abbbb.");
+    assert_eq!(screen.links()[0].label(), Some("abbbb"));
+    Ok(())
+}
+
 /// A `Screen` is an immutable snapshot, and the link log is the first piece
 /// of out-of-band state that is *mutated in place* after it is recorded — a
 /// span is pushed when it opens and completed when it closes. So the
