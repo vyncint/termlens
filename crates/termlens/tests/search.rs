@@ -347,6 +347,14 @@ mod patterns {
             .wait_until_matches_for(&never, Duration::from_millis(200))
             .unwrap_err();
         assert!(matches!(err, termlens::Error::Timeout { .. }), "{err}");
+        // The timeout names the pattern, which a closure's cannot (#840).
+        assert!(
+            err.to_string()
+                .lines()
+                .next()
+                .is_some_and(|line| line.contains(r"a row matching `never \d+`")),
+            "{err}"
+        );
         t.send(Key::Enter)?;
         assert!(t.wait_exit()?.success());
         Ok(())

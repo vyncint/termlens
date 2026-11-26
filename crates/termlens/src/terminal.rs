@@ -4161,6 +4161,19 @@ impl Terminal {
             .map(drop)
     }
 
+    /// [`wait_screen_deadline`](Self::wait_screen_deadline) for a wait
+    /// that can say what it awaits better than "the screen predicate",
+    /// such as a pattern: `what` is the timeout's `waiting_for`.
+    #[cfg(feature = "regex")]
+    fn wait_screen_described(
+        &mut self,
+        predicate: impl FnMut(&Screen) -> bool,
+        timeout: Duration,
+        what: String,
+    ) -> Result<Screen> {
+        self.wait_screen_inner(predicate, timeout, None, Some(what))
+    }
+
     /// `wait_until`'s wait, returning the screen the predicate held on.
     ///
     /// After a resize (`resized`), the predicate is asked only once the
@@ -4169,13 +4182,27 @@ impl Terminal {
     /// at the new size, and the predicate may well hold on that (#788).
     fn wait_screen_deadline(
         &mut self,
-        mut predicate: impl FnMut(&Screen) -> bool,
+        predicate: impl FnMut(&Screen) -> bool,
         timeout: Duration,
         resized: Option<Resized>,
     ) -> Result<Screen> {
-        let what = match &resized {
-            None => "the screen predicate to hold".to_owned(),
-            Some(Resized { cols, rows, .. }) => format!(
+        self.wait_screen_inner(predicate, timeout, resized, None)
+    }
+
+    fn wait_screen_inner(
+        &mut self,
+        mut predicate: impl FnMut(&Screen) -> bool,
+        timeout: Duration,
+        resized: Option<Resized>,
+        described: Option<String>,
+    ) -> Result<Screen> {
+        let what = match (&resized, described) {
+            (None, Some(what)) => what,
+            (Some(Resized { cols, rows, .. }), Some(what)) => {
+                format!("{what} on output read after the resize to {cols}x{rows}")
+            }
+            (None, None) => "the screen predicate to hold".to_owned(),
+            (Some(Resized { cols, rows, .. }), None) => format!(
                 "the screen predicate to hold on output read after the resize to {cols}x{rows}"
             ),
         };
@@ -4415,6 +4442,12 @@ impl Terminal {
         let deadline = deadline_after(timeout);
         let cursor = self.frame_cursor;
         let mut seen_frame = None;
+        // Frames past the cursor that left the ring before this wait could
+        // offer them: a burst longer than FRAME_HISTORY drops its oldest
+        // frames, and the timeout says so rather than reading as frames the
+        // predicate rejected (#840).
+        let mut next_unoffered = cursor + 1;
+        let mut dropped = 0u64;
         let outcome = self.shared.wait_until(deadline, |state| {
             self.exit_watch
                 .tick(&mut self.child, &mut self.exit_status, state);
@@ -4423,6 +4456,14 @@ impl Terminal {
             }
             if state.frames_seen > cursor && seen_frame != Some(state.frames_seen) {
                 seen_frame = Some(state.frames_seen);
+                if let Some((oldest, _)) = state
+                    .frames
+                    .iter()
+                    .find(|(index, _)| *index >= next_unoffered)
+                {
+                    dropped += oldest - next_unoffered;
+                }
+                next_unoffered = next_unoffered.max(state.frames_seen + 1);
                 // Oldest unobserved frame first: several frames can
                 // complete inside one read, and a test asserting on a
                 // sequence must see them in the order the application drew
@@ -4474,6 +4515,17 @@ impl Terminal {
                     let screen = guard.snapshot();
                     (guard.frames_seen, screen, guard.query_note())
                 };
+                let dropped_note = match dropped {
+                    0 => String::new(),
+                    1 => format!(
+                        "; 1 of them left the ring before a wait could see it, since only \
+                         the newest {FRAME_HISTORY} are kept"
+                    ),
+                    n => format!(
+                        "; {n} of them left the ring before a wait could see them, since \
+                         only the newest {FRAME_HISTORY} are kept"
+                    ),
+                };
                 let note = format!("{query}{}{}", self.unread_note(), history_note(&screen));
                 // What put the cursor where it is: the resize that moved it
                 // last, or else a frame an earlier wait returned. The message
@@ -4513,15 +4565,20 @@ impl Terminal {
                          for other apps use wait_until (docs/DESIGN.md §2){note}"
                     )
                 } else if cursor == 0 {
-                    format!("{WHAT} ({} observed){note}", frames_phrase(frames))
+                    format!(
+                        "{WHAT} ({} observed{dropped_note}){note}",
+                        frames_phrase(frames)
+                    )
                 } else if let Some((cols, rows)) = resized {
                     format!(
-                        "{WHAT} ({} since the resize to {cols}x{rows}, {frames} in total){note}",
+                        "{WHAT} ({} since the resize to {cols}x{rows}, {frames} in total\
+                         {dropped_note}){note}",
                         frames_phrase(frames - cursor)
                     )
                 } else {
                     format!(
-                        "{WHAT} ({} since the last one returned, {frames} in total){note}",
+                        "{WHAT} ({} since the last one returned, {frames} in total\
+                         {dropped_note}){note}",
                         frames_phrase(frames - cursor)
                     )
                 };
@@ -5375,19 +5432,11 @@ impl Terminal {
         re: &regex::Regex,
         timeout: Duration,
     ) -> Result<Screen> {
-        let mut matched = None;
-        self.wait_until_deadline(
-            |screen| {
-                if screen.matches(re) {
-                    matched = Some(screen.clone());
-                    true
-                } else {
-                    false
-                }
-            },
-            timeout,
-        )?;
-        Ok(matched.expect("the wait returned Ok, so the predicate held on a screen"))
+        // The timeout names the pattern: a closure cannot be described,
+        // but a pattern can, and a CI log of a failed regex wait should
+        // say which one it was (#840).
+        let what = format!("a row matching `{}`", re.as_str());
+        self.wait_screen_described(|screen| screen.matches(re), timeout, what)
     }
 }
 

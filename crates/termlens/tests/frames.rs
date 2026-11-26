@@ -426,6 +426,46 @@ fn one_frame_cannot_satisfy_two_waits() -> termlens::Result<()> {
 
 /// The burst is observable in emission order, which means out of order it
 /// is *not*: a frame already returned is behind the cursor.
+/// A timeout after a burst longer than the bound says how many frames left
+/// the ring unseen: "20 complete frames observed" alone reads as twenty
+/// frames the predicate rejected, when only the newest eight were offered
+/// to it (#840).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY closes a DEC 2026 bracket before the content it wrapped, so no frame holds what was drawn (#149)"
+)]
+fn a_timeout_after_a_long_burst_says_how_many_frames_were_dropped() -> termlens::Result<()> {
+    // 20 frames in one write, against a retention bound of 8.
+    let mut burst = String::new();
+    for n in 1..=20 {
+        burst.push_str(&format!(r"\e[?2026h\e[HFRAME {n:02}\e[?2026l"));
+    }
+    let mut t = emit(
+        Terminal::builder().timeout(Duration::from_secs(30)),
+        &["--raw", &burst, "--wait"],
+    )?;
+    t.wait_until(|s| s.contains("FRAME 20"))?;
+    let err = t
+        .wait_frame_for(|s| s.contains("FRAME 03"), Duration::from_millis(600))
+        .unwrap_err();
+    let first = err
+        .to_string()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        first.contains("20 complete frames observed; 12 of them left the ring"),
+        "{err}"
+    );
+    assert!(first.contains("only the newest 8 are kept"), "{err}");
+    // The oldest frame still offered is 13.
+    let oldest = t.wait_frame(|s| s.contains("FRAME"))?;
+    assert_eq!(oldest.row_text(0).trim_end(), "FRAME 13");
+    Ok(())
+}
+
 #[test]
 #[cfg_attr(
     windows,

@@ -52,6 +52,13 @@ reads that marker.
 
 ### Fixed
 
+- Two timeouts say what was awaited. `wait_until_matches` names its
+  pattern ("a row matching `version \d+`") instead of "the screen
+  predicate to hold", and a `wait_frame` timeout after a burst longer than
+  the 8 frames kept says how many of its frames left the ring before a
+  wait could see them: "20 complete frames observed" read as twenty frames
+  the predicate rejected, when only the newest eight were offered. (#840)
+
 - Both published crates, `termlens` and `termlens-cli`, ship `LICENSE-MIT`
   and `LICENSE-APACHE`. They are `MIT OR Apache-2.0`, and both licences ask
   for their text in every copy, but the texts sat only at the repository
