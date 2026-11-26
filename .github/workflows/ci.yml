@@ -410,6 +410,7 @@ jobs:
       # A published crate that ships its tests ships tests that cannot pass
       # outside the workspace: the library's build fixture binaries, and the
       # CLI's corpus test reads a sibling crate's directory (#385, #519).
+      # Both must ship the licence texts their licences require (#863).
       - run: .github/scripts/check-package-contents.sh
       # The audited unsafe block count documented in SECURITY.md matches the
       # codebase (#706).
