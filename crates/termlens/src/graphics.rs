@@ -889,18 +889,24 @@ fn decode_sixel(data: &[u8], background: Option<(u32, u32)>) -> Result<Bitmap, D
                     registers.resize(index + 1, BLACK);
                 }
                 if values.len() >= 5 {
-                    // `#n;1;…` is HLS; only RGB (`2`) is defined here, and a
-                    // guessed conversion would put wrong colours into an
-                    // assertion that reads as exact.
-                    if values[1] != 2 {
-                        return Err(DecodeError::Unsupported("sixel HLS colours"));
-                    }
-                    // A component over 100 % is a data error to xterm
-                    // (`graphics_sixel.c`), which ignores the definition and
-                    // leaves the register as it was.
-                    let components = [values[2], values[3], values[4]];
-                    if components.iter().all(|&value| value <= 100) {
-                        registers[index] = rgb(components);
+                    match values[1] {
+                        // `#n;1;…` is HLS; only RGB (`2`) is defined here,
+                        // and a guessed conversion would put wrong colours
+                        // into an assertion that reads as exact.
+                        1 => return Err(DecodeError::Unsupported("sixel HLS colours")),
+                        2 => {
+                            // A component over 100 % is a data error to
+                            // xterm (`graphics_sixel.c`), which ignores the
+                            // definition and leaves the register as it was.
+                            let components = [values[2], values[3], values[4]];
+                            if components.iter().all(|&value| value <= 100) {
+                                registers[index] = rgb(components);
+                            }
+                        }
+                        // Any other colour space is a data error to xterm
+                        // (`graphics_sixel.c`), which ignores the definition
+                        // and leaves the register as it was.
+                        _ => {}
                     }
                 }
                 current = index;
@@ -2903,6 +2909,27 @@ mod tests {
             builder.finish().expect("a payload").decode(),
             Err(DecodeError::Unsupported(_))
         ));
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn a_colour_in_an_unknown_space_leaves_the_register_as_it_was() {
+        // Register 1 is defined blue; colour spaces 3 and 0 are neither
+        // HLS nor RGB, so xterm ignores both definitions.
+        for space in [0, 3] {
+            let data = format!("#1;2;0;0;100#1;{space};10;20;30#1!3~");
+            let bitmap = sixel_payload(data.as_bytes()).decode().expect("decodes");
+            assert_eq!(
+                bitmap.colours(),
+                vec![([0, 0, 255, 255], 18)],
+                "space {space}"
+            );
+        }
+        // Undefined before, the register keeps its VT340 default.
+        let bitmap = sixel_payload(b"#1;3;10;20;30#1!3~")
+            .decode()
+            .expect("decodes");
+        assert_eq!(bitmap.colours(), vec![([51, 51, 204, 255], 18)]);
     }
 
     #[cfg(feature = "decode")]
