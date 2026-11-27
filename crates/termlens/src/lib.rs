@@ -236,15 +236,25 @@ macro_rules! assert_screen_snapshot {
     ($source:expr, @$inline:literal $(,)?) => {{
         use $crate::SnapshotSource as _;
         let __screen = ($source).screen_for_snapshot(::core::option::Option::None)?;
-        $crate::insta::assert_snapshot!(__screen.with_styles(), @$inline)
+        $crate::insta::assert_snapshot!(__screen.with_styles(), stringify!($source), @$inline)
     }};
     ($source:expr, styles = $styles:expr $(,)?) => {{
         use $crate::SnapshotSource as _;
         let __screen = ($source).screen_for_snapshot(::core::option::Option::None)?;
+        // The caller's expression, not this macro's binding, is what the
+        // snapshot records as its `expression` (#851).
         if $styles {
-            $crate::insta::assert_snapshot!(__screen.with_styles());
+            $crate::insta::assert_snapshot!(
+                ::core::option::Option::None::<::std::string::String>,
+                __screen.with_styles(),
+                stringify!($source)
+            );
         } else {
-            $crate::insta::assert_snapshot!(__screen);
+            $crate::insta::assert_snapshot!(
+                ::core::option::Option::None::<::std::string::String>,
+                __screen,
+                stringify!($source)
+            );
         }
     }};
     ($source:expr, after = $after:expr $(,)?) => {
@@ -259,10 +269,20 @@ macro_rules! assert_screen_snapshot {
         }
         let mut __after = __predicate($after);
         let __screen = ($source).screen_for_snapshot(::core::option::Option::Some(&mut __after))?;
+        // The caller's expression, not this macro's binding, is what the
+        // snapshot records as its `expression` (#851).
         if $styles {
-            $crate::insta::assert_snapshot!(__screen.with_styles());
+            $crate::insta::assert_snapshot!(
+                ::core::option::Option::None::<::std::string::String>,
+                __screen.with_styles(),
+                stringify!($source)
+            );
         } else {
-            $crate::insta::assert_snapshot!(__screen);
+            $crate::insta::assert_snapshot!(
+                ::core::option::Option::None::<::std::string::String>,
+                __screen,
+                stringify!($source)
+            );
         }
     }};
 }

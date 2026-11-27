@@ -88,6 +88,12 @@ reads that marker.
   declines parameter by parameter counted once per parameter. It now
   remembers up to 256 shapes past the 32 by hash and counts each once;
   past those, a shape counts each time it is sent. (#828)
+- A snapshot taken with `assert_screen_snapshot!` records the caller's
+  expression, `t` or `t.screen()`, as its `expression`. It recorded the
+  macro's own binding, `__screen.with_styles()` or `__screen`, so every
+  `.snap` file the macro wrote, and every failure summary, named a
+  variable the test never wrote. Snapshots already committed still match;
+  `cargo insta test --force-update-snapshots` rewrites their header. (#851)
 - Both published crates, `termlens` and `termlens-cli`, ship `LICENSE-MIT`
   and `LICENSE-APACHE`. They are `MIT OR Apache-2.0`, and both licences ask
   for their text in every copy, but the texts sat only at the repository
