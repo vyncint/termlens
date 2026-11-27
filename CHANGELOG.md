@@ -75,6 +75,13 @@ reads that marker.
   reports motion only when the pointer enters another cell, so an
   application that tells a click from a drag by a motion report saw a drag
   where a terminal delivers a click. (#834)
+- `unsupported()` no longer lists a DEC private mode list that pairs a
+  mode vt100 carries out with one termlens tracks, such as
+  `CSI ? 2004 ; 1004 h` or `CSI ? 25 ; 2026 h`. Every mode in it took
+  effect, but the list was judged by the tracked modes alone, so a
+  program that set its modes in one sequence could never have an empty
+  record. A list with a mode nobody honours, such as `CSI ? 25 ; 12 h`,
+  is still listed. (#829)
 - Both published crates, `termlens` and `termlens-cli`, ship `LICENSE-MIT`
   and `LICENSE-APACHE`. They are `MIT OR Apache-2.0`, and both licences ask
   for their text in every copy, but the texts sat only at the repository
