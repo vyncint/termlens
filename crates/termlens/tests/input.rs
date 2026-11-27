@@ -433,6 +433,42 @@ fn a_drag_reports_one_motion_per_cell_crossed() -> termlens::Result<()> {
     Ok(())
 }
 
+/// A drag that starts and ends in one cell crosses none, so it sends no
+/// motion report: xterm reports motion only when the pointer enters another
+/// cell (#834). An application that tells a click from a drag by a motion
+/// between press and release sees a click.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "the wire is read in raw mode, a tcsetattr, and ConPTY turns typed bytes into console events rather than forwarding them (#149)"
+)]
+fn a_drag_that_stays_in_its_cell_reports_no_motion() -> termlens::Result<()> {
+    let mut t = util::spawn_emit(
+        Terminal::builder()
+            .size(200, 24)
+            .timeout(Duration::from_secs(10)),
+        &[
+            "--raw-mode",
+            "--raw",
+            r"\e[?1002h\e[?1006h",
+            "READY",
+            // The `|` follows the read, so waiting for it waits for the wire.
+            "--read-quiet",
+            "300",
+            "|",
+            "--wait",
+        ],
+    )?;
+    t.wait_until(|s| s.contains("READY"))?;
+    t.drag(termlens::MouseButton::Left, 6, 1, 6, 1)?;
+    t.wait_until(|s| s.row_text(0).contains("|"))?;
+    let text = t.screen().row_text(0);
+    assert!(!text.contains("[<32;"), "no motion report:\n{text}");
+    assert!(text.contains("[<0;7;2M"), "{text}");
+    assert!(text.contains("[<0;7;2m"), "{text}");
+    Ok(())
+}
+
 /// The mode-aware refusals are untouched: under plain `?1000` the
 /// application asked not to hear about motion, so it hears none.
 #[test]
