@@ -56,7 +56,11 @@ reads that marker.
   The run's `animation` is in its own `style` attribute, which outranks
   every normal declaration from a style sheet, so the `animation:none`
   rule matched the run and changed nothing; it is now `!important`. (#848)
-
+- A sixel colour definition in a colour space other than HLS (`1`) or
+  RGB (`2`), such as `#1;3;10;20;30`, is ignored and the register keeps
+  its colour, as xterm does. Decoding failed with `termlens does not
+  decode sixel HLS colours`, naming a colour space the image did not
+  use. HLS is still refused. (#846)
 - Both published crates, `termlens` and `termlens-cli`, ship `LICENSE-MIT`
   and `LICENSE-APACHE`. They are `MIT OR Apache-2.0`, and both licences ask
   for their text in every copy, but the texts sat only at the repository
