@@ -419,7 +419,10 @@ impl Screen {
     /// blinks, so a screen without one renders as it always has. A
     /// `prefers-reduced-motion` rule beside them stops the animation for
     /// a reader who asked for that; the selector matches the inline style,
-    /// since that is where the `animation` lands.
+    /// since that is where the `animation` lands. The rule's `animation`
+    /// is `!important`: a declaration in a `style` attribute outranks
+    /// every normal declaration from a style sheet, so without it the rule
+    /// would match the run and change nothing.
     #[must_use]
     pub fn to_html(&self) -> String {
         let mut out = format!(
@@ -430,7 +433,7 @@ impl Screen {
             out.push_str(
                 "<style>@keyframes termlens-blink{50%{color:transparent}}\
                  @media(prefers-reduced-motion:reduce){\
-                 [style*=termlens-blink]{animation:none}}</style>",
+                 [style*=termlens-blink]{animation:none!important}}</style>",
             );
         }
         for row in 0..self.rows() {
@@ -507,5 +510,23 @@ mod tests {
         assert_eq!(sgr(&style), "\x1b[0;1;91;48;2;30;30;46m");
         style.fg = Color::Indexed(200);
         assert_eq!(sgr(&style), "\x1b[0;1;38;5;200;48;2;30;30;46m");
+    }
+
+    #[test]
+    fn reduced_motion_outranks_the_runs_own_animation() {
+        // The run's `animation` sits in its `style` attribute, which beats
+        // a normal declaration from the style sheet: only `!important`
+        // stops the blink for a reader who asked for reduced motion.
+        let screen =
+            Screen::parse("size: 10x1  cursor: 0,0\nBLINK here\n\nstyles:\n0: 0-4 blink\n")
+                .unwrap();
+        let html = screen.to_html();
+        assert!(
+            html.contains(
+                "@media(prefers-reduced-motion:reduce)\
+                 {[style*=termlens-blink]{animation:none!important}}"
+            ),
+            "{html}"
+        );
     }
 }

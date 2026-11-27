@@ -925,7 +925,7 @@ Rules:
    declared (`graphics()`, with `cell_size()`; #588): kitty puts it on the
    placement's last row, one column past its right edge, wrapping to the
    next row past the screen's and scrolling past the bottom margin, unless
-   `C=1`, `U=1` or `P=` says otherwise; xterm, with sixel scrolling on as it
+   `C=1`, a nonzero `U=` or a nonzero `P=` says otherwise; xterm, with sixel scrolling on as it
    is by default, puts it on the image's last text row and leaves the
    column. A terminal declared without the protocol ignores the escape and
    moves nothing, which is the default. The cursor is moved with line feeds
@@ -974,9 +974,15 @@ from the one the macro targets.
 ### Reading it back
 
 `Screen::parse` (0.10.0) is the reader for everything above: it accepts
-exactly what `Display` and `with_styles` write — the header, the grid, and
-optionally the blank line, `styles:` and its spans — and every other line is
-an `Error::Parse` naming it. The `termlens` CLI is built on it: `diff` and
+what `Display` and `with_styles` write — the header, the grid, and
+optionally the blank line, `styles:` and its spans — and a few shapes they
+never write, each read as its canonical form: a `+` before a number in the
+header, one space or none before `cursor:`, a row's spans split over
+several lines or with blank lines between them, `(none)` after spans, a
+range written `0-0`, a token repeated or out of order, and a span with no
+token. Every other line is an `Error::Parse` naming it. The tolerances stay
+because STABILITY promises that a file any release from 0.10.1 wrote parses
+in every later one, and a hand-edited snapshot may hold any of them. The `termlens` CLI is built on it: `diff` and
 `render` take saved screens, so a snapshot outlives the test run that
 produced it.
 
@@ -1025,8 +1031,9 @@ compares `==`.
 ### What a reader skips, and what it does not
 
 The format proper begins at the `size:` header and ends with the grid or
-the `styles:` block. `Screen::parse` accepts exactly that — every other
-line is an `Error::Parse` naming it. termlens itself writes two things
+the `styles:` block. `Screen::parse` accepts that, with the tolerances
+listed under "Reading it back" — every other line is an `Error::Parse`
+naming it. termlens itself writes two things
 *around* a screen, and its own reader, the `termlens` CLI, skips both:
 
 - **Above:** the insta header, `---` / `source: …` / `---`, which a `.snap`

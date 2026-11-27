@@ -2598,9 +2598,10 @@ fn cells_between(from: (u16, u16), to: (u16, u16)) -> Vec<(u16, u16)> {
     let d_row = to_row - from_row;
     let steps = d_col.abs().max(d_row.abs());
     if steps == 0 {
-        // A drag that goes nowhere still reports the motion it was asked
-        // for, at the one cell involved.
-        return vec![to];
+        // A drag that stays in its cell crosses none, so it reports no
+        // motion: xterm sends a motion report only when the pointer enters
+        // another cell, and the press has already reported this one.
+        return Vec::new();
     }
     (1..=steps)
         .map(|step| {
@@ -3509,7 +3510,9 @@ impl Terminal {
     }
 
     /// Drag from `(from_col, from_row)` to `(to_col, to_row)`: press, a
-    /// motion report **per cell crossed**, release.
+    /// motion report **per cell crossed**, release. A drag whose ends are
+    /// the same cell crosses none, so it is a press and a release, as a
+    /// terminal reports a click.
     ///
     /// Coordinates are columns first, matching [`click`](Self::click) and
     /// the other mouse methods. [`Screen::find`](crate::Screen::find) returns
@@ -7063,8 +7066,10 @@ mod tests {
     }
 
     #[test]
-    fn a_drag_that_goes_nowhere_still_reports_one_motion() {
-        assert_eq!(cells_between((7, 7), (7, 7)), vec![(7, 7)]);
+    fn a_drag_that_stays_in_its_cell_crosses_none() {
+        assert_eq!(cells_between((7, 7), (7, 7)), Vec::<(u16, u16)>::new());
+        // One cell or more still reports each cell crossed.
+        assert_eq!(cells_between((7, 7), (8, 7)), vec![(8, 7)]);
     }
 
     /// The endpoints are exact — an off-by-one here would put a drop target

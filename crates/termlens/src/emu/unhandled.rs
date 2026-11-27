@@ -26,12 +26,19 @@
 //! main screen's history, which is the one thing its history cannot tell
 //! afterwards: at the retention bound the length stops changing (#671).
 
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use vt100::Callbacks;
 
 /// Distinct shapes kept before the record only counts.
 pub(super) const MAX_UNSUPPORTED: usize = 32;
+
+/// Distinct shapes past [`MAX_UNSUPPORTED`] the record remembers by hash,
+/// so the overflow counts each of them once however often it is reported
+/// (#828). Past this many, a shape it does not remember counts each time.
+pub(super) const MAX_OVERFLOW_TRACKED: usize = 256;
 
 /// Bytes of an OSC string's content an entry keeps: enough for the command
 /// number and its first parameters, which is what names the sequence, and
@@ -54,6 +61,9 @@ pub(super) struct Unhandled {
     /// refcount rather than a copy.
     shared: Arc<[Arc<str>]>,
     overflow: u64,
+    /// Hashes of the shapes [`overflow`](Self::overflow) has counted, at
+    /// most [`MAX_OVERFLOW_TRACKED`] of them.
+    overflow_seen: HashSet<u64>,
     visual_bells: u64,
     /// Rows dropped off the front of the main screen's history since the
     /// emulator last took the count — see [`take_evicted`](Self::take_evicted).
@@ -84,6 +94,7 @@ impl Default for Unhandled {
             seen: Vec::new(),
             shared: Arc::from([] as [Arc<str>; 0]),
             overflow: 0,
+            overflow_seen: HashSet::new(),
             visual_bells: 0,
             evicted: 0,
             icon_name: false,
@@ -102,7 +113,8 @@ impl Unhandled {
         Arc::clone(&self.shared)
     }
 
-    /// Distinct shapes beyond [`MAX_UNSUPPORTED`], counted only.
+    /// Distinct shapes beyond [`MAX_UNSUPPORTED`], counted only: exact up
+    /// to [`MAX_OVERFLOW_TRACKED`] of them.
     pub(super) fn overflow(&self) -> u64 {
         self.overflow
     }
@@ -196,6 +208,19 @@ impl Unhandled {
             return;
         }
         if self.seen.len() >= MAX_UNSUPPORTED {
+            // vt100 reports an SGR or a DEC mode list once for each
+            // parameter it declines, and a program may send one shape every
+            // frame: count a shape once, as the retained ones are listed
+            // once.
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            shape.hash(&mut hasher);
+            let hash = hasher.finish();
+            if self.overflow_seen.contains(&hash) {
+                return;
+            }
+            if self.overflow_seen.len() < MAX_OVERFLOW_TRACKED {
+                self.overflow_seen.insert(hash);
+            }
             self.overflow = self.overflow.saturating_add(1);
             return;
         }
@@ -296,6 +321,12 @@ fn osc_shape(params: &[&[u8]], dropped: bool) -> String {
 /// termlens's answer is to keep sending VT. Recording it would put the
 /// console's handshake in every Windows snapshot's list (#149).
 const TRACKED_PRIVATE_MODES: &[u16] = &[9, 1000, 1002, 1003, 1005, 1006, 1015, 1004, 2026, 9001];
+
+/// DEC private modes vt100's own `decset` and `decrst` carry out. vt100
+/// hands the whole list to `unhandled_csi` for each mode in it that it
+/// declines, so a list that pairs one of these with a tracked mode reaches
+/// the record though every mode in it took effect (#829).
+const VT100_PRIVATE_MODES: &[u16] = &[1, 6, 9, 25, 47, 1000, 1002, 1003, 1005, 1006, 1049, 2004];
 
 /// DECAWM, autowrap. Setting it asks for the only behaviour the emulator
 /// has, so `CSI ? 7 h` — which ncurses sends at every start (`smam`) — is
@@ -510,12 +541,14 @@ impl Callbacks for Unhandled {
             (Some(b'?' | b'='), None, 'n') => true,
             (Some(b'='), None, 'c') => matches!(first, None | Some(0)),
             (Some(b'>'), None, 'q') => params == [&[0][..]],
-            // The private modes the tracker keeps; any other private mode
-            // vt100 declined is one nobody honoured.
-            (Some(b'?'), None, 'h' | 'l') => params
-                .iter()
-                .flat_map(|p| p.iter())
-                .all(|m| TRACKED_PRIVATE_MODES.contains(m) || (c == 'h' && *m == AUTOWRAP)),
+            // The private modes the tracker keeps, beside the ones vt100
+            // carries out itself; any other private mode vt100 declined is
+            // one nobody honoured.
+            (Some(b'?'), None, 'h' | 'l') => params.iter().flat_map(|p| p.iter()).all(|m| {
+                TRACKED_PRIVATE_MODES.contains(m)
+                    || VT100_PRIVATE_MODES.contains(m)
+                    || (c == 'h' && *m == AUTOWRAP)
+            }),
             _ => false,
         };
         if handled {
@@ -640,6 +673,31 @@ mod tests {
         // In a list, the set is honoured with the others it is set with.
         assert_eq!(shapes(b"\x1b[?7;1000h"), [] as [String; 0]);
         assert_eq!(shapes(b"\x1b[?7;12h"), ["^[[?7;12h"]);
+    }
+
+    /// vt100 hands the whole list on for each mode it declines, so a list
+    /// that pairs one of its own modes with a tracked one was listed,
+    /// though every mode in it took effect (#829).
+    #[test]
+    fn a_mode_list_of_vt100_and_tracked_modes_is_not_listed() {
+        for list in [
+            &b"\x1b[?2004;1004h"[..],
+            b"\x1b[?25;2026h\x1b[?2026l",
+            b"\x1b[?7;25h",
+            b"\x1b[?1;1015h",
+            b"\x1b[?1049;1004h",
+            b"\x1b[?6;9;47;1004l",
+        ] {
+            assert_eq!(
+                shapes(list),
+                [] as [String; 0],
+                "{}",
+                String::from_utf8_lossy(list)
+            );
+        }
+        // A mode nobody honours still puts its list on record.
+        assert_eq!(shapes(b"\x1b[?25;12h"), ["^[[?25;12h"]);
+        assert_eq!(shapes(b"\x1b[?7;25l"), ["^[[?7;25l"]);
     }
 
     #[test]
@@ -999,6 +1057,51 @@ mod tests {
         let parser = fed(&stream);
         assert_eq!(parser.callbacks().shapes().len(), MAX_UNSUPPORTED);
         assert_eq!(parser.callbacks().overflow(), 5);
+    }
+
+    /// The overflow counts distinct shapes, as its rustdoc says: a shape
+    /// reported again, or reported once per declined parameter, counts
+    /// once (#828).
+    #[test]
+    fn the_overflow_counts_each_shape_once() {
+        let mut stream = Vec::new();
+        for mode in 20..(20 + MAX_UNSUPPORTED as u16) {
+            stream.extend_from_slice(format!("\x1b[{mode}h").as_bytes());
+        }
+        stream.extend_from_slice(b"\x1b[99h\x1b[99h\x1b[99h\x1b[53;59m");
+        let parser = fed(&stream);
+        assert_eq!(parser.callbacks().shapes().len(), MAX_UNSUPPORTED);
+        assert_eq!(parser.callbacks().overflow(), 2);
+    }
+
+    /// Past the shapes it remembers, a shape counts each time, so the
+    /// memory the record keeps stays bounded.
+    #[test]
+    fn the_overflow_remembers_a_bounded_number_of_shapes() {
+        let mut stream = Vec::new();
+        let distinct = MAX_UNSUPPORTED + MAX_OVERFLOW_TRACKED + 1;
+        for mode in 0..distinct {
+            stream.extend_from_slice(format!("\x1b[{}h", 1000 + mode).as_bytes());
+        }
+        let parser = fed(&stream);
+        assert_eq!(parser.callbacks().overflow_seen.len(), MAX_OVERFLOW_TRACKED);
+        assert_eq!(
+            parser.callbacks().overflow(),
+            (MAX_OVERFLOW_TRACKED + 1) as u64
+        );
+        // A shape remembered still counts once; one past the bound, again.
+        let mut parser = parser;
+        parser.process(b"\x1b[1032h");
+        assert_eq!(
+            parser.callbacks().overflow(),
+            (MAX_OVERFLOW_TRACKED + 1) as u64
+        );
+        let last = format!("\x1b[{}h", 1000 + distinct - 1);
+        parser.process(last.as_bytes());
+        assert_eq!(
+            parser.callbacks().overflow(),
+            (MAX_OVERFLOW_TRACKED + 2) as u64
+        );
     }
 
     #[test]
