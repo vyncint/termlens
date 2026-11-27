@@ -26,12 +26,19 @@
 //! main screen's history, which is the one thing its history cannot tell
 //! afterwards: at the retention bound the length stops changing (#671).
 
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use vt100::Callbacks;
 
 /// Distinct shapes kept before the record only counts.
 pub(super) const MAX_UNSUPPORTED: usize = 32;
+
+/// Distinct shapes past [`MAX_UNSUPPORTED`] the record remembers by hash,
+/// so the overflow counts each of them once however often it is reported
+/// (#828). Past this many, a shape it does not remember counts each time.
+pub(super) const MAX_OVERFLOW_TRACKED: usize = 256;
 
 /// Bytes of an OSC string's content an entry keeps: enough for the command
 /// number and its first parameters, which is what names the sequence, and
@@ -54,6 +61,9 @@ pub(super) struct Unhandled {
     /// refcount rather than a copy.
     shared: Arc<[Arc<str>]>,
     overflow: u64,
+    /// Hashes of the shapes [`overflow`](Self::overflow) has counted, at
+    /// most [`MAX_OVERFLOW_TRACKED`] of them.
+    overflow_seen: HashSet<u64>,
     visual_bells: u64,
     /// Rows dropped off the front of the main screen's history since the
     /// emulator last took the count — see [`take_evicted`](Self::take_evicted).
@@ -84,6 +94,7 @@ impl Default for Unhandled {
             seen: Vec::new(),
             shared: Arc::from([] as [Arc<str>; 0]),
             overflow: 0,
+            overflow_seen: HashSet::new(),
             visual_bells: 0,
             evicted: 0,
             icon_name: false,
@@ -102,7 +113,8 @@ impl Unhandled {
         Arc::clone(&self.shared)
     }
 
-    /// Distinct shapes beyond [`MAX_UNSUPPORTED`], counted only.
+    /// Distinct shapes beyond [`MAX_UNSUPPORTED`], counted only: exact up
+    /// to [`MAX_OVERFLOW_TRACKED`] of them.
     pub(super) fn overflow(&self) -> u64 {
         self.overflow
     }
@@ -196,6 +208,19 @@ impl Unhandled {
             return;
         }
         if self.seen.len() >= MAX_UNSUPPORTED {
+            // vt100 reports an SGR or a DEC mode list once for each
+            // parameter it declines, and a program may send one shape every
+            // frame: count a shape once, as the retained ones are listed
+            // once.
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            shape.hash(&mut hasher);
+            let hash = hasher.finish();
+            if self.overflow_seen.contains(&hash) {
+                return;
+            }
+            if self.overflow_seen.len() < MAX_OVERFLOW_TRACKED {
+                self.overflow_seen.insert(hash);
+            }
             self.overflow = self.overflow.saturating_add(1);
             return;
         }
@@ -1032,6 +1057,51 @@ mod tests {
         let parser = fed(&stream);
         assert_eq!(parser.callbacks().shapes().len(), MAX_UNSUPPORTED);
         assert_eq!(parser.callbacks().overflow(), 5);
+    }
+
+    /// The overflow counts distinct shapes, as its rustdoc says: a shape
+    /// reported again, or reported once per declined parameter, counts
+    /// once (#828).
+    #[test]
+    fn the_overflow_counts_each_shape_once() {
+        let mut stream = Vec::new();
+        for mode in 20..(20 + MAX_UNSUPPORTED as u16) {
+            stream.extend_from_slice(format!("\x1b[{mode}h").as_bytes());
+        }
+        stream.extend_from_slice(b"\x1b[99h\x1b[99h\x1b[99h\x1b[53;59m");
+        let parser = fed(&stream);
+        assert_eq!(parser.callbacks().shapes().len(), MAX_UNSUPPORTED);
+        assert_eq!(parser.callbacks().overflow(), 2);
+    }
+
+    /// Past the shapes it remembers, a shape counts each time, so the
+    /// memory the record keeps stays bounded.
+    #[test]
+    fn the_overflow_remembers_a_bounded_number_of_shapes() {
+        let mut stream = Vec::new();
+        let distinct = MAX_UNSUPPORTED + MAX_OVERFLOW_TRACKED + 1;
+        for mode in 0..distinct {
+            stream.extend_from_slice(format!("\x1b[{}h", 1000 + mode).as_bytes());
+        }
+        let parser = fed(&stream);
+        assert_eq!(parser.callbacks().overflow_seen.len(), MAX_OVERFLOW_TRACKED);
+        assert_eq!(
+            parser.callbacks().overflow(),
+            (MAX_OVERFLOW_TRACKED + 1) as u64
+        );
+        // A shape remembered still counts once; one past the bound, again.
+        let mut parser = parser;
+        parser.process(b"\x1b[1032h");
+        assert_eq!(
+            parser.callbacks().overflow(),
+            (MAX_OVERFLOW_TRACKED + 1) as u64
+        );
+        let last = format!("\x1b[{}h", 1000 + distinct - 1);
+        parser.process(last.as_bytes());
+        assert_eq!(
+            parser.callbacks().overflow(),
+            (MAX_OVERFLOW_TRACKED + 2) as u64
+        );
     }
 
     #[test]

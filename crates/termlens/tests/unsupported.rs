@@ -135,6 +135,27 @@ fn a_list_of_honoured_modes_is_not_listed() -> termlens::Result<()> {
     Ok(())
 }
 
+/// The overflow counts distinct shapes: past the 32 retained, a shape sent
+/// three times counts once, and so does one SGR with two parameters nobody
+/// models, which vt100 reports once for each (#828).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY renders what it implements and drops the rest before termlens sees a byte, so the record there is the console's, not the application's (#149)"
+)]
+fn the_overflow_counts_distinct_shapes() -> termlens::Result<()> {
+    let mut stream: String = (20..52u16).map(|mode| format!(r"\e[{mode}h")).collect();
+    stream.push_str(r"\e[99h\e[99h\e[99h\e[53;59m");
+    let mut t = emit(&["--raw", &stream, "DONE", "--wait"])?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    assert_eq!(s.unsupported().len(), 32, "{s}");
+    assert_eq!(s.unsupported().overflow(), 2, "{s}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// A visual bell is a different event from an audible one, and a request to
 /// resize the window is recorded rather than honoured.
 #[test]

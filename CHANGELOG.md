@@ -82,6 +82,12 @@ reads that marker.
   program that set its modes in one sequence could never have an empty
   record. A list with a mode nobody honours, such as `CSI ? 25 ; 12 h`,
   is still listed. (#829)
+- `Unsupported::overflow` counts distinct shapes, as its rustdoc says. Past
+  the 32 retained it added one for every report, so a shape sent once a
+  frame drove it into the thousands, and an SGR or DEC mode list vt100
+  declines parameter by parameter counted once per parameter. It now
+  remembers up to 256 shapes past the 32 by hash and counts each once;
+  past those, a shape counts each time it is sent. (#828)
 - Both published crates, `termlens` and `termlens-cli`, ship `LICENSE-MIT`
   and `LICENSE-APACHE`. They are `MIT OR Apache-2.0`, and both licences ask
   for their text in every copy, but the texts sat only at the repository
