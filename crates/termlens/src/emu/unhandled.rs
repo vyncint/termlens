@@ -322,6 +322,12 @@ fn osc_shape(params: &[&[u8]], dropped: bool) -> String {
 /// console's handshake in every Windows snapshot's list (#149).
 const TRACKED_PRIVATE_MODES: &[u16] = &[9, 1000, 1002, 1003, 1005, 1006, 1015, 1004, 2026, 9001];
 
+/// DEC private modes vt100's own `decset` and `decrst` carry out. vt100
+/// hands the whole list to `unhandled_csi` for each mode in it that it
+/// declines, so a list that pairs one of these with a tracked mode reaches
+/// the record though every mode in it took effect (#829).
+const VT100_PRIVATE_MODES: &[u16] = &[1, 6, 9, 25, 47, 1000, 1002, 1003, 1005, 1006, 1049, 2004];
+
 /// DECAWM, autowrap. Setting it asks for the only behaviour the emulator
 /// has, so `CSI ? 7 h` — which ncurses sends at every start (`smam`) — is
 /// honoured; resetting it is not modelled, and stays on record (#581).
@@ -535,12 +541,14 @@ impl Callbacks for Unhandled {
             (Some(b'?' | b'='), None, 'n') => true,
             (Some(b'='), None, 'c') => matches!(first, None | Some(0)),
             (Some(b'>'), None, 'q') => params == [&[0][..]],
-            // The private modes the tracker keeps; any other private mode
-            // vt100 declined is one nobody honoured.
-            (Some(b'?'), None, 'h' | 'l') => params
-                .iter()
-                .flat_map(|p| p.iter())
-                .all(|m| TRACKED_PRIVATE_MODES.contains(m) || (c == 'h' && *m == AUTOWRAP)),
+            // The private modes the tracker keeps, beside the ones vt100
+            // carries out itself; any other private mode vt100 declined is
+            // one nobody honoured.
+            (Some(b'?'), None, 'h' | 'l') => params.iter().flat_map(|p| p.iter()).all(|m| {
+                TRACKED_PRIVATE_MODES.contains(m)
+                    || VT100_PRIVATE_MODES.contains(m)
+                    || (c == 'h' && *m == AUTOWRAP)
+            }),
             _ => false,
         };
         if handled {
@@ -665,6 +673,31 @@ mod tests {
         // In a list, the set is honoured with the others it is set with.
         assert_eq!(shapes(b"\x1b[?7;1000h"), [] as [String; 0]);
         assert_eq!(shapes(b"\x1b[?7;12h"), ["^[[?7;12h"]);
+    }
+
+    /// vt100 hands the whole list on for each mode it declines, so a list
+    /// that pairs one of its own modes with a tracked one was listed,
+    /// though every mode in it took effect (#829).
+    #[test]
+    fn a_mode_list_of_vt100_and_tracked_modes_is_not_listed() {
+        for list in [
+            &b"\x1b[?2004;1004h"[..],
+            b"\x1b[?25;2026h\x1b[?2026l",
+            b"\x1b[?7;25h",
+            b"\x1b[?1;1015h",
+            b"\x1b[?1049;1004h",
+            b"\x1b[?6;9;47;1004l",
+        ] {
+            assert_eq!(
+                shapes(list),
+                [] as [String; 0],
+                "{}",
+                String::from_utf8_lossy(list)
+            );
+        }
+        // A mode nobody honours still puts its list on record.
+        assert_eq!(shapes(b"\x1b[?25;12h"), ["^[[?25;12h"]);
+        assert_eq!(shapes(b"\x1b[?7;25l"), ["^[[?7;25l"]);
     }
 
     #[test]

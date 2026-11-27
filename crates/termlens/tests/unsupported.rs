@@ -104,6 +104,37 @@ fn a_semicolon_title_is_honoured_and_a_mode_list_is_judged_whole() -> termlens::
     Ok(())
 }
 
+/// A DEC mode list that pairs one of vt100's own modes with one the tracker
+/// keeps is not listed: every mode in it took effect (#829). One mode
+/// nobody honours still puts its list on record.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY renders what it implements and drops the rest before termlens sees a byte, so the record there is the console's, not the application's (#149)"
+)]
+fn a_list_of_honoured_modes_is_not_listed() -> termlens::Result<()> {
+    let mut t = emit(&[
+        "--raw",
+        r"\e[?2004;1004h\e[?25;2026h\e[?2026l\e[?7;25h\e[?1;1015h\e[?1049;1004h",
+        "DONE",
+        "--wait",
+    ])?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    let s = t.screen();
+    assert!(s.bracketed_paste() && s.focus_events(), "{s}");
+    assert!(s.application_cursor() && s.alternate_screen(), "{s}");
+    assert_eq!(shapes(&t), Vec::<String>::new(), "{s}");
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+
+    let mut t = emit(&["--raw", r"\e[?25;12h", "DONE", "--wait"])?;
+    t.wait_until(|s| s.contains("DONE"))?;
+    assert_eq!(shapes(&t), ["^[[?25;12h"], "{}", t.screen());
+    t.send(Key::Enter)?;
+    assert!(t.wait_exit()?.success());
+    Ok(())
+}
+
 /// The overflow counts distinct shapes: past the 32 retained, a shape sent
 /// three times counts once, and so does one SGR with two parameters nobody
 /// models, which vt100 reports once for each (#828).
