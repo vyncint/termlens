@@ -291,7 +291,8 @@ pub enum CursorShape {
 ///
 /// Distinct sequence shapes, first seen first, in the form the timeout
 /// messages use (`^[[20h` for `CSI 20 h`), at most 32 retained;
-/// [`overflow`](Self::overflow) counts the distinct shapes beyond those, so
+/// [`overflow`](Self::overflow) counts the distinct shapes beyond those (each
+/// once, however often it is sent, exact up to 256 of them), so
 /// a stream that invents thousands cannot grow a snapshot and "nothing was
 /// dropped" is one check, [`is_empty`](Self::is_empty).
 ///
@@ -334,7 +335,9 @@ impl<'a> Unsupported<'a> {
         self.retained.iter().any(|shape| &**shape == sequence)
     }
 
-    /// Distinct shapes seen beyond the 32 retained, counted only.
+    /// Distinct shapes seen beyond the 32 retained, counted only. A shape
+    /// counts once however often it is sent, for the first 256 such shapes;
+    /// past those, a shape not among them counts each time it is sent.
     #[must_use]
     pub fn overflow(&self) -> u64 {
         self.overflow

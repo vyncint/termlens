@@ -52,12 +52,53 @@ reads that marker.
 
 ### Fixed
 
+- The HTML rendering stops a blinking run under `prefers-reduced-motion`.
+  The run's `animation` is in its own `style` attribute, which outranks
+  every normal declaration from a style sheet, so the `animation:none`
+  rule matched the run and changed nothing; it is now `!important`. (#848)
+- A sixel colour definition in a colour space other than HLS (`1`) or
+  RGB (`2`), such as `#1;3;10;20;30`, is ignored and the register keeps
+  its colour, as xterm does. Decoding failed with `termlens does not
+  decode sixel HLS colours`, naming a colour space the image did not
+  use. HLS is still refused. (#846)
+- A sixel colour definition with an RGB component over 100, as an encoder
+  that writes 0-255 values gives, is ignored and the register keeps its
+  colour, as xterm does. Each component was clamped to 100 and applied,
+  so the image decoded in colours xterm never shows. (#845)
+- A kitty placement decides whether it moves the cursor by the values of
+  `U=` and `P=`, as kitty does. `P=0` names no parent, so it moves the
+  cursor, and any nonzero `U=` makes the placement virtual, so it does
+  not; termlens took `P=` by its presence and `U=` only at 1, so the text
+  a client wrote after `P=0` landed on the image. (#844)
+- A `drag` whose two ends are the same cell sends a press and a release,
+  with no motion report between them. It sent one at that cell, but xterm
+  reports motion only when the pointer enters another cell, so an
+  application that tells a click from a drag by a motion report saw a drag
+  where a terminal delivers a click. (#834)
+- `unsupported()` no longer lists a DEC private mode list that pairs a
+  mode vt100 carries out with one termlens tracks, such as
+  `CSI ? 2004 ; 1004 h` or `CSI ? 25 ; 2026 h`. Every mode in it took
+  effect, but the list was judged by the tracked modes alone, so a
+  program that set its modes in one sequence could never have an empty
+  record. A list with a mode nobody honours, such as `CSI ? 25 ; 12 h`,
+  is still listed. (#829)
+- `Unsupported::overflow` counts distinct shapes, as its rustdoc says. Past
+  the 32 retained it added one for every report, so a shape sent once a
+  frame drove it into the thousands, and an SGR or DEC mode list vt100
+  declines parameter by parameter counted once per parameter. It now
+  remembers up to 256 shapes past the 32 by hash and counts each once;
+  past those, a shape counts each time it is sent. (#828)
+- A snapshot taken with `assert_screen_snapshot!` records the caller's
+  expression, `t` or `t.screen()`, as its `expression`. It recorded the
+  macro's own binding, `__screen.with_styles()` or `__screen`, so every
+  `.snap` file the macro wrote, and every failure summary, named a
+  variable the test never wrote. Snapshots already committed still match;
+  `cargo insta test --force-update-snapshots` rewrites their header. (#851)
 - `Screen::parse`'s rustdoc and DESIGN §3 no longer say it accepts
   "exactly" what `Display` and `with_styles` write. It also reads a few
   shapes they never write, such as `size: +4x+1` or a row's spans split
   over two lines, each into the screen its canonical form gives; the docs
   now list them, and a test pins each one. (#849)
-
 - Both published crates, `termlens` and `termlens-cli`, ship `LICENSE-MIT`
   and `LICENSE-APACHE`. They are `MIT OR Apache-2.0`, and both licences ask
   for their text in every copy, but the texts sat only at the repository

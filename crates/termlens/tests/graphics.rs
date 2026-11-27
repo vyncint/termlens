@@ -335,3 +335,30 @@ fn a_declared_kitty_terminal_moves_the_cursor_past_a_placement() -> termlens::Re
     }
     Ok(())
 }
+
+/// kitty reads `P=` and `U=` by value: `P=0` names no parent, so the
+/// placement moves the cursor, and `U=2` is a virtual placement, which does
+/// not (#844).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "ConPTY does not forward kitty or sixel payloads (#149)"
+)]
+fn p_and_u_decide_the_cursor_move_by_value() -> termlens::Result<()> {
+    for (key, expected) in [("P=0", (1, 3)), ("U=2", (0, 0))] {
+        let escape = format!(r"\e_Ga=T,f=24,s=1,v=1,c=3,r=2,{key};ESIz\e\\X");
+        let mut t = util::spawn_emit(
+            Terminal::builder()
+                .size(20, 5)
+                .timeout(Duration::from_secs(30))
+                .graphics(termlens::Graphics::Kitty)
+                .cell_size(10, 20),
+            &["--raw", escape.as_str(), "--wait"],
+        )?;
+        t.wait_until(|s| s.contains("X"))?;
+        assert_eq!(t.screen().find("X"), Some(expected), "{key}");
+        t.send(termlens::Key::Enter)?;
+        t.wait_exit()?;
+    }
+    Ok(())
+}

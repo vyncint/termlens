@@ -925,7 +925,7 @@ Rules:
    declared (`graphics()`, with `cell_size()`; #588): kitty puts it on the
    placement's last row, one column past its right edge, wrapping to the
    next row past the screen's and scrolling past the bottom margin, unless
-   `C=1`, `U=1` or `P=` says otherwise; xterm, with sixel scrolling on as it
+   `C=1`, a nonzero `U=` or a nonzero `P=` says otherwise; xterm, with sixel scrolling on as it
    is by default, puts it on the image's last text row and leaves the
    column. A terminal declared without the protocol ignores the escape and
    moves nothing, which is the default. The cursor is moved with line feeds
