@@ -165,7 +165,7 @@ impl Vt100Emulator {
     ///
     /// kitty moves it right by the placement's columns and down by its rows
     /// less one — onto the image's last row, one column past it — for a
-    /// placement that asks (no `C=1`, `U=1` or `P=`). xterm, with sixel
+    /// placement that asks (no `C=1`, nonzero `U=` or nonzero `P=`). xterm, with sixel
     /// scrolling on as it is by default, moves it down to the image's last
     /// text row and leaves the column. Each ignores the other's escape.
     fn image_step(&self, payload: &GraphicsPayload, placement: &Placement) -> Option<ImageStep> {
