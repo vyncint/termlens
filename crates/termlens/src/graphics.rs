@@ -823,7 +823,8 @@ fn decode_sixel(data: &[u8], background: Option<(u32, u32)>) -> Result<Bitmap, D
 
     fn percent(value: u32) -> u8 {
         // Sixel colour components are percentages, and the rounding has to
-        // match what a terminal does or every assertion lands one off.
+        // match what a terminal does or every assertion lands one off. A
+        // definition with a component over 100 never gets here.
         ((value.min(100) * 255 + 50) / 100) as u8
     }
     fn rgb([r, g, b]: [u32; 3]) -> [u8; 4] {
@@ -888,13 +889,25 @@ fn decode_sixel(data: &[u8], background: Option<(u32, u32)>) -> Result<Bitmap, D
                     registers.resize(index + 1, BLACK);
                 }
                 if values.len() >= 5 {
-                    // `#n;1;…` is HLS; only RGB (`2`) is defined here, and a
-                    // guessed conversion would put wrong colours into an
-                    // assertion that reads as exact.
-                    if values[1] != 2 {
-                        return Err(DecodeError::Unsupported("sixel HLS colours"));
+                    match values[1] {
+                        // `#n;1;…` is HLS; only RGB (`2`) is defined here,
+                        // and a guessed conversion would put wrong colours
+                        // into an assertion that reads as exact.
+                        1 => return Err(DecodeError::Unsupported("sixel HLS colours")),
+                        2 => {
+                            // A component over 100 % is a data error to
+                            // xterm (`graphics_sixel.c`), which ignores the
+                            // definition and leaves the register as it was.
+                            let components = [values[2], values[3], values[4]];
+                            if components.iter().all(|&value| value <= 100) {
+                                registers[index] = rgb(components);
+                            }
+                        }
+                        // Any other colour space is a data error to xterm
+                        // (`graphics_sixel.c`), which ignores the definition
+                        // and leaves the register as it was.
+                        _ => {}
                     }
-                    registers[index] = rgb([values[2], values[3], values[4]]);
                 }
                 current = index;
             }
@@ -1205,8 +1218,9 @@ pub(crate) struct Placement {
     pub(crate) cell_x: u32,
     pub(crate) cell_y: u32,
     /// kitty: whether a placement moves the cursor at all. `C=1` asks it not
-    /// to, and neither a Unicode-placeholder placement (`U=1`) nor one
-    /// relative to another image (`P=`) moves it.
+    /// to, and neither a Unicode-placeholder placement (a nonzero `U=`) nor
+    /// one relative to another image (a nonzero `P=`) moves it. kitty reads
+    /// both by value, so `P=0` and `U=0` name no parent and no placeholder.
     pub(crate) moves: bool,
     /// sixel: the image's height in pixels as xterm measures it, the larger
     /// of the raster attributes' and the painted rows'.
@@ -1317,7 +1331,7 @@ impl GraphicsBuilder {
                 src_y: value(b"y"),
                 cell_x: value(b"X"),
                 cell_y: value(b"Y"),
-                moves: value(b"C") != 1 && value(b"U") != 1 && key(control, b"P").is_none(),
+                moves: value(b"C") != 1 && value(b"U") == 0 && value(b"P") == 0,
                 height: 0,
                 forgets: None,
                 number: value(b"I"),
@@ -1768,6 +1782,23 @@ mod tests {
             let (_, placement) = builder.finish_placed().expect("a payload");
             assert!(!placement.moves, "{}", String::from_utf8_lossy(control));
         }
+    }
+
+    /// kitty decides by value: `P=0` names no parent and `U=0` no
+    /// placeholder, so both move the cursor, while any nonzero `U=` makes
+    /// the placement virtual (`handle_put_command`, #844).
+    #[test]
+    fn p_and_u_decide_the_cursor_move_by_value() {
+        let moves = |control: &[u8]| {
+            let mut builder = GraphicsBuilder::default();
+            builder.kitty(control);
+            builder.chunk(0, b"", true, usize::MAX);
+            builder.finish_placed().expect("a payload").1.moves
+        };
+        assert!(moves(b"a=T,c=3,r=2,P=0"));
+        assert!(moves(b"a=T,c=3,r=2,U=0"));
+        assert!(!moves(b"a=T,c=3,r=2,U=2"));
+        assert!(!moves(b"a=T,c=3,r=2,P=1"));
     }
 
     /// What a delete frees, as kitty's `handle_delete_command` frees it:
@@ -2896,6 +2927,44 @@ mod tests {
             builder.finish().expect("a payload").decode(),
             Err(DecodeError::Unsupported(_))
         ));
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn a_colour_in_an_unknown_space_leaves_the_register_as_it_was() {
+        // Register 1 is defined blue; colour spaces 3 and 0 are neither
+        // HLS nor RGB, so xterm ignores both definitions.
+        for space in [0, 3] {
+            let data = format!("#1;2;0;0;100#1;{space};10;20;30#1!3~");
+            let bitmap = sixel_payload(data.as_bytes()).decode().expect("decodes");
+            assert_eq!(
+                bitmap.colours(),
+                vec![([0, 0, 255, 255], 18)],
+                "space {space}"
+            );
+        }
+        // Undefined before, the register keeps its VT340 default.
+        let bitmap = sixel_payload(b"#1;3;10;20;30#1!3~")
+            .decode()
+            .expect("decodes");
+        assert_eq!(bitmap.colours(), vec![([51, 51, 204, 255], 18)]);
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn a_colour_with_a_component_over_100_is_ignored() {
+        // Register 1 is defined blue, then given a red component of 150:
+        // xterm ignores that definition, so the columns stay blue.
+        let bitmap = sixel_payload(b"#1;2;0;0;100#1;2;150;0;0$#1!3~")
+            .decode()
+            .expect("decodes");
+        let top: Vec<[u8; 4]> = (0..bitmap.width())
+            .map(|x| bitmap.pixel(x, 0).unwrap())
+            .collect();
+        assert_eq!(top, [[0, 0, 255, 255]; 3]);
+        // 100 itself is in range.
+        let bitmap = sixel_payload(b"#1;2;100;0;0#1~").decode().expect("decodes");
+        assert_eq!(bitmap.pixel(0, 0), Some([255, 0, 0, 255]));
     }
 
     #[test]
