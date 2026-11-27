@@ -94,6 +94,11 @@ reads that marker.
   `.snap` file the macro wrote, and every failure summary, named a
   variable the test never wrote. Snapshots already committed still match;
   `cargo insta test --force-update-snapshots` rewrites their header. (#851)
+- `Screen::parse`'s rustdoc and DESIGN §3 no longer say it accepts
+  "exactly" what `Display` and `with_styles` write. It also reads a few
+  shapes they never write, such as `size: +4x+1` or a row's spans split
+  over two lines, each into the screen its canonical form gives; the docs
+  now list them, and a test pins each one. (#849)
 - Both published crates, `termlens` and `termlens-cli`, ship `LICENSE-MIT`
   and `LICENSE-APACHE`. They are `MIT OR Apache-2.0`, and both licences ask
   for their text in every copy, but the texts sat only at the repository
